@@ -28,6 +28,7 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -64,12 +65,14 @@ def _param_patterns(
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
+    The trailing-partial regex holds back an unfinished next parameter tag
+    so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     return (
         re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
-        re.compile(rf"{head}(.*)$", re.DOTALL),
+        re.compile(rf"{head}(.*?)(?:{start}[^>]*)?$", re.DOTALL),
     )
 
 
@@ -110,6 +113,46 @@ def _dsml_arg_converter(
                     params[name] = json.loads(value)
 
     return json.dumps(params, ensure_ascii=False)
+
+
+def _dsml_arg_value_extender(
+    raw_args: str,
+    *,
+    param_re: re.Pattern = _PARAM_RE,
+    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+    param_start: str = DSML_PARAM_START,
+    param_close: str = DSML_PARAM_CLOSE,
+) -> ArgValueExtender | None:
+    # ``arg_structural_chars`` skips every delta without ``>``, so a long
+    # string value would wait for its closing tag. Extend the open trailing
+    # ``string="true"`` value instead. The lexer can flush a held partial
+    # tag as text, so keep a tail to catch a tag split across deltas.
+    names = set()
+    last_end = 0
+    for m in param_re.finditer(raw_args):
+        names.add(m.group(1))
+        last_end = m.end()
+    pm = partial_param_re.search(raw_args, last_end)
+    if (
+        pm is None
+        or pm.group(2) != "true"
+        or pm.group(1) in names
+        or pm.end(3) != len(raw_args)
+    ):
+        return None
+
+    keep = max(len(param_start), len(param_close)) - 1
+    tail = raw_args[-keep:]
+
+    def extend(delta: str) -> str | None:
+        nonlocal tail
+        text = tail + delta
+        if param_start in text or param_close in text:
+            return None
+        tail = text[-keep:]
+        return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+    return extend
 
 
 def _unwrap_wrapper_args(
@@ -238,6 +281,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
+        arg_value_extender=_dsml_arg_value_extender,
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )
