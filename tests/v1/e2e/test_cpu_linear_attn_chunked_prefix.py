@@ -8,7 +8,6 @@ import pytest
 
 from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.cpu_model
@@ -113,24 +112,3 @@ def test_prefix_cache_hit_matches_cold_cache(full_prefill_refs):
         name_0="cold_cache",
         name_1="warm_cache",
     )
-
-
-def test_prefix_cache_hit_reaches_last_full_block():
-    """A repeated prompt must hit every full block of the hybrid block size.
-
-    The workers raise the block size to fit the GDN state pages, and the
-    engine core reruns its config checks after its handshake; the raised size
-    must survive them, or the prefill's state checkpoint misses the block
-    boundaries and nothing is reused. One chunk holds the whole prompt.
-    """
-    llm = _make_llm(enable_prefix_caching=True, max_num_batched_tokens=2048)
-    block_size = llm.llm_engine.vllm_config.cache_config.block_size
-    # Ends mid-block: only the last full block's state can be reused.
-    num_tokens = block_size + block_size // 2
-    assert num_tokens <= 2048
-    prompt = TokensPrompt(prompt_token_ids=[1000 + i for i in range(num_tokens)])
-    sp = SamplingParams(max_tokens=1)
-    hits = [llm.generate(prompt, sp)[0].num_cached_tokens for _ in range(2)]
-    del llm
-
-    assert hits == [0, block_size]

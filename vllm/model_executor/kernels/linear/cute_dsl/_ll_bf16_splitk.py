@@ -47,7 +47,7 @@ class LLBf16SplitK:
 
     :param ab_dtype: Element type for A and B operands.
     :param acc_dtype: Accumulator type used by MMA and reductions.
-    :param out_dtype: Output element type (fp32 or bf16).
+    :param out_dtype: Output element type. The public wrapper uses fp32.
     :param tile_n: CTA tile size in N. M is fixed to 16 for router batches.
     :type tile_n: int
     :param tile_k: K tile size staged through shared memory.
@@ -580,6 +580,6 @@ class LLBf16SplitK:
                             reduction_profile=0,
                         )
                     )
-                    gC[local_coord] = cutlass.Float32(acc).to(gC.element_type)
+                    gC[local_coord] = acc
 
         cute.arch.sync_threads()

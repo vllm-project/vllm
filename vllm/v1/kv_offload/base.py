@@ -3,9 +3,8 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, field, fields
+from collections.abc import Collection, Iterable, Sequence
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -199,16 +198,6 @@ The class provides the following primitives:
         as well as a list of blocks that were evicted as a result.
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
-
-Exclusion:
-    lock is a context manager guarding a manager's whole state subtree: the
-    manager itself, every tier it composes, and any front-end state those
-    tiers own. Manager methods never take the lock themselves, so a caller
-    holds it across as many operations as its invariants need -- notably a
-    lookup() HIT and the prepare_load() that pins the result, which must not
-    be separated by another thread's eviction. The default is a no-op;
-    managers that can be entered from more than one thread supply a real
-    lock.
 """
 
 
@@ -225,12 +214,7 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    # Gauge-only in prometheus_client: how MultiProcessCollector merges samples
-    # written by different API-server processes. Offloading stats reach one
-    # frontend per step as complete per-engine snapshots, so the freshest write
-    # is the correct value and summing would multiply it by the number of
-    # participating frontends.
-    multiprocess_mode: str = "mostrecent"
+    pass
 
 
 @dataclass(frozen=True)
@@ -248,57 +232,7 @@ class OffloadingKVEventsConfig:
     self_describing_kv_events: bool
 
 
-# The labels of one info metric series: a label name mapped to its value.
-ConfigInfoMapping = Mapping[str, str | int | float | bool]
-
-
-@dataclass(frozen=True)
-class ConfigInfo:
-    """Static facts that one component publishes on vllm:kv_offload_config_info.
-
-    Each field is one label. The OffloadingSpec declares the names with
-    config_info_keys(), and the OffloadingManager fills the values with
-    as_config_info(). A declared name that the manager does not fill reads
-    empty, and an undeclared name is dropped. The values must stay fixed for
-    the process lifetime. Document each field in
-    docs/features/kv_offloading_usage.md. See CPUOffloadingInfo for an example.
-    """
-
-    @classmethod
-    def config_info_keys(cls) -> tuple[str, ...]:
-        """Return one label name for each field, in field order."""
-        return tuple(info.name for info in fields(cls))
-
-    def as_config_info(self) -> ConfigInfoMapping:
-        """Return the label values. A None value becomes "None", not empty."""
-        values = (getattr(self, info.name) for info in fields(self))
-        return {
-            key: "None" if value is None else value
-            for key, value in zip(self.config_info_keys(), values)
-        }
-
-
 class OffloadingManager(ABC):
-    @property
-    def lock(self) -> AbstractContextManager[Any]:
-        """Context manager granting exclusive access to this manager's state.
-
-        Scope is the manager, every tier it composes, and any front-end state
-        those tiers own (e.g. a tier's async lookup front end). Every caller of
-        an OffloadingManager method, except shutdown(), must hold it. Manager
-        methods never enter it themselves, so a caller may hold it across an
-        arbitrary sequence of operations -- which is required wherever one call
-        establishes a fact a later call relies on, such as a lookup() HIT
-        followed by the prepare_load() that pins it.
-
-        The default is a no-op, for managers that are only ever entered from
-        one thread. A manager that may be entered from another thread -- its
-        own background thread, say -- returns a real lock instead. Callers must
-        not assume either: always enter it, and never re-enter it while held,
-        since a real lock need not be reentrant.
-        """
-        return nullcontext()
-
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """Checks whether a single block is offloaded and ready to be read.
@@ -461,10 +395,6 @@ class OffloadingManager(ABC):
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
-        This is the last manager call of a step: every lookup(), prepare_load(),
-        prepare_store() and on_request_finished() for the step has already been
-        issued.
-
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
         """
@@ -486,20 +416,8 @@ class OffloadingManager(ABC):
         """Return collected metrics since last call, or None if disabled."""
         return None
 
-    def config_info(self) -> Sequence[ConfigInfoMapping]:
-        """Return the info metric labels, one mapping for each series.
-
-        The scheduler reads this once. See ConfigInfo.
-        """
-        return [{}]
-
     def shutdown(self) -> None:
-        """Shutdown the manager and release any resources.
-
-        The one exception to the rule that callers hold ``lock``: call this
-        without it. A manager with a background thread stops that thread here
-        and may need the lock to do so.
-        """
+        """Shutdown the manager and release any resources."""
         return
 
 
@@ -683,18 +601,6 @@ class OffloadingSpec(ABC):
     ) -> dict[str, "OffloadingMetricMetadata"]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
-
-    @classmethod
-    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
-        """Return the info metric label names that the manager fills.
-
-        See ConfigInfo.
-
-        Args:
-            extra_config: kv_connector_extra_config of this instance.
-
-        """
-        return ()
 
     def __init__(self, config: OffloadingConfig):
         self.config = config

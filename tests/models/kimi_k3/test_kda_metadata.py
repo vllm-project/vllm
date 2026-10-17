@@ -198,8 +198,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 
     builder_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            dtype=torch.bfloat16,
-            hf_text_config=SimpleNamespace(linear_key_head_dim=32),
+            hf_text_config=SimpleNamespace(linear_key_head_dim=32)
         ),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",

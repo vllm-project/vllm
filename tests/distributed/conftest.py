@@ -182,15 +182,19 @@ class MockSubscriber:
 
 @pytest.fixture
 def enable_ray_v2_backend():
-    """Run the engine in-process for Ray executor tests and shut down Ray
+    """Set env vars for the Ray V2 executor backend and shut down Ray
     between tests."""
     import ray
 
     saved = {
+        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": os.environ.get(
+            "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
+        ),
         "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
             "VLLM_ENABLE_V1_MULTIPROCESSING"
         ),
     }
+    os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     if ray.is_initialized():
         ray.shutdown()

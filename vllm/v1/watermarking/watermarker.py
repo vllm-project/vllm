@@ -7,7 +7,6 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
-from vllm.config.watermarking import WatermarkContextScope
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 
@@ -43,18 +42,6 @@ class RandomSampler:
             logits_cache_source=self.logits_cache_source,
             use_fp64=self.use_fp64,
         )
-
-
-@dataclass
-class DraftContextState:
-    contexts: torch.Tensor
-    enabled: torch.Tensor
-    prior_contexts: torch.Tensor
-    prompt_lens: torch.Tensor
-    deduplicate_contexts: WatermarkContextScope
-    deduplicate_contexts_max_history: int | None
-    all_token_ids: torch.Tensor | None = None
-    total_lens: torch.Tensor | None = None
 
 
 class Watermarker(ABC):
@@ -105,20 +92,6 @@ class Watermarker(ABC):
         skip_mask: torch.Tensor,
         random_sampler: RandomSampler,
     ) -> WatermarkSample | None:
-        return None
-
-    def _try_sample_block(
-        self,
-        logits: torch.Tensor,
-        num_steps: int,
-        random_sampler: RandomSampler,
-        state: DraftContextState,
-    ) -> torch.Tensor | None:
-        """Sample a (request, step) draft block in one fused pass.
-
-        Returns None when there is no fused implementation, in which case the
-        caller samples the block one step at a time.
-        """
         return None
 
 

@@ -114,8 +114,7 @@ class RequestState:
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        if self.num_speculative_steps > 0:
-            self.draft_tokens[req_idx].zero_()
+        self.draft_tokens[req_idx].zero_()
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()

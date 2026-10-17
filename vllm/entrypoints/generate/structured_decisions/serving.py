@@ -45,7 +45,6 @@ def parse_questions(
                 spec.instructions,
                 spec.criteria,
                 limits.max_options,
-                labeled=limits.labeled,
             )
         )
     return questions

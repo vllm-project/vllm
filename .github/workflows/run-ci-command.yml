@@ -39,7 +39,6 @@ jobs:
           BUILDKITE_ORGANIZATION: vllm
           BUILDKITE_PIPELINE: ci
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
-          GH_BRANCH_UPDATE_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
       - name: Report failure on the PR
         if: failure()

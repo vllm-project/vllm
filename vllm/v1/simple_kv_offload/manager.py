@@ -151,7 +151,6 @@ class SimpleCPUOffloadScheduler:
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
-        num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -171,7 +170,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity, num_cpu_blocks
+            kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
@@ -279,9 +278,7 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _derive_cpu_config(
-        gpu_config: "KVCacheConfig",
-        cpu_capacity_bytes: int,
-        num_cpu_blocks: int | None = None,
+        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
@@ -294,16 +291,7 @@ class SimpleCPUOffloadScheduler:
         # so its size is the total GPU KV cache size.
         gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        local_capacity = num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes
-        if num_cpu_blocks is None:
-            num_cpu_blocks = max(1, local_capacity)
-        elif (
-            type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity
-        ):
-            raise ValueError(
-                f"num_cpu_blocks={num_cpu_blocks!r} must be between 1 and "
-                f"local offload capacity {local_capacity}"
-            )
+        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(

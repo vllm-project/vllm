@@ -21,9 +21,7 @@ pub mod hf;
 pub struct NewChatOutputProcessorOptions<'a> {
     pub tool_call_parser: &'a ParserSelection,
     pub reasoning_parser: &'a ParserSelection,
-    /// Server-side floor for tool-call structural tags, or `None` for the
-    /// tool parser's default level.
-    pub tool_strict_level: Option<ToolStrictLevel>,
+    pub tool_strict_level: ToolStrictLevel,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.

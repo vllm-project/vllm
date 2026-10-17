@@ -302,8 +302,10 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
 
-    dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
-    with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
+    with (
+        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
+        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
+    ):
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(

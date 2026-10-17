@@ -22,7 +22,6 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
@@ -396,52 +395,6 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
 
     assert actual_logits_hidden is hidden
     assert actual_feedback_hidden is hidden
-
-
-@pytest.mark.parametrize("partitioned", [False, True])
-def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
-    hidden = torch.full((4, 3), 1.0)
-    speculator = _make_speculator(monkeypatch, hidden)
-    gathered_is_padding = torch.tensor(
-        [False, False, False, True, False, False, True, True]
-    )
-    manager = PCPManager(
-        pcp_world_size=2,
-        pcp_rank=0,
-        device=torch.device("cpu"),
-        shard_decode_requests=True,
-        max_num_tokens=4,
-        moe_gathers_tokens=True,
-    )
-    if partitioned:
-        manager.draft_prefill_batch = SimpleNamespace(
-            input_ids=torch.arange(4),
-            positions=torch.arange(4),
-            is_padding=gathered_is_padding,
-        )
-    else:
-        local_is_padding = torch.tensor([False, False, False, True])
-        speculator.input_buffers.is_padding = local_is_padding
-        gathered_is_padding = torch.cat([local_is_padding, local_is_padding])
-    seen = {}
-    monkeypatch.setattr(
-        spec_module,
-        "set_forward_context",
-        lambda *args, **kwargs: (seen.update(kwargs), nullcontext())[1],
-    )
-    speculator.pcp_manager = manager
-
-    speculator._run_model(
-        4,
-        attn_metadata=None,
-        slot_mappings=None,
-        num_tokens_across_dp=None,
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-    )
-
-    torch.testing.assert_close(seen["is_padding"], gathered_is_padding)
-    if partitioned:
-        assert seen["is_padding"] is gathered_is_padding
 
 
 @pytest.mark.parametrize(
