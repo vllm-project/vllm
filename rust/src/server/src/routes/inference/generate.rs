@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod convert;
+mod top_k;
 mod types;
 mod validate;
 
@@ -17,7 +18,7 @@ use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
@@ -30,6 +31,7 @@ use vllm_llm::{
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
+use self::top_k::{TopKLogprobsAccumulator, top_k_response};
 use self::types::{
     GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
     GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
@@ -121,7 +123,39 @@ pub async fn generate(
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
 
-    let collected = match raw_stream.collect_output().instrument(request_span.clone()).await {
+    collect_response(
+        raw_stream,
+        prepared.request_id,
+        api_server_options,
+        prepared.options,
+        mm_placeholders,
+    )
+    .instrument(request_span)
+    .await
+}
+
+/// Collect a non-streaming raw generate request into its HTTP response.
+async fn collect_response(
+    raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Send,
+    request_id: String,
+    api_server_options: ApiServerOptions,
+    options: ResponseOptions,
+    mm_placeholders: Option<MultiModalPlaceholders>,
+) -> Response {
+    // Validation guarantees `logprobs >= 1` for `return_top_k_logprobs`.
+    let mut top_k = (options.return_top_k_logprobs)
+        .then(|| TopKLogprobsAccumulator::new(options.logprobs.unwrap_or(1) as usize));
+    let collected = raw_stream
+        .map_ok(|mut output| {
+            // Top-k block: encode each step's logprobs as it arrives.
+            if let Some(top_k) = top_k.as_mut() {
+                top_k.push(output.token_ids.len(), output.logprobs.take());
+            }
+            output
+        })
+        .collect_output()
+        .await;
+    let collected = match collected {
         Ok(collected) => collected,
         Err(error) => {
             return server_error!(
@@ -131,19 +165,31 @@ pub async fn generate(
             .into_response();
         }
     };
+    let top_k = match top_k.map(TopKLogprobsAccumulator::finish).transpose() {
+        Ok(top_k) => top_k,
+        Err(error) => return ApiError::server_error(error).into_response(),
+    };
 
+    // The top-k block replaces the rendered `content`.
+    let render_options = ResponseOptions {
+        logprobs: options.logprobs.filter(|_| top_k.is_none()),
+        ..options
+    };
     let response = match collect_generate(
         collected,
-        prepared.request_id,
+        request_id,
         api_server_options,
-        prepared.options,
+        render_options,
         mm_placeholders,
     ) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
     };
 
-    Json(response).into_response()
+    match top_k {
+        None => Json(response).into_response(),
+        Some(top_k) => top_k_response(response, top_k),
+    }
 }
 
 #[try_stream]
@@ -162,6 +208,8 @@ async fn generate_chunk_stream(
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
         return_token_ids,
+        // Rejected for streaming at validation.
+        return_top_k_logprobs: _,
     }: ResponseOptions,
     mut mm_placeholders: Option<MultiModalPlaceholders>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
@@ -290,6 +338,8 @@ fn collect_generate(
         include_logprobs,
         include_prompt_logprobs,
         return_token_ids,
+        // The caller renders output logprobs as the top-k block instead.
+        return_top_k_logprobs: _,
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
@@ -388,6 +438,7 @@ fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, Api
 
     Ok(GenerateLogProbs {
         content: Some(content),
+        ..Default::default()
     })
 }
 
@@ -541,9 +592,10 @@ mod tests {
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_llm::GeneratePromptInfo;
 
+    use super::top_k::tests::{decode_top_k, engine_top_k};
     use super::*;
 
-    fn position(entries: &[(u32, f32, u32)]) -> PositionLogprobs {
+    pub(super) fn position(entries: &[(u32, f32, u32)]) -> PositionLogprobs {
         PositionLogprobs {
             entries: entries
                 .iter()
@@ -1199,5 +1251,237 @@ mod tests {
             response.choices[0].stop_reason,
             Some(StopReason::TokenId(7))
         );
+    }
+
+    const EMPTY_TAIL: &str = concat!(
+        r#""prompt_logprobs":null,"prompt_token_id_logprobs":null,"#,
+        r#""prompt_token_ids":null,"mm_placeholders":null,"#,
+        r#""kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}"#
+    );
+
+    fn step(
+        token_ids: Vec<u32>,
+        positions: Option<Vec<PositionLogprobs>>,
+        finish_reason: Option<FinishReason>,
+    ) -> vllm_llm::Result<GenerateOutput> {
+        let mut output = stream_output(None, token_ids, finish_reason);
+        output.logprobs = positions.map(|positions| Logprobs { positions });
+        Ok(output)
+    }
+
+    /// The body of a non-streaming response, or its status if it is an error.
+    async fn response_body(
+        steps: Vec<vllm_llm::Result<GenerateOutput>>,
+        options: ResponseOptions,
+    ) -> Result<String, axum::http::StatusCode> {
+        let response = collect_response(
+            stream::iter(steps),
+            "top-k-1".to_string(),
+            ApiServerOptions::default(),
+            options,
+            None,
+        )
+        .await;
+        if response.status() != axum::http::StatusCode::OK {
+            return Err(response.status());
+        }
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        // Every response carries a Content-Length: set explicitly for the
+        // streamed top-k body, from the exact size of a buffered one.
+        let length = (response.headers().get("content-length"))
+            .map(|length| length.to_str().unwrap().parse().unwrap())
+            .or(http_body::Body::size_hint(response.body()).exact());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(length, Some(body.len() as u64));
+        Ok(String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn top_k_options(k: i32) -> ResponseOptions {
+        ResponseOptions {
+            logprobs: Some(k),
+            return_top_k_logprobs: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn top_k_body_is_exact() {
+        let steps = |row: Vec<(u32, f32, u32)>| {
+            vec![step(
+                vec![7],
+                Some(vec![position(&row)]),
+                Some(FinishReason::Length),
+            )]
+        };
+        let body = response_body(
+            steps(vec![(7, -0.5, 1), (3, -1.0, 2), (9, -2.0, 3)]),
+            top_k_options(1),
+        )
+        .await
+        .expect("top-k response");
+        assert_eq!(
+            body,
+            [
+                r#"{"request_id":"top-k-1","choices":[{"index":0,"logprobs":{"#,
+                r#""content":null,"top_k":{"num_positions":1,"k":1,"#,
+                r#""token_ids":"AwAAAA==","logprobs":"AACAvw=="}},"#,
+                r#""finish_reason":"length","stop_reason":null,"token_ids":[7],"#,
+                r#""sampling_mask":null,"weight_versions":null}],"#,
+                EMPTY_TAIL,
+            ]
+            .concat()
+        );
+        // Raw engine bits: the -inf candidate is not clamped.
+        let body = response_body(
+            steps(vec![(7, f32::NAN, 0), (3, f32::NEG_INFINITY, 1)]),
+            top_k_options(1),
+        )
+        .await
+        .expect("top-k response");
+        assert!(
+            body.contains(concat!(
+                r#""logprobs":{"content":null,"top_k":{"num_positions":1,"k":1,"#,
+                r#""token_ids":"AwAAAA==","logprobs":"AACA/w=="}},"#
+            )),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn top_k_matches_default_render_of_the_same_rows() {
+        // Greedy rows (sampled token = top-1), so the default `top_logprobs`
+        // and the `top_k` engine slots 1..=k name the same candidates.
+        let rows: Vec<PositionLogprobs> = (0..300_u32)
+            .map(|i| {
+                let mut entries = vec![(i, -0.1 - i as f32 * 1e-3, 1)];
+                entries.extend((0..4).map(|j| (i + j * 1000, -0.1 - (i + j) as f32 * 1e-3, j + 1)));
+                position(&entries)
+            })
+            .collect();
+        let steps = || {
+            vec![
+                step((0..100).collect(), Some(rows[..100].to_vec()), None),
+                step((100..300).collect(), Some(rows[100..].to_vec()), None),
+                // Abort: terminal output with no new tokens or logprobs.
+                step(vec![], None, Some(FinishReason::Abort)),
+            ]
+        };
+        let parse = |body: String| serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let default = parse(
+            response_body(
+                steps(),
+                ResponseOptions {
+                    logprobs: Some(3),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        let packed = parse(response_body(steps(), top_k_options(3)).await.unwrap());
+
+        let content = default["choices"][0]["logprobs"]["content"].as_array().unwrap();
+        let logprobs = &packed["choices"][0]["logprobs"];
+        assert!(logprobs["content"].is_null());
+        assert_eq!(
+            packed["choices"][0]["token_ids"],
+            default["choices"][0]["token_ids"]
+        );
+        assert_eq!(packed["choices"][0]["finish_reason"], "abort");
+        let as_f32 = |value: &serde_json::Value| value.as_f64().unwrap() as f32;
+        let top_k = &logprobs["top_k"];
+        assert_eq!(top_k["num_positions"], 300);
+        assert_eq!(top_k["k"], 3);
+        let (token_ids, bits) = decode_top_k(top_k);
+        assert_eq!((token_ids.clone(), bits.clone()), engine_top_k(&rows, 3));
+        let default_top: Vec<(i32, f32)> = content
+            .iter()
+            .flat_map(|c| c["top_logprobs"].as_array().unwrap())
+            .map(|entry| {
+                (
+                    entry["token_id"].as_i64().unwrap() as i32,
+                    as_f32(&entry["logprob"]),
+                )
+            })
+            .collect();
+        let packed_top: Vec<(i32, f32)> =
+            token_ids.into_iter().zip(bits.into_iter().map(f32::from_bits)).collect();
+        assert_eq!(packed_top, default_top);
+    }
+
+    /// Outputs the layout cannot represent fail the request with a 500.
+    #[tokio::test]
+    async fn top_k_malformed_outputs_fail_the_request() {
+        let row = |id: u32, width: u32| {
+            position(
+                &(0..width)
+                    .map(|slot| (id + slot, -0.25 * slot as f32, slot.max(1)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let cases = [
+            (
+                "token id beyond int32",
+                vec![step(
+                    vec![1],
+                    Some(vec![position(&[
+                        (1, -0.1, 1),
+                        (1 << 31, -0.2, 1),
+                        (2, -0.3, 2),
+                    ])]),
+                    Some(FinishReason::Length),
+                )],
+            ),
+            (
+                "token without payload",
+                vec![
+                    step(vec![1], None, None),
+                    step(vec![2], Some(vec![row(2, 3)]), Some(FinishReason::Length)),
+                ],
+            ),
+            (
+                "row narrower than k + 1",
+                vec![step(
+                    vec![1],
+                    Some(vec![row(1, 2)]),
+                    Some(FinishReason::Length),
+                )],
+            ),
+            (
+                "empty row",
+                vec![step(
+                    vec![1],
+                    Some(vec![PositionLogprobs { entries: vec![] }]),
+                    Some(FinishReason::Length),
+                )],
+            ),
+        ];
+        // Only emitted (top-k) ids must fit int32; the sampled slot and the
+        // padding are not checked.
+        let wide = position(&[
+            (u32::MAX, -0.1, 1),
+            (1, -0.2, 1),
+            (2, -0.3, 2),
+            (u32::MAX, -1.0, 3),
+        ]);
+        assert!(
+            response_body(
+                vec![step(vec![1], Some(vec![wide]), Some(FinishReason::Length))],
+                top_k_options(2)
+            )
+            .await
+            .is_ok()
+        );
+        for (name, steps) in cases {
+            let status = response_body(steps, top_k_options(2)).await.expect_err(name);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{name}"
+            );
+        }
     }
 }

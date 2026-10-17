@@ -8419,3 +8419,123 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
 
     engine_task.abort_and_join().await;
 }
+
+/// Send one raw HTTP/1.1 POST and return (lower-cased header block, body).
+async fn raw_http_post(addr: std::net::SocketAddr, path: &str, body: String) -> (String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("header end");
+    let head = String::from_utf8(raw[..split].to_vec()).unwrap().to_ascii_lowercase();
+    (head, raw[split + 4..].to_vec())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_top_k_http_framing_through_production_serve_loop() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-raw-generate-top-k-framing".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                // 20,000 positions: several encoded segments.
+                let tokens: Vec<u32> = (100..20_100).collect();
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            tokens.clone(),
+                            Some(EngineCoreFinishReason::Stop),
+                            None,
+                            Some(sample_logprobs_for_tokens(&tokens)),
+                            None,
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    // The production connection loop (hyper http1 + graceful drain), not
+    // `axum::serve`.
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let server = tokio::spawn(crate::serve_connections(
+        listener,
+        app,
+        shutdown.clone().cancelled_owned(),
+        crate::ConnectionTimeouts {
+            header_read: Duration::from_secs(30),
+            keep_alive_enabled: true,
+        },
+    ));
+
+    // Top-k block: exact Content-Length.
+    let request = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "token_ids": [11, 22],
+        "sampling_params": {"max_tokens": 20_000, "logprobs": 1},
+        "return_top_k_logprobs": true
+    });
+    let (head, body) = raw_http_post(addr, "/inference/v1/generate", request.to_string()).await;
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: application/json"), "{head}");
+    assert!(
+        head.contains(&format!("content-length: {}", body.len())),
+        "{head}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let logprobs = &json["choices"][0]["logprobs"];
+    assert!(logprobs["content"].is_null());
+    assert!(logprobs.get("sampled").is_none());
+    assert_eq!(logprobs["top_k"]["num_positions"], 20_000);
+    let ids = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        logprobs["top_k"]["token_ids"].as_str().expect("token_ids"),
+    )
+    .expect("base64");
+    assert_eq!(ids.len(), 4 * 20_000);
+    assert_eq!(ids[..4], 101_i32.to_le_bytes());
+
+    shutdown.cancel();
+    server.await.expect("serve task").expect("serve_connections");
+    engine_task.await.expect("mock engine task");
+}
