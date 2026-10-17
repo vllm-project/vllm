@@ -1449,7 +1449,7 @@ def _project_kv_cache_groups_to_worker(
             KVCacheGroupSpec(
                 worker_layer_names,
                 group_spec,
-                is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
+                is_eagle_group=group.is_eagle_group,
                 host_resident=group.host_resident,
                 enable_kv_transfer=group.enable_kv_transfer,
                 role=group.role,
@@ -1532,7 +1532,7 @@ def get_kv_cache_configs(
     spec_config = vllm_config.speculative_config
     if spec_config is not None and spec_config.use_eagle_block_drop():
         draft_layer_names = {
-            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft_layer
+            name for name, spec in merged_kv_cache_specs.items() if spec.is_draft
         }
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)

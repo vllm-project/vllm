@@ -1944,7 +1944,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(specs, use_eagle_block_drop=True):
+def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = SimpleNamespace(
@@ -1952,12 +1952,14 @@ def _spec_decode_kv_cache_groups(specs, use_eagle_block_drop=True):
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
     )
-    return get_kv_cache_configs(config, [specs], [2**30])[0].kv_cache_groups
+    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
+    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
 
 
 def _as_draft(spec):
-    return replace(spec, is_draft_layer=True)
+    return replace(spec, is_draft=True)
 
 
 def _hybrid_specs(draft=True):
@@ -1992,29 +1994,52 @@ _DRAFT_SPEC_SHAPES = {
 @pytest.mark.parametrize(
     "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
 )
-def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs):
+@pytest.mark.parametrize("pp", [1, 2])
+def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
     specs = make_specs()
-    draft_layers = {name for name, spec in specs.items() if spec.is_draft_layer}
-    groups = _spec_decode_kv_cache_groups(specs)
-    untagged = {
-        name: replace(spec, is_draft_layer=False) for name, spec in specs.items()
-    }
-
+    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
+    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
+    groups = _spec_decode_kv_cache_groups([specs])
     assert [(g.layer_names, g.kv_cache_spec) for g in groups] == [
-        (g.layer_names, g.kv_cache_spec) for g in _spec_decode_kv_cache_groups(untagged)
+        (g.layer_names, g.kv_cache_spec)
+        for g in _spec_decode_kv_cache_groups([untagged])
     ]
-    for group in groups:
-        assert group.is_eagle_group == bool(draft_layers & set(group.layer_names))
+
+    worker_specs = [
+        {n: s for n, s in specs.items() if n not in draft_layers},
+        {n: s for n, s in specs.items() if n in draft_layers},
+    ]
+    scheduler_groups = _spec_decode_kv_cache_groups(
+        [specs] if pp == 1 else worker_specs
+    )
+    assert [g.is_eagle_group for g in scheduler_groups] == [
+        bool(draft_layers & set(g.layer_names)) for g in groups
+    ]
 
 
 def test_no_eagle_groups_without_eagle_block_drop():
-    groups = _spec_decode_kv_cache_groups(_hybrid_specs(), use_eagle_block_drop=False)
+    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
     assert not any(g.is_eagle_group for g in groups)
 
 
-def test_untagged_hybrid_draft_warns(caplog_vllm):
-    _spec_decode_kv_cache_groups(_hybrid_specs(draft=False))
-    assert "could be identified as the draft model's" in caplog_vllm.text
+@pytest.mark.parametrize(
+    "make_specs,warns",
+    [
+        (lambda: _hybrid_specs(draft=False), True),
+        (
+            lambda: {
+                "layers.0": new_kv_cache_spec(),
+                "draft.0": new_kv_cache_spec(),
+            },
+            False,
+        ),
+    ],
+    ids=["untagged_hybrid", "untagged_uniform_attention"],
+)
+def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
+    _spec_decode_kv_cache_groups([make_specs()])
+    warned = "could be identified as the draft model's" in caplog_vllm.text
+    assert warned == warns
 
 
 _GQA_SPEC = FullAttentionSpec(

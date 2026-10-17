@@ -133,7 +133,7 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
 
     specs = attn_utils.get_kv_cache_spec(config)
-    assert specs["draft"].is_draft_layer and not specs["target"].is_draft_layer
+    assert specs["draft"].is_draft and not specs["target"].is_draft
 
 
 class _FakeMetadataBuilder:

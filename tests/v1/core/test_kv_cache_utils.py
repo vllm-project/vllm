@@ -1314,7 +1314,7 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     ],
 )
 def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
-    draft = replace(target, is_draft_layer=True)
+    draft = replace(target, is_draft=True)
     assert draft == target and hash(draft) == hash(target)
     assert type(target).merge([target, draft]) == target
 

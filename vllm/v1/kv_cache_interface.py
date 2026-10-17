@@ -175,7 +175,7 @@ class KVCacheSpec:
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
 
-    is_draft_layer: bool = field(default=False, kw_only=True, compare=False)
+    is_draft: bool = field(default=False, kw_only=True, compare=False)
     """Whether a draft model owns this layer; excluded from equality so it never
     affects grouping."""
 
