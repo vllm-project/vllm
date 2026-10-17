@@ -24,6 +24,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -41,7 +42,11 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    init_none_hash,
+    maybe_convert_block_hash,
+)
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -7393,6 +7398,69 @@ def _seed_hybrid_prefix(
         mamba_ids.append(group_mamba_ids[i])
     manager.free(fill)
     return fa_ids, mamba_ids
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("connector_lookup", [False, True])
+def test_hybrid_full_hit_events_reach_scheduler_publisher(fallback, connector_lookup):
+    """Scheduler publishes full reuse reports once, including on fallback."""
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens=0, supports_divergent_hits=connector_lookup
+    )
+    manager = scheduler.kv_cache_manager
+    manager.enable_kv_cache_events = True
+    manager.block_pool.enable_kv_cache_events = True
+    fa_ids, mamba_ids = _seed_hybrid_prefix(manager, 4 if fallback else 1, 16)
+    if fallback:
+        manager.block_pool.evict_blocks(
+            {fa_ids[2], fa_ids[3], mamba_ids[1], mamba_ids[2]}
+        )
+    manager.take_events()
+    publisher = Mock()
+    scheduler.kv_event_publisher = publisher
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=80 if fallback else 17,
+        same_prompt=True,
+        req_ids=["reuse"],
+    )
+    request.kv_cache_report_mode = "full"
+    scheduler.add_request(request)
+    with patch.object(
+        manager,
+        "get_computed_blocks_for_connector",
+        wraps=manager.get_computed_blocks_for_connector,
+    ) as lookup:
+        output = scheduler.schedule()
+    assert lookup.call_count == int(connector_lookup)
+    (new_request,) = output.scheduled_new_reqs
+    assert new_request.num_computed_tokens == 16
+    assert output.num_scheduled_tokens[request.request_id] > 0
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+        ),
+    )
+    first_hash = maybe_convert_block_hash(request.block_hashes[0])
+    reused = [
+        event
+        for call in publisher.publish.call_args_list
+        for event in call.args[0].events
+        if isinstance(event, BlockStored) and event.block_hashes == [first_hash]
+    ]
+    print(
+        f"fallback={fallback} connector_lookup={connector_lookup} "
+        f"cached={new_request.num_computed_tokens} "
+        f"scheduled={output.num_scheduled_tokens} "
+        f"published_groups={sorted(event.group_idx for event in reused)}"
+    )
+    publisher.publish.assert_called_once()
+    assert sorted(event.group_idx for event in reused) == [0, 1]
+    assert all(event.token_ids == [0] * 16 for event in reused)
+    assert manager.take_events() == []
 
 
 @pytest.mark.parametrize(

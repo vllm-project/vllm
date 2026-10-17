@@ -4080,6 +4080,53 @@ def test_block_removed_event_group_idx(group_id: int):
         assert event.group_idx == group_id
 
 
+@pytest.mark.parametrize("connector_lookup", [False, True])
+@pytest.mark.parametrize("report_mode", ["full", "incremental"])
+@pytest.mark.parametrize("enable_events", [False, True])
+def test_hybrid_converged_hit_reports_reused_blocks(
+    connector_lookup, report_mode, enable_events
+):
+    """A connector lookup must report the same valid local hit as a regular lookup."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 32, 1, "mamba"),
+        max_model_len=128,
+        hash_block_size=block_size,
+        enable_caching=True,
+        enable_kv_cache_events=enable_events,
+    )
+    original = make_request("original", list(range(block_size)), block_size, sha256)
+    assert manager.allocate_slots(original, block_size) is not None
+    manager.free(original)
+    manager.take_events()
+
+    request = make_request("reuse", list(range(block_size + 1)), block_size, sha256)
+    request.kv_cache_report_mode = report_mode
+    if connector_lookup:
+        blocks, num_cached, _, diverged = manager.get_computed_blocks_for_connector(
+            request
+        )
+        assert not diverged
+    else:
+        blocks, num_cached, _ = manager.get_computed_blocks(request)
+    assert num_cached == block_size
+    assert all(len(group) == 1 and not group[0].is_null for group in blocks.blocks)
+
+    events = manager.take_events()
+    if enable_events and report_mode == "full":
+        assert len(events) == manager.num_kv_cache_groups
+        for group_id, event in enumerate(events):
+            assert isinstance(event, BlockStored)
+            assert event.group_idx == group_id
+            assert event.token_ids == list(range(block_size))
+            assert event.block_hashes == [
+                kv_cache_utils.maybe_convert_block_hash(request.block_hashes[0])
+            ]
+    else:
+        assert events == []
+    assert manager.take_events() == []
+
+
 def test_emit_cached_block_events():
     """emit_cached_block_events emits one BlockStored for already-cached
     (reused) prefix blocks, carrying the correct group_idx /
