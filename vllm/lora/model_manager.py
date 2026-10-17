@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import TypeVar
 
 import torch
@@ -16,6 +17,7 @@ from vllm.lora.layers import (
     ClassificationHeadWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    LogitsProcessorWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
@@ -800,6 +802,16 @@ class LoRAModelManager:
             self.lora_config.target_modules,
             self.packed_modules_mapping,
         )
+
+    def token_logits_rows(self, start: int, end: int) -> AbstractContextManager:
+        """See `PunicaWrapperBase.token_logits_rows`.
+
+        A no-op unless the model has an lm_head LoRA layer.
+        """
+        for module in self.modules.values():
+            if isinstance(module, LogitsProcessorWithLoRA):
+                return module.punica_wrapper.token_logits_rows(start, end)
+        return nullcontext()
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """Determine whether this module supports LoRA and which wrapper to use."""
