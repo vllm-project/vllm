@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.platforms import current_platform
 
 
 def _make_fp8_tp_experts(
@@ -162,8 +163,20 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
 @pytest.mark.parametrize("tp_size,block", [(2, 64), (4, 32)])
 def test_fp8_tp_default_keeps_refined_layout(monkeypatch, backend, tp_size, block):
     layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0, backend)
-    assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
-    assert layer.quant_method.moe_block_shape == [block, block]
+    if (
+        backend == "triton"
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
+    ):
+        assert (
+            layer.moe_config.intermediate_size_per_partition
+            == ((640 // tp_size + 127) // 128) * 128
+        )
+        assert layer.moe_config.tp_shard_with_padding
+        assert layer.quant_method.moe_block_shape == [128, 128]
+    else:
+        assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
+        assert layer.quant_method.moe_block_shape == [block, block]
 
 
 @pytest.mark.parametrize(
