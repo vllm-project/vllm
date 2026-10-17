@@ -50,6 +50,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
@@ -66,10 +67,18 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 _Tuple2: TypeAlias = int | tuple[int, int] | Sequence[int]
+
+_MAX_AUDIO_LENGTH = 160000
 
 
 def _resolve_tuple2(x: _Tuple2) -> tuple[int, int]:
@@ -545,7 +554,7 @@ class MiDashengLMProcessingInfo(BaseProcessingInfo):
         return 3200
 
     def get_max_audio_len(self):
-        return 160000
+        return _MAX_AUDIO_LENGTH
 
 
 class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessingInfo]):
@@ -671,7 +680,7 @@ class MiDashengLMMultiModalProcessor(
     info=MiDashengLMProcessingInfo,
     dummy_inputs=MiDashengLMDummyInputsBuilder,
 )
-class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
+class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -684,6 +693,8 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         ],
     }
 
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -695,8 +706,17 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.quant_config = quant_config
+
+        # LoRA on the tower/connector requires per-item token counts that are
+        # predictable from the item alone (see `get_mm_lora_token_counts`).
+        # Batched items are otherwise padded to the batch's max length, so pad
+        # every audio to `_MAX_AUDIO_LENGTH` samples instead.
+        self.pad_audio_to_max_length = bool(
+            lora_config is not None and lora_config.enable_tower_connector_lora
+        )
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_encoder = DashengAudioTransformer(
@@ -724,6 +744,58 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             self.decoder.make_empty_intermediate_tensors
         )
 
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefix in multimodal models."""
+        return MultiModelKeys.from_string_field(
+            language_model="decoder",
+            connector="audio_projector",
+            tower_model="audio_encoder",
+        )
+
+    def _mm_lora_counts_per_item(self) -> tuple[int, int]:
+        """Tower/connector rows per `_MAX_AUDIO_LENGTH`-padded audio item."""
+        encoder_config = self.config.audio_encoder_config
+        num_samples = _MAX_AUDIO_LENGTH + (
+            encoder_config.n_fft if encoder_config.center else 0
+        )
+        hop_length = encoder_config.hop_length
+        mel_frames = 1 + (num_samples - encoder_config.n_fft) // hop_length
+        patch_size = _resolve_tuple2(encoder_config.patch_size)
+        patch_stride = _resolve_tuple2(encoder_config.patch_stride)
+        freq_patches = (encoder_config.n_mels - patch_size[0]) // patch_stride[0] + 1
+        time_patches = (mel_frames - patch_size[1]) // patch_stride[1] + 1
+        tower_tokens = freq_patches * time_patches
+        return tower_tokens, tower_tokens // self.config.subsample_factor
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA.
+
+        With ``pad_audio_to_max_length`` (enforced when tower/connector LoRA
+        is enabled), the tower always runs on the patch count of a
+        ``_MAX_AUDIO_LENGTH``-sample input per item and the projector folds
+        those patches by ``subsample_factor``, so with ``mm_kwargs`` (a
+        scheduled item) both counts are constant per item.
+
+        Without ``mm_kwargs``, the call sizes the punica wrappers from the
+        encoder budget. Placeholder counts are derived from each audio's true
+        length, not padded per item, so the only bound on the number of items
+        within the budget is one-embed items: size for ``num_mm_embeds``
+        items. Scaling the per-item counts by full items instead (an item
+        yields at most ``connector_tokens`` embeds) would under-allocate for
+        batches of many short audios.
+        """
+        del modality
+        tower_tokens, connector_tokens = self._mm_lora_counts_per_item()
+        if mm_kwargs is not None:
+            return tower_tokens, connector_tokens
+        return num_mm_embeds * tower_tokens, num_mm_embeds * connector_tokens
+
     def _parse_and_validate_audio_input(
         self, **kwargs: object
     ) -> MiDashengLMAudioInputs | None:
@@ -738,6 +810,21 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
                 input_values,
                 batch_first=True,
             )
+
+        if self.pad_audio_to_max_length:
+            # Pad every audio to a fixed length so the number of tokens
+            # processed by the tower/connector per item is constant, keeping
+            # the LoRA token mappings computed by `get_mm_lora_token_counts`
+            # exact. Attention to the extra padding is masked via
+            # `audio_length`.
+            pad_length = _MAX_AUDIO_LENGTH - input_values.shape[-1]
+            if pad_length < 0:
+                raise ValueError(
+                    f"Audio inputs longer than {_MAX_AUDIO_LENGTH} samples "
+                    "are not supported with `enable_tower_connector_lora`."
+                )
+            if pad_length > 0:
+                input_values = torch.nn.functional.pad(input_values, (0, pad_length))
 
         return MiDashengLMAudioInputs(
             input_values=input_values,
