@@ -328,19 +328,9 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
-        weight_scale = (
-            params.weight_scale
-            if params.weight_scale_inv is None
-            else params.weight_scale_inv
-        )
-        if weight_scale is not None and weight_scale.dtype == torch.float8_e8m0fnu:
-            scale_attr_name = (
-                params.WEIGHT_SCALE
-                if params.weight_scale_inv is None
-                else params.WEIGHT_SCALE_INV
-            )
+        if params.block_scale.dtype == torch.float8_e8m0fnu:
             replace_parameter(
-                layer, scale_attr_name, _upcast_e8m0_to_fp32(weight_scale)
+                layer, params.block_scale_attr, _upcast_e8m0_to_fp32(params.block_scale)
             )
 
     def apply_block_scaled_mm(
