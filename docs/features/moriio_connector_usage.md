@@ -133,6 +133,8 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
     - WRITE mode: **Block allocation:** the decoder notifies the prefiller about its block ids, so the prefiller can push its computed KV blocks into the correct place on the decoder instance. **Completion:** once all blocks have been transferred, the prefiller notifies the decoder that it's safe to use its blocks.
     - READ mode: **Completion:** once the decoder has read all blocks from the prefiller, it notifies the prefiller so it can free its KV cache blocks.
 
+- `write_recv_timeout`: WRITE mode, decoder only. Seconds (default `540`, must be finite and greater than zero) the decoder waits for the prefiller's completion notification before failing the request. This keeps a request from hanging forever in `WAITING_FOR_REMOTE_KVS` when the prefiller dies or its notification is lost. The timer starts when the decoder allocates the request's blocks, so set it above your worst-case prefill queueing plus transfer time, and below your client timeout so the decoder acts first. A timed-out request is failed but its KV blocks are **not** freed, because a late one-sided RDMA write could still land in them. They stay allocated until the decoder restarts; releasing them when a late completion arrives is tracked in [#59058](https://github.com/vllm-project/vllm/pull/59058). It only takes effect with the default `kv_load_failure_policy` of `fail`.
+
 !!! note
     `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
 
