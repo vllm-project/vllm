@@ -804,7 +804,7 @@ def filter_safetensors_files_by_weight_name(
 ) -> list[str]:
     """Drop safetensors shards in which `is_unused_weight` accepts every tensor.
 
-    Loaders that read whole files (InstantTensor, fastsafetensors, multi-thread,
+    Loaders that read whole files (fastsafetensors, multi-thread,
     eager, prefetch) cannot skip single tensors, so dropping shards is their
     only way to avoid reading weights the model does not load.
 
@@ -1357,6 +1357,8 @@ def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
+    *,
+    is_unused_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using instanttensor library."""
@@ -1370,32 +1372,41 @@ def instanttensor_weights_iterator(
     if not current_platform.is_cuda():
         raise ValueError("InstantTensor requires NVIDIA GPUs")
 
-    try:
-        world_group = get_world_group()
-    except AssertionError:
-        # Entering here only in unit tests where the world group is not initialized.
-        process_group = None
-    else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
-
-    device = current_platform.current_device()
-
-    extra_kwargs: dict[str, Any] = {}
-    if local_expert_ids is not None:
+    tensor_filter = None
+    if local_expert_ids is not None or is_unused_weight is not None:
         checkpoint_names: list[str] = []
         for path in hf_weights_files:
             with safe_open(path, framework="pt") as metadata:
                 checkpoint_names.extend(metadata.keys())  # noqa: SIM118
         # Every rank must make the same decision about collective loading.
         empty_expert_ids: set[int] = set()
-        if any(should_skip_weight(name, empty_expert_ids) for name in checkpoint_names):
-            process_group = None
-            extra_kwargs["tensor_filter"] = [
+        if is_unused_weight is not None or any(
+            should_skip_weight(name, empty_expert_ids) for name in checkpoint_names
+        ):
+            tensor_filter = [
                 name
                 for name in checkpoint_names
                 if not should_skip_weight(name, local_expert_ids)
+                and (is_unused_weight is None or not is_unused_weight(name))
             ]
-            extra_kwargs["tensor_name_match_mode"] = "exact"
+        if is_unused_weight is not None and not tensor_filter:
+            return
+
+    if tensor_filter is not None:
+        # InstantTensor requires independent per-GPU reads when filtering.
+        process_group = None
+    else:
+        try:
+            world_group = get_world_group()
+        except AssertionError:
+            # The world group is not initialized in unit tests.
+            process_group = None
+        else:
+            process_group = (
+                world_group.device_group if world_group.world_size > 1 else None
+            )
+
+    device = current_platform.current_device()
 
     # copy=True yields tensors that own their memory, staying valid after the
     # context exits or InstantTensor reuses its buffer.
@@ -1405,7 +1416,8 @@ def instanttensor_weights_iterator(
         device=device,
         process_group=process_group,
         copy=True,
-        **extra_kwargs,
+        tensor_filter=tensor_filter,
+        tensor_name_match_mode="exact",
     ) as f:
         # Track bytes so the bar reports load throughput (GB/s).
         pbar = tqdm(
