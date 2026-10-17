@@ -85,6 +85,7 @@ class SharedExperts(torch.nn.Module):
         # Both these comm backends have been shown to be safe for shared expert overlap.
         _EPLB_OVERLAP_SAFE_BACKENDS = (
             "allgather_reducescatter",
+            "deepep_v2",
             "flashinfer_nvlink_one_sided",
         )
 

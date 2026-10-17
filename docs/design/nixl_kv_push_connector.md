@@ -181,6 +181,68 @@ The completion notif sent from P to D after a WRITE is the existing
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
 
+## Pipeline parallelism and hybrid KV caches
+
+The pull connector requires the local and remote workers to expose a
+congruent list of KV regions — region *i* here corresponds to region
+*i* there. That assumption breaks under pipeline parallelism (PP)
+combined with a hybrid (HMA) KV layout:
+
+* a PP-sharded prefiller (**P**) holds only a slice of the model's
+  layers while the `PP=1` decoder (**D**) holds them all, so region
+  counts differ;
+* with HMA, several layer names are pooled into one region and the layer
+  that represents a pooled region can differ between P and D.
+
+`NixlPushConnector` handles this for PP-sharded producers by routing
+**by layer name** instead of by region index. Each
+worker advertises which layer names back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). A producer that
+needs layer routing derives its transfer layer order once, when it
+registers its KV caches, and every transfer it issues uses that order.
+`add_remote_agent` then selects exactly the remote regions this stage
+owns and reorders them to match, so both sides stay paired regardless of
+how each remote rank happens to order its metadata.
+
+Addresses, block lengths, strides, and per-region capacities follow the same
+layer order. Descriptor offsets use each layer's region capacity, so P and
+D need not allocate the same number of blocks. Physical allocations are still
+registered once, even when multiple layers share them.
+
+Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
+pages of every layer for one block in a single row. A PP stage holds only its
+own layers, so its rows are shorter and each layer sits at a different offset:
+
+```text
+D (PP=1),    block b: | L0 | L1 | L2 | L3 | L4 | L5 |
+P (stage 2), block b: | L3 | L4 | L5 |
+```
+
+`PP=1` peers transfer whole rows. They also advertise where each layer's page
+sits in the row (`NixlAgentMetadata.packed_member_layouts`), so a PP producer
+writes each of its pages to the matching slot in D's row. Page sizes must
+match; offsets, row strides, and block counts may differ. Because PP stages can
+list the same attention backends in a different order, packed push compares the
+sorted set of backend names during the handshake. Pull mode is unchanged.
+
+Invariants enforced when the remote regions are aligned:
+
+* every locally owned layer must be advertised exactly once by the
+  remote; a missing layer fails the handshake rather than silently
+  leaving that layer's KV stale, and remote-only layers (owned by other
+  PP stages) are ignored;
+* a remote that omits layer metadata while the local layout requires
+  layer routing fails the handshake instead of falling back to
+  region-index routing;
+* layer order is a property of the local layout alone, so the same local
+  source descriptors serve every remote engine and TP rank; only the
+  remote descriptor list is rebuilt per rank.
+
+Decode-side PP is unsupported because completions are counted per
+consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
+requires MLA caches and equal P/D block sizes. MLA pages are replicated
+across TP ranks, so producer TP1 to consumer TP2 is supported.
+
 ## Scheduler-side responsibilities
 
 `NixlPushConnectorScheduler` extends the base scheduler with:

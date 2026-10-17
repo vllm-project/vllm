@@ -57,6 +57,7 @@ def check_inkling_fa4_support() -> None:
 
     Raises:
         ValueError: If the device has no paged-KV relative-attention path.
+
     """
     capability = current_platform.get_device_capability()
     # None means the capability could not be queried (non-CUDA, or NVML

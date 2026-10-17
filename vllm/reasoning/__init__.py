@@ -76,6 +76,18 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "granite_thinking_parser": (
+        "granite_thinking_engine_reasoning_parser",
+        "GraniteThinkingParserReasoningAdapter",
+    ),
+    "hf": (
+        "response_template_reasoning_parser",
+        "ResponseTemplateReasoningParser",
+    ),
+    "beam": (
+        "beam_reasoning_parser",
+        "BeamReasoningParser",
+    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
@@ -105,8 +117,12 @@ _REASONING_PARSERS_TO_REGISTER = {
         "K2HorizonReasoningParser",
     ),
     "mimo": (
-        "qwen3_engine_reasoning_parser",
-        "Qwen3ParserReasoningAdapter",
+        "mimo_engine_reasoning_parser",
+        "MiMoParserReasoningAdapter",
+    ),
+    "minicpmv": (
+        "minicpmv_reasoning_parser",
+        "MiniCPMVParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -132,6 +148,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
+    "plamo3": (
+        "plamo3_engine_reasoning_parser",
+        "Plamo3ParserReasoningAdapter",
+    ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",
         "MuseGlimmerReasoningParser",
@@ -149,8 +169,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Step3ReasoningParser",
     ),
     "step3p5": (
-        "step3p5_reasoning_parser",
-        "Step3p5ReasoningParser",
+        "step3p5_engine_reasoning_parser",
+        "Step3p5ParserReasoningAdapter",
     ),
     "inkling": (
         "inkling_reasoning_parser",

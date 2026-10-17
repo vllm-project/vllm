@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import math
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -16,11 +17,14 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
-from .utils import BeamSearchSequence, create_sort_beams_key_function
+from .utils import (
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+)
 
 
 class BeamSearchOnlineMixin(ABC):
-    """online serving for beam search"""
+    """online serving for beam search."""
 
     renderer: BaseRenderer
     engine_client: EngineClient
@@ -40,6 +44,7 @@ class BeamSearchOnlineMixin(ABC):
         temperature = params.temperature
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
+        self.engine_client.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -62,8 +67,13 @@ class BeamSearchOnlineMixin(ABC):
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
+            watermarking=False,
             detokenize=False,
         )
+        params.configure_logprobs(
+            sampling_params, self.engine_client.input_processor.vllm_config
+        )
+        allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -99,11 +109,7 @@ class BeamSearchOnlineMixin(ABC):
 
             output = [x[0] for x in await asyncio.gather(*tasks)]
 
-            candidates = []
-            # Iterate through all beam inference results
-            for i, result in enumerate(output):
-                current_beam = all_beams[i]
-
+            for result in output:
                 # check for error finish reason and abort beam search
                 if result.outputs[0].finish_reason == "error":
                     # yield error output and terminate beam search
@@ -126,8 +132,29 @@ class BeamSearchOnlineMixin(ABC):
                     )
                     return
 
+            if any(result.outputs[0].finish_reason == "abort" for result in output):
+                for beam in all_beams:
+                    beam.finish_reason = "abort"
+                break
+
+            candidates = []
+            for i, result in enumerate(output):
+                current_beam = all_beams[i]
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
+                    if allowed is not None:
+                        logprobs = {
+                            token: score
+                            for token, score in sorted(
+                                logprobs.items(),
+                                key=lambda item: item[1].logprob,
+                                reverse=True,
+                            )
+                            if token in allowed and math.isfinite(score.logprob)
+                        }
+                        for score in logprobs.values():
+                            score.rank = None
                     for token_id, logprob_obj in logprobs.items():
                         candidate_logprob = (
                             current_beam.cum_logprob + logprob_obj.logprob
@@ -197,7 +224,9 @@ class BeamSearchOnlineMixin(ABC):
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
-            beam.text = tokenizer.decode(tokens)
+            beam.text = tokenizer.decode(
+                tokens, skip_special_tokens=params.skip_special_tokens
+            )
 
         yield RequestOutput(
             request_id=request_id,
