@@ -533,6 +533,9 @@ class OpenAIServingChat(GenerateBaseServing):
         tools_streamed = [False] * num_choices
 
         previous_texts = [""] * num_choices
+        # previous_texts is only read when output logging is enabled; skip
+        # the per-chunk accumulation otherwise.
+        log_full_text = self.enable_log_outputs and self.request_logger is not None
 
         try:
             if self.parser_cls is not None:
@@ -714,7 +717,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    previous_texts[i] += delta_text
+                    if log_full_text:
+                        previous_texts[i] += delta_text
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
@@ -722,9 +726,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         generated_token_ids[i].extend(output.token_ids)
                         if include_continuous_usage:
                             previous_reasoning_tokens[i] = (
-                                parser.count_reasoning_tokens(
-                                    tuple(generated_token_ids[i])
-                                )
+                                parser.count_reasoning_tokens(generated_token_ids[i])
                             )
 
                     # if the message delta is None (e.g. because it was a
@@ -861,7 +863,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 for i, parser in enumerate(parsers):
                     if parser is not None and generated_token_ids[i]:
                         previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                            tuple(generated_token_ids[i])
+                            generated_token_ids[i]
                         )
 
             # once the final token is handled, if stream_options.include_usage
