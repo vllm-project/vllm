@@ -768,11 +768,13 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
 )
 def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected):
     """`pause_generation` rejects new requests with a retryable error until
-    resume; `keep` and internal pauses (sleep, elastic EP) queue them. KV
-    cleanup markers and inputs to an open streaming session are not new work,
-    and a rejected P/D request still reaches the connector as a cleanup marker."""
+    resume, even across a later internal pause; `keep` and internal pauses
+    (sleep, elastic EP) queue them. KV cleanup markers and inputs to an open
+    streaming session are not new work, and a rejected P/D request still reaches
+    the connector as a cleanup marker."""
     core = _pausable_engine_core_proc()
     core.shutdown_state = EngineShutdownState.RUNNING
+    core.reject_new_requests = False
     core.scheduler.requests = {"r": MagicMock()} if kind == "session" else {}
     core.add_request = MagicMock()
     core._send_finish_outputs_to_client = MagicMock()
@@ -784,6 +786,8 @@ def test_pause_generation_rejects_new_requests(mode, reject_new, kind, rejected)
     )
 
     core.pause_scheduler(mode=mode, clear_cache=False, reject_new=reject_new)
+    # An internal pause on top (e.g. sleep) leaves the policy alone.
+    core.pause_scheduler(mode="abort", clear_cache=False)
     core._handle_client_request(EngineCoreRequestType.ADD, (request, 0))
 
     if rejected:

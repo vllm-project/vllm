@@ -2127,9 +2127,10 @@ class EngineCoreProc(EngineCore):
         """Pause generation; behavior depends on mode.
 
         All pause modes queue new adds -- "abort" and "keep" skip step();
-        "wait" allows step() so in-flight requests can drain. With
-        ``reject_new``, "abort" and "wait" instead reject new requests with a
-        retryable error until resume.
+        "wait" allows step() so in-flight requests can drain. ``reject_new``
+        marks a ``pause_generation`` call: "abort" and "wait" then reject new
+        requests with a retryable error until resume, and "keep" stops doing so.
+        Other pauses (e.g. sleep) leave that policy unchanged.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
@@ -2141,7 +2142,8 @@ class EngineCoreProc(EngineCore):
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
-        self.reject_new_requests = reject_new and mode != "keep"
+        if reject_new:
+            self.reject_new_requests = mode != "keep"
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:

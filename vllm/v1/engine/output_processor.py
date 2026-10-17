@@ -772,7 +772,6 @@ class OutputProcessor:
                 )
                 if req_state.parent_req is not None:
                     req_state.parent_req.child_requests.discard(req_id)
-                self.lora_states.request_finished(req_id, req_state.lora_name)
                 self._finish_request(req_state)
                 if req_state.streaming_input:
                     # Input chunks sent since may re-create the session.
