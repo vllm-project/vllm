@@ -55,6 +55,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -81,6 +82,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.muse_glimmer import MuseGlimmerProcessor
@@ -1214,6 +1216,18 @@ class MuseGlimmerAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        attn_output = self._forward_unfused(qkv, positions)
+
+        if self.use_output_gate:
+            gate, _ = self.output_gate_proj(hidden_states)
+            attn_output = torch.sigmoid(gate) * attn_output
+
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    def _forward_unfused(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.use_qk_norm:
@@ -1228,15 +1242,7 @@ class MuseGlimmerAttention(nn.Module):
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
 
-        attn_output = self.attn(q, k, v)
-
-        if self.use_output_gate:
-            # Gate reads the layer input hidden states (not the attn output).
-            gate, _ = self.output_gate_proj(hidden_states)
-            attn_output = torch.sigmoid(gate) * attn_output
-
-        output, _ = self.o_proj(attn_output)
-        return output
+        return self.attn(q, k, v)
 
 
 class MuseGlimmerDecoderLayer(nn.Module):
@@ -1263,18 +1269,19 @@ class MuseGlimmerDecoderLayer(nn.Module):
         )
         # Sandwich norms with baked +1 offset. Pre-norms use rms_norm_eps; the
         # post-norms use the (typically smaller) post_norm_eps.
-        self.input_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_attention_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
-        )
-        self.pre_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
-        )
+        self.use_amd_fused_norm = current_platform.is_rocm()
+
+        def make_sandwich_norm(eps: float) -> nn.Module:
+            if self.use_amd_fused_norm:
+                # GemmaRMSNorm has Muse's (1 + weight) scaling and exposes the
+                # residual-aware IR pattern matched by the ROCm AITER fusion.
+                return GemmaRMSNorm(config.hidden_size, eps=eps)
+            return MuseGlimmerRMSNorm(config.hidden_size, eps=eps, weight_offset=1)
+
+        self.input_layernorm = make_sandwich_norm(config.rms_norm_eps)
+        self.post_attention_layernorm = make_sandwich_norm(config.post_norm_eps)
+        self.pre_feedforward_layernorm = make_sandwich_norm(config.rms_norm_eps)
+        self.post_feedforward_layernorm = make_sandwich_norm(config.post_norm_eps)
 
     def forward(
         self,
@@ -1286,11 +1293,16 @@ class MuseGlimmerDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        if self.use_amd_fused_norm:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states, residual = self.pre_feedforward_layernorm(
+                hidden_states, residual
+            )
+        else:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = residual + hidden_states
+            residual = hidden_states
+            hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
@@ -1355,9 +1367,16 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
             self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, None
+                aux_hidden_states,
+                layer_idx + 1,
+                hidden_states,
+                None,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
