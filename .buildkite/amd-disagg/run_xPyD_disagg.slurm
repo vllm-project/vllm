@@ -61,11 +61,23 @@ echo "$DISAGG_SCRIPTS_DIR"
 CONTAINER_SCRIPTS="${CONTAINER_SCRIPTS:-/vllm-workspace/.buildkite/amd-disagg}"
 CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 
+# Overlay the staged vLLM fixes onto the image's copies: deepseek_v32/amd/model.py
+# carries the GLM-5.2 MoE all-reduce fix for TP and wide-EP.
+# VLLM_DIST_PACKAGES must match the image. If it doesn't, the mounts land on
+# paths nothing imports and the run silently uses the image's copies.
+VLLM_DIST_PACKAGES="${VLLM_DIST_PACKAGES:-/usr/local/lib/python3.12/dist-packages}"
+VLLM_OVERLAY_ARGS=()
+_dsv32_amd_overlay="${DISAGG_SCRIPTS_DIR}/overlays/models_deepseek_v32_amd_model.py"
+if [ -f "$_dsv32_amd_overlay" ]; then
+    VLLM_OVERLAY_ARGS+=(-v "${_dsv32_amd_overlay}:${VLLM_DIST_PACKAGES}/vllm/models/deepseek_v32/amd/model.py:ro")
+    echo "[disagg-pd] vLLM overlay: deepseek_v32/amd/model.py"
+fi
+
 
 # Health endpoints (TP-mode ports from cluster.sh defaults).
 PREFILL_PORT="${PREFILL_PORT:-8100}"
 DECODE_PORT="${DECODE_PORT:-8200}"
-HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"
 
 # EP-mode ports, mirrored from cluster.sh purely so the preflight below can test
 # them host-side; the in-container values still come from cluster.sh.
@@ -95,10 +107,10 @@ echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
 echo "SLURM_NNODES: $SLURM_NNODES"
 echo "SLURM_NTASKS: $SLURM_NTASKS"
 
-# scontrol is available on classic Slurm but not in the Spur job body. Use it to
-# expand compressed ranges when present, else split the (already comma-separated,
-# full-hostname) SLURM_JOB_NODELIST on commas.
-if command -v scontrol >/dev/null 2>&1; then
+# Only a compressed classic-Slurm list ("node[1-4]") needs scontrol to expand it.
+# Spur hands the job a plain comma-separated list of full hostnames, and its
+# scontrol (on PATH in the job body since 0.14) has no `show hostnames`.
+if [[ "$SLURM_JOB_NODELIST" == *"["* ]]; then
     FULL_NODELIST=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 else
     FULL_NODELIST=$(echo "$SLURM_JOB_NODELIST" | tr ',' '\n')
@@ -385,15 +397,28 @@ run_node_container() {
     # container IF present: the image ships an ABI-incompatible copy and the NICs
     # are invisible without the host libs. Each entry is added only when the host
     # file exists, so this is a no-op on non-ionic (e.g. mlx5) clusters.
+    #
+    # SKIP_IONIC_MOUNTS=1 leaves the image's own ionic userspace in place. Images
+    # built from AINIC >= 1.117.5 ship libionic on the 1.1 soname line, while these
+    # hosts are on 1.0; the mount then swaps a 1.0 library under a 1.1 filename for
+    # every rank. Set this to test an image against its own matched provider.
+    #
+    # These compose with AINIC_SWAP_CHANNEL: the swap is baked into the image by a
+    # container that deliberately gets no ionic mounts (so apt can write these
+    # paths), and the mounts are layered at serve time on top of that result.
     local IONIC_MOUNTS=()
     local host_ionic
-    host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
-    [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
-    [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
-        IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
-    [ -f /etc/libibverbs.d/ionic.driver ] && \
-        IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
-    echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    if [ "${SKIP_IONIC_MOUNTS:-0}" = "1" ]; then
+        echo "Rank $rank ionic mounts: <skipped: SKIP_IONIC_MOUNTS=1>"
+    else
+        host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
+        [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
+        [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
+            IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
+        [ -f /etc/libibverbs.d/ionic.driver ] && \
+            IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
+        echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    fi
 
     # Pull latest container.
     if [ "$DRY_RUN" != "1" ]; then
@@ -404,6 +429,61 @@ run_node_container() {
             docker pull "$VLLM_ROUTER_IMAGE" || echo "WARN: docker pull failed on $(hostname) for $VLLM_ROUTER_IMAGE (using local copy if present)"
         fi
     fi
+
+    # Replace the image's ionic RoCE userspace with another repo.radeon.com
+    # channel. The image's provider is rejected by libibverbs against this
+    # cluster's kernel module ("Driver ionic does not support the kernel ABI of
+    # 4"), so MoRI enumerates zero devices and every worker aborts on
+    # `availDevices.size() > 0' in RdmaManager. The swap needs apt as root, but
+    # the serving container runs as the calling user, so bake a committed image
+    # here and serve from that instead.
+    RUN_IMAGE="$IMAGE"
+    if [ -n "${AINIC_SWAP_CHANNEL:-}" ] && [ "$DRY_RUN" != "1" ]; then
+        local src_id ainic_tag build_cont swap_rc
+        src_id=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null | cut -d: -f2 | cut -c1-12)
+        # Key the tag on the source image id so a moving :nightly cannot silently
+        # serve a swap baked on top of an older pull.
+        ainic_tag="vllm-disagg-ainic:${AINIC_SWAP_CHANNEL}-${src_id:-unknown}"
+        if docker image inspect "$ainic_tag" >/dev/null 2>&1; then
+            echo "Rank $rank ainic swap: reusing $ainic_tag"
+        else
+            echo "Rank $rank ainic swap: building $ainic_tag from $IMAGE"
+            build_cont="ainic-swap-${SLURM_JOB_ID:-0}-${rank}"
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            if docker run --name "$build_cont" --user 0:0 --network host \
+                    -v "$DISAGG_SCRIPTS_DIR":"$CONTAINER_SCRIPTS":ro \
+                    --entrypoint /bin/bash "$IMAGE" \
+                    -c "bash $CONTAINER_SCRIPTS/swap_ainic_userspace.sh $AINIC_SWAP_CHANNEL" \
+               && docker commit "$build_cont" "$ainic_tag" >/dev/null; then
+                echo "Rank $rank ainic swap: committed $ainic_tag"
+                swap_rc=0
+            else
+                echo "ERROR: rank $rank ainic swap to $AINIC_SWAP_CHANNEL failed on $(hostname)" >&2
+                swap_rc=1
+            fi
+            # Reached on both paths so a failed bake cannot leave the name behind
+            # and block the next attempt. The container has already exited by now,
+            # so the stop is a no-op that keeps teardown uniform with the rest of
+            # the script.
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            [ "$swap_rc" = "0" ] || return 1
+        fi
+        RUN_IMAGE="$ainic_tag"
+    fi
+
+    # Mount only the overlays this image doesn't already ship byte-for-byte.
+    local overlay_args=() i src dst
+    for (( i = 0; i < ${#VLLM_OVERLAY_ARGS[@]}; i += 2 )); do
+        IFS=: read -r src dst _ <<< "${VLLM_OVERLAY_ARGS[i+1]}"
+        if docker run --rm --entrypoint cat "$RUN_IMAGE" "$dst" 2>/dev/null | cmp -s - "$src"; then
+            echo "Rank $rank overlay skipped, image already ships it: ${dst##*/dist-packages/}"
+        else
+            overlay_args+=("${VLLM_OVERLAY_ARGS[i]}" "${VLLM_OVERLAY_ARGS[i+1]}")
+        fi
+    done
+    echo "Rank $rank vLLM overlay mounts: ${overlay_args[*]:-<none>}"
 
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
     if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ] && [ "$DRY_RUN" = "1" ]; then
@@ -431,6 +511,7 @@ run_node_container() {
 
     docker run --rm \
 	--user "$(id -u):$(id -g)" \
+        "${overlay_args[@]}" \
         --device /dev/dri \
         --device /dev/kfd \
         --device /dev/infiniband \
@@ -478,7 +559,7 @@ run_node_container() {
         -e GATEWAY_PORT="$GATEWAY_PORT" \
         --name "$DOCKER_CONT_NAME" \
         --entrypoint /bin/bash \
-        "$IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
+        "$RUN_IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
       2>&1 | tee "$LOG_PATH/main_NODE${rank}.log"
     local node_rc=${PIPESTATUS[0]}   # docker run exit code (not tee), for rank-0 pass/fail
     # Stop the external router (rank-0 node) once the main container returns.
@@ -517,12 +598,14 @@ trap 'echo "[disagg-pd] signal received, tearing down containers"; teardown_cont
 
 RC=0
 if command -v srun >/dev/null 2>&1; then
-    # classic Slurm: fan out one task/node; ship the fn and call it with the
-    # srun-supplied per-task SLURM_PROCID (escaped so the remote shell expands it).
+    # classic Slurm / Spur >= 0.14: fan out one task/node; ship the fns and call
+    # them with the srun-supplied per-task SLURM_PROCID (escaped so the remote
+    # shell expands it). Arrays don't survive the environment, so the overlay
+    # mounts travel as a declaration alongside the functions.
     srun --label \
          --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-      bash -c "$(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
+      bash -c "$(declare -p VLLM_OVERLAY_ARGS); $(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
 else
     # Spur: the body already runs once per node; this node's rank is
     # SPUR_TASK_OFFSET (fall back to NODE_RANK, then 0 for a single-node run).
