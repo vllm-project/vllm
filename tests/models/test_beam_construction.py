@@ -19,6 +19,7 @@ from torch import nn
 from vllm import LLM, SamplingParams
 from vllm.models.beam.nvidia import model as beam
 from vllm.models.beam.nvidia import moe as beam_moe
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -61,6 +62,7 @@ TINY_CONFIG = {
 }
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Beam targets CUDA")
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize(
     "enforce_eager,tp_size,num_experts,enable_ep",
