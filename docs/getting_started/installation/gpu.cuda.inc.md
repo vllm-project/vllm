@@ -178,7 +178,7 @@ uv pip install -e . --torch-backend=auto
     For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
     As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
-    `ccache` helps most after clean builds or branch switches. If you build from several checkouts, set `CCACHE_NOHASHDIR="true"` so they can share cache entries.
+    `ccache` helps most after clean builds or branch switches. Build with `--no-build-isolation`: build isolation installs torch to a new temporary path each time, so nothing hits the cache. To share cache entries across several checkouts, set `CCACHE_BASEDIR` to their common parent directory and `CCACHE_NOHASHDIR="true"`.
 
     [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.

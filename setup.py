@@ -213,6 +213,7 @@ class CMakeBuildEnv(TypedDict):
     torch_dir: str
     torch_version: str
     generator: str | None
+    launcher: str | None
 
 
 class cmake_build_ext(build_ext):
@@ -232,21 +233,15 @@ class cmake_build_ext(build_ext):
                 plat_specifier += "-pydebug"
             self.build_temp = os.path.join(build.build_base, f"temp.{plat_specifier}")
 
-    def invalidate_stale_cmake_cache(self, build_env: CMakeBuildEnv) -> None:
-        """Drop the CMake cache if it was configured for another `build_env`."""
-        cache = Path(self.build_temp, "CMakeCache.txt")
-        if not cache.exists():
-            return
+    def cmake_cache_is_stale(self, build_env: CMakeBuildEnv, stamp: Path) -> bool:
+        """Whether the CMake cache was configured for another `build_env`."""
+        if not Path(self.build_temp, "CMakeCache.txt").exists():
+            return False
         try:
-            stamp = Path(self.build_temp, "vllm_build_env.json").read_text()
-            configured_env = json.loads(stamp)
+            configured_env = json.loads(stamp.read_text())
         except (OSError, ValueError):
             configured_env = None
-        if configured_env == build_env:
-            return
-        logger.warning("Build environment changed; reconfiguring CMake.")
-        cache.unlink()
-        shutil.rmtree(Path(self.build_temp, "CMakeFiles"), ignore_errors=True)
+        return configured_env != build_env
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -316,18 +311,15 @@ class cmake_build_ext(build_ext):
             cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 
         if is_sccache_available():
-            cmake_args += [
-                "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache",
-                "-DCMAKE_HIP_COMPILER_LAUNCHER=sccache",
-            ]
+            launcher = "sccache"
         elif is_ccache_available():
+            launcher = "ccache"
+        else:
+            launcher = None
+        if launcher:
             cmake_args += [
-                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
-                "-DCMAKE_HIP_COMPILER_LAUNCHER=ccache",
+                f"-DCMAKE_{lang}_COMPILER_LAUNCHER={launcher}"
+                for lang in ("C", "CXX", "CUDA", "HIP")
             ]
 
         # Pass the python executable to cmake so it can find an exact
@@ -379,13 +371,20 @@ class cmake_build_ext(build_ext):
             torch_dir=os.path.dirname(torch.__file__),
             torch_version=torch.__version__,
             generator=generator,
+            launcher=launcher,
         )
-        self.invalidate_stale_cmake_cache(build_env)
+        stamp = Path(self.build_temp, "vllm_build_env.json")
+        fresh = []
+        if self.cmake_cache_is_stale(build_env, stamp):
+            logger.warning("Build environment changed; reconfiguring CMake.")
+            fresh = ["--fresh"]
+            # Rewritten on success, so a failed configure is redone fresh.
+            stamp.unlink(missing_ok=True)
         subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            ["cmake", ext.cmake_lists_dir, *fresh, *build_tool, *cmake_args],
             cwd=self.build_temp,
         )
-        Path(self.build_temp, "vllm_build_env.json").write_text(json.dumps(build_env))
+        stamp.write_text(json.dumps(build_env))
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
