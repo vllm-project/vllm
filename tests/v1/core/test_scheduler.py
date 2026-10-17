@@ -78,8 +78,11 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_make_scheduled_encoder_input_stats_output_embeddings():
+def test_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.max_num_encoder_input_tokens = 441
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=441)
     mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -100,13 +103,15 @@ def test_make_scheduled_encoder_input_stats_output_embeddings():
             mm_position=PlaceholderRange(offset=400, length=49),
         ),
     ]
-    scheduler.requests["req"] = Mock(mm_features=mm_features)
+    (request,) = create_requests(num_requests=1, num_tokens=449)
+    request.mm_features = mm_features
+    scheduler.add_request(request)
 
-    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+    stats = scheduler.schedule().iteration_details
 
     assert stats is not None
-    assert stats.num_inputs == 3
-    assert stats.output_tokens == 441
+    assert stats.num_encoder_inputs == 3
+    assert stats.num_encoder_output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
@@ -114,12 +119,12 @@ def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
 ):
     scheduler = create_scheduler()
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_scheduled_encoder_input_stats_disabled_without_log_stats(
@@ -129,12 +134,12 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     scheduler.log_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_add_requests():
@@ -145,6 +150,89 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_iteration_workload_uses_current_chunk_attention_lengths(async_scheduling):
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_model_len=32,
+        max_num_batched_tokens=4,
+        long_prefill_token_threshold=3,
+        use_v2_model_runner=True,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.observability_config.iteration_timing_enabled = True
+    scheduler.observability_config.enable_iteration_workload_metrics = True
+    requests = create_requests(num_requests=2, num_tokens=8)
+    for request in requests:
+        scheduler.add_request(request)
+
+    for kv_sum, variance in [(0, 0.25), (4, 2.25)]:
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None and details.scheduled_workload is not None
+        assert details.num_prefill_requests == 2
+        assert details.num_prefill_tokens == 4
+        assert details.num_decode_requests == 0
+        assert details.scheduled_workload.sum_prefill_kv_tokens == kv_sum
+        assert details.scheduled_workload.var_prefill_length == variance
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id for request in requests],
+                req_id_to_index={r.request_id: i for i, r in enumerate(requests)},
+                sampled_token_ids=[[], []],
+            ),
+        )
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_iteration_workload_classifies_all_recompute_chunks_as_prefill(
+    use_v2_model_runner, async_scheduling
+):
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_model_len=32,
+        max_num_batched_tokens=4,
+        use_v2_model_runner=use_v2_model_runner,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.observability_config.iteration_timing_enabled = True
+    scheduler.observability_config.enable_iteration_workload_metrics = True
+    (request,) = create_requests(num_requests=1, num_tokens=8)
+    request.append_output_token_ids([1, 2])
+    request.status = RequestStatus.PREEMPTED
+    request.num_preemptions = 1
+    scheduler.add_request(request)
+
+    for computed in (0, 4):
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None and details.scheduled_workload is not None
+        assert details.num_prefill_requests == 1
+        assert details.num_decode_requests == 0
+        assert details.scheduled_workload.sum_prefill_kv_tokens == computed
+        assert details.scheduled_workload.sum_decode_kv_tokens == 0
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput([request.request_id], {request.request_id: 0}, [[]]),
+        )
+
+
+def test_disabled_iteration_workload_does_not_allocate_accumulator(monkeypatch):
+    scheduler = create_scheduler()
+    scheduler.observability_config.iteration_timing_enabled = True
+    accumulator = Mock(side_effect=AssertionError("unexpected workload collection"))
+    monkeypatch.setattr(
+        "vllm.v1.core.sched.scheduler.IterationWorkloadAccumulator", accumulator
+    )
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    accumulator.assert_not_called()
+    assert output.iteration_details.scheduled_workload is None
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2])
