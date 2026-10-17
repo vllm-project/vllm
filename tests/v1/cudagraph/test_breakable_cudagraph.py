@@ -448,6 +448,24 @@ def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
 # ---------------------------------------------------------------------------
 
 
+def test_replay_guard_is_cleared_after_segment_failure():
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        is_in_breakable_cuda_graph,
+    )
+
+    def failing_segment():
+        assert is_in_breakable_cuda_graph()
+        raise ValueError("segment failed")
+
+    cap = BreakableCUDAGraphCapture()
+    cap.segments = [failing_segment]
+    assert not is_in_breakable_cuda_graph()
+    with pytest.raises(ValueError, match="segment failed"):
+        cap.replay()
+    assert not is_in_breakable_cuda_graph()
+
+
 def test_replay_invokes_eager_segments_in_order(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
