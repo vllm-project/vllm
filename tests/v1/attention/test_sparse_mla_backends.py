@@ -4419,9 +4419,10 @@ def _build_sparse_dcp_vllm_config(
     local_heads: int,
     dcp_world_size: int,
     comm_backend: str = "ag_rs",
+    cache_dtype: str = "fp8_ds_mla",
 ):
-    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP head-envelope
-    guard. TP is simulated by mocking ``get_num_attention_heads`` to return the
+    """Minimal sparse-MLA VllmConfig for the FlashMLASparse DCP builder
+    guards. TP is simulated by mocking ``get_num_attention_heads`` to return the
     per-rank head count, as the decode-correctness test above does.
     """
     kv_lora_rank = 512
@@ -4462,7 +4463,7 @@ def _build_sparse_dcp_vllm_config(
     model_config.get_head_size = MethodType(lambda self: head_size, model_config)
     model_config.get_sliding_window = MethodType(lambda self: None, model_config)
 
-    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    vllm_config.cache_config.cache_dtype = cache_dtype
     vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
     vllm_config.parallel_config.dcp_comm_backend = comm_backend
     # The base builder clones the layer's dense-MHA prefill backend from
@@ -4585,6 +4586,98 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+@pytest.mark.parametrize(
+    "local_heads,dcp_world_size",
+    [
+        (32, 4),  # fp8 would take the separate prefill/decode path
+        (16, 8),  # fp8 local and gathered heads would pad to 64 vs 128
+    ],
+)
+def test_bf16_dcp_skips_fp8_guards(local_heads, dcp_world_size):
+    """The bf16 kernel returns the LSE for every token and pads the gathered
+    heads itself, so the fp8-only DCP guards must not reject bf16 configs."""
+    device = torch.device(DEVICE_TYPE)
+    vllm_config = _build_sparse_dcp_vllm_config(
+        local_heads, dcp_world_size, cache_dtype="bfloat16"
+    )
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+    builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    assert not builder.use_fp8_kv_cache
+
+
+def test_bf16_dcp_filters_topk_and_neutralizes_empty_rows(monkeypatch):
+    """Under DCP the bf16 path must keep only this rank's top-k shard, and a
+    row with no local candidates must come back as (0, -inf): the kernel
+    reports lse=+inf for it, which would dominate the cross-rank merge."""
+    num_tokens, num_heads, padded_heads, head_dim = 3, 2, 4, 3
+    q = torch.empty(num_tokens, num_heads, head_dim, device=DEVICE_TYPE)
+    local_indices = torch.tensor(
+        [[0, 1, -1, -1], [-1, -1, -1, -1], [2, 3, -1, -1]],
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    valid_counts = torch.tensor([2, 0, 2], dtype=torch.int32, device=DEVICE_TYPE)
+    dcp_filter = MagicMock(return_value=(local_indices, valid_counts))
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_filter_and_convert_dcp_index",
+        dcp_filter,
+    )
+
+    def run_kernel(q, kv, topk_indices, topk_length, actual_num_heads):
+        assert topk_indices is local_indices
+        assert topk_length is valid_counts
+        # Mirror the real kernel: head-padded results sliced to the actual heads.
+        out = torch.zeros(num_tokens, padded_heads, head_dim, device=DEVICE_TYPE)
+        lse = torch.full((num_tokens, padded_heads), float("inf"), device=DEVICE_TYPE)
+        for token_id in (0, 2):
+            out[token_id] = float(token_id + 1)
+            lse[token_id] = float(token_id + 1)
+        return out[:, :actual_num_heads], lse[:, :actual_num_heads]
+
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        num_decode_tokens=num_tokens,
+        num_actual_tokens=num_tokens,
+        block_size=64,
+        cp_kv_cache_interleave_size=1,
+    )
+    impl = SimpleNamespace(
+        index_group=None,
+        index_group_index=0,
+        dcp_world_size=2,
+        dcp_rank=1,
+        need_to_return_lse_for_decode=True,
+        _bf16_flash_mla_kernel=run_kernel,
+    )
+    global_indices = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
+
+    out, lse = FlashMLASparseImpl._forward_bf16_kv(
+        impl,
+        q,
+        torch.empty(1, 64, head_dim, device=DEVICE_TYPE),
+        global_indices,
+        metadata,
+        num_heads,
+    )
+
+    dcp_filter.assert_called_once()
+    assert dcp_filter.call_args.kwargs["dcp_size"] == 2
+    assert dcp_filter.call_args.kwargs["dcp_rank"] == 1
+    assert torch.equal(out[1], torch.zeros_like(out[1]))
+    assert torch.isneginf(lse[1]).all()
+    for token_id in (0, 2):
+        assert torch.equal(out[token_id], torch.full_like(out[token_id], token_id + 1))
+        assert torch.equal(lse[token_id], torch.full_like(lse[token_id], token_id + 1))
+    assert out.is_contiguous()
 
 
 def test_hisparse_prefill_reuses_builder_staging_plan():
