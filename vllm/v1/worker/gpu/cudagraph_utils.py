@@ -263,6 +263,7 @@ class CudaGraphManager:
         max_decode_tokens = self.max_num_reqs * self.decode_query_len
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
+        prefill_capture_sizes = self.compilation_config.cudagraph_capture_sizes_prefill
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
@@ -349,9 +350,15 @@ class CudaGraphManager:
                         descs_by_mode[decode_mode].append(ubatch_desc)
 
             # recoverSSM cannot capture a dummy query wider than its workspace.
-            if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
-                or num_tokens <= max_decode_tokens
+            if (
+                mixed_mode
+                and (
+                    prefill_capture_sizes is None or num_tokens in prefill_capture_sizes
+                )
+                and (
+                    not self.vllm_config.cache_config.use_kda_recoverssm
+                    or num_tokens <= max_decode_tokens
+                )
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
@@ -594,6 +601,14 @@ class ModelCudaGraphManager(CudaGraphManager):
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
     ):
+        if (
+            vllm_config.compilation_config.cudagraph_capture_sizes_prefill is not None
+            and cudagraph_mode != CUDAGraphMode.FULL_AND_PIECEWISE
+        ):
+            raise ValueError(
+                "cudagraph_capture_sizes_prefill requires FULL_AND_PIECEWISE "
+                "after attention backend selection"
+            )
         super().__init__(
             vllm_config,
             device,

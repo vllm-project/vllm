@@ -1058,6 +1058,54 @@ def _create_vllm_config_for_validation(
     return mock_config
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("prefill_sizes", [[0], [-1], [3], [16]])
+def test_prefill_capture_sizes_must_be_a_positive_subset(prefill_sizes):
+    with pytest.raises(ValueError, match="cudagraph_capture_sizes_prefill"):
+        config = CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+            max_cudagraph_capture_size=8,
+            cudagraph_capture_sizes_prefill=prefill_sizes,
+        )
+        config.post_init_cudagraph_sizes()
+
+
+@pytest.mark.cpu_test
+def test_prefill_capture_sizes_normalize_without_changing_compile_sizes():
+    config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_capture_sizes_prefill=[8, 2, 8],
+        compile_sizes=["cudagraph_capture_sizes"],
+    )
+    config.post_init_cudagraph_sizes()
+    assert config.cudagraph_capture_sizes_prefill == [2, 8]
+    assert sorted(config.compile_sizes) == [1, 2, 4, 8]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mode",
+    [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+    ],
+)
+def test_prefill_capture_sizes_require_separate_mixed_graphs(mode):
+    with pytest.raises(ValueError, match="FULL_AND_PIECEWISE"):
+        config = CompilationConfig(
+            cudagraph_mode=mode,
+            cudagraph_capture_sizes=[1, 2, 4, 8],
+            max_cudagraph_capture_size=8,
+            cudagraph_capture_sizes_prefill=[8],
+        )
+        config.post_init_cudagraph_sizes()
+
+
 def test_compile_sizes_padding_validation():
     """Test that compile_sizes with values that would be padded raises an error."""
     # cudagraph_capture_sizes=[1, 2, 4, 8] means:

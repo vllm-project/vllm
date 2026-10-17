@@ -196,6 +196,23 @@ Now the CLI is directly using the uppercase string of cudagraph_mode for compila
 vllm serve --model meta-llama/Llama-3.1-8B-Instruct --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
 ```
 
+### Sparse prefill captures in Model Runner V2
+
+In `FULL_AND_PIECEWISE` mode, `cudagraph_capture_sizes_prefill` selects a subset
+of the resolved `cudagraph_capture_sizes` for prefill/mixed graphs. Decode graphs
+retain their existing sizes. For example:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256],"cudagraph_capture_sizes_prefill":[64,128,256]}'
+```
+
+Omitting the option preserves the existing behavior. An empty list disables mixed
+graph captures while retaining decode graphs. Selected sizes must be present after
+capture-size resolution, including token-budget and alignment constraints.
+Fewer captures can reduce startup work but increase padding or eager fallbacks;
+measure latency, memory and throughput for the intended workload.
+Changing padded batch shapes can also change floating-point results.
+
 ### Python examples
 
 ```python
