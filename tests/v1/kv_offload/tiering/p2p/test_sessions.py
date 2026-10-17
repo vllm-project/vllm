@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.manager import CascadeTransferJob
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -304,12 +305,11 @@ class FakeParent:
         chunk_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
-        return TransferJob(
+        return CascadeTransferJob(
             job_id=job_id,
+            req_context=ctx,
             keys=keys_list,
             chunk_ids=chunk_ids,
-            is_promotion=False,
-            req_context=ctx,
         )
 
     def on_request_finished(self, ctx: ReqContext) -> None:

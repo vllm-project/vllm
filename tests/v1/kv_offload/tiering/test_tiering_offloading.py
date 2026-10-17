@@ -10,6 +10,9 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import os
+import threading
+import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +33,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadingGaugeMetadata,
+    OffloadingKVEventsConfig,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
@@ -38,6 +42,12 @@ from vllm.v1.kv_offload.base import (
     TierFilter,
     TierMatcher,
     make_offload_key,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
@@ -48,15 +58,54 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
     CPUPrimaryTierOffloadingManager,
+    PromotionTransferJob,
     TieringOffloadingManager,
+    _LockedPrimaryTier,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
+
+# Constants for FS-tier integration tests.  Small block size so tests are fast
+# and don't require O_DIRECT alignment; the FS tier gracefully falls back to
+# buffered I/O when O_DIRECT is unavailable.
+_FS_N_CHUNKS = 8
+_FS_BLOCK_BYTES = 64
+
+_FS_OFFLOADING_SPEC = MagicMock()
+_FS_OFFLOADING_SPEC.config = OffloadingConfig(
+    groups=(),
+    worker_kv_bytes_per_block=0,
+    enable_kv_cache_events=False,
+    extra_config={},
+    engine_id="test-engine",
+    model=OffloadingModelConfig(name="test-model", dtype="float32"),
+    cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+    parallel=OffloadingParallelConfig(
+        rank=0,
+        world_size=1,
+        tp_size=1,
+        pp_size=1,
+        pcp_size=1,
+        dcp_size=1,
+        data_parallel_index=0,
+        data_parallel_size=1,
+        data_parallel_rank_local=None,
+        is_parallelism_agnostic=True,
+    ),
+    replicated_layout=False,
+)
+_FS_OFFLOADING_SPEC.blocks_per_chunk = 1
+_FS_OFFLOADING_SPEC.kv_events_config = OffloadingKVEventsConfig(
+    enable_kv_cache_events=False,
+    self_describing_kv_events=False,
+)
 
 
 def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
@@ -228,6 +277,126 @@ def test_tiering_manager_aggregates_secondary_stats():
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
 
 
+def _make_deferred_promotion_job(alloc_fn, keys=None):
+    if keys is None:
+        keys = to_keys([1, 2])
+    return PromotionTransferJob(
+        job_id=1,
+        req_context=_CTX,
+        keys=keys,
+        chunk_ids=None,
+        alloc_fn=alloc_fn,
+    )
+
+
+class TestPromotionTransferJob:
+    def test_keys_raise_before_get(self):
+        """Accessing .keys/.chunk_ids before get() raises ValueError."""
+        job = _make_deferred_promotion_job(
+            lambda keys, ctx: (list(keys), np.array([0, 1]))
+        )
+        with pytest.raises(ValueError):
+            _ = job.keys
+        with pytest.raises(ValueError):
+            _ = job.chunk_ids
+
+    def test_successful_get(self):
+        """get() returns the alloc_fn claim; properties expose it."""
+        keys = to_keys([1, 2])
+        chunk_ids = np.array([3, 7], dtype=np.int32)
+        job = _make_deferred_promotion_job(
+            lambda k, ctx: (list(k), chunk_ids), keys=keys
+        )
+
+        assert job.get() == (keys, chunk_ids)
+        assert list(job.keys) == keys
+        assert np.array_equal(job.chunk_ids, chunk_ids)
+
+    def test_alloc_fn_receives_requested_keys_and_ctx(self):
+        """alloc_fn is called with exactly the requested keys and req_context."""
+        keys = to_keys([10, 20])
+        received = {}
+
+        def capturing_alloc(k, ctx):
+            received["keys"] = list(k)
+            received["ctx"] = ctx
+            return (list(k), np.array([0, 1], dtype=np.int32))
+
+        job = _make_deferred_promotion_job(capturing_alloc, keys=keys)
+        job.get()
+
+        assert received["keys"] == keys
+        assert received["ctx"] is _CTX
+
+    def test_allocation_failure_memoized(self):
+        """A None alloc_fn result is memoized: get() stays None, alloc_fn runs
+        once, and properties keep raising."""
+        calls = []
+
+        def failing_alloc(keys, ctx):
+            calls.append(1)
+            return None
+
+        job = _make_deferred_promotion_job(failing_alloc)
+
+        assert job.get() is None
+        assert job.get() is None
+        assert len(calls) == 1
+        with pytest.raises(ValueError):
+            _ = job.keys
+
+    def test_get_is_idempotent(self):
+        """Calling get() twice invokes alloc_fn exactly once."""
+        call_count = [0]
+
+        def counting_alloc(keys, ctx):
+            call_count[0] += 1
+            return (list(keys), np.array([0, 1], dtype=np.int32))
+
+        job = _make_deferred_promotion_job(counting_alloc)
+        first = job.get()
+        assert job.get() == first
+        assert call_count[0] == 1
+
+    def test_malformed_deferred_job_rejected(self):
+        """A deferred job without alloc_fn fails construction."""
+        with pytest.raises(AssertionError):
+            PromotionTransferJob(
+                job_id=1,
+                req_context=_CTX,
+                keys=to_keys([1]),
+                chunk_ids=None,
+            )
+
+    def test_materialized_at_construction(self):
+        """Equal-length keys/chunk_ids make the job materialized; get() returns
+        the pre-set claim without an alloc_fn."""
+        keys = to_keys([1, 2])
+        chunk_ids = np.array([4, 5], dtype=np.int32)
+        job = PromotionTransferJob(
+            job_id=1, req_context=_CTX, keys=keys, chunk_ids=chunk_ids
+        )
+
+        assert job.get() == (keys, chunk_ids)
+        assert list(job.keys) == keys
+        assert np.array_equal(job.chunk_ids, chunk_ids)
+
+
+class TestCascadeTransferJob:
+    def test_claim_available_immediately(self):
+        """Cascades are materialized at construction; get() is a claim readback."""
+        keys = to_keys([1])
+        chunk_ids = np.array([0], dtype=np.int32)
+        job = CascadeTransferJob(
+            job_id=1, req_context=_CTX, keys=keys, chunk_ids=chunk_ids
+        )
+
+        assert job.get() == (keys, chunk_ids)
+        assert job.get() == (keys, chunk_ids)
+        assert list(job.keys) == keys
+        assert np.array_equal(job.chunk_ids, chunk_ids)
+
+
 class TestExampleSecondaryTierManager:
     """Tests for ExampleSecondaryTierManager implementation."""
 
@@ -350,16 +519,16 @@ class TestTieringOffloadingManager:
         self._start_request()
         # Register an in-flight promotion job for tier1 by hand.
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                keys=to_keys([1, 2]),
-                chunk_ids=np.array([0, 1], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+        # Hand-built job: simulate the allocation-side chunk-count recording
+        # that _promotion_allocation performs for real promotions.
+        self.manager._metrics.on_primary_chunk_count(0, 2, is_promotion=True)
+        job = PromotionTransferJob(
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            chunk_ids=np.array([0, 1], dtype=np.int32),
         )
+        self.manager._register_job(job, 0)
         failed = JobResult(job_id=job_id, success=False)
         with (
             patch.object(
@@ -377,16 +546,14 @@ class TestTieringOffloadingManager:
 
         self._start_request()
         job_id = self.manager._next_job_id()
-        self.manager._register_job(
-            TransferJob(
-                job_id=job_id,
-                keys=to_keys([1]),
-                chunk_ids=np.array([0], dtype=np.int64),
-                is_promotion=True,
-                req_context=_CTX,
-            ),
-            0,
+        self.manager._metrics.on_primary_chunk_count(0, 1, is_promotion=True)
+        job = PromotionTransferJob(
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1]),
+            chunk_ids=np.array([0], dtype=np.int32),
         )
+        self.manager._register_job(job, 0)
         ok = JobResult(job_id=job_id, success=True)
         with (
             patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
@@ -1483,6 +1650,52 @@ class TestTieringOffloadingManager:
         assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT_PENDING
         self.secondary_tier1.lookup.assert_called()
 
+    def test_promotion_keys_lifecycle(self, manager_setup):
+        """_inflight_promotion_keys tracks in-flight promotions and is cleared
+        correctly.
+
+        Lifecycle: two keys looked up across two requests → both appear in
+        _inflight_promotion_keys → on_schedule_end flushes and completes → both cleared.
+        Then a third lookup without a flush is followed by reset_cache to verify
+        pending (not-yet-flushed) keys are also cleared.
+        """
+        key1 = to_keys([1])[0]
+        key2 = to_keys([2])[0]
+        key3 = to_keys([3])[0]
+        self.secondary_tier1.chunks[key1] = True
+        self.secondary_tier1.chunks[key2] = True
+
+        # req1 looks up key1
+        ctx1 = ReqContext(req_id="r1")
+        assert self.manager.lookup(key1, ctx1) is LookupResult.HIT_PENDING
+        assert key1 in self.manager._inflight_promotion_keys
+
+        # req2 looks up key2 — both keys now in _promoting_keys
+        ctx2 = ReqContext(req_id="r2")
+        assert self.manager.lookup(key2, ctx2) is LookupResult.HIT_PENDING
+        assert key1 in self.manager._inflight_promotion_keys
+        assert key2 in self.manager._inflight_promotion_keys
+
+        # Flush submissions; Example tier completes synchronously on next step
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # Both cleared after job completion
+        assert key1 not in self.manager._inflight_promotion_keys
+        assert key2 not in self.manager._inflight_promotion_keys
+
+        # Lookup key3 without flushing → pending but not yet a registered job
+        self.secondary_tier1.chunks[key3] = True
+        ctx3 = ReqContext(req_id="r3")
+        assert self.manager.lookup(key3, ctx3) is LookupResult.HIT_PENDING
+        assert key3 in self.manager._inflight_promotion_keys
+        assert self.manager._pending_load_submissions
+
+        # reset_cache must clear _promoting_keys even for unflushed pending keys
+        self.manager.reset_cache()
+        assert key3 not in self.manager._inflight_promotion_keys
+        assert not self.manager._pending_load_submissions
+
 
 class TestTieringOffloadingWithoutSecondaryTiers:
     """Test TieringOffloadingManager with no secondary tiers (backward compat)."""
@@ -1583,6 +1796,427 @@ def test_parse_tier_filter_skips_bad_entries():
         TierMatcher(medium=Medium.STORAGE),
         TierMatcher(medium=Medium.CPU),
     )
+
+
+# ---------------------------------------------------------------------------
+# FS-tier integration tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fs_tier(mmap_region, root_dir: str) -> FileSystemTierManager:
+    """Construct a FileSystemTierManager wired to the given mmap region."""
+    return FileSystemTierManager(
+        offloading_spec=_FS_OFFLOADING_SPEC,
+        primary_kv_view=mmap_region.create_kv_memoryview(),
+        tier_type="fs",
+        root_dir=root_dir,
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+
+
+@pytest.fixture
+def fs_manager_setup(tmp_path):
+    """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
+    mmap = _mock_mmap_region(_FS_N_CHUNKS, _FS_BLOCK_BYTES)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=_FS_N_CHUNKS, mmap_region=mmap
+    )
+    fs_tier = _make_fs_tier(mmap, str(tmp_path))
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[fs_tier],
+    )
+    yield manager, primary_tier, fs_tier
+    manager.reset_cache()
+    fs_tier.shutdown()
+
+
+def _wait_lookup_workers(
+    *fs_tiers: FileSystemTierManager, timeout: float = 2.0
+) -> None:
+    """Block until the lookup worker thread has delivered results for all
+    in-flight probes.
+    """
+    deadline = time.monotonic() + timeout
+    for tier in fs_tiers:
+        while time.monotonic() < deadline:
+            if not tier._lookup_manager._pending_results.empty():
+                break
+            time.sleep(0.005)
+        else:
+            raise TimeoutError(
+                f"Lookup worker did not produce results within {timeout}s"
+            )
+
+
+def _drain_fs_results(
+    manager: TieringOffloadingManager, *fs_tiers: FileSystemTierManager
+) -> None:
+    """Deterministically drain all in-flight FS work and promotion jobs."""
+    ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+    manager.on_schedule_end(ctx)  # flush pending lookups to thread pool
+    for tier in fs_tiers:
+        tier.drain_jobs()
+
+
+def _write_keys_to_fs(fs_tier: FileSystemTierManager, keys) -> None:
+    """Create key files directly in the FS tier's backing directory, bypassing
+    the store-job mechanism."""
+    for k in keys:
+        path = fs_tier.file_mapper.get_file_name(k)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(bytes(_FS_BLOCK_BYTES))
+
+
+class TestTieringOffloadingManagerWithFsTier:
+    """Integration tests for TieringOffloadingManager backed by a real FS tier."""
+
+    def test_locked_primary_tier_wrapping(self, fs_manager_setup):
+        """When any secondary tier supports deferred allocation the primary tier is
+        wrapped in _LockedPrimaryTier."""
+        manager, _, _ = fs_manager_setup
+        assert isinstance(manager.primary_tier, _LockedPrimaryTier), (
+            "primary_tier must be a _LockedPrimaryTier when FS (deferred)",
+            " tier is present",
+        )
+
+    def test_one_fs_tier_promotion(self, fs_manager_setup):
+        """Store keys in FS, verify all lookups return HIT_PENDING, wait for
+        promotion to finish (with a timeout), then verify all keys are loaded."""
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(4))
+        _write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r1")
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.RETRY, "Lookups are submit now"
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
+        )
+        _wait_lookup_workers(fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT_PENDING
+
+        _drain_fs_results(manager, fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT, (
+                f"key {k} expected HIT after promotion, got {r!r}"
+            )
+
+    def test_two_fs_tier_promotions_different_keys(self, tmp_path):
+        """Two FS tiers each hold different keys; promotions go to correct tier."""
+        mmap = _mock_mmap_region(_FS_N_CHUNKS, _FS_BLOCK_BYTES)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=_FS_N_CHUNKS, mmap_region=mmap
+        )
+        path0, path1 = tmp_path / "tier0", tmp_path / "tier1"
+        path0.mkdir()
+        path1.mkdir()
+
+        fs_tier0 = _make_fs_tier(mmap, str(path0))
+        fs_tier1 = _make_fs_tier(mmap, str(path1))
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier0, fs_tier1],
+        )
+
+        keys0 = to_keys(range(2))
+        keys1 = to_keys(range(2, 4))
+        _write_keys_to_fs(fs_tier0, keys0)
+        _write_keys_to_fs(fs_tier1, keys1)
+
+        req_ctx = ReqContext(req_id="r2")
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
+                "Lookups submit now"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r2"], preempted_req_ids=[])
+        )
+        _wait_lookup_workers(fs_tier0)
+        _wait_lookup_workers(fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
+                "Promotions initiate here"
+            )
+
+        _drain_fs_results(manager, fs_tier0, fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT
+
+        manager._metrics.assert_idle()
+
+        fs_tier0.shutdown()
+        fs_tier1.shutdown()
+
+    def test_promotion_counter_ordering_invariant_deferred(self, fs_manager_setup):
+        """While a deferred promotion job is redeeming, both
+        active_promotion_count >= 1 and primary_write_chunk_count > 0 hold.
+
+        active_promotion_count is incremented synchronously on job registration
+        (before the worker runs). primary_write_chunk_count is incremented
+        inside the FS worker when _promotion_allocation records the acquired
+        chunk count via on_primary_chunk_count. A gate on that call freezes
+        the worker at that exact moment so both counters can be asserted
+        simultaneously.
+        """
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(3))
+        _write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r_order")
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
+                "Lookups submit here"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r_order"], preempted_req_ids=[])
+        )
+        _wait_lookup_workers(fs_tier)
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
+                "Promotions initiate here"
+            )
+
+        # Gate: block the FS worker before/after alloc to check state
+        alloc_start = threading.Event()
+        alloc_continue = threading.Event()
+        alloc_end = threading.Event()
+        alloc_end_continue = threading.Event()
+        original_fn = manager._metrics.on_primary_chunk_count
+
+        def _gated(tier_idx, chunk_count, is_promotion):
+            alloc_start.set()
+            alloc_continue.wait()
+            original_fn(tier_idx, chunk_count, is_promotion)
+            alloc_end.set()
+            alloc_end_continue.wait()
+
+        with patch.object(
+            manager._metrics, "on_primary_chunk_count", side_effect=_gated
+        ):
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+            tier_state = manager._metrics._tier_states[0]
+            # State before alloc
+            assert alloc_start.wait(timeout=5.0)
+            assert tier_state.active_promotion_count == 1
+            assert tier_state.primary_write_chunk_count == 0
+            alloc_continue.set()  # let the worker increment
+            # State after alloc
+            assert alloc_end.wait(timeout=5.0)
+            assert tier_state.active_promotion_count == 1
+            assert tier_state.primary_write_chunk_count == 3
+            alloc_end_continue.set()  # release the worker
+
+        _drain_fs_results(manager, fs_tier)
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT
+
+        manager._metrics.assert_idle()
+
+
+class TestPromotionAllocation:
+    """Unit tests for TieringOffloadingManager._promotion_allocation."""
+
+    def _make_manager(self, num_chunks: int, secondary_tiers):
+        mmap = _mock_mmap_region(num_chunks)
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=mmap
+        )
+        return TieringOffloadingManager(
+            primary_tier=primary, secondary_tiers=secondary_tiers
+        ), mmap
+
+    def _make_eager_tier(self, mmap):
+        return ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mmap.create_kv_memoryview(),
+            tier_type="example",
+        )
+
+    def test_returns_none_and_fires_failure_metric_when_primary_full(self):
+        """When prepare_write returns None (primary full), _promotion_allocation
+        returns None and increments the allocation-failure counter."""
+        num_chunks = 1
+        manager, mmap = self._make_manager(
+            num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
+        )
+        req_ctx = ReqContext(req_id="req")
+        key = to_keys([1])[0]
+
+        # Fill the single primary chunk so prepare_write returns None
+        out = manager.primary_tier.prepare_store([key], req_ctx)
+        assert out is not None
+
+        failure_key = TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
+        assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 0
+
+        # Trigger a failure
+        result = manager._promotion_allocation(0, to_keys([2]), req_ctx)
+        assert result is None
+        assert manager._metrics._stats._values.get(failure_key, {}).get((), 0) == 1
+
+        # Release blocks by completing the store
+        manager.primary_tier.complete_store([key], req_ctx, success=True)
+
+    def test_allocation_records_chunk_count_metric(self):
+        """_promotion_allocation records the chunk count for every promotion:
+        eager tiers call it at initiate, deferred tiers via the job's alloc_fn
+        when get() redeems the claim."""
+        num_chunks = 4
+        manager, mmap = self._make_manager(
+            num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
+        )
+        req_ctx = ReqContext(req_id="req")
+        key = to_keys([1])[0]
+
+        tier_state = manager._metrics._tier_states[0]
+        assert tier_state.primary_write_chunk_count == 0
+
+        result = manager._promotion_allocation(0, [key], req_ctx)
+
+        assert result is not None
+        keys_out, chunk_ids_out = result
+        assert key in keys_out
+        assert len(chunk_ids_out) > 0
+        assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
+
+    def test_promotion_fails_for_finalized_request(self):
+        from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
+
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=4, mmap_region=_mock_mmap_region(4)
+        )
+        req_ctx = ReqContext(req_id="finished-req")
+
+        # Warm up request state so the manager knows about this request.
+        primary.on_new_request(req_ctx)
+        key = to_keys([1])[0]
+        out = primary.prepare_store([key], req_ctx)
+        assert out is not None
+        primary.complete_store([key], req_ctx, success=True)
+
+        # Finalize the request — sets state.finished = True.
+        primary.on_request_finished(req_ctx)
+
+        new_key = to_keys([99])[0]
+        result = primary.safe_prepare_write([new_key], req_ctx)
+        assert isinstance(result, CPUPrimaryTierOffloadingManager._RequestFinalized), (
+            f"Expected REQUEST_FINALIZED sentinel, got {result!r}"
+        )
+
+
+class TestLockedPrimaryTier:
+    """Tests for the _LockedPrimaryTier threading proxy."""
+
+    def test_not_wrapped_when_no_deferred_tier(self):
+        """Without a deferred secondary tier, primary_tier must NOT be wrapped."""
+        num_chunks = 4
+        mmap = _mock_mmap_region(num_chunks)
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=mmap
+        )
+        example_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mmap.create_kv_memoryview(),
+            tier_type="example",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary,
+            secondary_tiers=[example_tier],
+        )
+        assert not isinstance(manager.primary_tier, _LockedPrimaryTier), (
+            "primary_tier must NOT be wrapped when all secondary tiers are eager"
+        )
+
+    def test_wrapped_when_deferred_tier_present(self, fs_manager_setup):
+        """With a deferred FS secondary tier, primary_tier IS wrapped."""
+        manager, _, _ = fs_manager_setup
+        assert isinstance(manager.primary_tier, _LockedPrimaryTier)
+
+
+class TestProtectedLookupKeys:
+    """Tests for CPUPrimaryTierOffloadingManager._protected_lookup_keys."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        num_chunks = 6
+        self.primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=_mock_mmap_region(num_chunks)
+        )
+
+    def test_protected_lookup_keys_lifecycle(self):
+        """Full lifecycle of _protected_lookup_keys:
+
+        1. HIT lookup adds the key.
+        2. A new request ID clears the set before the next lookup.
+        3. on_schedule_end clears the set.
+        4. Keys in the set are protected from eviction.
+        5. reset_cache clears the set.
+        """
+        # Use a tight 2-chunk primary so eviction pressure is easy to trigger.
+        num_chunks = 2
+        primary = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_chunks, mmap_region=_mock_mmap_region(num_chunks)
+        )
+        setup_ctx = ReqContext(req_id="setup")
+        k1, k2, k3 = to_keys([1])[0], to_keys([2])[0], to_keys([3])[0]
+
+        def store(key):
+            out = primary.prepare_store([key], setup_ctx)
+            assert out is not None
+            primary.complete_store([key], setup_ctx, success=True)
+
+        store(k1)
+        store(k2)  # primary is now full (2/2 chunks)
+
+        # 1. HIT lookup adds the key to the set.
+        r = primary.lookup(k1, ReqContext(req_id="req1"))
+        assert r is LookupResult.HIT
+        assert k1 in primary._protected_lookup_keys
+
+        # 2. New request ID clears the set before serving the new request.
+        primary.lookup(k2, ReqContext(req_id="req2"))
+        assert k1 not in primary._protected_lookup_keys
+        assert k2 in primary._protected_lookup_keys
+
+        # 3. on_schedule_end clears the set.
+        primary.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        )
+        assert not primary._protected_lookup_keys
+
+        # 4. Re-protect k1; storing k3 must evict k2 (not k1).
+        primary.lookup(k1, ReqContext(req_id="req3"))
+        assert k1 in primary._protected_lookup_keys
+
+        result = primary.prepare_store([k3], ReqContext(req_id="evict"))
+        if result is not None:
+            assert primary._policy.get(k1) is not None, (
+                "k1 was evicted despite being in _protected_lookup_keys"
+            )
+
+        # 5. reset_cache clears the protection set.
+        primary.reset_cache()
+        assert not primary._protected_lookup_keys
 
 
 if __name__ == "__main__":

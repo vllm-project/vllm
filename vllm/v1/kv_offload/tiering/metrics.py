@@ -112,21 +112,52 @@ class TieringMetricsTracker:
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
-        chunk_count = len(transfer_job.chunk_ids)
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
-            state.primary_write_chunk_count += chunk_count
+            # Promotion chunk counts are updated in
+            # TieringOffloadingManager::PromotionAllocation()
         else:
             state.active_cascade_count += 1
-            state.primary_read_chunk_count += chunk_count
+            self.on_primary_chunk_count(
+                job_metadata.tier_idx, len(transfer_job.chunk_ids), is_promotion=False
+            )
 
     def on_job_finished(
         self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
+        transfer_job = job_metadata.transfer_job
+        state = self._tier_states[job_metadata.tier_idx]
+        # Update tier job counts
+        if transfer_job.is_promotion:
+            assert state.active_promotion_count > 0
+            state.active_promotion_count -= 1
+        else:
+            assert state.active_cascade_count > 0
+            state.active_cascade_count -= 1
+
+        if not transfer_job.is_materialized():
+            # Job not materialized. No further stats to update
+            return
+        chunk_count = len(transfer_job.chunk_ids)
+        if transfer_job.is_promotion:
+            state.primary_write_chunk_count -= chunk_count
+            assert state.primary_write_chunk_count >= 0
+        else:
+            state.primary_read_chunk_count -= chunk_count
+            assert state.primary_read_chunk_count >= 0
+
         self._observe_finished_job_stats(job_metadata, result)
         if job_metadata.transfer_job.is_promotion:
             self._observe_promotion_latency(job_metadata, result)
-        self._decrement_tier_state(job_metadata)
+
+    def on_primary_chunk_count(
+        self, tier_idx: int, chunk_count: int, is_promotion: bool
+    ):
+        state = self._tier_states[tier_idx]
+        if is_promotion:
+            state.primary_write_chunk_count += chunk_count
+        else:
+            state.primary_read_chunk_count += chunk_count
 
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
@@ -187,27 +218,14 @@ class TieringMetricsTracker:
             for state in self._tier_states
         )
 
-    def _decrement_tier_state(self, job_metadata: _JobMetadataLike) -> None:
-        transfer_job = job_metadata.transfer_job
-        state = self._tier_states[job_metadata.tier_idx]
-        chunk_count = len(transfer_job.chunk_ids)
-        if transfer_job.is_promotion:
-            assert state.active_promotion_count > 0
-            state.active_promotion_count -= 1
-            state.primary_write_chunk_count -= chunk_count
-            assert state.primary_write_chunk_count >= 0
-        else:
-            assert state.active_cascade_count > 0
-            state.active_cascade_count -= 1
-            state.primary_read_chunk_count -= chunk_count
-            assert state.primary_read_chunk_count >= 0
-
     def _observe_finished_job_stats(
         self,
         job_metadata: _JobMetadataLike,
         completed_job: JobResult,
     ) -> None:
         transfer_job = job_metadata.transfer_job
+        assert transfer_job.is_materialized()
+
         labelvalues = self.tier_label(job_metadata.tier_idx)
         completed_key_count = len(transfer_job.keys)
         if not completed_job.success:
@@ -248,6 +266,7 @@ class TieringMetricsTracker:
         covers only the active data movement, and so includes tier queueing.
         Failed promotions are observed too; PROMOTION_JOB_FAILURES counts them.
         """
+        assert job_metadata.transfer_job.is_materialized()
         self._stats.observe_histogram(
             TieringOffloadingMetrics.PROMOTION_LATENCY,
             time.monotonic() - job_metadata.transfer_job.submit_time,
