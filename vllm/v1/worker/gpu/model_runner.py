@@ -1980,6 +1980,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        pp_routed_experts = None
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             if not requires_raw_input_tokens(self.model):
@@ -1989,6 +1990,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare the intermediate tensors.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
+            if not dummy_run and self.aux_output_connector is not None:
+                pp_routed_experts = intermediate_tensors["routed_experts"]
             n = input_batch.num_tokens_after_padding
             new_tensors = {
                 k: v[:n]
@@ -2076,6 +2079,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
+        if not dummy_run and self.use_pp and self.aux_output_connector is not None:
+            pp_routed_experts = self.aux_output_connector.merge_pp_routed_experts(
+                input_batch, pp_routed_experts
+            )
+
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
@@ -2088,15 +2096,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            pp_routed_experts=pp_routed_experts,
         )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
+            if pp_routed_experts is not None:
+                # Add expert IDs without mutating the model's output dictionary.
+                output_intermediate_tensors = IntermediateTensors(
+                    output_intermediate_tensors.tensors
+                    | {"routed_experts": pp_routed_experts}
+                )
+            return output_intermediate_tensors
         return None
 
     @torch.inference_mode()
@@ -2118,6 +2134,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        pp_routed_experts = self.execute_model_state.pp_routed_experts
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2194,7 +2211,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
-            pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
+            pending_aux_output = self.aux_output_connector.prepare_output(
+                input_batch, pp_routed_experts
+            )
 
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -2427,6 +2446,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    pp_routed_experts: torch.Tensor | None = None
 
 
 class BatchReqState(NamedTuple):

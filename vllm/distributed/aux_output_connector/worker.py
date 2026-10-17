@@ -27,7 +27,7 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -109,7 +109,7 @@ class AuxOutputWorkerConnector:
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
-        if not get_tp_group().is_first_rank:
+        if not get_tp_group().is_first_rank or not get_pp_group().is_last_rank:
             return
 
         shape_per_token = self._capturer.shape_per_token
@@ -135,7 +135,26 @@ class AuxOutputWorkerConnector:
             vllm_config.max_concurrent_batches,
         )
 
-    def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
+    def merge_pp_routed_experts(
+        self, input_batch: InputBatch, previous: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Merge local and preceding PP stages' routed expert IDs into a snapshot."""
+        num_rows = int(input_batch.query_start_loc_np[len(input_batch.req_ids)])
+        local = self._capturer.device_buffer[:num_rows]
+        if previous is None:
+            return local.clone()
+        if previous.shape != local.shape:
+            raise ValueError(
+                "PP routed expert shapes must match: "
+                f"previous={tuple(previous.shape)}, local={tuple(local.shape)}"
+            )
+        return local + previous
+
+    def prepare_output(
+        self,
+        input_batch: InputBatch,
+        routed_experts: torch.Tensor | None = None,
+    ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
         if self._buffer is None or self._step_metadata is None:
             return None
@@ -148,7 +167,11 @@ class AuxOutputWorkerConnector:
             request_ids=request_ids,
             token_starts=input_batch.num_computed_tokens_np,
             query_start_loc=query_start_loc,
-            routed_experts_gpu=self._capturer.snapshot_routing_data(num_rows),
+            routed_experts_gpu=(
+                self._capturer.snapshot_routing_data(num_rows)
+                if routed_experts is None
+                else routed_experts.to(self._capturer.output_dtype)
+            ),
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
