@@ -312,8 +312,9 @@ steps:
           kernels/test_relu2_fp8_quant.py
           --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
 
-- label: ":nvidia: (L4) Attention Kernels Shard %N"
+- label: ":nvidia: (L4) Attention Kernels"
   key: kernels-attention-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -326,15 +327,14 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 7
+    - pytest -v -s kernels/attention
   mirror:
     amd:
-      label: ":amd: (MI300) Attention Kernels Shard %N"
+      label: ":amd: (MI300) Attention Kernels"
+      automatic_shard: true
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
-      parallelism: 6
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -347,7 +347,7 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -432,8 +432,9 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
 
-- label: ":nvidia: (L4) Quantization Kernels Shard %N"
+- label: ":nvidia: (L4) Quantization Kernels"
   key: kernels-quantization-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -442,11 +443,11 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 6
+    - pytest -v -s kernels/quantization
   mirror:
     amd:
-      label: ":amd: (MI300) Quantization Kernels Shard %N"
+      label: ":amd: (MI300) Quantization Kernels"
+      automatic_shard: true
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
@@ -469,10 +470,11 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/quantization -k "not test_nvfp4_dense_emulation"
 
-- label: ":nvidia: (L4) MoE Kernels Shard %N"
+- label: ":nvidia: (L4) MoE Kernels"
   key: kernels-moe-test
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 50
@@ -485,12 +487,12 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 5
+    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
   mirror:
     amd:
-      label: ":amd: (MI300) MoE Kernels Shard %N"
+      label: ":amd: (MI300) MoE Kernels"
+      automatic_shard: true
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
@@ -779,8 +781,9 @@ steps:
       kernels/moe/test_b12x.py
       quantization/test_auto_round.py -k b12x
 
-- label: ":nvidia: (H100) Helion Kernels Shard %N"
+- label: ":nvidia: (H100) Helion Kernels"
   key: kernels-helion-test
+  automatic_shard: true
   timeout_in_minutes: 115
   device: h100
   source_file_dependencies:
@@ -788,16 +791,14 @@ steps:
   - tests/kernels/helion/
   commands:
     - pip install helion==1.4.0
-    - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 5
+    - pytest -v -s kernels/helion/
   mirror:
     amd:
-      label: ":amd: (MI250) Helion Kernels Shard %N"
+      label: ":amd: (MI250) Helion Kernels"
+      automatic_shard: true
       dind: false
       device: mi250_1
       timeout_in_minutes: 45
-      # Explicit so the base step's count does not multiply the mirror's replicas.
-      parallelism: 2
       depends_on:
       - image-build-amd
       source_file_dependencies:
