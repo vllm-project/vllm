@@ -8,6 +8,9 @@ from vllm.model_executor.models.transformers.fusers.base import (
     RewriteFuser,
     StackedFuser,
 )
+from vllm.model_executor.models.transformers.fusers.classifier import (
+    ClassifierFuser,
+)
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.merged_column import (
     MergedColumnParallelFuser,
@@ -23,6 +26,7 @@ __all__ = [
     "BaseFuser",
     "RewriteFuser",
     "StackedFuser",
+    "ClassifierFuser",
     "GLUFuser",
     "MergedColumnParallelFuser",
     "MLAFuser",

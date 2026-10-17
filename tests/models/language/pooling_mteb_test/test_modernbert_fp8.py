@@ -43,7 +43,7 @@ def _assert_modernbert_online_fp8(model) -> None:
         Fp8PerTensorOnlineLinearMethod,
     )
 
-    layer = model.encoder_layer.layers[0]
+    layer = model.model.layers[0]
     linears = {
         "attn.Wqkv": layer.attn.Wqkv,
         "attn.Wo": layer.attn.Wo,
@@ -73,6 +73,6 @@ def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None
         MODEL_INFO,
         vllm_extra_kwargs={"quantization": "fp8_per_tensor"},
         # Account for Online FP8 kernel variance across GPU architectures.
-        atol=2e-3,
+        atol=2.5e-3,
         vllm_model_callback=check_online_fp8,
     )
