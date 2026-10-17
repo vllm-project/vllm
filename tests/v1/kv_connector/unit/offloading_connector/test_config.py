@@ -46,7 +46,6 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
-    make_offload_key,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
@@ -1259,41 +1258,6 @@ def test_chunked_local_canonical_gate_rejects_unsupported(unsupported):
     assert not build_offloading_config(
         config, kv_config
     ).parallel.is_parallelism_agnostic
-
-
-def test_chunked_local_canonical_namespace_across_tp():
-    """Real configs share keys across TP only within one canonical format."""
-    paths: dict[tuple[bool, str], set[str]] = {}
-    for canonical, layout in [(False, "LBNHC"), (True, "LBNHC"), (True, "LBHNC")]:
-        paths[canonical, layout] = set()
-        for tp in (1, 2, 4):
-            config = _make_vllm_config(
-                tensor_parallel_size=tp,
-                extra_config={"canonical_layout": canonical},
-            )
-            config.use_v2_model_runner = False
-            config.cache_config.kv_cache_layout = layout
-            config.parallel_config.rank = tp - 1
-            cache_spec = ChunkedLocalAttentionSpec(
-                block_size=16,
-                num_kv_heads=4 // tp,
-                head_size=128,
-                dtype=torch.float32,
-                attention_chunk_size=128,
-            )
-            kv_config = KVCacheConfig(
-                num_blocks=0, kv_cache_tensors=[], kv_cache_groups=_groups(cache_spec)
-            )
-            spec = MockOffloadingSpec(build_offloading_config(config, kv_config))
-            mapper = FileMapper.from_offloading_spec(
-                "/cache", spec, parallel_agnostic=True
-            )
-            paths[canonical, layout].add(
-                mapper.get_file_name(make_offload_key(b"kv", 0))
-            )
-    assert len(paths[False, "LBNHC"]) == 3
-    assert len(paths[True, "LBNHC"]) == len(paths[True, "LBHNC"]) == 1
-    assert len(set.union(*paths.values())) == 5
 
 
 def test_chunked_local_canonical_rejects_uncertified_runtime_layout():

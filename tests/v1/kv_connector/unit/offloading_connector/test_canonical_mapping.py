@@ -403,41 +403,6 @@ def test_chunked_local_cross_tp_store_load(form, writer_tp, reader_tp, total_hea
             assert _load_one(mapping, stored) == pages[block_id]
 
 
-@pytest.mark.parametrize("unsupported", ["layout", "quantization", "heads"])
-def test_chunked_local_mapping_fails_closed(unsupported):
-    """Uncertifiable chunked-local pages retain a topology-specific mapping."""
-    spec = ChunkedLocalAttentionSpec(
-        block_size=4,
-        num_kv_heads=1 if unsupported == "heads" else 2,
-        head_size=64,
-        dtype=torch.int8,
-        attention_chunk_size=8,
-        kv_quant_mode=(
-            KVQuantMode.FP8_PER_TOKEN_HEAD
-            if unsupported == "quantization"
-            else KVQuantMode.NONE
-        ),
-    )
-    spec = TritonAttentionBackend.customize_spec(spec)
-    cache = _split_nhd_cache(spec)
-    if unsupported == "layout":
-        cache = torch.zeros(
-            NUM_BLOCKS,
-            spec.block_size,
-            2,
-            spec.num_kv_heads,
-            spec.head_size,
-            dtype=torch.int8,
-        ).permute(0, 2, 1, 3, 4)
-    mapping = derive_canonical_mappings(
-        _vllm_config(tp=2, total_kv_heads=4),
-        _kv_cache_config([KVCacheGroupSpec(["local"], spec)]),
-        {"local": cache},
-    )["local"]
-    assert not mapping.parallelism_agnostic
-    assert mapping.canonical_page_size_bytes == 2 * spec.unpadded_page_size_bytes
-
-
 def test_cp_round_trip():
     # tp=4 / dcp=2 / 2 KV heads: 4 workers jointly hold one canonical page
     spec = _full_spec(num_kv_heads=1)

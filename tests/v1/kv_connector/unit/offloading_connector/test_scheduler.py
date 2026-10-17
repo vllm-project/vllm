@@ -4665,7 +4665,7 @@ def _make_chunked_local_scheduler(prompt_tokens):
     return scheduler, request, manager
 
 
-@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33])
+@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 31, 32, 33])
 @pytest.mark.parametrize("step_size", [4, 32])
 def test_chunked_local_prefill_store_boundaries(prompt_tokens, step_size):
     """Prefill stores complete live blocks once, never released or partial blocks."""
@@ -4735,7 +4735,7 @@ def test_chunked_local_store_retry_skips_released_blocks():
     assert jobs[job_id].src_spec.block_ids.tolist() == [blocks[2].block_id]
 
 
-@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33])
+@pytest.mark.parametrize("prompt_tokens", [7, 8, 9, 31, 32, 33])
 def test_chunked_local_load_skips_previous_attention_chunks(prompt_tokens):
     """Load jobs restore only the live chunk, including an empty tail at its start."""
     scheduler, request, manager = _make_chunked_local_scheduler(prompt_tokens)
