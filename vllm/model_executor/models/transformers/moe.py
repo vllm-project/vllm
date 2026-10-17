@@ -127,43 +127,6 @@ direct_register_custom_op(
 )
 
 
-def _hf_topk_router_precomputed(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    moe_state: TransformersMoEState,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return `(topk_weights, topk_ids)` the HF block forward already computed:
-    weights arrive as `gating_output`, ids via `moe_state`."""
-    topk_weights = gating_output
-    topk_ids = moe_state.topk_ids
-    assert topk_ids is not None
-    # Handle all gather in expert parallel
-    if topk_ids.size(0) != hidden_states.size(0):
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-        assert sizes is not None
-        is_sp = moe_state.is_sequence_parallel
-        group = get_ep_group() if is_sp else get_dp_group()
-        assert sizes[group.rank_in_group] == topk_ids.shape[0]
-        (topk_ids,) = group.all_gatherv([topk_ids], 0, sizes)
-    return topk_weights, topk_ids
-
-
-def _hf_topk_router(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    gate: nn.Module,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Route with a Transformers gate returning `(_, topk_weights, topk_ids)`."""
-    _, topk_weights, topk_ids = gate(hidden_states)
-    return topk_weights, topk_ids
-
-
 class TransformersRoutedExperts(RoutedExperts):
     def get_expert_mapping(
         self,
@@ -347,17 +310,26 @@ class MoEMixin(MixtureOfExperts, Base):
                         is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
+                    fuser = MoEBlockFuser.match(moe_block, experts_name)
                     # _maybe_apply_routed_scale_to_output edge case. Transformers
                     # decoder layers do not compensate for dividing by scaling factor.
-                    divides_shared_output = (
+                    reaches_fp16_trick = (
                         routed_scaling_factor != 1.0
                         and apply_routed_scale_to_output
                         and self.model_config.dtype == torch.float16
+                        and fuser is not None
+                        and fuser.shared_name is not None
                     )
-                    fuser = MoEBlockFuser.match(
-                        moe_block, experts_name, divides_shared_output
-                    )
-                    if fuser is not None:
+                    if reaches_fp16_trick:
+                        logger.warning_once(
+                            "%s could be fused but routing it in vLLM would apply "
+                            "`routed_scaling_factor` by dividing the shared expert "
+                            "output, which only fp16 overflow protection expects the "
+                            "decoder layer to compensate for. Falling back to routing "
+                            "in Transformers; run in bfloat16 to fuse it.",
+                            moe_block_cls,
+                        )
+                    if fuser is not None and not reaches_fp16_trick:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in MoERunner.
                         shared_experts = fuser.shared_experts(moe_block, prefix)
@@ -369,52 +341,39 @@ class MoEMixin(MixtureOfExperts, Base):
                                 down_name = glu_fuser.down_name
                                 if down_name is not None:
                                     shared_down_projs.append((hf_shared, down_name))
-                        if scoring_func := fuser.scoring_func:
-                            # Internal routing kwargs.
-                            # Prefer config, otherwise read it from fuser.
-                            router_dtype = config_router_dtype or fuser.router_dtype
-                            gate = fuser.gate(moe_block, prefix, router_dtype)
-                            kwargs |= dict(
-                                scoring_func=scoring_func,
-                                renormalize=(
-                                    layer_renormalize
-                                    if fuser.renormalize is None
-                                    else fuser.renormalize
-                                ),
-                                gate=gate,
-                            )
-                            if router_dtype is not None:
-                                kwargs["router_logits_dtype"] = router_dtype
-                            if use_grouped_topk:
-                                kwargs |= grouped_topk_routing_kwargs
-                            if routed_scaling_factor != 1.0:
-                                kwargs |= routed_scaling_factor_kwargs
-                            bias = getattr(gate, "e_score_correction_bias", None)
-                            if bias is not None:
-                                kwargs["e_score_correction_bias"] = bias
-                        else:
-                            # External routing kwargs
-                            kwargs |= dict(
-                                num_expert_group=num_expert_group,
-                                topk_group=topk_group,
-                                custom_routing_function=partial(
-                                    _hf_topk_router,
-                                    gate=getattr(moe_block, fuser.gate_name),
-                                ),
-                            )
-
+                        # Prefer config, otherwise read it from fuser.
+                        router_dtype = config_router_dtype or fuser.router_dtype
+                        gate = fuser.gate(moe_block, prefix, router_dtype)
                         kwargs |= dict(
+                            scoring_func=fuser.scoring_func,
+                            renormalize=(
+                                layer_renormalize
+                                if fuser.renormalize is None
+                                else fuser.renormalize
+                            ),
                             is_sequence_parallel=(
                                 self.parallel_config.use_sequence_parallel_moe
                             ),
+                            gate=gate,
                             shared_experts=shared_experts,
                         )
+                        if router_dtype is not None:
+                            kwargs["router_logits_dtype"] = router_dtype
+                        if use_grouped_topk:
+                            kwargs |= grouped_topk_routing_kwargs
+                        if routed_scaling_factor != 1.0:
+                            kwargs |= routed_scaling_factor_kwargs
+                        bias = getattr(gate, "e_score_correction_bias", None)
+                        if bias is not None:
+                            kwargs["e_score_correction_bias"] = bias
                         fuser.rewrite_forward(moe_block)
+                        routed = "gate + experts"
+                        if fuser.shared_name:
+                            routed += " + shared experts"
                         logger.info_once(
-                            "Fused: gate + experts%s (%s) -> MoERunner (%s routing)",
-                            " + shared experts" if fuser.shared_name else "",
+                            "Fused: %s (%s) -> MoERunner (internal routing)",
+                            routed,
                             moe_block_cls,
-                            "external" if fuser.scoring_func is None else "internal",
                         )
                     else:
                         # MoE block forward is unmodified.
@@ -422,11 +381,35 @@ class MoEMixin(MixtureOfExperts, Base):
                         # We then smuggle the topk_ids in using a custom op.
                         moe_state = TransformersMoEState()
 
+                        def custom_routing_function(
+                            hidden_states: torch.Tensor,
+                            gating_output: torch.Tensor,
+                            topk: int,
+                            renormalize: bool,
+                            moe_state: TransformersMoEState,
+                        ):
+                            """Return `topk_weights` from `gating_output` and the
+                            `topk_ids` we stored in the layer earlier."""
+                            topk_weights = gating_output
+                            topk_ids = moe_state.topk_ids
+                            assert topk_ids is not None
+                            # Handle all gather in expert parallel
+                            if topk_ids.size(0) != hidden_states.size(0):
+                                dp_metadata = get_forward_context().dp_metadata
+                                assert dp_metadata is not None
+                                sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+                                assert sizes is not None
+                                is_sp = moe_state.is_sequence_parallel
+                                group = get_ep_group() if is_sp else get_dp_group()
+                                assert sizes[group.rank_in_group] == topk_ids.shape[0]
+                                (topk_ids,) = group.all_gatherv([topk_ids], 0, sizes)
+                            return topk_weights, topk_ids
+
                         kwargs |= dict(
                             num_expert_group=num_expert_group,
                             topk_group=topk_group,
                             custom_routing_function=partial(
-                                _hf_topk_router_precomputed, moe_state=moe_state
+                                custom_routing_function, moe_state=moe_state
                             ),
                             runner_cls=TransformersMoERunner,
                             runner_args={"moe_state": moe_state},

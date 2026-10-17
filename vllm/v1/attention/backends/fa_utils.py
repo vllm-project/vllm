@@ -340,8 +340,6 @@ def flash_attn_supports_mla():
 
         except (ImportError, AssertionError):
             pass
-    elif current_platform.is_xpu():
-        return True
     return False
 
 

@@ -16,8 +16,6 @@ We currently support the following OpenAI APIs:
 - [Chat Completions batch API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions/batch`)
 - [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-- [Decisions API](../../models/structured_decisions_models.md#openai-decisions-api) (`/v1/decisions`)
-    - Supports text-only predicate, choice, and score questions on supported generation models.
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -78,7 +76,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
-- [Structured Decisions API](../../models/structured_decisions_models.md#typesafe-system-one-endpoint) (`/v1/systemone`)
+- [Structured Decisions API](structured_decisions.md) (`/v1/systemone`)
     - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - Answers typed questions about a state with a probability for every allowed answer.
 

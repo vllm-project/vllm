@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
-from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -53,7 +51,6 @@ from vllm.entrypoints.openai.responses.context import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
-    ResponseIncompleteEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
     ResponsesResponse,
@@ -1417,7 +1414,6 @@ def _make_request_output(
     text,
     token_ids,
     metrics: RequestStateStats | None = None,
-    finish_reason: str | None = None,
 ):
     completion = CompletionOutput(
         index=0,
@@ -1425,7 +1421,7 @@ def _make_request_output(
         token_ids=token_ids,
         cumulative_logprob=0.0,
         logprobs=None,
-        finish_reason=finish_reason,
+        finish_reason=None,
         stop_reason=None,
     )
     return RequestOutput(
@@ -1445,11 +1441,10 @@ def _make_simple_context_with_output(
     token_ids,
     response_parser=None,
     metrics: RequestStateStats | None = None,
-    finish_reason: str | None = None,
 ):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
-    req_output = _make_request_output(text, token_ids, metrics, finish_reason)
+    req_output = _make_request_output(text, token_ids, metrics)
     ctx.append_output(req_output)
     ctx.request_metrics = metrics
     return ctx
@@ -1564,66 +1559,6 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
-
-
-async def _stream_truncated_by_length(serving: OpenAIServingResponses):
-    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
-    context = _make_simple_context_with_output(
-        "cut mid sen", [10, 20], finish_reason="length"
-    )
-
-    async def one_context():
-        yield context
-
-    return [
-        event
-        async for event in serving.responses_stream_generator(
-            request=request,
-            sampling_params=SamplingParams(max_tokens=2),
-            result_generator=one_context(),
-            context=context,
-            model_name="test-model",
-            tokenizer=MagicMock(),
-            request_metadata=RequestResponseMetadata(request_id="req"),
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_responses_stream_truncated_by_length_reports_incomplete():
-    """A max_output_tokens cut must end the stream with ``response.incomplete``
-    and mark the cut item ``incomplete`` in both ``output_item.done`` and the
-    final response (#57998)."""
-    events = await _stream_truncated_by_length(_make_serving_instance())
-
-    item_done = [e for e in events if e.type == "response.output_item.done"]
-    assert [e.item.status for e in item_done] == ["incomplete"]
-    final = events[-1]
-    assert isinstance(final, ResponseIncompleteEvent)
-    assert final.response.status == "incomplete"
-    assert final.response.incomplete_details.reason == "max_output_tokens"
-    assert [item.status for item in final.response.output] == ["incomplete"]
-
-
-@pytest.mark.asyncio
-async def test_background_stream_replay_stops_on_response_incomplete():
-    """Replaying a stored background stream must end at ``response.incomplete``
-    as it does at ``response.completed``, instead of waiting for more events."""
-    serving = _make_serving_instance()
-    events = await _stream_truncated_by_length(serving)
-    assert isinstance(events[-1], ResponseIncompleteEvent)
-    serving.event_store["resp_bg"] = (deque(events), asyncio.Event())
-
-    async def replay(starting_after=None):
-        return [
-            event
-            async for event in serving.responses_background_stream_generator(
-                "resp_bg", starting_after=starting_after
-            )
-        ]
-
-    assert await asyncio.wait_for(replay(), timeout=5) == events
-    assert await asyncio.wait_for(replay(starting_after=0), timeout=5) == events[1:]
 
 
 @pytest.mark.asyncio

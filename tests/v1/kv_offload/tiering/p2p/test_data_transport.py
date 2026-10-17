@@ -5,24 +5,12 @@
 from __future__ import annotations
 
 import ctypes
-import threading
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
-from vllm.v1.kv_offload.tiering.p2p.data import nixl as nixl_module
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
-
-
-class nixlRemoteDisconnectError(Exception):  # noqa: N801
-    """Stand-in for NIXL's binding exception of the same name."""
-
-
-def _remote_disconnect() -> Exception:
-    return nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
-
 
 # ---------------------------------------------------------------------------
 # DataTransport base class tests
@@ -118,59 +106,6 @@ class TestNixlTransportWithMockedAgent:
     def test_get_agent_metadata(self):
         transport = self._make_transport()
         assert transport.get_agent_metadata() == b"test-metadata"
-
-    def test_add_remote_peer_async_registers_off_the_caller_thread(self):
-        """The O(num_blocks) registration must not run on the caller thread.
-
-        This is the whole point of the async path: the scheduler thread
-        hands the work off rather than paying prep_xfer_dlist inline.
-        """
-        transport = self._make_transport()
-        caller = threading.get_ident()
-        worker_threads: list[int] = []
-
-        def record_thread(*args, **kwargs):
-            worker_threads.append(threading.get_ident())
-            return MagicMock(name="remote_dlist")
-
-        transport._agent.prep_xfer_dlist.side_effect = record_thread
-
-        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
-        future.result(timeout=5)
-
-        assert worker_threads and caller not in worker_threads
-        assert transport.write_blocks("peer:1", [0], [1]) is not None
-
-    def test_registration_landing_after_remove_is_discarded(self):
-        """A late registration must not revive a peer that was reaped.
-
-        The session is torn down and remove_remote_peer runs while the
-        worker is still building descriptors; publishing afterwards would
-        leave a registered peer with no session and leak its handles.
-        """
-        transport = self._make_transport()
-        building = threading.Event()
-        release = threading.Event()
-
-        def blocking_prep(*args, **kwargs):
-            building.set()
-            release.wait(timeout=5)
-            return MagicMock(name="remote_dlist")
-
-        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
-
-        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
-        assert building.wait(timeout=5)
-        transport.remove_remote_peer("peer:1")
-        release.set()
-
-        with pytest.raises(RuntimeError, match="superseded"):
-            future.result(timeout=5)
-        assert "peer:1" not in transport._remote_dlists
-        assert transport.write_blocks("peer:1", [0], [1]) is None
-        # The handles the worker built were released rather than leaked.
-        assert transport._agent.release_dlist_handle.called
-        assert transport._agent.remove_remote_agent.called
 
     def test_write_blocks_returns_none_for_unknown_peer(self):
         """write_blocks returns None if peer not registered."""
@@ -296,93 +231,18 @@ class TestNixlTransportWithMockedAgent:
         assert transport.cancel([999, 1000]) == []
         assert transport.cancel([999, 1000], mode="wait") == []
 
-    @pytest.mark.parametrize("state", ["DONE", "ERR"])
-    def test_cancel_wait_release_succeeds(self, state):
-        """wait-mode cancel of a stopped transfer pops it and returns []."""
+    def test_cancel_wait_release_succeeds(self):
+        """wait-mode cancel that succeeds pops the entry and returns []."""
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
         assert tid in transport._inflight
 
-        transport._agent.check_xfer_state.return_value = state
         result = transport.cancel([tid], mode="wait")
         assert result == []
         assert tid not in transport._inflight
         transport._agent.release_xfer_handle.assert_called_once()
-
-    @pytest.mark.parametrize("state", ["PROC", "PEND"])
-    def test_cancel_wait_keeps_running_transfer(self, state):
-        """Releasing a running NIXL WRITE does not stop it, so wait-mode
-        cancel must not release it or report it as cancelled."""
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-
-        tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.return_value = state
-
-        assert transport.cancel([tid], mode="wait") == [tid]
-        assert tid in transport._inflight
-        transport._agent.release_xfer_handle.assert_not_called()
-
-    def test_cancel_wait_state_check_raises(self):
-        """A failed state check is not proof the transfer stopped."""
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-
-        tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = RuntimeError("NOT_FOUND")
-
-        assert transport.cancel([tid], mode="wait") == [tid]
-        assert tid in transport._inflight
-        transport._agent.release_xfer_handle.assert_not_called()
-
-    def test_cancel_wait_remote_disconnect_is_terminal(self):
-        """A dead peer can no longer be written to: wait-mode cancel drops
-        the transfer even if its handle can no longer be released."""
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-
-        tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = _remote_disconnect()
-        transport._agent.release_xfer_handle.side_effect = RuntimeError("gone")
-
-        assert transport.cancel([tid], mode="wait") == []
-        assert tid not in transport._inflight
-        assert transport.poll() == PollResult(done=(), failed=())
-
-    @pytest.mark.parametrize(
-        "exc",
-        [
-            _remote_disconnect(),
-            # Recognized by status code even if the binding class is renamed.
-            RuntimeError("getXferStatus: NIXL_ERR_REMOTE_DISCONNECT"),
-        ],
-    )
-    def test_poll_reports_remote_disconnect_as_failed(self, exc):
-        """check_xfer_state raises instead of returning ERR once the peer
-        disconnected; poll must surface that as a failure, not keep the
-        transfer inflight forever."""
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-
-        tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = exc
-
-        result = transport.poll()
-        assert result.done == ()
-        assert tid in result.failed
-        assert tid not in transport._inflight
-
-    def test_poll_keeps_transfer_on_other_state_check_errors(self):
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-
-        tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = RuntimeError("NOT_FOUND")
-
-        assert transport.poll() == PollResult(done=(), failed=())
-        assert tid in transport._inflight
 
     def test_cancel_wait_release_raises(self):
         """wait-mode cancel keeps the entry and returns the tid on raise."""
@@ -390,7 +250,6 @@ class TestNixlTransportWithMockedAgent:
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.return_value = "DONE"
         transport._agent.release_xfer_handle.side_effect = RuntimeError(
             "NIXL_ERR_REPOST_ACTIVE"
         )
@@ -425,71 +284,6 @@ class TestNixlTransportWithMockedAgent:
         assert "peer:1" not in transport._remote_dlists
         transport._agent.release_dlist_handle.assert_called()
         transport._agent.remove_remote_agent.assert_called()
-
-    def test_remove_peer_removes_agent_even_if_release_fails(self):
-        """A dlist release failure must not skip the agent removal.
-
-        Teardown runs two independent NIXL operations. If
-        release_dlist_handle() raises, remove_remote_agent() must still be
-        attempted with the registered agent name; skipping it would leave
-        a stale NIXL registration behind after the peer is gone.
-        """
-        transport = self._make_transport()
-        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
-        transport._agent.release_dlist_handle.side_effect = RuntimeError(
-            "simulated release failure"
-        )
-
-        with patch.object(nixl_module.logger, "warning") as mock_warning:
-            transport.remove_remote_peer("peer:1")
-
-        # The release failure was logged rather than swallowed silently.
-        mock_warning.assert_called_once()
-        # Agent removal was still attempted with the registered name.
-        transport._agent.release_dlist_handle.assert_called_once()
-        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
-        assert "peer:1" not in transport._remote_dlists
-
-    def test_superseded_registration_removes_agent_even_if_release_fails(self):
-        """A release failure while discarding must still remove the agent.
-
-        _publish_peer discards handles built under a stale generation when
-        the peer was removed or re-registered mid-registration. Its
-        descriptor-list release and agent removal are independent too: if
-        release_dlist_handle() raises, remove_remote_agent() must still be
-        attempted for the superseded registration, otherwise its remote
-        agent stays registered forever.
-        """
-        transport = self._make_transport()
-        building = threading.Event()
-        release = threading.Event()
-
-        def blocking_prep(*args, **kwargs):
-            building.set()
-            release.wait(timeout=5)
-            return MagicMock(name="remote_dlist")
-
-        transport._agent.prep_xfer_dlist.side_effect = blocking_prep
-
-        future = transport.add_remote_peer_async("peer:1", b"meta", 0x1000, 8, 1024)
-        assert building.wait(timeout=5)
-        # Supersede the registration while its worker still builds handles.
-        transport.remove_remote_peer("peer:1")
-        transport._agent.release_dlist_handle.side_effect = RuntimeError(
-            "simulated release failure"
-        )
-
-        with patch.object(nixl_module.logger, "warning") as mock_warning:
-            release.set()
-            with pytest.raises(RuntimeError, match="superseded"):
-                future.result(timeout=5)
-
-            # The release failure was logged rather than swallowed silently.
-            mock_warning.assert_called_once()
-        # The superseded registration's agent was still removed.
-        transport._agent.release_dlist_handle.assert_called_once()
-        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
-        assert "peer:1" not in transport._remote_dlists
 
     def test_close_releases_everything(self):
         """Close releases all handles and clears state."""

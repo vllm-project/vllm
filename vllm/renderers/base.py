@@ -687,17 +687,13 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
-        prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
 
-        return prompt
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     @overload
     async def _tokenize_singleton_prompt_async(
@@ -731,17 +727,13 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
-        prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
 
-        return prompt
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     def _tokenize_enc_dec_prompt(
         self,

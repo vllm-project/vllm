@@ -25,51 +25,6 @@ class VerifyAndUpdateConfig:
         return
 
 
-class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        hf_config = model_config.hf_config
-        if getattr(hf_config, "kda_allow_negative_eigenvalues", None) is not False:
-            raise NotImplementedError(
-                "AliceAI requires kda_allow_negative_eigenvalues=false"
-            )
-        if getattr(hf_config, "router_score_function", None) != "sigmoid":
-            raise ValueError("AliceAI requires router_score_function='sigmoid'")
-        if getattr(hf_config, "router_bias_correction", None) is not True:
-            raise ValueError("AliceAI requires router_bias_correction=true")
-        mtp_layers = getattr(hf_config, "mtp_num_hidden_layers", 0)
-        if mtp_layers:
-            logger.warning(
-                "AliceAI checkpoint declares %s MTP layer(s), but this "
-                "implementation ignores the MTP configuration and weights; "
-                "MTP speculative decoding is unavailable.",
-                mtp_layers,
-            )
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        if vllm_config.parallel_config.pipeline_parallel_size != 1:
-            raise NotImplementedError(
-                "AliceAI does not support pipeline parallelism; "
-                "pipeline_parallel_size=1 is required"
-            )
-
-        speculative_config = vllm_config.speculative_config
-        speculative_method = (
-            speculative_config.method if speculative_config is not None else None
-        )
-        if speculative_method in {
-            "dflash",
-            "dspark",
-            "eagle3",
-            "extract_hidden_states",
-        }:
-            raise NotImplementedError(
-                "AliceAI does not support speculative method "
-                f"{speculative_method!r} because it requires auxiliary hidden states"
-            )
-
-
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -113,32 +68,6 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         vllm_config.parallel_config.set_dcp_defaults(
             comm_backend="a2a", q_replicate=True
         )
-
-
-class Glm5NextModelConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        from vllm.platforms import current_platform
-
-        cache_config = vllm_config.cache_config
-        if (
-            cache_config.cache_dtype != "auto"
-            or not current_platform.is_cuda()
-            or not current_platform.is_device_capability_family(100)
-            or getattr(vllm_config.model_config.hf_text_config, "index_topk", None)
-            is None
-        ):
-            return
-
-        cache_config.cache_dtype = "fp8"
-        logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
-        spec_config = vllm_config.speculative_config
-        if (
-            spec_config is not None
-            and spec_config.method != "mtp"
-            and spec_config.kv_cache_dtype is None
-        ):
-            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -992,7 +921,7 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
-            current_platform.is_cuda_alike()
+            current_platform.is_cuda()
             and parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size != 1
         ):
@@ -1087,54 +1016,6 @@ class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
             config.is_causal = is_causal
 
 
-class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
-    """Apply the contract declared by a Decision 3.0 `decision_config.json`."""
-
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        hf_config = model_config.hf_config
-        decision = getattr(hf_config, "decision_config", None)
-        if not isinstance(decision, dict):
-            raise ValueError("Decision 3.0 checkpoints need a decision_config.json")
-        if decision.get("format_version") != 1:
-            raise ValueError(
-                "unsupported decision_config.json format_version "
-                f"{decision.get('format_version')!r}; vLLM reads version 1"
-            )
-        if decision.get("pooling", "last") != "last":
-            raise ValueError(
-                f"unsupported decision_config.json pooling {decision['pooling']!r}"
-            )
-        attention_mode = decision.get("attention_mode", "causal")
-        if attention_mode not in ("causal", "noncausal_full_attention"):
-            raise ValueError(
-                f"unsupported decision_config.json attention_mode {attention_mode!r}"
-            )
-        codes = decision.get("codes")
-        token_ids = decision.get("token_ids")
-        if not codes or not isinstance(token_ids, list) or len(codes) != len(token_ids):
-            raise ValueError(
-                "decision_config.json must list one token id per answer code"
-            )
-
-        # The full attention layers read the whole prompt in both directions;
-        # the Gated DeltaNet layers stay causal.
-        is_causal = attention_mode == "causal"
-        for config in {
-            id(config): config for config in (hf_config, model_config.hf_text_config)
-        }.values():
-            config.is_causal = is_causal
-        # One readout row per answer code.
-        hf_config.id2label = dict(enumerate(codes))
-
-        # Probabilities only exist over a question's own options, so the head
-        # returns raw code logits unless activation is requested.
-        pooler_config = model_config.pooler_config
-        assert pooler_config is not None
-        if pooler_config.use_activation is None:
-            pooler_config.use_activation = False
-
-
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1180,10 +1061,8 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
-    "AliceAIForCausalLM": AliceAIForCausalLMConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
-    "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
@@ -1196,8 +1075,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
-    "Glm5NextForCausalLM": Glm5NextModelConfig,
-    "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,

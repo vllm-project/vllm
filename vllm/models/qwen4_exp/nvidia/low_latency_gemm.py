@@ -240,19 +240,11 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         8: SkinnyGemmConfig(8, 128, 1, vector_width=2, static_k=6144),
         16: SkinnyGemmConfig(16, 32, 1, static_k=6144),
     },
-    # QSA fused QKV/gate projection, TP=2 (LoRA keeps the indexer projection separate).
+    # QSA fused QKV/gate projection, TP=2.
     (6656, 2560): {
         1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
         2: SkinnyGemmConfig(2, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
         4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
-    },
-    # QSA fused QKV/gate + replicated indexer Q/K projection, TP=2.
-    (7296, 2560): {
-        1: SkinnyGemmConfig(1, 32, 1, vector_width=2, static_k=2560),
-        2: SkinnyGemmConfig(2, 32, 1, vector_width=2, static_k=2560),
-        4: SkinnyGemmConfig(4, 32, 1, vector_width=2, static_k=2560),
-        8: SkinnyGemmConfig(8, 32, 1, vector_width=2, static_k=2560),
-        16: SkinnyGemmConfig(16, 32, 4, vector_width=2, static_k=2560),
     },
     # GDN fused QKVZ projection, TP=2.
     (8192, 2560): {
