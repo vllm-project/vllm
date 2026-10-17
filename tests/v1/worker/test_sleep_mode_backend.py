@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only unit tests for the sleep-mode backend abstraction (RFC #34303).
 
-These cover the registry/factory contract and capability flags. They do not
-touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/memory/``.
+These cover the registry/factory contract, capability flags, and the
+resume-time host-cache decision with a fake allocator. They do not touch
+CUDA - the ``cumem`` suspend/resume path against real allocations is
+exercised end-to-end on GPU in ``tests/basic_correctness/memory/``.
 """
 
 import pytest
 
+import vllm.envs as envs
 from vllm.device_allocator.sleep_mode_backend import (
     CuMemBackend,
     SleepModeBackend,
@@ -36,6 +38,41 @@ def test_cumem_capability_flags():
 def test_new_backend_starts_in_running_state():
     # Constructing a backend must not touch the GPU; only suspend/resume do.
     assert CuMemBackend().state() == "RUNNING"
+
+
+@pytest.mark.parametrize("release_host_memory", [True, False])
+@pytest.mark.parametrize("restored_bytes", [0, 1 << 20])
+def test_cumem_resume_drains_host_cache_only_after_host_backup(
+    monkeypatch, restored_bytes: int, release_host_memory: bool
+):
+    """resume() empties the pinned host cache only when this wake-up restored
+    a host backup and VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY is enabled."""
+    releases: list[int] = []
+
+    class FakeAllocator:
+        def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+            pass
+
+        def wake_up(self, tags: list[str] | None = None) -> int:
+            return restored_bytes
+
+    monkeypatch.setattr(
+        "vllm.device_allocator.get_mem_allocator_instance", FakeAllocator
+    )
+    monkeypatch.setattr(
+        "vllm.device_allocator.sleep_mode_backend._release_host_memory",
+        lambda: releases.append(restored_bytes),
+    )
+    monkeypatch.setenv(
+        "VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY", "1" if release_host_memory else "0"
+    )
+    envs.disable_envs_cache()
+
+    backend = CuMemBackend()
+    backend.suspend(level=1)
+    backend.resume(tags=["weights"])
+
+    assert bool(releases) is (release_host_memory and restored_bytes > 0)
 
 
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
