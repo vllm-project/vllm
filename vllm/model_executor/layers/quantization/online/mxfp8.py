@@ -109,7 +109,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
-        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe
+        )
 
     def create_weights(
         self,
@@ -174,13 +176,15 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         w2_input_scale: torch.Tensor | None,
     ) -> None:
         from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            convert_to_fp8_moe_kernel_format,
             make_fp8_moe_kernel,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+            convert_to_mxfp8_moe_kernel_format,
         )
 
         # Shuffle weights to runtime format.
-        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
+        w13, w2, w13_scale, w2_scale = convert_to_mxfp8_moe_kernel_format(
+            backend=self.fp8_backend,
             layer=layer,
             w13=w13,
             w2=w2,
