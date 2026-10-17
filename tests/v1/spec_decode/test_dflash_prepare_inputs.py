@@ -26,10 +26,10 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    max_num_reqs: int = 4,
+    max_num_tokens: int = 16,
 ):
     device = torch.device("cuda")
-    max_num_reqs = 4
-    max_num_tokens = 16
     num_speculative_steps = 3
 
     input_buffers = SimpleNamespace(
@@ -149,6 +149,71 @@ def _run_prepare(
         sample_idx_mapping=sample_idx_mapping.cpu(),
         temperature=temperature.cpu(),
         seeds=seeds.cpu(),
+    )
+
+
+def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
+    """The padding launch is exercised through the real `propose()` path.
+
+    `_pad_dflash_buffers_kernel` fills the tail of each draft input buffer so
+    a CUDA-graph replay at a larger captured size reads padding rather than
+    stale values. Asserting that through `_run_prepare` -- rather than against
+    a local copy of the launch arithmetic -- is the point: `pad_span`, the
+    grid and `PAD_BLOCK_SIZE` are production code, and a test that re-derives
+    them passes no matter how they regress.
+
+    Shape here is num_reqs=1, num_query_per_req=num_speculative_steps=3,
+    max_num_reqs=4, max_num_tokens=4096, so last_query_end=3 and
+    pad_span=4093. That matters: PAD_BLOCK_SIZE caps at 1024, so the launch
+    is a FOUR-program grid and `tl.program_id(0)` takes four distinct values.
+
+    At the 16-token shape this test used to run, pad_span was 13 and
+    PAD_BLOCK_SIZE was next_power_of_2(13)=16, so the grid was a single
+    program and `program_id(0)` was always 0. `offs = program_id(0)*BLOCK +
+    arange(0, BLOCK)` is then indistinguishable from `offs = arange(0,
+    BLOCK)`, and a regression that dropped the program offset would leave
+    every slot past the first block stale -- in production
+    (max_num_tokens=16384, a 16-program grid) that is
+    query_slot_mapping[1024:] holding real slot IDs from the target's
+    previous step, which is exactly what this padding exists to prevent.
+
+    `_run_prepare` pre-fills every buffer with a sentinel (-1 / -2), so an
+    unwritten tail shows up as the sentinel rather than as a plausible zero.
+    """
+    max_num_tokens = 4096
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+        max_num_tokens=max_num_tokens,
+    )
+    last_query_end = 3
+
+    # Per-request buffers are padded to max_num_reqs for CUDA-graph safety:
+    # query_start_loc holds the final offset, seq_lens holds 0.
+    assert out.input_buffers.query_start_loc.cpu().tolist()[1:] == [last_query_end] * 4
+    assert out.input_buffers.seq_lens.cpu().tolist()[1:] == [0, 0, 0]
+
+    # Padded sample slots point at query index 0 -- a valid row -- so replay
+    # never reads out of bounds; their idx mapping is -1 so sampling discards
+    # them instead of writing stale draft logits.
+    assert out.sample_indices.tolist()[3:] == [0] * 9
+    assert out.sample_pos.tolist()[3:] == [0] * 9
+    assert out.sample_idx_mapping.tolist()[3:] == [-1] * 9
+
+    # Slots past the real query tokens must be PAD so a larger replay writes
+    # no K/V.
+    num_pad = max_num_tokens - last_query_end
+    assert out.query_slot_mapping.tolist()[last_query_end:] == [PAD_SLOT_ID] * num_pad
+
+    # The same tail of the per-token buffers is zeroed and flagged as
+    # padding, so a replay at a captured size larger than the batch reads
+    # inert rows rather than the previous step's tokens and positions. The
+    # sentinels distinguish "written as 0" from "never written": input_ids
+    # and positions arrive pre-filled with -1, and is_padding all-False.
+    assert out.input_buffers.input_ids.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert out.input_buffers.positions.cpu().tolist()[last_query_end:] == [0] * num_pad
+    assert (
+        out.input_buffers.is_padding.cpu().tolist()[last_query_end:] == [True] * num_pad
     )
 
 
