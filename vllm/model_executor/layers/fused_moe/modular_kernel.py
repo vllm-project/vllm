@@ -1326,7 +1326,8 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(

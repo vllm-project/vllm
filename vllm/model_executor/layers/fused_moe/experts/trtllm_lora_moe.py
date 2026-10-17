@@ -308,8 +308,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         w13_meta = (None, None, None, None)
 
         # zeros (not empty): under EP the punica expand kernel only writes
-        # slots whose expert is local to this rank; non-local (token, top_k)
-        # slots must stay 0 so they contribute no bias when fed to flashinfer.
+        # slots whose expert is local to this rank; the kernel skips the rest.
         gemm1_lora_delta = torch.zeros(
             num_tokens,
             top_k,
@@ -605,6 +604,14 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
     @staticmethod
     def _supports_routing_method(routing_method, weight_key, activation_key) -> bool:
         return True  # routing is done outside the kernel
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        # DP gathers tokens, but the no-LoRA fast path reads the local batch.
+        p = moe_parallel_config
+        return p.dp_size == 1 and not p.use_all2all_kernels and not p.enable_eplb
 
     def workspace_shapes(
         self,
