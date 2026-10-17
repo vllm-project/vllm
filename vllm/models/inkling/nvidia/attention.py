@@ -50,11 +50,14 @@ from .ops.qkvr_prep import fused_qkvr_prep
 from .sconv_swa_attn import _K, _V, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
 
+# FA4 has no paged-KV relative-attention forward on SM8x or SM12x (#51405).
+_TRITON_ATTENTION_MAJORS = (8, 12)
+
 
 @cache
-def _use_sm8x_triton_attention() -> bool:
+def _use_triton_rel_attention() -> bool:
     capability = current_platform.get_device_capability()
-    return capability is not None and capability.major == 8
+    return capability is not None and capability.major in _TRITON_ATTENTION_MAJORS
 
 
 def compute_log_scaling_tau(
@@ -103,7 +106,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.log_scaling_alpha = config.log_scaling_alpha
         # q/k are per-head RMS-normed (unit norm), so Inkling scales by 1/head_dim.
         self.scaling = 1.0 / head_dim
-        self._use_triton_attention = _use_sm8x_triton_attention()
+        self._use_triton_attention = _use_triton_rel_attention()
 
         tp_size = get_tensor_model_parallel_world_size()
         self.num_total_heads = num_heads

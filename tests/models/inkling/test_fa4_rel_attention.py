@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for Inkling's NVIDIA relative-attention backends.
 
-Checks FA4 and the SM8x Triton fallback against a pure-PyTorch reference
+Checks FA4 and the SM8x/SM12x Triton fallback against a pure-PyTorch reference
 that implements the relative bias documented in the Inkling architecture guide::
 
     logit(i, j, h) = (1 / head_dim) * dot(q[i, h], k[j, h]) + rel_bias(i, j, h)
@@ -28,8 +28,9 @@ from vllm.models.inkling.common.ops.triton_rel_attention_decode import (
     use_split_kv_decode,
 )
 from vllm.models.inkling.nvidia.attention import (
+    _TRITON_ATTENTION_MAJORS,
     InklingAttention,
-    _use_sm8x_triton_attention,
+    _use_triton_rel_attention,
     compute_log_scaling_tau,
 )
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
@@ -97,24 +98,24 @@ def test_split_packed_kv_cache(layout):
 
 @pytest.mark.parametrize(
     ("major", "expected"),
-    [(8, True), (9, False), (10, False), (11, False), (12, False)],
+    [(8, True), (9, False), (10, False), (11, False), (12, True)],
 )
-def test_sm8x_triton_attention_selection(monkeypatch, major, expected):
+def test_triton_attention_selection(monkeypatch, major, expected):
     monkeypatch.setattr(
         current_platform,
         "get_device_capability",
         lambda: DeviceCapability(major=major, minor=0),
     )
-    _use_sm8x_triton_attention.cache_clear()
+    _use_triton_rel_attention.cache_clear()
     try:
-        assert _use_sm8x_triton_attention() is expected
+        assert _use_triton_rel_attention() is expected
         attention = InklingAttention.__new__(InklingAttention)
         torch.nn.Module.__init__(attention)
-        attention._use_triton_attention = _use_sm8x_triton_attention()
+        attention._use_triton_attention = _use_triton_rel_attention()
         backend = TritonAttentionBackend if expected else FlashAttentionBackend
         assert attention.get_attn_backend() is backend
     finally:
-        _use_sm8x_triton_attention.cache_clear()
+        _use_triton_rel_attention.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -420,7 +421,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         num_kv_heads=num_kv_heads,
         max_kv_len=max(kv_lens),
     )
-    use_triton = _cap is not None and _cap.major == 8
+    use_triton = _cap is not None and _cap.major in _TRITON_ATTENTION_MAJORS
     attention = (
         inkling_triton_rel_attention
         if use_triton
@@ -462,7 +463,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
 
 
-def _make_sm8x_comparison_case(
+def _make_triton_comparison_case(
     seq_lens,
     *,
     num_heads=8,
@@ -577,8 +578,10 @@ def _make_flex_reference(case, local_extent):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or _cap is None or _cap.major != 8,
-    reason="requires SM8x",
+    not current_platform.is_cuda()
+    or _cap is None
+    or _cap.major not in _TRITON_ATTENTION_MAJORS,
+    reason="requires SM8x or SM12x",
 )
 @pytest.mark.parametrize("local_extent", [None, 16])
 @pytest.mark.parametrize(
@@ -591,9 +594,9 @@ def _make_flex_reference(case, local_extent):
     ],
 )
 @torch.inference_mode()
-def test_sm8x_triton_matches_flex_and_reference(monkeypatch, local_extent, seq_lens):
+def test_triton_matches_flex_and_reference(monkeypatch, local_extent, seq_lens):
     rel_extent = local_extent or 64
-    case = _make_sm8x_comparison_case(seq_lens, rel_extent=rel_extent)
+    case = _make_triton_comparison_case(seq_lens, rel_extent=rel_extent)
     q = case["q"]
     flex_impl, flex_metadata = _make_flex_reference(case, local_extent)
     attention = InklingAttention.__new__(InklingAttention)
@@ -717,7 +720,7 @@ def test_score_mod_relative_attention(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
     _cap is None or _cap.major < 8,
-    reason="requires SM8x Triton or SM90+ FA4",
+    reason="requires SM8x/SM12x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -742,7 +745,7 @@ def test_full_attention(seq_lens, num_heads, rel_extent):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
     _cap is None or _cap.major < 8,
-    reason="requires SM8x Triton or SM90+ FA4",
+    reason="requires SM8x/SM12x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -763,7 +766,7 @@ def test_chunked_prefill(seq_lens, num_heads, rel_extent):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
     _cap is None or _cap.major < 8,
-    reason="requires SM8x Triton or SM90+ FA4",
+    reason="requires SM8x/SM12x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -792,7 +795,7 @@ def test_sliding_window(seq_lens, num_heads, local_extent):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
     _cap is None or _cap.major < 8,
-    reason="requires SM8x Triton or SM90+ FA4",
+    reason="requires SM8x/SM12x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
