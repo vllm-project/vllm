@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright (c) 2026 MetaX Integrated Circuits (Shanghai) Co., Ltd.
 
-"""vLLM custom-op wrapper for the TileLang Hadamard kernel."""
+"""Composite rotation using HadaCore and a TileLang mixing/sign epilogue."""
 
 from __future__ import annotations
 
@@ -10,39 +10,46 @@ import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from .torch import composite_hadamard_torch
+from .utils import resolve_hadamard_dim
+
 
 def composite_hadamard_tilelang(
     x: torch.Tensor,
     sign: torch.Tensor,
     hk: torch.Tensor,
-    h_gemm: torch.Tensor,
     inverse: bool,
     k: int,
     p: int,
 ) -> torch.Tensor:
-    """Execute the TileLang Hadamard transform."""
-    if x.reshape(-1, x.shape[-1]).shape[0] == 0:
+    """Apply H_P/sqrt(P), followed by checkpoint mixing and 1/sqrt(K)."""
+    if x.numel() == 0:
         return torch.empty_like(x, memory_format=torch.contiguous_format)
 
-    # Keep TileLang out of the model import path and compile on first use.
-    from .tilelang_kernels import composite_hadamard as composite_hadamard_impl
+    if x.dtype == torch.float32:
+        return composite_hadamard_torch(x, sign, hk, inverse=inverse, k=k, p=p)
+    if not 32 <= p <= 32768:
+        raise ValueError("HadaCore rotation requires 32 <= P <= 32768")
 
-    return composite_hadamard_impl(
-        x,
-        sign,
-        inverse=inverse,
-        hk=hk,
-        h_gemm=h_gemm,
-        k=k,
-        p=p,
-    )
+    from vllm import _custom_ops as ops
+
+    from .warmup import COMPOSITE_HADAMARD_EPILOGUE
+
+    values = x.contiguous()
+    if not inverse:
+        values = values * sign
+    values = ops.hadacore_transform(values.reshape(-1, p), inplace=False)
+    values = values.reshape(-1, k * p)
+    output = torch.empty_like(values)
+    kernel = COMPOSITE_HADAMARD_EPILOGUE(k, p, inverse, x.dtype)
+    kernel(values, sign, hk, output)
+    return output.reshape(x.shape)
 
 
 def _composite_hadamard_tilelang_fake(
     x: torch.Tensor,
     sign: torch.Tensor,
     hk: torch.Tensor,
-    h_gemm: torch.Tensor,
     inverse: bool,
     k: int,
     p: int,
@@ -62,18 +69,21 @@ def composite_hadamard(
     x: torch.Tensor,
     sign: torch.Tensor,
     hk: torch.Tensor,
-    h_gemm: torch.Tensor,
     *,
     inverse: bool,
     k: int,
     p: int,
 ) -> torch.Tensor:
-    """Apply the registered TileLang Hadamard custom op."""
+    """Apply the registered composite Hadamard custom op."""
+    resolve_hadamard_dim(x.shape[-1], k=k, p=p)
+    if x.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        raise TypeError("Hadamard supports bfloat16, float16, and float32")
+    if hk.shape != (k, k):
+        raise ValueError(f"hk must have shape ({k}, {k})")
     return torch.ops.vllm.composite_hadamard_tilelang(
         x,
         sign,
         hk,
-        h_gemm,
         inverse,
         k,
         p,
