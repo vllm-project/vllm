@@ -203,6 +203,15 @@ _DEFAULT_LAYOUT_PREFERENCE = (
 )
 
 
+def get_flashinfer_kv_cache_layouts() -> tuple[KVCacheLayout, ...]:
+    """The default preference, minus layouts FlashInfer has no name for."""
+    return tuple(
+        layout
+        for layout in _DEFAULT_LAYOUT_PREFERENCE
+        if layout.name in _FLASHINFER_LAYOUT_NAMES
+    )
+
+
 def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
 
