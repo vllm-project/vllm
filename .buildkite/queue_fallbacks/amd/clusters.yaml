@@ -1,0 +1,10 @@
+# mi355_dpx is its own cluster and mi355_4 spans two, so neither is grouped.
+- group:
+    name: mi300
+    devices: [mi300_1, mi300_2, mi300_4, mi300_8]
+- group:
+    name: mi355
+    devices: [mi355_1, mi355_2, mi355_8]
+- group:
+    name: mi250
+    devices: [mi250_1, mi250_2, mi250_4]
