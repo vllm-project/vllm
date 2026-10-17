@@ -49,6 +49,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
 )
+from vllm.model_executor.layers.rotation import bind_rotation_transforms
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
@@ -423,6 +424,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
+            draft_model = getattr(self.speculator, "model", None)
+            bind_rotation_transforms(self.model, draft_model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
