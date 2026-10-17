@@ -15,7 +15,6 @@ from vllm.tokenizers.detokenizer_utils import (
 )
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.protocol import TokenizerLike
-from vllm.transformers_utils.repo_utils import with_retry
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (
     FastIncrementalDetokenizer,
@@ -96,13 +95,10 @@ def _run_incremental_decode(
 
 @pytest.fixture
 def tokenizer(tokenizer_name):
-    return with_retry(
-        lambda: (
-            MistralTokenizer.from_pretrained(tokenizer_name)
-            if "mistral" in tokenizer_name
-            else AutoTokenizer.from_pretrained(tokenizer_name)
-        ),
-        log_msg=f"Error loading tokenizer {tokenizer_name}",
+    return (
+        MistralTokenizer.from_pretrained(tokenizer_name)
+        if "mistral" in tokenizer_name
+        else AutoTokenizer.from_pretrained(tokenizer_name)
     )
 
 

@@ -145,7 +145,6 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
     )
 
 
-bench_forward = auto_mock("vllm.benchmarks.forward", "main")
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_startup = auto_mock("vllm.benchmarks", "startup")
@@ -341,7 +340,6 @@ pages = {
         False,
     ),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
-    "cli/bench/forward.md": (create_parser(bench_forward.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
     # URL kept as `mm_processor` for back-compat; command name is `mm-processor`
     "cli/bench/mm_processor.md": (

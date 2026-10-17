@@ -119,8 +119,6 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
-# Tuned configs can pick a BLOCK_SIZE_K wider than the quantization block.
-@pytest.mark.parametrize("fp8_block_k", [32, 256])
 def test_batched_mm(
     num_experts: int,
     max_tokens_per_expert: int,
@@ -129,7 +127,6 @@ def test_batched_mm(
     dtype: torch.dtype,
     block_shape: list[int] | None,
     per_act_token_quant: bool,
-    fp8_block_k: int,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
@@ -151,9 +148,6 @@ def test_batched_mm(
 
     if per_act_token_quant and block_shape is not None:
         pytest.skip("Skip illegal quantization test.")
-
-    if fp8_block_k != 32 and not use_fp8_w8a8:
-        pytest.skip("BLOCK_SIZE_K is only varied for fp8.")
 
     if dtype.itemsize == 1:
         act_dtype = torch.bfloat16
@@ -220,7 +214,7 @@ def test_batched_mm(
         config={
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else fp8_block_k,
+            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32,
         },
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,

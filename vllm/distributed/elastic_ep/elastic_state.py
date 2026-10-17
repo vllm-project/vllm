@@ -11,9 +11,6 @@ from vllm.config import ParallelConfig
 from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
-from vllm.distributed.elastic_ep.external_elastic_ep import (
-    ExternalElasticEPScaleCoordinator,
-)
 from vllm.distributed.utils import get_cached_tcp_store_client
 from vllm.logger import init_logger
 from vllm.v1.engine import (
@@ -259,23 +256,10 @@ class ElasticEPScalingState:
         if state == ScaleDownRemovingEngineState.PREPARE:
             assert self.old_dp_group.rank() > 0
             self._commit_scale_down(removing=True)
-            external_lb = self.vllm_config.parallel_config.data_parallel_external_lb
-            if external_lb:
-                # Preserve completion delivery: client cleanup on exit must not
-                # cancel the receiver before it records the notification.
-                parallel_config = self.new_parallel_config
-                store = get_cached_tcp_store_client(
-                    parallel_config.data_parallel_master_ip,
-                    parallel_config._coord_store_port,
-                )
-                key = ExternalElasticEPScaleCoordinator.key
-                epoch = store.get(key("current_epoch")).decode()
+            self.state = ScaleDownRemovingEngineState.COMPLETE
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.SHUTDOWN_COMPLETE
             )
-            if external_lb:
-                store.wait([key(epoch, "shutdown_complete", self.engine_core.dp_rank)])
-            self.state = ScaleDownRemovingEngineState.COMPLETE
             return True
 
         else:
@@ -400,10 +384,7 @@ class ElasticEPScalingState:
 
     def _send_reconfigure_finished(self):
         assert self.new_dp_group is not None
-        if (
-            self.new_dp_group.rank() == 0
-            or self.vllm_config.parallel_config.data_parallel_external_lb
-        ):
+        if self.new_dp_group.rank() == 0:
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )

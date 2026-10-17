@@ -294,7 +294,16 @@ def _compare_tp(
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
 
-    pp_env = None
+    if distributed_backend == "ray":
+        # Test Ray Compiled Graph for all the tests
+        pp_env = {
+            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
+        }
+    elif distributed_backend == "mp":
+        pp_env = None
+    else:
+        pp_env = None
+
     tp_env = None
 
     pp_args = [

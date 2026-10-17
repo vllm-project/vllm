@@ -223,6 +223,29 @@ def _pct_sku_config() -> _PctSku | None:
     return sku
 
 
+def _get_gpu_index(
+    parallel_config, local_rank: int, dp_local_rank: int | None = None
+) -> int:
+    """Compute the physical GPU index used for NUMA lookup."""
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and parallel_config.data_parallel_backend != "ray"
+        and parallel_config.nnodes_within_dp == 1
+    ):
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        return local_rank + dp_local_rank * tp_pp_world_size
+
+    return local_rank
+
+
 def _get_numa_node(parallel_config, gpu_index: int) -> int:
     numa_nodes = parallel_config.numa_bind_nodes
     if numa_nodes is None:
@@ -323,7 +346,7 @@ def _get_numactl_worker_args(
     parallel_config, local_rank: int, dp_local_rank: int | None = None
 ) -> str:
     """Compute the numactl args for a single TP/PP worker subprocess."""
-    gpu_index = parallel_config.get_local_gpu_index(local_rank, dp_local_rank)
+    gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
     numa_node = _get_numa_node(parallel_config, gpu_index)
     cpu_binding = _get_cpu_binding(parallel_config, gpu_index, [numa_node])
 
@@ -361,8 +384,17 @@ def _get_enginecore_numa_nodes(
         and parallel_config.data_parallel_backend != "ray"
         and parallel_config.nnodes_within_dp == 1
     ):
-        shard_start = parallel_config.get_local_gpu_index(0, dp_local_rank)
-        shard_end = min(shard_start + parallel_config.world_size, len(numa_nodes))
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        shard_start = dp_local_rank * tp_pp_world_size
+        shard_end = min(shard_start + tp_pp_world_size, len(numa_nodes))
         shard_indices: range | tuple[int, ...] = range(shard_start, shard_end)
     else:
         shard_indices = range(len(numa_nodes))

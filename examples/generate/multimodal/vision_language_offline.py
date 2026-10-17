@@ -2274,7 +2274,6 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
-    "deepseek_vl_v2",
     "ernie45_vl",
     "minicpmv2_5_vl",
     "minicpmv2_6_vl",

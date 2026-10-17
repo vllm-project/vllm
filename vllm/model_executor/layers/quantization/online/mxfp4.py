@@ -127,7 +127,6 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
-        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -296,8 +295,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-        self._zero_padding(layer, w13_weight, w2_weight)
+        self._zero_padding(layer)
 
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             layer._already_called_process_weights_after_loading = True
@@ -306,8 +304,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = _quantize_mxfp4_moe_weight(w13_weight)
-        w2, w2_scale = _quantize_mxfp4_moe_weight(w2_weight)
+        w13, w13_scale = _quantize_mxfp4_moe_weight(layer.w13_weight)
+        w2, w2_scale = _quantize_mxfp4_moe_weight(layer.w2_weight)
 
         self._setup_kernel(
             layer,
@@ -318,6 +316,5 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             getattr(layer, "w13_bias", None),
             getattr(layer, "w2_bias", None),
         )
-        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

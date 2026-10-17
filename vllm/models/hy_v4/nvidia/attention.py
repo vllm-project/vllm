@@ -40,7 +40,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
@@ -494,11 +493,13 @@ class HYV4MLAAttention(nn.Module):
         if self.learnable_sink:
             sink_backend = self._resolve_sink_backend(kv_cache_dtype)
             enable_sink = sink_backend is not None
-            # The kernels require fp32 sinks; the disabled path keeps the
-            # checkpoint dtype since the value is never consumed.
-            self.learnable_sink_param = make_attention_sink(
-                self.num_local_heads,
-                torch.float32 if enable_sink else torch.bfloat16,
+            self.learnable_sink_param = nn.Parameter(
+                torch.empty(
+                    self.num_local_heads,
+                    # The kernels require fp32 sinks; the disabled path keeps
+                    # the checkpoint dtype since the value is never consumed.
+                    dtype=torch.float32 if enable_sink else torch.bfloat16,
+                )
             )
             if enable_sink:
                 sinks = self.learnable_sink_param

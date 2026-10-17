@@ -431,6 +431,11 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
 
     if gptoss_moe.triton_kernels_version == "3.5.1":
         pytest.skip("SparseMatrix path requires triton_kernels v3.6.0+")
+    if gptoss_moe.triton_kernels_version == "3.8":
+        pytest.skip(
+            "3.8 rebuilds routing from raw ids, so routing_data_from_sparse_topk "
+            "just forwards to make_routing_data and the comparison is vacuous"
+        )
 
     from triton_kernels.topk import topk as topk_fn
 
@@ -462,52 +467,11 @@ def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
         elif hasattr(ref, "__dict__"):
             for k, v in vars(ref).items():
                 assert_equivalent(getattr(new, k), v, f"{path}.{k}")
-        elif hasattr(type(ref), "__slots__"):
-            for k in type(ref).__slots__:
-                assert_equivalent(getattr(new, k), getattr(ref, k), f"{path}.{k}")
         else:
             assert type(new) is type(ref), f"{path}: {type(new)} vs {type(ref)}"
 
     assert_equivalent(rd_new, rd_ref)
-    if isinstance(gather_ref, torch.Tensor):
-        torch.testing.assert_close(gather_new, gather_ref)
-        torch.testing.assert_close(scatter_new, scatter_ref)
-        return
     torch.testing.assert_close(gather_new.src_indx, gather_ref.src_indx)
     torch.testing.assert_close(gather_new.dst_indx, gather_ref.dst_indx)
     torch.testing.assert_close(scatter_new.src_indx, scatter_ref.src_indx)
     torch.testing.assert_close(scatter_new.dst_indx, scatter_ref.dst_indx)
-
-
-@pytest.mark.parametrize("n_tokens", [1, 33, 4099])
-@pytest.mark.parametrize("n_experts,topk", [(128, 4), (256, 6)])
-def test_make_routing_data_tk38_matches_reference(n_tokens, n_experts, topk):
-    from vllm.model_executor.layers.fused_moe.experts import (
-        gpt_oss_triton_kernels_moe as gptoss_moe,
-    )
-
-    if gptoss_moe.triton_kernels_version != "3.8":
-        pytest.skip("requires triton_kernels 3.8")
-
-    torch.manual_seed(0)
-    topk_ids = torch.stack(
-        [torch.randperm(n_experts, device="cuda")[:topk] for _ in range(n_tokens)]
-    ).to(torch.int32)
-    topk_ids[torch.rand(topk_ids.shape, device="cuda") < 0.5] = -1
-    topk_weights = torch.rand(topk_ids.shape, device="cuda")
-
-    routing, gather_tok, scatter_tok = gptoss_moe.make_routing_data(
-        topk_ids, topk_weights, n_experts
-    )
-
-    flat = topk_ids.reshape(-1).to(torch.int64)
-    order = torch.argsort(flat.clamp(min=0), stable=True)
-    counts = torch.bincount(flat.clamp(min=0), minlength=n_experts).to(torch.int32)
-    weights = topk_weights.reshape(-1) * (flat >= 0).to(torch.float32)
-
-    assert torch.equal(routing.ragged.slice_sizes, counts)
-    assert torch.equal(gather_tok, (order // topk).to(torch.int32))
-    assert torch.equal(scatter_tok, gather_tok)
-    assert torch.equal(routing.gate_scal, weights[order])
-    assert routing.n_expts_act == topk
-    assert routing.n_valid == flat.numel()

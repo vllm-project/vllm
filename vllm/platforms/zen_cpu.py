@@ -25,10 +25,8 @@ class ZenCpuPlatform(CpuPlatform):
         # is_cpu() also returns True for this platform (inherited from CpuPlatform).
         return True
 
-    # fp16 compute needs AVX512-FP16, which AMD ships from Venice (6th Gen
-    # EPYC) onwards; Turin (5th Gen EPYC) and earlier have no fp16 kernels.
+    # Currently, AMD CPUs do not support float16 compute.
+    # Hence explicitly return bfloat16 and float32.
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        if torch.ops.zentorch.zentorch_is_fp16_supported():
-            return [torch.bfloat16, torch.float32, torch.float16]
         return [torch.bfloat16, torch.float32]

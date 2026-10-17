@@ -71,7 +71,7 @@ Ray also offers high-level APIs for large-scale [offline batch inference](https:
 Ray is an optional dependency. Install it explicitly before using Ray-based execution, for example:
 
 ```bash
-pip install ray
+pip install "ray[cgraph]"
 ```
 
 For details, see the [Ray documentation](https://docs.ray.io/en/latest/index.html).

@@ -9,7 +9,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -41,7 +40,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -494,13 +492,6 @@ def select_fp8_moe_backend(
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
-    elif (model_config := get_current_vllm_config().model_config) is not None and (
-        should_auto_disable_deep_gemm(
-            getattr(model_config.hf_text_config, "model_type", None)
-        )
-    ):
-        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
-        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -841,11 +832,6 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
-        # TRTLLM fp8-block consumes activation scales as [K/128, M]; emit them
-        # transposed from the quant kernel instead of copying afterwards.
-        is_scale_transposed=(
-            fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and block_shape == [128, 128]
-        ),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,

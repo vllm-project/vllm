@@ -29,7 +29,6 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -43,10 +42,7 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-from vllm.v1.attention.backends.registry import (
-    AttentionBackendEnum,
-    MambaAttentionBackendEnum,
-)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import (
     estimate_max_model_len,
     get_kv_cache_configs,
@@ -514,53 +510,6 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
     platform = CpuPlatform if cpu else Platform
     with pytest.raises(ValueError, match="MOCK_EXACT"):
         platform.update_block_size_for_backend(vllm_config)
-
-
-class _CheckpointingMambaLayer(MambaBase):
-    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
-
-    def __init__(self, prefill_checkpoint_alignment: int | None):
-        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
-
-    def get_prefill_checkpoint_alignment(self) -> int | None:
-        return self._prefill_checkpoint_alignment
-
-    def get_state_shape(self):
-        return ()
-
-    def get_state_dtype(self):
-        return ()
-
-
-def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
-    from tests.v1.attention.utils import create_vllm_config
-
-    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
-    cache_config = vllm_config.cache_config
-    cache_config.mamba_cache_mode = "align"
-    forward_context = vllm_config.compilation_config.static_forward_context
-    for i, alignment in enumerate(prefill_checkpoint_alignments):
-        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
-    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
-    return cache_config
-
-
-@pytest.mark.parametrize(
-    ("prefill_checkpoint_alignments", "block_size"),
-    [((64,), 576), ((None,), 544), ((64, None), 544)],
-)
-def test_blocks_land_on_the_mamba_checkpoint_grid(
-    prefill_checkpoint_alignments, block_size
-):
-    """A layer that checkpoints every 64 tokens needs 64-aligned blocks.
-
-    Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
-    grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
-    stops the scheduler from taking any, so the block stays.
-    """
-    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
-
-    assert cache_config.block_size == block_size
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):

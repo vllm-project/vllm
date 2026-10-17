@@ -67,7 +67,7 @@ class PoolerConfig:
     """
     Whether the engine-side late-interaction scorer may use the fused
     flash-maxsim Triton kernel. Disabled automatically when the API server
-    is started with `--disable-flash-late-interaction`; the reference
+    is started with `--no-enable-flash-late-interaction`; the reference
     scorer is used instead.
     """
 

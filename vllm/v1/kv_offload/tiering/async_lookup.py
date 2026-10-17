@@ -11,12 +11,8 @@ Locking design
 --------------
 There is no explicit lock.  Thread safety is achieved by ownership:
 
-* _lookup_state and _lookup_batch are owned by whichever thread holds the
-  OffloadingManager lock.  lookup(), flush(), and cleanup() read and write
-  them directly.  That is usually the scheduler thread, but a tier reached
-  through ParentManager -- a peer lookup fanning out from another tier, say --
-  can arrive on the tiering manager's tier-poll thread instead.  Both hold
-  the manager lock, so the accesses stay serialized.
+* _lookup_state and _lookup_batch are owned exclusively by the scheduler
+  thread.  lookup(), flush(), and cleanup() read and write them directly.
 
 * _lookup_queue is written by the scheduler (flush → put_nowait, one item
   per step) and read by the background thread (get).  queue.Queue is
@@ -220,14 +216,12 @@ class AsyncLookupManager(ABC):
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
-        Keys with no cached entry are skipped, and so are keys whose entry is
-        a newer probe still PENDING or IN_FLIGHT: its own result will land,
-        and forcing it to RESOLVED here would trip the phase asserts in
-        flush() / drain_results() on the scheduler thread."""
+        Keys with no cached entry are skipped."""
         for key in keys:
             state = self._lookup_state.get(key)
-            if state is not None and state.phase is LookupPhase.RESOLVED:
+            if state is not None:
                 state.result = False
+                state.phase = LookupPhase.RESOLVED
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.

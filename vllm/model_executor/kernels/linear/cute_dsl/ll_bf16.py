@@ -11,20 +11,24 @@ from typing import Any, Literal
 
 import torch
 
-from ._ll_router_common import (
-    current_cuda_stream,
-    cute_context,
-    is_cutedsl_available,
-    make_fake_gemm_tensors,
-    use_pdl,
-    validate_common_gemm_inputs,
-)
-
 logger = logging.getLogger(__name__)
+
+_cutedsl_available: bool | None = None
 
 
 def is_available() -> bool:
-    return is_cutedsl_available("ll_bf16_gemm")
+    global _cutedsl_available
+    if _cutedsl_available is not None:
+        return _cutedsl_available
+    try:
+        import cutlass  # noqa: F401
+        import cutlass.cute  # noqa: F401
+
+        _cutedsl_available = True
+    except ImportError:
+        _cutedsl_available = False
+        logger.info("cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled")
+    return _cutedsl_available
 
 
 # Default configs
@@ -47,8 +51,6 @@ _SM100F_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] 
         **{M: (8, 5) for M in (5, 8)},
         9: (8, 2),
     },
-    (5120, 1792): {M: (2, 4) for M in range(5, 17)},
-    (5120, 3584): {M: (2, 4) for M in range(5, 17)},
     (7168, 256): {14: (8, 2)},
     (6144, 256): {M: (8, 2) for M in (9, 12, 16)},
     (7168, 384): {M: (7, 5) for M in (13, 16)},
@@ -94,6 +96,33 @@ def _arch_tuned_configs() -> tuple[
     return {}, {}
 
 
+_cute_ctx = None
+
+
+def _cute():
+    global _cute_ctx
+    if _cute_ctx is not None:
+        return _cute_ctx
+    import cutlass.cute as cute
+    from cuda.bindings.driver import CUstream
+
+    _cute_ctx = (cute, CUstream)
+    return _cute_ctx
+
+
+def _stream():
+    _, CUstream = _cute()
+    from vllm.utils.torch_utils import current_stream
+
+    return CUstream(current_stream().cuda_stream)
+
+
+def _use_pdl() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_arch_support_pdl()
+
+
 class LLBf16Gemm:
     @dataclass(frozen=True, slots=True)
     class CompileKey:
@@ -103,66 +132,49 @@ class LLBf16Gemm:
         bs: int = 0
         split_k: int = 0
         num_stages: int = 0
-        output_dtype: torch.dtype = torch.float32
 
     def __init__(self, *, prefetch_pdl_weights: bool = False) -> None:
         self._prefetch_pdl_weights = prefetch_pdl_weights
-        # M and K are compile-time constants for dot-product.
-        self._compiled_cache: dict[tuple[int, int, int, torch.dtype], Any] = {}
-        # Split-K is shape-dynamic; both caches distinguish output dtype.
-        self._splitk_cache: dict[tuple[int, int, torch.dtype], Any] = {}
+        # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
+        self._compiled_cache: dict[tuple[int, int, int], Any] = {}
+        # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
+        self._splitk_cache: dict[tuple[int, int], Any] = {}
 
-    def dispatch(
-        self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
-    ) -> CompileKey:
+    def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
         tuned_bs, tuned_splitk = _arch_tuned_configs()
         if M <= _DEFAULT_DOTPROD_MAX_M or K < 2048:
             bs = tuned_bs.get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
-            return self.CompileKey(
-                backend="dotprod", M=M, K=K, bs=bs, output_dtype=output_dtype
-            )
+            return self.CompileKey(backend="dotprod", M=M, K=K, bs=bs)
 
         split_k, num_stages = tuned_splitk.get((K, N), {}).get(
             M, _DEFAULT_SPLITK_CONFIG
         )
-        return self.CompileKey(
-            backend="splitk",
-            split_k=split_k,
-            num_stages=num_stages,
-            output_dtype=output_dtype,
-        )
+        return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
 
     def get_warmup_keys(
         self,
         *,
         shapes: Iterable[tuple[int, int]],
         m_values: Iterable[int],
-        output_dtype: torch.dtype = torch.float32,
     ) -> list[CompileKey]:
         return list(
             dict.fromkeys(
-                self.dispatch(M=M, K=K, N=N, output_dtype=output_dtype)
-                for K, N in shapes
-                for M in m_values
+                self.dispatch(M=M, K=K, N=N) for K, N in shapes for M in m_values
             )
         )
 
     @staticmethod
-    def _fake_gemm_tensors(*, M, K, N, divisibility: int, output_dtype: torch.dtype):
-        return make_fake_gemm_tensors(
-            M=M,
-            K=K,
-            N=N,
-            a_dtype=torch.bfloat16,
-            b_dtype=torch.bfloat16,
-            divisibility=divisibility,
-            output_dtype=output_dtype,
-        )
+    def _fake_gemm_tensors(*, M, K, N, divisibility: int):
+        from cutlass import BFloat16, Float32
+        from quack.compile_utils import make_fake_tensor
+
+        hidden_states = make_fake_tensor(BFloat16, (M, K), divisibility=divisibility)
+        router_weight = make_fake_tensor(BFloat16, (N, K), divisibility=divisibility)
+        output = make_fake_tensor(Float32, (M, N), divisibility=1)
+        return hidden_states, router_weight, output
 
     def _compile_splitk(self, compile_key: CompileKey) -> None:
-        cute, _ = cute_context()
-        from cutlass import BFloat16, Float32
-
+        cute, _ = _cute()
         from ._ll_bf16_splitk import LLBf16SplitK
 
         hidden_states, router_weight, output = self._fake_gemm_tensors(
@@ -170,30 +182,24 @@ class LLBf16Gemm:
             K=cute.sym_int(),
             N=cute.sym_int(),
             divisibility=8,
-            output_dtype=compile_key.output_dtype,
         )
         gemm = LLBf16SplitK(
-            out_dtype=BFloat16
-            if compile_key.output_dtype == torch.bfloat16
-            else Float32,
             tile_n=16,
             tile_k=256,
             num_stages=compile_key.num_stages,
             num_dma_warps=4,
             split_k=compile_key.split_k,
-            use_pdl=use_pdl(),
+            use_pdl=_use_pdl(),
         )
         compiled = cute.compile(
             gemm,
             hidden_states,
             router_weight,
             output,
-            current_cuda_stream(),
+            _stream(),
             options="--enable-tvm-ffi",
         )
-        self._splitk_cache[
-            (compile_key.split_k, compile_key.num_stages, compile_key.output_dtype)
-        ] = compiled
+        self._splitk_cache[(compile_key.split_k, compile_key.num_stages)] = compiled
         logger.debug(
             "Compiled ll_bf16_splitk: sk=%d ns=%d",
             compile_key.split_k,
@@ -201,7 +207,7 @@ class LLBf16Gemm:
         )
 
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
-        cute, _ = cute_context()
+        cute, _ = _cute()
         from ._ll_bf16_dotprod import LLBf16Dotprod
 
         N = cute.sym_int()
@@ -211,12 +217,11 @@ class LLBf16Gemm:
             K=compile_key.K,
             N=N,
             divisibility=stride_divisibility,
-            output_dtype=compile_key.output_dtype,
         )
         gemm = LLBf16Dotprod(
             k=compile_key.K,
             bs=compile_key.bs,
-            use_pdl=use_pdl(),
+            use_pdl=_use_pdl(),
             prefetch_pdl_weights=self._prefetch_pdl_weights,
         )
         compiled = cute.compile(
@@ -227,12 +232,10 @@ class LLBf16Gemm:
             compile_key.M,
             compile_key.K,
             1,  # runtime N placeholder for fake-tensor compile
-            current_cuda_stream(),
+            _stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
-        self._compiled_cache[
-            (compile_key.M, compile_key.K, compile_key.bs, compile_key.output_dtype)
-        ] = compiled
+        self._compiled_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
         logger.debug(
             "Compiled ll_bf16_dotprod: M=%d, K=%d, bs=%d",
             compile_key.M,
@@ -242,21 +245,12 @@ class LLBf16Gemm:
 
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key.backend == "splitk":
-            splitk_cache_key = (
-                compile_key.split_k,
-                compile_key.num_stages,
-                compile_key.output_dtype,
-            )
+            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
             if splitk_cache_key not in self._splitk_cache:
                 self._compile_splitk(compile_key)
             return
 
-        dotprod_cache_key = (
-            compile_key.M,
-            compile_key.K,
-            compile_key.bs,
-            compile_key.output_dtype,
-        )
+        dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
         if dotprod_cache_key not in self._compiled_cache:
             self._compile_dotprod(compile_key)
 
@@ -265,11 +259,8 @@ class LLBf16Gemm:
         *,
         shapes: Iterable[tuple[int, int]],
         m_values: Iterable[int],
-        output_dtype: torch.dtype = torch.float32,
     ) -> None:
-        for compile_key in self.get_warmup_keys(
-            shapes=shapes, m_values=m_values, output_dtype=output_dtype
-        ):
+        for compile_key in self.get_warmup_keys(shapes=shapes, m_values=m_values):
             self.compile(compile_key)
 
     @staticmethod
@@ -278,53 +269,58 @@ class LLBf16Gemm:
         router_weight: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> None:
+        if hidden_states.dim() != 2 or router_weight.dim() != 2:
+            raise ValueError("hidden_states and router_weight must be 2D tensors")
         if (
             hidden_states.dtype != torch.bfloat16
             or router_weight.dtype != torch.bfloat16
         ):
             raise ValueError("hidden_states and router_weight must have dtype=bfloat16")
+        if hidden_states.device.type != "cuda" or router_weight.device.type != "cuda":
+            raise ValueError(
+                "hidden_states and router_weight must have device_type=cuda"
+            )
+        if hidden_states.device != router_weight.device:
+            raise ValueError(
+                "hidden_states and router_weight must be on the same CUDA device"
+            )
+        if output_dtype != torch.float32:
+            raise ValueError("ll_bf16_gemm only supports output_dtype=torch.float32")
+        if hidden_states.shape[1] != router_weight.shape[1]:
+            raise ValueError(
+                "hidden_states and router_weight must have matching K dimensions"
+            )
         # Kernels use vectorized bf16 loads and require 16-byte row alignment.
-        validate_common_gemm_inputs(
-            hidden_states,
-            router_weight,
-            output_dtype,
-            op_name="ll_bf16_gemm",
-            k_multiple=8,
-            output_dtypes=(torch.float32, torch.bfloat16),
-        )
+        if hidden_states.shape[1] % 8 != 0:
+            raise ValueError("ll_bf16_gemm requires K to be divisible by 8")
+        if not hidden_states.is_contiguous() or not router_weight.is_contiguous():
+            raise ValueError(
+                "hidden_states and router_weight must be contiguous row-major inputs"
+            )
 
     def __call__(
         self,
         hidden_states: torch.Tensor,  # [M, K] bf16
         router_weight: torch.Tensor,  # [N, K] bf16
         output_dtype: torch.dtype = torch.float32,
-    ) -> torch.Tensor:  # [M, N]
+    ) -> torch.Tensor:  # [M, N] fp32
         self._validate_inputs(hidden_states, router_weight, output_dtype)
 
         M, K = hidden_states.shape
         N = router_weight.shape[0]
-        compile_key = self.dispatch(M=M, K=K, N=N, output_dtype=output_dtype)
+        compile_key = self.dispatch(M=M, K=K, N=N)
         if compile_key.backend == "splitk":
-            splitk_cache_key = (
-                compile_key.split_k,
-                compile_key.num_stages,
-                compile_key.output_dtype,
-            )
+            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
             if splitk_cache_key not in self._splitk_cache:
                 self.compile(compile_key)
             kernel = self._splitk_cache[splitk_cache_key]
         else:
-            dotprod_cache_key = (
-                compile_key.M,
-                compile_key.K,
-                compile_key.bs,
-                compile_key.output_dtype,
-            )
+            dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
             if dotprod_cache_key not in self._compiled_cache:
                 self.compile(compile_key)
             kernel = self._compiled_cache[dotprod_cache_key]
 
-        stream = current_cuda_stream()
+        stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
         if compile_key.backend == "splitk":
             kernel(hidden_states, router_weight, output, stream, 1.0)

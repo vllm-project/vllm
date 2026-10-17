@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 import torch
 
-import vllm.envs as envs
 from tests.conftest import HfRunner, VllmRunner
 from tests.utils import (
     large_gpu_mark,
@@ -169,16 +168,9 @@ def test_with_eagle3_spec_decoding(
     reason=("XPU matmul/attention kernels are not batch-invariant"),
 )
 def test_with_ngram_gpu_spec_decoding(
-    vllm_runner: type[VllmRunner],
-    hf_runner: type[HfRunner],
-    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner], hf_runner: type[HfRunner]
 ):
     """Check ngram accuracy and acceptance across scheduling configurations."""
-    if current_platform.is_rocm():
-        # hipBLASLt picks GEMM solutions by batch shape, so sync and async runs
-        # can flip near-tie greedy tokens and shift ngram acceptance.
-        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     ngram_gpu_config = {
         "method": "ngram_gpu",
         "num_speculative_tokens": 3,

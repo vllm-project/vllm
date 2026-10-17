@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import os
-import time
 import traceback
 from collections.abc import Callable
 from typing import Any, Concatenate
@@ -23,8 +22,6 @@ from vllm.utils.network_utils import get_open_port
 ## Parallel Processes Utils
 
 P = ParamSpec("P")
-
-LAUNCH_TIMEOUT_S = 900
 
 
 @dataclasses.dataclass
@@ -151,7 +148,7 @@ def parallel_launch_with_config(
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> None:
-    context = spawn(
+    spawn(
         _worker_parallel_launch,
         args=(
             world_size,
@@ -165,16 +162,5 @@ def parallel_launch_with_config(
         )
         + args,
         nprocs=world_size,
-        join=False,
+        join=True,
     )
-    # A worker stuck in communicator setup never exits, so bound the wait.
-    deadline = time.monotonic() + LAUNCH_TIMEOUT_S
-    while not context.join(timeout=max(0.0, deadline - time.monotonic())):
-        if time.monotonic() >= deadline:
-            for process in context.processes:
-                process.kill()
-            for process in context.processes:
-                process.join()
-            raise TimeoutError(
-                f"Parallel workers did not finish within {LAUNCH_TIMEOUT_S}s"
-            )

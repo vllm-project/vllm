@@ -41,9 +41,12 @@ class DPCoordinator:
       DPEngineCoreProc._has_global_unfinished_reqs method.
 
     * Broadcasts the START_DP_WAVE message to engines to move them from paused
-      to running state when an idle engine receives a new request and notifies
-      the coordinator. Only the engines start waves: a front-end's view of the
-      running state can be stale, and a paused engine discards START_DP_WAVE.
+      to running state when one engine receives a new request. This can happen
+      in two cases:
+      1) A front-end sending a new request while the engines are paused will
+         concurrently notify the coordinator.
+      2) An engine receiving a request for a stale request wave while in paused
+         state will notify the coordinator.
 
     Engines will move into running state when receiving a new request or
     START_DP_WAVE message.
@@ -123,7 +126,6 @@ class DPCoordinator:
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
         self.coord_out_address = back_output_address
-        self._coord_store: object | None = None
         self._finalizer = weakref.finalize(self, shutdown, [self.proc])
 
     def get_stats_publish_address(self) -> str:
@@ -350,9 +352,27 @@ class DPCoordinatorProc:
                             )
                         continue  # Skip normal engine notification processing
 
-                    logger.error(
-                        "DP Coordinator received unexpected message from front-end"
-                    )
+                    # Wave coordination: handle new-request messages from front-end.
+                    # Only process these when wave coordination is enabled
+                    if self.enable_wave_coordination:
+                        # We received a message on the front-end XPUB socket,
+                        # from an API server sending a new request while the
+                        # engines are paused, so that we can wake the other
+                        # engines.
+                        engine_to_exclude, wave = decoded
+                        if not engines_running:
+                            if wave < current_wave:
+                                # If the wave number is stale, ensure the message
+                                # is handled by all the engines.
+                                engine_to_exclude = None
+
+                            # engines_running is only set from the engines'
+                            # own notifications; a paused engine discards
+                            # START_DP_WAVE, so sending it is not evidence
+                            # that the engines are running.
+                            self._send_start_wave(
+                                publish_back, current_wave, engine_to_exclude
+                            )
 
                 if output_back in events:
                     # We received a message from one of the engines.
@@ -427,12 +447,13 @@ class DPCoordinatorProc:
                             wave > current_wave
                             or (wave == current_wave and not engines_running)
                         ):
-                            # 3. An engine started a wave (e.g. an idle engine
-                            # received a request), so the others must join it.
+                            # 3. The engine received request for a non-current wave
+                            # so we must ensure that other engines progress to the
+                            # next wave (race condition handling).
                             logger.debug(
-                                "Starting wave %d on notification from engine %d.",
+                                "Starting wave %d after notification of "
+                                "stale wave request from engine.",
                                 wave,
-                                eng_index,
                             )
                             current_wave = wave
                             engines_running = True

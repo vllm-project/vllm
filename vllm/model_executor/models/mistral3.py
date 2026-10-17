@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias, cast
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -74,19 +74,6 @@ class Mistral3ImagePixelInputs(TensorSchema):
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
     ]
-
-
-class Mistral3ImageEmbeddingInputs(TensorSchema):
-    """Projected features with shape (num_images, feature_size, hidden_size)."""
-
-    type: Literal["image_embeds"] = "image_embeds"
-    data: Annotated[
-        torch.Tensor | list[torch.Tensor],
-        TensorShape("bn", "ifs", "hs", dynamic_dims={"ifs"}),
-    ]
-
-
-Mistral3ImageInputs: TypeAlias = Mistral3ImagePixelInputs | Mistral3ImageEmbeddingInputs
 
 
 class Mistral3PatchMerger(nn.Module):
@@ -507,7 +494,7 @@ class Mistral3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Mistral3ImageInputs | None:
+    ) -> Mistral3ImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -521,8 +508,8 @@ class Mistral3ForConditionalGeneration(
 
     def _process_image_input(
         self,
-        image_input: Mistral3ImageInputs,
-    ) -> MultiModalEmbeddings:
+        image_input: Mistral3ImagePixelInputs,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 

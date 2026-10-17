@@ -66,7 +66,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -141,7 +140,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "w13": humming_quant_config.w1_humming_config,
             "w2": humming_quant_config.w2_humming_config,
         }
-        self.locks = create_humming_locks(moe_config.device)
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=moe_config.device)
         self.num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
         self.quant_config = humming_quant_config

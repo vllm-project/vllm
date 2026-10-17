@@ -7,10 +7,7 @@ min_acceptance_length: 2.5
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1800
-# Pinned to the revision before the checkpoint stored its Engram tables as
-# MXFP4, which vLLM cannot load until #61530 lands. Unpin with #61530.
 server_args: >-
-  --revision 3431dde3247c13b5957f682b1e3c6fcae2566079
   --tokenizer-mode deepseek_v41
   --trust-remote-code
   --max-model-len 8192

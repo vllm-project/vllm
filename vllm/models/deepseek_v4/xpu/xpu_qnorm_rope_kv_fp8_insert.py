@@ -88,13 +88,10 @@ def _xpu_qnorm_rope_kernel(
         kv_base = kv_ptr + token_idx * HEAD_DIM
         kv_out_base = kv_out_ptr + token_idx * HEAD_DIM
 
-        # Copy only the NoPE portion; the RoPE region is written exclusively
-        # by the rotated stores below. Masking avoids a write-after-write
-        # hazard on the overlapping RoPE addresses (matches the Q branch).
+        # Copy full KV unchanged first
         offs = tl.arange(0, HEAD_DIM)
         kv_full = tl.load(kv_base + offs)
-        nope_mask = offs < NOPE_DIM
-        tl.store(kv_out_base + offs, kv_full, mask=nope_mask)
+        tl.store(kv_out_base + offs, kv_full)
 
         # GPT-J interleaved RoPE on the last ROPE_DIM dimensions
         even_offs = NOPE_DIM + rope_pair_idx * 2

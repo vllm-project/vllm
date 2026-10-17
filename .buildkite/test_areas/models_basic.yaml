@@ -58,7 +58,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
-  automatic_shard: true
   timeout_in_minutes: 38
   source_file_dependencies:
   - vllm/
@@ -69,12 +68,10 @@ steps:
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v41_decoder_replay_layers.py
   - tests/models/test_deepseek_v41_replay_batch.py
-  - tests/models/test_deepseek_v41_pcp.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
-  - tests/models/test_deepseek_v4_vl_stream_weights.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v4_vl_stream_weights.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -161,11 +158,8 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
-- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
+- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache Shard %N"
   key: kimi-k3-prefix-cache-4xb200
-  # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
-  optional: true
-  automatic_shard: true
   timeout_in_minutes: 75
   device: b200-k8s
   num_devices: 4
@@ -183,7 +177,8 @@ steps:
   - .buildkite/scripts/install-kv-connectors.sh
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s models/kimi_k3/test_prefix_cache.py
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
@@ -217,7 +212,7 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
-    - pytest -v -s models/qwen4_exp/test_ple.py
+    - pytest -v -s models/qwen4_exp/test_ple.py -k test_fused_conv_correctness
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Qwen4 Exp"
@@ -256,10 +251,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
   - tests/models/test_qwen3_5_mtp_config.py
-  - tests/models/test_alice_ai.py
-  - tests/models/test_alice_ai_config.py
   - tests/models/transformers/fusers/
-  - tests/models/transformers/test_dynamic_rope.py
   - tests/model_executor/layers/test_activation.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
@@ -268,7 +260,7 @@ steps:
   - tests/models/transformers/test_layer_registry.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
@@ -280,7 +272,6 @@ steps:
   depends_on:
   - image-build-amd
   source_file_dependencies:
-  - docker/Dockerfile.rocm_base
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py

@@ -525,8 +525,9 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     step = 32.0 * tile_scale.repeat_interleave(32, dim=-1)
     assert ((rec_fused - rec_ref).abs() <= step).all()
     # The NoPE dims see no rotation at all, so they must be byte-identical.
-    ref_rows = k_cache_ref.view(num_blocks, block_size, V41_HEAD_BYTES)
-    fused_rows = k_cache_fused.view(num_blocks, block_size, V41_HEAD_BYTES)
+    nope_bytes = slice(0, block_size * HEAD_DIM)
+    ref_rows = k_cache_ref[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
+    fused_rows = k_cache_fused[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
     torch.testing.assert_close(
         fused_rows[..., :NOPE_DIM], ref_rows[..., :NOPE_DIM], rtol=0, atol=0
     )

@@ -17,8 +17,6 @@ from vllm.v1.hisparse.layout import (
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
-    drop_hisparse_host_pool,
-    get_hisparse_host_pool,
     initialize_hisparse_runtime_buffers,
     release_pinned_state,
 )
@@ -128,7 +126,7 @@ def init_hisparse_kv_cache(
     block_tables: "BlockTables",
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
+    host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
             kv_cache_config,
@@ -152,9 +150,6 @@ def init_hisparse_kv_cache(
     except Exception:
         if host_pool.shared_region is not None:
             host_pool.shared_region.cleanup()
-        elif host_pool.registered is not None:
-            release_pinned_state([], [host_pool.registered])
-        drop_hisparse_host_pool(vllm_config)
         raise
 
 
@@ -168,14 +163,37 @@ def _get_hisparse_cache(
 
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
-    """Detach the profiling caches but keep the host pool for the real KV cache."""
-    runtimes = {
-        id(cache.runtime): cache.runtime
+    cache_handles = [
+        cache
         for layer in forward_context.values()
         if (cache := getattr(layer, "hisparse_cache", None)) is not None
-        and hasattr(cache.runtime, "_host_cache")
+    ]
+    runtimes = {
+        id(cache.runtime): cache.runtime
+        for cache in cache_handles
+        if hasattr(cache.runtime, "_host_cache")
     }
-    release_pinned_state(list(runtimes.values()), [])
+    if not runtimes:
+        return
+
+    shared_regions = {
+        id(runtime.shared_host_region): runtime.shared_host_region
+        for runtime in runtimes.values()
+        if runtime.shared_host_region is not None
+    }
+    assert len(shared_regions) <= 1
+    shared_region = next(iter(shared_regions.values()), None)
+    registered_pools = (
+        []
+        if shared_region is not None
+        else list(
+            {
+                runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
+                for runtime in runtimes.values()
+            }.values()
+        )
+    )
+    release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
 
 
 def bind_hisparse_kv_caches(

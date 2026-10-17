@@ -139,7 +139,7 @@ def test_sentencepiece_leading_space_matches_engine():
     assert [t.token for t in entry.top_logprobs] == convert_ids_list_to_tokens(
         tokenizer, [spaced, bare]
     )
-    completion = _convert_chat_logprobs_to_completion_logprobs(resolved, logprobs)
+    completion = _convert_chat_logprobs_to_completion_logprobs(resolved)
     assert completion.top_logprobs == [{" true": -0.5, "true": -1.5}]
 
 

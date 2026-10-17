@@ -517,7 +517,6 @@ _TILE_CONFIG_OVERRIDES = {
         256: (128, 32),
         512: (128, 19),
     },
-    (5120, 256): {64: (64, 64)},  # GB200
     (6144, 128): {  # MiniMax-M3
         64: (32, 64),
         128: (64, 64),
@@ -534,7 +533,7 @@ def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     if 32 < N <= 512:
         token_bucket = triton.next_power_of_2(N)
         overrides = _TILE_CONFIG_OVERRIDES.get((K, M))
-        if overrides is not None and token_bucket in overrides:
+        if overrides is not None:
             BN, split_k = overrides[token_bucket]
             return BN, min(split_k, k_tiles)
 
@@ -610,8 +609,6 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
     N, K = X.shape
     M, _ = W.shape
-    if N == 0:
-        return X.new_empty((N, M), dtype=torch.float32)
     num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
 
     BN, split_k = _pick_tile_config(N, K, M, num_sms)

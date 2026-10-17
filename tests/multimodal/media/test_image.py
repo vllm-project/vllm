@@ -85,24 +85,6 @@ def test_image_media_io_rgba_custom_background(tmp_path):
     assert green_numpy[0][0][2] == 0  # B
 
 
-@pytest.mark.parametrize("background_color", [(255, 255, 255), (12, 34, 56)])
-def test_image_media_io_rgb_png_transparency(tmp_path, background_color):
-    image = Image.new("RGB", (2, 1), (255, 0, 0))
-    image.putpixel((1, 0), (0, 0, 255))
-    path = tmp_path / "rgb_transparency.png"
-    image.save(path, transparency=(255, 0, 0))
-
-    with Image.open(path) as source:
-        reference = Image.alpha_composite(
-            Image.new("RGBA", source.size, (*background_color, 255)),
-            source.convert("RGBA"),
-        ).convert("RGB")
-
-    image_io = ImageMediaIO(rgba_background_color=background_color)
-    converted = image_io.load_file(path)
-    np.testing.assert_array_equal(np.asarray(converted), np.asarray(reference))
-
-
 def test_image_media_io_no_mode_conversion(tmp_path):
     """image_mode=None skips conversion and preserves the original mode."""
     # RGBA image: opaque black pixel on a fully transparent background

@@ -37,7 +37,6 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.platforms import current_platform
-from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -103,7 +102,9 @@ class SpecDecodeBaseProposer:
         # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
         # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
         draft_hf_config = self.draft_model_config.hf_config
-        if get_compress_ratios(draft_hf_config) and hasattr(draft_hf_config, "hc_mult"):
+        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
+            draft_hf_config, "hc_mult"
+        ):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
 
         # Unifying eagle, draft model, and parallel drafting support.
@@ -1330,13 +1331,10 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
-        for name in draft_attn_layer_names:
-            all_attn_layers[name].is_draft_layer = True
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
-            for name in draft_attn_layer_names
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
