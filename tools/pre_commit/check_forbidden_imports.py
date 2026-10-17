@@ -56,6 +56,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/all_reduce_utils.py",
             "vllm/distributed/device_communicators/shm_broadcast.py",
             "vllm/distributed/device_communicators/shm_object_storage.py",
+            "vllm/distributed/device_communicators/shm_tensor_arena.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
             "vllm/model_executor/model_loader/weight_cache/protocol.py",
@@ -72,7 +73,6 @@ CHECK_IMPORTS = {
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
-            "vllm/v1/executor/ray_executor.py",
             "vllm/entrypoints/llm.py",
             "tests/utils.py",
             # pickle and cloudpickle

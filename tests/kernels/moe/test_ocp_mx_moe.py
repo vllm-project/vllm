@@ -42,13 +42,15 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+ROCM_GFX1250 = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx950, on_gfx1250
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
+    ROCM_GFX1250 = on_gfx1250()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -1568,6 +1570,15 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_TRITON_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "act_type": "mxfp4",
+        "rtol": 1.0,
+        "percent": 0.8,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "requires_gfx1250": True,
+    },
 }
 
 
@@ -1607,6 +1618,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config.get("requires_gfx1250") and not ROCM_GFX1250:
+        pytest.skip(f"Backend {backend_name} requires GFX1250")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -2114,6 +2127,117 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         assert "parallel config" in reason
 
 
+@pytest.mark.parametrize(
+    "all2all_backend",
+    [
+        "deepep_high_throughput",
+        "flashinfer_nvlink_two_sided",
+        "flashinfer_nvlink_one_sided",
+    ],
+)
+def test_make_mxfp4_moe_kernel_rejects_cutlass_unsupported_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+    all2all_backend: str,
+):
+    """Compressed-tensors CUTLASS W4A4 bypasses the oracle; guard at assembly."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        mxfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsMxfp4,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+
+    monkeypatch.setattr(
+        CutlassExpertsMxfp4, "_supports_current_device", staticmethod(lambda: True)
+    )
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=256,
+            num_local_experts=32,
+            hidden_dim=4096,
+            intermediate_size=2048,
+        ),
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=8,
+            dp_rank=0,
+            ep_size=8,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+            enable_eplb=False,
+        ),
+    )
+    w1_scale = torch.empty(32, 64, 128, dtype=torch.uint8)
+    w2_scale = torch.empty(32, 4096, 64, dtype=torch.uint8)
+    quant_config = mxfp4_moe_quant_config(w1_scale=w1_scale, w2_scale=w2_scale)
+
+    with pytest.raises(ValueError, match="parallel config"):
+        make_mxfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            CutlassExpertsMxfp4,
+            Mxfp4MoeBackend.MARLIN,
+        )
+
+
+def test_make_mxfp4_moe_kernel_validates_cutlass_expert_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CUTLASS MXFP4 supports EP with allgather_reducescatter after expert_map."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsMxfp4,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _validate_mxfp4_experts_config,
+    )
+
+    monkeypatch.setattr(
+        CutlassExpertsMxfp4, "_supports_current_device", staticmethod(lambda: True)
+    )
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=256,
+            num_local_experts=32,
+            hidden_dim=4096,
+            intermediate_size=2048,
+        ),
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            pcp_size=1,
+            pcp_rank=0,
+            dp_size=8,
+            dp_rank=0,
+            ep_size=8,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=False,
+        ),
+    )
+
+    _validate_mxfp4_experts_config(
+        CutlassExpertsMxfp4, moe_config, Mxfp4MoeBackend.MARLIN
+    )
+
+
 # Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
 # `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
 # the activation untouched, so a name it does not know (e.g. "mxfp6" instead of
@@ -2254,4 +2378,80 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     assert max_diff > 0.0, (
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
+    )
+
+
+# (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
+#
+# The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
+# per-partition intermediate is aligned to 128, not 256, so a model whose native
+# shard is already 128-aligned is allocated at its real width instead of being
+# padded up. `hidden_size` deliberately stays on 256 -- the gfx950 stage-1 mxfp4
+# kernels are generated with tile_k 256 only, and stage-1 reduces over model_dim.
+#
+# The remaining rows pin the neighbouring branches so a future edit to this
+# function cannot silently move a backend between them.
+ROCM_MXFP4_ROUNDUP_CASES = [
+    # W4A4: 3072 / TP8 = 384 stays 384. This is the case the alignment change is
+    # for; the generic 256 round-up would allocate 512.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 384, 6144, 384),
+    # W4A4, already 256-aligned (e.g. moe_intermediate 2048 at TP8): identity in
+    # both the old and the new form, so such models are provably untouched.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 256, 6144, 256),
+    # W4A4, 1024 / TP8 = 128: the most aggressive case, halved rather than trimmed.
+    ("AITER_MXFP4_MXFP4", "SILU", 4096, 128, 4096, 128),
+    # W4A4 ignores the activation -- the branch does not read it.
+    ("AITER_MXFP4_MXFP4", None, 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", 6144, 384, 6144, 384),
+    # W4A4 hidden_size is still rounded to 256, unlike the intermediate.
+    ("AITER_MXFP4_MXFP4", "SILU", 384, 384, 512, 384),
+    # W4A16 CK + SiTU/SILU keeps its own 128/128 carve-out.
+    ("AITER_MXFP4_BF16", "SITU", 384, 384, 384, 384),
+    ("AITER_MXFP4_BF16", "SILU", 384, 384, 384, 384),
+    # ... but only for those activations; anything else takes the generic ROCm arm.
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
+    # Backends that stay on the generic ROCm 256/256 round-up.
+    ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
+    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
+    ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+]
+
+
+@pytest.mark.parametrize(
+    "backend_name,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    ROCM_MXFP4_ROUNDUP_CASES,
+)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+def test_rocm_mxfp4_round_up_hidden_and_intermediate(
+    backend_name: str,
+    activation_name: str | None,
+    hidden_in: int,
+    inter_in: int,
+    hidden_out: int,
+    inter_out: int,
+):
+    """Pin the ROCm arm of mxfp4_round_up_hidden_size_and_intermediate_size.
+
+    The allocation this function returns is what every MXFP4 MoE weight buffer,
+    scale buffer and aiter tuned-config lookup is sized from, so a change here is
+    invisible locally and expensive everywhere else. Asserting the table keeps
+    each backend on the alignment its kernels actually require.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    backend = Mxfp4MoeBackend[backend_name]
+    activation = MoEActivation[activation_name] if activation_name else None
+
+    hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
+        backend, hidden_in, inter_in, activation
+    )
+
+    assert (hidden, intermediate) == (hidden_out, inter_out), (
+        f"{backend_name} / {activation_name}: "
+        f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
+        f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
     )

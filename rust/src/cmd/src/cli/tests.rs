@@ -185,10 +185,11 @@ fn serve_args_forward_python_flags_with_separator() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -198,15 +199,14 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -371,6 +371,34 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
             "torch_profiler_dir": "/tmp/profile",
         })
     );
+}
+
+#[test]
+fn serve_args_forward_stream_interval_to_frontend_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "4",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(frontend_config.stream_interval.get(), 4);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--stream-interval",
+        "0",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -944,6 +972,40 @@ fn serve_args_reject_unsupported_flag_arg() {
 }
 
 #[test]
+fn serve_args_enable_per_request_metrics_requires_engine_stats() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+    ])
+    .expect("per-request metrics flag is supported");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:0".into());
+    assert!(config.api_server_options.enable_per_request_metrics);
+    assert!(config.validate().is_ok());
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+        "--disable-log-stats",
+    ])
+    .expect("flags parse independently");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.to_frontend_config("tcp://127.0.0.1:0".into()).validate().unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("--enable-per-request-metrics requires engine statistics logging")
+    );
+}
+
+#[test]
 fn serve_args_reject_custom_generation_config_source() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -1026,10 +1088,11 @@ fn frontend_args_accept_json() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1039,15 +1102,14 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1352,13 +1414,13 @@ fn serve_args_parse_cors_flags() {
 }
 
 #[test]
-fn serve_args_cors_defaults_are_permissive() {
+fn serve_args_cors_defaults_restrict_origins() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
     let Command::Serve(serve) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(serve.runtime.allowed_origins.0, ["*"]);
+    assert!(serve.runtime.allowed_origins.0.is_empty());
     assert_eq!(serve.runtime.allowed_methods.0, ["*"]);
     assert_eq!(serve.runtime.allowed_headers.0, ["*"]);
     assert!(!serve.runtime.allow_credentials);
@@ -1698,10 +1760,11 @@ fn serve_args_accept_handshake_aliases() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
+                        stream_interval: 1,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1711,15 +1774,14 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1857,7 +1919,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1866,17 +1928,17 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -1952,7 +2014,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1961,17 +2023,17 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -2091,7 +2153,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             grpc_listener_mode: None,
             tool_call_parser: None,
             reasoning_parser: None,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2100,17 +2162,17 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             lora_modules: [],
             chat_template_content_format: Auto,
             max_logprobs: None,
+            stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],

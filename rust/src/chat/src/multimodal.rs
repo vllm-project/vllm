@@ -714,7 +714,7 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
 ///
 /// Embedding inputs share their base modality's budget rather than getting one
 /// of their own, matching Python's `modality.replace("_embeds", "")` in
-/// `vllm/entrypoints/chat_utils.py`.
+/// `vllm/renderers/chat_utils.py`.
 fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmModality> {
     match part {
         MediaContentPart::Text { .. } => None,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -19,6 +20,7 @@ from vllm.entrypoints.generate.base.serving import (
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
+    completion_top_logprobs_limit,
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
@@ -289,7 +291,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
-        previous_text_lens = [0] * num_choices * num_prompts
+        next_text_offsets = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
@@ -374,6 +376,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             not delta_text
                             and not delta_token_ids
                             and not previous_num_tokens[i]
+                            and finish_reason is None
                         ):
                             # Chunked prefill case, don't return empty chunks
                             continue
@@ -386,13 +389,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
                             logprob_token_ids=request.logprob_token_ids,
-                            initial_text_offset=previous_text_lens[i],
+                            initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
+                        # Advance by the tokens just reported, not by delta_text:
+                        # text held back for stop strings lags the tokens.
+                        if logprobs.tokens:
+                            next_text_offsets[i] = logprobs.text_offset[-1] + len(
+                                logprobs.tokens[-1]
+                            )
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] += len(delta_text)
                     previous_num_tokens[i] += len(output.token_ids)
                     stop_reason = output.stop_reason
 
@@ -412,6 +420,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 token_ids=(
                                     as_list(output.token_ids)
                                     if request.return_token_ids
+                                    else None
+                                ),
+                                weight_versions=(
+                                    output.weight_versions
+                                    if request.return_weight_versions
                                     else None
                                 ),
                             )
@@ -587,6 +600,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    weight_versions=(
+                        output.weight_versions
+                        if request.return_weight_versions
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
@@ -716,8 +734,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             tokenizer,
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
-                        for i, top_lp in enumerate(step_top_logprobs.items())
-                        if logprob_token_ids or num_output_top_logprobs >= i
+                        for top_lp in itertools.islice(
+                            step_top_logprobs.items(),
+                            completion_top_logprobs_limit(
+                                num_output_top_logprobs, bool(logprob_token_ids)
+                            ),
+                        )
                     }
                 )
 

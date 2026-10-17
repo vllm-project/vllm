@@ -90,6 +90,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "response_template_tool_parser",
         "ResponseTemplateToolParser",
     ),
+    "beam": (
+        "beam_tool_parser",
+        "BeamToolParser",
+    ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
         "PoolsideV1ToolParser",
@@ -193,6 +197,13 @@ _TOOL_PARSERS_TO_REGISTER = {
     "qwen3_coder": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
+    ),
+    # TODO: Qwen2.5/QwQ/Qwen3 JSON tool calls. Aliased to `hermes` for now;
+    # a dedicated parser should treat the template's newline before and
+    # between `<tool_call>` blocks as framing, as the Rust frontend does.
+    "qwen3_json": (
+        "hermes_tool_parser",
+        "Hermes2ProToolParser",
     ),
     "qwen3_xml": (
         "qwen3_engine_tool_parser",
