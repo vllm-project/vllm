@@ -818,6 +818,7 @@ def get_model_params(config):
         hidden_size = config.hidden_size
     elif architecture in (
         "BailingMoeV3ForCausalLM",
+        "BerryLMForCausalLM",
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
