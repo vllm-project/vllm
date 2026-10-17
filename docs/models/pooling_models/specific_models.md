@@ -242,7 +242,7 @@ ColUltraVBERT pairs the UltraBERT text encoder with a SigLIP vision encoder and 
 
 | Architecture | Backbone | Example HF Models |
 | - | - | - |
-| `ColUltraVBertForRetrieval` | UltraVBERT | `athrael-soju/ColUltraVBERT` |
+| `UltraVBertModel` | UltraVBERT | `athrael-soju/ColUltraVBERT` |
 
 Clients send the prompts the model was trained with: a page goes in as `User:<image>Describe the image.<end_of_utterance>\nAssistant:` with its image, and a query as its text followed by ten `<end_of_utterance>` tokens.
 

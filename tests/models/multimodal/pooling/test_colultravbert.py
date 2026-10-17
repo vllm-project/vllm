@@ -10,6 +10,7 @@ MODEL_NAME = "athrael-soju/ColUltraVBERT"
 DTYPE = "bfloat16"
 PAGE_PROMPT = "User:<image>Describe the image.<end_of_utterance>\nAssistant:"
 IMAGE_SEQ_LEN = 64
+EMBEDDING_DIM = 768
 
 
 @pytest.fixture(scope="module")
@@ -23,18 +24,13 @@ def colultravbert_model(vllm_runner):
         yield vllm_model
 
 
-@pytest.fixture(scope="module")
-def embedding_dim(colultravbert_model):
-    return colultravbert_model.llm.model_config.hf_config.embedding_dim
-
-
-def test_colultravbert_text_token_embed(colultravbert_model, embedding_dim):
+def test_colultravbert_text_token_embed(colultravbert_model):
     outputs = colultravbert_model.token_embed(["What is machine learning?"])
 
     assert len(outputs) == 1
     emb = torch.tensor(outputs[0])
     assert emb.dim() == 2
-    assert emb.shape[1] == embedding_dim
+    assert emb.shape[1] == EMBEDDING_DIM
     assert emb.shape[0] > 1
 
 
@@ -68,9 +64,7 @@ def test_colultravbert_text_late_interaction(colultravbert_model):
     assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
 
 
-def test_colultravbert_image_token_embed(
-    colultravbert_model, embedding_dim, image_assets
-):
+def test_colultravbert_image_token_embed(colultravbert_model, image_assets):
     image = image_assets[0].pil_image
     inputs = colultravbert_model.get_inputs(
         [PAGE_PROMPT],
@@ -85,5 +79,5 @@ def test_colultravbert_image_token_embed(
     assert len(outputs) == 1
     emb = torch.tensor(outputs[0])
     assert emb.dim() == 2
-    assert emb.shape[1] == embedding_dim
+    assert emb.shape[1] == EMBEDDING_DIM
     assert emb.shape[0] >= 2 * IMAGE_SEQ_LEN

@@ -273,7 +273,7 @@ _LATE_INTERACTION_MODELS = {
     "JinaForRanking": ("jina", "JinaForRanking"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
-    "ColUltraVBertForRetrieval": ("colultravbert", "ColUltraVBertForRetrieval"),
+    "UltraVBertModel": ("colultravbert", "ColUltraVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),

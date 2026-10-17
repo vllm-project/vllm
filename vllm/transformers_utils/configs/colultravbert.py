@@ -28,25 +28,11 @@ class UltraBertConfig(PreTrainedConfig):
         rope_parameters: dict[str, Any] | None = None,
         **kwargs,
     ):
-        attention_windows = kwargs.pop("attention_windows", None)
-        rope_theta = kwargs.pop("rope_theta", None)
-        if attention_windows is not None:
-            sliding_window = next((w for w in attention_windows if w), sliding_window)
-            if layer_types is None:
-                layer_types = [
-                    "sliding_attention" if w else "full_attention"
-                    for w in attention_windows
-                ]
         if layer_types is None:
             layer_types = [
                 "sliding_attention" if (i + 1) % 3 else "full_attention"
                 for i in range(num_hidden_layers)
             ]
-        if rope_parameters is None and rope_theta is not None:
-            rope_parameters = {
-                kind: {"rope_type": "default", "rope_theta": theta}
-                for kind, theta in zip(layer_types, rope_theta)
-            }
         if rope_parameters is None:
             rope_parameters = {
                 "sliding_attention": {"rope_type": "default", "rope_theta": 10_000.0},
@@ -75,12 +61,13 @@ class UltraBertConfig(PreTrainedConfig):
 
 
 class ColUltraVBertConfig(PreTrainedConfig):
-    model_type = "colultravbert"
+    """The `ultravbert` config of a ColUltraVBERT Sentence Transformers package;
+    the package's `1_Dense` module holds the output projection."""
+
+    model_type = "ultravbert"
 
     def __init__(
         self,
-        vlm_config: dict | PreTrainedConfig | None = None,
-        embedding_dim: int = 128,
         text_config: dict | UltraBertConfig | None = None,
         vision_config: dict | SiglipVisionConfig | None = None,
         image_token_id: int = 49191,
@@ -88,17 +75,6 @@ class ColUltraVBertConfig(PreTrainedConfig):
         connector_norm: bool = True,
         **kwargs,
     ):
-        if vlm_config is not None:
-            if isinstance(vlm_config, PreTrainedConfig):
-                vlm_config = vlm_config.to_dict()
-            text_config = vlm_config.get("text_config", text_config)
-            vision_config = vlm_config.get("vision_config", vision_config)
-            image_token_id = vlm_config.get("image_token_id", image_token_id)
-            pixel_shuffle_factor = vlm_config.get(
-                "pixel_shuffle_factor", pixel_shuffle_factor
-            )
-            connector_norm = vlm_config.get("connector_norm", connector_norm)
-
         if not isinstance(text_config, UltraBertConfig):
             text_config = {
                 k: v
@@ -117,10 +93,9 @@ class ColUltraVBertConfig(PreTrainedConfig):
         self.image_token_id = image_token_id
         self.pixel_shuffle_factor = pixel_shuffle_factor
         self.connector_norm = connector_norm
-        self.embedding_dim = embedding_dim
         self.hidden_size = text_config.hidden_size
 
-        kwargs.setdefault("architectures", ["ColUltraVBertForRetrieval"])
+        kwargs.setdefault("architectures", ["UltraVBertModel"])
         super().__init__(**kwargs)
 
     @property

@@ -509,10 +509,8 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
     # prefix; the longer prefix must stay first.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "vlm.vision_model.vision_model.": "vision_model.vision_model.",
-            "vlm.vision_model.": "vision_model.vision_model.",
-            "vlm.connector.": "connector.",
-            "vlm.text_model.": "text_model.",
+            "vision_model.vision_model.": "vision_model.vision_model.",
+            "vision_model.": "vision_model.vision_model.",
         },
     )
 
@@ -538,19 +536,11 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
                 prefix=maybe_prefix(prefix, "text_model"),
             )
 
-        self.embedding_proj_layer = nn.Linear(
-            config.text_config.hidden_size,
-            config.embedding_dim,
-            bias=True,
-            dtype=vllm_config.model_config.head_dtype,
-        )
-
+        # The projection loads from the package's Sentence Transformers
+        # `1_Dense` module.
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
-        self.pooler = pooler_for_token_embed(
-            pooler_config,
-            projector=self.embedding_proj_layer,
-        )
+        self.pooler = pooler_for_token_embed(pooler_config)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
