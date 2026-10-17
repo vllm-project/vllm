@@ -4,11 +4,13 @@
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from itertools import permutations
 from threading import Event
 
 import numpy as np
 import pytest
 from transformers import AutoTokenizer
+from xgrammar import get_model_structural_tag
 
 from vllm.config import (
     DeviceConfig,
@@ -24,7 +26,9 @@ from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_guidance import GuidanceGrammar
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
+from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
 from vllm.v1.structured_output.request import get_structured_output_key
 
 TOKENIZER = "gpt2"
@@ -42,6 +46,105 @@ NUM_SPEC_TOKENS = 8
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained(TOKENIZER)
+
+
+@pytest.mark.parametrize("order", list(permutations(("json", "named", "required"))))
+@pytest.mark.parametrize("async_grammar", [False, True])
+@pytest.mark.cpu_test
+def test_auto_backend_selection_ignores_request_order(tokenizer, order, async_grammar):
+    """Mixed auto requests retain their validated compiler and native masks."""
+    config = VllmConfig(
+        model_config=ModelConfig(model=TOKENIZER, tokenizer=TOKENIZER),
+        device_config=DeviceConfig(device="cpu"),
+        structured_outputs_config=StructuredOutputsConfig(
+            backend="auto", enable_in_reasoning=True
+        ),
+    )
+    manager = StructuredOutputManager(config)
+    manager._use_async_grammar_compilation = async_grammar
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+    named = {"type": "function", "function": {"name": "lookup"}}
+    call = (
+        "<tool_call>\n<function=lookup>\n"
+        "<parameter=city>Paris</parameter>\n</function>\n</tool_call>"
+    )
+    try:
+        for index, kind in enumerate((*order, *reversed(order), *order)):
+            if kind == "json":
+                outputs = StructuredOutputsParams(
+                    json={"type": "integer", "multipleOf": 2}
+                )
+                text, expected_backend = "6", "guidance"
+            else:
+                tag = get_model_structural_tag(
+                    "qwen_3_coder",
+                    tools,
+                    named if kind == "named" else "required",
+                    reasoning=False,
+                )
+                outputs = StructuredOutputsParams(structural_tag=tag.model_dump_json())
+                text, expected_backend = call, "xgrammar"
+            sampling = SamplingParams(structured_outputs=outputs)
+            sampling._validate_structured_outputs(
+                config.model_config, config.structured_outputs_config, tokenizer
+            )
+            assert outputs._backend == expected_backend
+            sampling.update_from_generation_config({}, tokenizer.eos_token_id)
+            request = Request(
+                request_id=f"mixed-{index}",
+                prompt_token_ids=[],
+                sampling_params=sampling,
+                pooling_params=None,
+                reasoning_ended=True,
+            )
+            manager.grammar_init(request)
+            _wait_for_grammar(request)
+            assert request.structured_output_request is not None
+            grammar = request.structured_output_request.grammar
+            assert grammar is not None and not isinstance(grammar, Exception)
+            expected_grammar = (
+                GuidanceGrammar if expected_backend == "guidance" else XgrammarGrammar
+            )
+            assert isinstance(grammar, expected_grammar)
+            mask = manager.grammar_bitmask(
+                {request.request_id: request}, [request.request_id], {}
+            )
+            assert mask is not None and mask.dtype == np.int32
+            assert mask.shape == (1, (config.model_config.get_vocab_size() + 31) // 32)
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+            assert grammar.validate_tokens(token_ids) == token_ids
+            first = token_ids[0]
+            assert mask[0].view(np.uint32)[first >> 5] & np.uint32(1 << (first & 31))
+            if kind == "json":
+                bad = tokenizer.encode("5", add_special_tokens=False) + [
+                    tokenizer.eos_token_id
+                ]
+                assert grammar.validate_tokens(bad) != bad
+            else:
+                wrong_name = tokenizer.encode(
+                    call.replace("lookup", "other"), add_special_tokens=False
+                )
+                assert grammar.validate_tokens(wrong_name) != wrong_name
+            assert grammar.accept_tokens(request.request_id, token_ids)
+            assert grammar.accept_tokens(request.request_id, [tokenizer.eos_token_id])
+            assert grammar.is_terminated()
+    finally:
+        manager.clear_backend()
+    assert manager.backend is None
 
 
 @dataclass(frozen=True)
