@@ -25,10 +25,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.worker import utils as vllm_v1_worker_utils
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
@@ -480,6 +481,100 @@ def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
     storage[row : 2 * row] = 7
     copy_kv_cache_blocks_inplace(runner_kv_caches, num_blocks, copies)
     assert (mla[3] == 7).all() and (indexer[3] == 7).all()
+
+
+@pytest.mark.parametrize("max_transient_bytes", [None, 1])
+def test_copy_kv_cache_blocks_inplace_chunked_matches_unchunked(
+    monkeypatch, max_transient_bytes
+):
+    """Chunked CoW copies must be order-equivalent to the single gather.
+
+    The RHS gather materializes len(src) rows at once; with tens-of-MiB
+    rows (mamba state) a large CoW wave transiently allocates multi-GiB
+    and OOMs near the memory limit. The copy is therefore chunked to a
+    byte bound. Chunking is order-equivalent because CoW src and dst sets
+    are disjoint (dst blocks are freshly allocated); this test pins that
+    equivalence with the bound forced down to a single row per chunk.
+    """
+    if max_transient_bytes is not None:
+        monkeypatch.setattr(
+            vllm_v1_worker_utils, "_MAX_COW_TRANSIENT_BYTES", max_transient_bytes
+        )
+
+    num_blocks, rows_per_block, feat = 8, 2, 3
+    reference = torch.randn(num_blocks * rows_per_block, feat)
+    caches = []
+    for _ in range(2):
+        cache = reference.clone()
+        caches.append(cache)
+        copy_kv_cache_blocks_inplace(
+            [cache],
+            num_blocks=num_blocks,
+            kv_cache_block_copies=[
+                KVCacheBlockCopy(1, 0),
+                KVCacheBlockCopy(3, 2),
+                KVCacheBlockCopy(7, 5),
+            ],
+        )
+
+    expected = reference.clone()
+    expected[0:2] = reference[2:4]
+    expected[4:6] = reference[6:8]
+    expected[10:12] = reference[14:16]
+    for cache in caches:
+        torch.testing.assert_close(cache, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_copy_kv_cache_blocks_inplace_unchunked_gather_ooms_chunked_survives(
+    monkeypatch,
+):
+    """The unbounded CoW gather OOMs under a memory cap; the chunked copy survives.
+
+    Hermetic reproduction of the production failure: a 16-request
+    shared-prefix wave put 67 mamba state rows (~50MiB each) in the CoW
+    list and the single gather tried to allocate 3.15GiB at once, OOMing
+    at gpu_memory_utilization 0.955. Here the CUDA allocator is capped
+    with set_per_process_memory_fraction and the wave is sized so the
+    single-gather transient exceeds the cap: with the bound forced to one
+    chunk (the pre-fix single gather) the copy raises
+    torch.OutOfMemoryError, and with the 64MiB byte bound it completes
+    with the correct result.
+    """
+    num_blocks, row_bytes = 128, 4 * MiB_bytes
+    feat = row_bytes // 4  # float32 rows
+    pairs = [KVCacheBlockCopy(s, d) for s, d in zip(range(64), range(64, 128))]
+    cpu_ref = torch.randn(num_blocks, feat)
+    cache = cpu_ref.cuda("cuda:0")
+
+    torch.cuda.empty_cache()
+    total = torch.cuda.get_device_properties(cache.device).total_memory
+    # 672MiB cap: cache (512MiB) + single-gather transient (256MiB) exceeds
+    # it; cache + 64MiB-bounded chunk transient fits.
+    torch.cuda.set_per_process_memory_fraction(672 * MiB_bytes / total)
+    try:
+        # Pre-fix behavior: one chunk = the full gather -> transient 256MiB
+        # on top of the 512MiB cache blows the 672MiB cap.
+        monkeypatch.setattr(vllm_v1_worker_utils, "_MAX_COW_TRANSIENT_BYTES", 1 << 60)
+        with pytest.raises(torch.OutOfMemoryError):
+            copy_kv_cache_blocks_inplace(
+                [cache], num_blocks=num_blocks, kv_cache_block_copies=pairs
+            )
+
+        # Post-fix behavior: 64MiB byte bound -> 10-row chunks, peak
+        # transient ~60MiB; the copy completes and matches the reference.
+        monkeypatch.setattr(
+            vllm_v1_worker_utils, "_MAX_COW_TRANSIENT_BYTES", 64 * MiB_bytes
+        )
+        copy_kv_cache_blocks_inplace(
+            [cache], num_blocks=num_blocks, kv_cache_block_copies=pairs
+        )
+        expected = cpu_ref.clone()
+        expected[64:128] = cpu_ref[0:64]
+        torch.testing.assert_close(cache.cpu(), expected)
+    finally:
+        torch.cuda.set_per_process_memory_fraction(1.0)
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
