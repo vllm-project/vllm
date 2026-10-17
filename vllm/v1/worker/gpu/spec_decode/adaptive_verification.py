@@ -3,7 +3,7 @@
 """Adaptive verification for DSpark speculative decoding."""
 
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -49,19 +49,22 @@ def _assign_draft_token_budget(
     capacities: torch.Tensor,
     draft_budget: int,
     num_steps: int,
+    pinned: torch.Tensor,
 ) -> None:
     """Admit the globally best `draft_budget` draft slots, in place.
 
     Every (request, step) slot is scored by its survival probability, the running
     product of that request's per-position confidences, and the highest scores win.
     Survival only decreases along a request, so a global top-k always admits
-    continuously along steps with a request.
+    continuously along steps with a request. Slots of `pinned` requests are always
+    admitted (the budget includes them).
 
     `capacities` enters holding each request's scheduled draft count (which bounds its
     eligible slots) and leaves holding the admitted count. The caller only calls this
     when `draft_budget < capacities.sum()`, so every winner is a real draft slot.
     """
     survival = confidence_probs[idx_mapping].cumprod(dim=1)
+    survival = survival.masked_fill(pinned[:, None], float("inf"))
     steps = torch.arange(num_steps, device=survival.device)
     # Out-of-range slots score -inf so they never outrank a real draft.
     out_of_range = steps[None, :] >= capacities[:, None]
@@ -129,6 +132,11 @@ def build_cost_tables_from_curves(
 
 
 class AdaptiveVerificationManager:
+    # Optional drafter hook: given request-state indices, a mask of requests
+    # whose scheduled drafts must all be verified, so that their output does
+    # not depend on the rest of the batch (or None).
+    pinned_requests: Callable[[np.ndarray], np.ndarray | None] | None = None
+
     def __init__(
         self,
         req_states: "RequestState",
@@ -161,6 +169,8 @@ class AdaptiveVerificationManager:
         self._batch_draft_capacity = torch.empty(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        self._pinned_rows = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+        self._pinned_req_ids: set[str] = set()
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
@@ -310,11 +320,24 @@ class AdaptiveVerificationManager:
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
+        max_logits = max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens)
+        pinned = self.pinned_requests(slots) if self.pinned_requests else None
+        num_pinned = 0 if pinned is None else int(scheduled_drafts[pinned].sum())
+        if num_pinned > max_logits:
+            # They must be trimmed to fit one rejection-sampler chunk.
+            pinned, num_pinned = None, 0
+        pinned_accepted = 0.0
+        if pinned is not None:
+            pinned_valid = valid & pinned[:, None]
+            pinned_accepted = float(survival_probability[pinned_valid].sum())
+            valid &= ~pinned[:, None]
+        self._pinned_req_ids = (
+            set() if pinned is None else {req_ids[i] for i in np.flatnonzero(pinned)}
+        )
         scores = np.sort(survival_probability[valid])[::-1]
-        num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+        num_non_draft_tokens_total = int(num_non_draft_tokens.sum()) + num_pinned
         max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+            int(scheduled_drafts.sum()) - num_pinned, max_logits - num_pinned
         )
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
@@ -322,8 +345,9 @@ class AdaptiveVerificationManager:
             self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
             >= self.req_states.prefill_len.np[slots]
         )
+        base_accepted = num_sampling_requests + pinned_accepted
         num_tokens_to_estimated_accepted_tokens = np.concatenate(
-            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
+            ([base_accepted], base_accepted + np.cumsum(scores))
         )
         costs = (
             draft_cost_ms[len(req_ids)]
@@ -341,7 +365,9 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        draft_budget = num_pinned + int(
+            np.argmax(num_tokens_to_estimated_accepted_tokens / costs)
+        )
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -417,12 +443,23 @@ class AdaptiveVerificationManager:
         else:
             async_tensor_h2d(scheduled_drafts, out=capacities)
             if draft_budget < int(scheduled_drafts.sum()):
+                pinned_rows = self._pinned_rows[:num_reqs]
+                if self._pinned_req_ids:
+                    pinned = np.fromiter(
+                        (req_id in self._pinned_req_ids for req_id in req_ids),
+                        dtype=bool,
+                        count=num_reqs,
+                    )
+                    async_tensor_h2d(pinned, out=pinned_rows)
+                else:
+                    pinned_rows.zero_()
                 _assign_draft_token_budget_compiled(
                     self._confidence_probs,
                     idx_mapping,
                     capacities,
                     draft_budget,
                     self.num_speculative_steps,
+                    pinned_rows,
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]

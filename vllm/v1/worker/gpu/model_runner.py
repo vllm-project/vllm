@@ -276,8 +276,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
-        use_dense_all_token_ids = (
-            self.speculative_config is not None and self.speculative_config.use_ngram()
+        use_dense_all_token_ids = self.speculative_config is not None and (
+            self.speculative_config.use_ngram()
+            or self.speculative_config.method == "suffix"
         )
 
         # General request states.
@@ -517,6 +518,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            set_sampling_states = getattr(self.speculator, "set_sampling_states", None)
+            if set_sampling_states is not None:
+                set_sampling_states(self.sampler.sampling_states)
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -705,6 +709,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
         )
+        if self.adaptive_verification is not None:
+            # Requests whose drafts must all be verified to stay reproducible.
+            self.adaptive_verification.pinned_requests = getattr(
+                self.speculator, "seeded_requests", None
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -1167,6 +1176,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
+        on_requests_finished = getattr(self.speculator, "on_requests_finished", None)
+        if on_requests_finished is not None and finished_req_ids:
+            # Before the slots are freed: drafters with cross-request memory
+            # read the finished requests' token history. Preempted requests
+            # resume with the same tokens and are not passed.
+            on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
@@ -1213,6 +1228,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
+                # Drafters with per-slot verification stats reset them.
+                speculator_add_request = getattr(self.speculator, "add_request", None)
+                if speculator_add_request is not None:
+                    speculator_add_request(req_index)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
