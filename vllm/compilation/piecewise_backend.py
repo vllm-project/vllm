@@ -19,6 +19,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -39,17 +40,42 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
 
     Used for single-size compilation where we need concrete-shaped inputs.
     The Dynamo-captured graph gives us example inputs with SymInts in them.
+    Symbols that Dynamo created only for an input's stride or storage offset
+    keep their traced value. They are assumed not to change with the size
+    (e.g. the row pitch of a slice of a persistent buffer).
     """
+    from torch._dynamo.source import TensorProperty, TensorPropertySource
     from torch._prims_common import compute_required_storage_length
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.symbolic_shapes import ShapeEnv, is_symbolic
 
+    def is_layout_symbol(shape_env: ShapeEnv, s: Any) -> bool:
+        sources = shape_env.var_to_sources.get(s)
+        return bool(sources) and all(
+            isinstance(src, TensorPropertySource)
+            and src.prop is not TensorProperty.SIZE
+            for src in sources
+        )
+
     def concretize(sym_val: Any) -> int:
-        """Replace all symbolic variables in a SymInt expression with size."""
+        """Replace size symbols with size, layout symbols with traced values."""
         if not is_symbolic(sym_val):
             return int(sym_val)
+        shape_env = sym_val.node.shape_env
+        traced_vals = (
+            shape_env.backed_var_to_val
+            if is_torch_equal_or_newer("2.11.0")
+            else shape_env.var_to_val
+        )
         expr = sym_val.node.expr
-        return int(expr.subs({s: size for s in expr.free_symbols}))
+        return int(
+            expr.subs(
+                {
+                    s: traced_vals[s] if is_layout_symbol(shape_env, s) else size
+                    for s in expr.free_symbols
+                }
+            )
+        )
 
     fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
