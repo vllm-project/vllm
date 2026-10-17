@@ -11,11 +11,26 @@ from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 class FilesystemResolver(LoRAResolver):
     def __init__(self, lora_cache_dir: str):
         self.lora_cache_dir = lora_cache_dir
+        self._resolved_lora_cache_dir = os.path.realpath(lora_cache_dir)
+
+    def _resolve_lora_path(self, lora_name: str) -> str | None:
+        if os.path.isabs(lora_name):
+            return None
+
+        lora_path = os.path.realpath(
+            os.path.join(self._resolved_lora_cache_dir, lora_name)
+        )
+        common_path = os.path.commonpath([self._resolved_lora_cache_dir, lora_path])
+        if common_path != self._resolved_lora_cache_dir:
+            return None
+        return lora_path
 
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
     ) -> LoRARequest | None:
-        lora_path = os.path.join(self.lora_cache_dir, lora_name)
+        lora_path = self._resolve_lora_path(lora_name)
+        if lora_path is None:
+            return None
         maybe_lora_request = await self._get_lora_req_from_path(
             lora_name, lora_path, base_model_name
         )
