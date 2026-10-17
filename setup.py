@@ -389,11 +389,7 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         toolkit = None
         if _is_cuda() and CUDA_HOME is not None:
-            # Re-detect the local GPU arch rather than reuse a cached one.
-            cmake_args += [
-                f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc",
-                "-UCUDA_GPU_DETECT_OUTPUT",
-            ]
+            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
             toolkit = os.path.realpath(CUDA_HOME)
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
