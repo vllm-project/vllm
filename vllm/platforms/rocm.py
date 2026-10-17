@@ -732,6 +732,38 @@ class RocmPlatform(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
+        # TurboQuant KV cache must always route to the TURBOQUANT backend,
+        # regardless of any forced backend override (e.g. Gemma4's TRITON_ATTN
+        # override for heterogeneous head dims). TURBOQUANT supports any head
+        # size and is the only backend that can decode turboquant_* caches.
+        # Sliding-window layers never reach here with a turboquant dtype: they
+        # have kv_cache_dtype reset to "auto" in Attention.__init__ because
+        # TurboQuantAttentionBackend only supports full (non-sliding) attention.
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.info_once("Using TurboQuant attention backend on ROCm.")
+            return AttentionBackendEnum.TURBOQUANT.get_path()
+
+        # Skip/boundary layers within a turboquant_* context use native dtype
+        # (fp8 or auto). kv-first backends (ROCM_ATTN etc.) cannot handle
+        # page-size-padded caches; route these layers directly to TRITON_ATTN
+        # which uses a num-blocks-first layout compatible with padded pages.
+        from vllm.config import get_current_vllm_config_or_none
+        _vllm_config = get_current_vllm_config_or_none()
+        global_cache_dtype = getattr(
+            getattr(_vllm_config, "cache_config", None), "cache_dtype", None
+        )
+        if (
+            isinstance(global_cache_dtype, str)
+            and global_cache_dtype.startswith("turboquant_")
+            and kv_cache_dtype is not None
+            and not kv_cache_dtype.startswith("turboquant_")
+        ):
+            logger.info_once(
+                "Routing native-dtype layer to TRITON_ATTN within turboquant_* context."
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             # Keep lazy: vllm.config imports current_platform during initialization.
