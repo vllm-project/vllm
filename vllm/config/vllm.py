@@ -2595,6 +2595,14 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
+            mono_spec = self.model_config.mono_spec
+            if self.kernel_config.monokernel and mono_spec is not None:
+                from vllm.models.common.mono.guards import capture_sizes
+
+                cudagraph_capture_sizes = capture_sizes(
+                    mono_spec, self, cudagraph_capture_sizes
+                )
+
             # user-specific compilation_config.max_cudagraph_capture_size get
             # truncated to valid_max_size when they are inconsistent.
             valid_max_size = (
@@ -2723,6 +2731,15 @@ class VllmConfig:
             computed_compile_ranges_endpoints
         )
 
+    def _configure_monokernel(self) -> None:
+        """With ``--monokernel``, refuses an unsupported config before load
+        (RFC #60904)."""
+        from vllm.models.common.mono.guards import configure, enabled
+
+        spec = self.model_config.mono_spec
+        if enabled(self) and spec is not None:
+            configure(self, spec)
+
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
@@ -2753,6 +2770,8 @@ class VllmConfig:
             cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        self._configure_monokernel()
 
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)

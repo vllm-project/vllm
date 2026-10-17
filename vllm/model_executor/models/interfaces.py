@@ -1203,6 +1203,23 @@ class SupportsMambaPrefixCaching(Protocol):
 
 
 @runtime_checkable
+class SupportsMonoKernel(Protocol):
+    """The interface for models with MonoKernels (RFC #60904): persistent
+    kernels that run a decoder layer's decode step in one launch.
+
+    ``mono_spec`` names the model's ``MonoSpec`` by import path
+    (``"package.module:NAME"``), so config code can read and check it without
+    importing the model.
+    """
+
+    mono_spec: ClassVar[str]
+
+
+def mono_spec(model: type[object] | object) -> str | None:
+    return getattr(model, "mono_spec", None)
+
+
+@runtime_checkable
 class SupportsReplaySSM(Protocol):
     """The interface for models whose recurrent layers support ReplaySSM
     cached decode.

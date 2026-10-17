@@ -305,6 +305,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # MonoKernel counters since the last step (models.common.mono.failstop)
+    mono_kernel_stats: dict[str, int] | None = None
+
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.

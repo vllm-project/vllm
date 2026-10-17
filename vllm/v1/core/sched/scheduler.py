@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
@@ -163,6 +163,7 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
+        self._mono_kernel_stats: Counter[str] = Counter()
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -2121,6 +2122,8 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        if model_runner_output.mono_kernel_stats:
+            self._mono_kernel_stats.update(model_runner_output.mono_kernel_stats)
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -3045,7 +3048,15 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            mono_kernel_stats=self._drain_mono_kernel_stats(),
         )
+
+    def _drain_mono_kernel_stats(self) -> dict[str, int] | None:
+        if not self._mono_kernel_stats:
+            return None
+        stats = dict(self._mono_kernel_stats)
+        self._mono_kernel_stats.clear()
+        return stats
 
     def make_spec_decoding_stats(
         self,

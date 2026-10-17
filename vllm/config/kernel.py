@@ -295,8 +295,8 @@ class KernelConfig:
     monokernel: bool = False
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
-    in a single launch (DeepSeek-V4.1 on MI355X). A deployment that cannot run
-    it is refused at startup."""
+    in a single launch (DeepSeek-V4.1 and Kimi-K3 on MI355X). A deployment that
+    cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

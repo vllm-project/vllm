@@ -48,6 +48,7 @@ from .interfaces import (
     has_noops,
     is_attention_free,
     is_hybrid,
+    mono_spec,
     requires_raw_input_tokens,
     supports_hc_sp,
     supports_kv_cache_grouping,
@@ -886,6 +887,7 @@ class _ModelInfo:
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    mono_spec: str | None
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -923,6 +925,7 @@ class _ModelInfo:
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
+            mono_spec=mono_spec(model),
         )
 
 
