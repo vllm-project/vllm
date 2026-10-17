@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
@@ -185,6 +185,30 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self.neg_inf_tensor = torch.tensor(
             -float("inf"), dtype=torch.float32, device=self.device
         )
+        # Full vocab size of the model. When the LM head is TP-sharded
+        # (vocab-parallel logits fed to the sampler), `logits` only spans
+        # this rank's shard of the vocabulary, so stop-token ids are mapped
+        # to local column ids (and ids owned by other ranks are dropped)
+        # when the CPU-side index tensors are rebuilt in `update_state`.
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size > 1:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            from vllm.model_executor.layers.vocab_parallel_embedding import (
+                DEFAULT_VOCAB_PADDING_SIZE,
+                pad_vocab_size,
+                vocab_range_from_global_vocab_size,
+            )
+
+            vocab_size_padded = pad_vocab_size(
+                self.vocab_size, DEFAULT_VOCAB_PADDING_SIZE
+            )
+            self._shard_start, self._shard_end = vocab_range_from_global_vocab_size(
+                vocab_size_padded, get_tensor_model_parallel_rank(), tp_size
+            )
+        else:
+            self._shard_start = 0
+            self._shard_end = self.vocab_size
 
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
@@ -233,11 +257,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 stop_tok_ids,
                 uses_structured_output,
             ) in self.min_toks.items():
-                reqs.extend([req] * len(stop_tok_ids))
-                tok_ids.extend(stop_tok_ids)
+                local_toks = self._local_stop_ids(stop_tok_ids)
+                if not local_toks:
+                    continue
+                reqs.extend([req] * len(local_toks))
+                tok_ids.extend(local_toks)
                 if uses_structured_output:
-                    restore_reqs.extend([req] * len(stop_tok_ids))
-                    restore_tok_ids.extend(stop_tok_ids)
+                    restore_reqs.extend([req] * len(local_toks))
+                    restore_tok_ids.extend(local_toks)
 
             self.logits_slice = (
                 self._device_tensor(reqs, torch.int32),
@@ -250,6 +277,16 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return async_tensor_h2d(data, device=self.device, dtype=dtype)
+
+    def _local_stop_ids(self, tok_ids: Iterable[int]) -> list[int]:
+        """Map global token ids onto this rank's logits columns.
+
+        Ids outside this rank's vocabulary shard belong to other ranks'
+        samplers and are dropped. With an unsharded LM head this is the
+        identity mapping.
+        """
+        start, end = self._shard_start, self._shard_end
+        return [tok - start for tok in tok_ids if start <= tok < end]
 
     def _mask_stop_token_logits(
         self,
@@ -338,11 +375,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
 
             if n_mask > 0:
+                local_toks = self._local_stop_ids(stop_toks)
+                if not local_toks:
+                    continue
                 offset = cumsum[req_idx]
                 row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
-                n_stop = len(stop_toks)
+                n_stop = len(local_toks)
                 rows = np.repeat(row_indices, n_stop)
-                toks = np.tile(stop_toks, n_mask)
+                toks = np.tile(local_toks, n_mask)
                 all_rows.append(rows)
                 all_toks.append(toks)
                 if uses_structured_output:
