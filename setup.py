@@ -214,6 +214,7 @@ class CMakeBuildEnv(TypedDict):
     torch_version: str
     generator: str | None
     launcher: str | None
+    cmake_args: str | None
 
 
 class cmake_build_ext(build_ext):
@@ -346,8 +347,8 @@ class cmake_build_ext(build_ext):
         if nvcc_threads:
             cmake_args += [f"-DNVCC_THREADS={nvcc_threads}"]
 
-        generator = "Ninja" if is_ninja_available() else None
-        if generator:
+        if is_ninja_available():
+            generator = "Ninja"
             build_tool = ["-G", generator]
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
@@ -355,6 +356,7 @@ class cmake_build_ext(build_ext):
             ]
         else:
             # Default build tool to whatever cmake picks.
+            generator = os.environ.get("CMAKE_GENERATOR")
             build_tool = []
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda() and CUDA_HOME is not None:
@@ -367,11 +369,12 @@ class cmake_build_ext(build_ext):
             cmake_args += other_cmake_args.split()
 
         build_env = CMakeBuildEnv(
-            python=sys.executable,
+            python=os.path.realpath(sys.executable),
             torch_dir=os.path.dirname(torch.__file__),
             torch_version=torch.__version__,
             generator=generator,
             launcher=launcher,
+            cmake_args=other_cmake_args,
         )
         stamp = Path(self.build_temp, "vllm_build_env.json")
         fresh = []

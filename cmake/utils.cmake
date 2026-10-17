@@ -40,16 +40,38 @@ function (run_python OUT EXPR ERR_MSG)
 endfunction()
 
 #
-# Read the key a source generator last wrote to `STAMP_FILE` into `OUT`.
-# Kept next to the generated sources so it is shared across build directories;
-# remove it before regenerating so an interrupted run is redone.
+# Generate sources by running `COMMAND` (the remaining arguments) unless
+# `STAMP_FILE` already holds `KEY`. The stamp is kept next to the generated
+# sources so it is shared across build directories, and removed before
+# regenerating so an interrupted run is redone. Output goes to `LOG_NAME` in
+# the build directory.
 #
-function (read_generator_stamp OUT STAMP_FILE)
-  set(_KEY "")
+function (run_source_generator NAME LOG_NAME STAMP_FILE KEY)
+  set(_LAST_KEY "")
   if (EXISTS "${STAMP_FILE}")
-    file(READ "${STAMP_FILE}" _KEY)
+    file(READ "${STAMP_FILE}" _LAST_KEY)
   endif()
-  set(${OUT} "${_KEY}" PARENT_SCOPE)
+  message(STATUS "${NAME} generation key: ${KEY}")
+  message(STATUS "Last run ${NAME} generation key: ${_LAST_KEY}")
+  if ("${_LAST_KEY}" STREQUAL "${KEY}")
+    message(STATUS "${NAME} generation inputs have not changed, skipping generation.")
+    return()
+  endif()
+
+  file(REMOVE "${STAMP_FILE}")
+  set(_LOG "${CMAKE_CURRENT_BINARY_DIR}/${LOG_NAME}")
+  execute_process(
+    COMMAND ${ARGN}
+    RESULT_VARIABLE _RESULT
+    OUTPUT_FILE "${_LOG}"
+    ERROR_FILE "${_LOG}")
+  if (NOT _RESULT EQUAL 0)
+    message(FATAL_ERROR "${NAME} generation failed."
+                        " Result: \"${_RESULT}\""
+                        "\nCheck the log for details: ${_LOG}")
+  endif()
+  file(WRITE "${STAMP_FILE}" "${KEY}")
+  message(STATUS "${NAME} generation completed successfully.")
 endfunction()
 
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
