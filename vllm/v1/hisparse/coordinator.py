@@ -522,9 +522,12 @@ class HiSparseCoordinator:
         if publication is None:
             return
         assert self.host_manager is not None
-        num_tokens = min(
-            publication.num_computed_tokens,
-            state.ready_prefix_pages * self.host_manager.block_size,
+        publication_complete = state.ready_prefix_pages >= publication.num_pages
+        # Preserve sub-page prompt hash boundaries once the sealed pages are ready.
+        num_tokens = (
+            publication.num_computed_tokens
+            if publication_complete
+            else state.ready_prefix_pages * self.host_manager.block_size
         )
         self.host_manager.publish_blocks(
             publication.request,
@@ -533,7 +536,7 @@ class HiSparseCoordinator:
             replay_boundaries=publication.replay_boundaries,
         )
         self._record_copies(request_id, num_tokens)
-        if state.ready_prefix_pages >= publication.num_pages:
+        if publication_complete:
             state.publication = None
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
@@ -563,6 +566,16 @@ class HiSparseCoordinator:
                 restore=True,
             )
         self._publish_host_blocks_if_ready(request_id)
+
+    def plan_prefix_tail_restore(self, request_id: str, page_idx: int) -> None:
+        """Restore a local hit once every resident group has its private tail.
+
+        Host COW runs before page restores on the worker. Resident managers
+        call this after allocation; the last one makes the transfer ready.
+        """
+        self._plan_page_transfer(
+            request_id, page_idx, after_forward=False, restore=True
+        )
 
     def _plan_page_transfer(
         self,
