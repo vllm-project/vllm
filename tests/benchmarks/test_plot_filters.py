@@ -37,6 +37,27 @@ class TestPlotFilters:
             }
         )
 
+        self.df_boolean = pd.DataFrame(
+            {
+                "enable_prefix_caching": [True, False],
+                "value": [10, 20],
+            }
+        )
+
+        self.df_boolean_nullable = pd.DataFrame(
+            {
+                "enable_prefix_caching": [True, False, None],
+                "value": [10, 20, 30],
+            }
+        )
+
+        self.df_string_bool = pd.DataFrame(
+            {
+                "enable_prefix_caching": ["true", "false"],
+                "value": [10, 20],
+            }
+        )
+
     @pytest.mark.parametrize(
         "target,expected_count",
         [
@@ -57,6 +78,44 @@ class TestPlotFilters:
         result = filter_obj.apply(self.df_inf_float)
         # Should match both float('inf') entries because float('inf') == float('inf')
         assert len(result) == 2
+
+    @pytest.mark.parametrize(
+        "target,expected_values",
+        [
+            ("true", [10]),
+            ("True", [10]),
+            ("false", [20]),
+            ("False", [20]),
+        ],
+    )
+    def test_equal_to_boolean(self, target, expected_values):
+        filter_obj = PlotEqualTo("enable_prefix_caching", target)
+        result = filter_obj.apply(self.df_boolean)
+        assert result["value"].tolist() == expected_values
+
+    @pytest.mark.parametrize(
+        "target,expected_values",
+        [
+            ("true", [20]),
+            ("True", [20]),
+            ("false", [10]),
+            ("False", [10]),
+        ],
+    )
+    def test_not_equal_to_boolean(self, target, expected_values):
+        filter_obj = PlotNotEqualTo("enable_prefix_caching", target)
+        result = filter_obj.apply(self.df_boolean)
+        assert result["value"].tolist() == expected_values
+
+    def test_equal_to_boolean_with_none(self):
+        filter_obj = PlotEqualTo("enable_prefix_caching", "true")
+        result = filter_obj.apply(self.df_boolean_nullable)
+        assert result["value"].tolist() == [10]
+
+    def test_equal_to_string_bool_literal(self):
+        filter_obj = PlotEqualTo("enable_prefix_caching", "true")
+        result = filter_obj.apply(self.df_string_bool)
+        assert result["value"].tolist() == [10]
 
     @pytest.mark.parametrize(
         "target,expected_count",
@@ -142,6 +201,18 @@ class TestPlotFilters:
             ("request_rate>=10.0", "request_rate", "10.0", PlotGreaterThanOrEqualTo),
             ("request_rate==inf", "request_rate", "inf", PlotEqualTo),
             ("request_rate!='inf'", "request_rate", "inf", PlotNotEqualTo),
+            (
+                "enable_prefix_caching==true",
+                "enable_prefix_caching",
+                "true",
+                PlotEqualTo,
+            ),
+            (
+                "enable_prefix_caching!=true",
+                "enable_prefix_caching",
+                "true",
+                PlotNotEqualTo,
+            ),
         ],
     )
     def test_parse_str(self, filter_str, expected_var, expected_target, expected_type):
