@@ -66,7 +66,7 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
             self._postprocessing, executor=self._executor
         )
 
-        ObservabilityMixin.__init__(self)
+        self._init_observability()
 
     async def __call__(
         self,

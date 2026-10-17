@@ -38,14 +38,14 @@ class _ObservabilityMixin:
     span_entrypoint_engine_call = "engine_call"
     span_entrypoint_postprocessing = "postprocessing"
 
-    def __init__(self):
+    def _init_observability(self):
         observability_config = self.vllm_config.observability_config
         self.is_tracing_request = observability_config.is_tracing_enabled
 
         if not self.is_tracing_request:
             return
 
-        # will raise ValueError: OpenTelemetry is not available.
+        # Will raise ValueError if OpenTelemetry is not available.
         self.trace_provider = init_otel_trace_provider(
             observability_config.otlp_traces_endpoint_str
         )
