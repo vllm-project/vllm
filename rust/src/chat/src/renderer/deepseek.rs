@@ -31,6 +31,7 @@ const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const SYSTEM_SP_TOKEN: &str = "<｜System｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
+const LATEST_REMINDER_SP_TOKEN: &str = "<｜latest_reminder｜>";
 const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
@@ -227,6 +228,16 @@ pub(super) fn render_request_with_media_order(
                     );
                 }
             }
+            ChatMessage::Custom { role, content } if role == "latest_reminder" => {
+                out.push_str(LATEST_REMINDER_SP_TOKEN);
+                write_chat_content(
+                    &mut out,
+                    content,
+                    dialect,
+                    message_index,
+                    &mut media_order,
+                )?;
+            }
             ChatMessage::Custom { role, .. } => {
                 return Err(Error::UnsupportedChatRole { role: role.clone() });
             }
@@ -245,6 +256,7 @@ pub(super) fn render_request_with_media_order(
                 last_user_like_message_index,
             ) {
                 Some(ChatMessage::Assistant { .. }) => true,
+                Some(ChatMessage::Custom { role, .. }) if role == "latest_reminder" => true,
                 None => request.chat_options.add_generation_prompt(),
                 Some(_) => false,
             };
