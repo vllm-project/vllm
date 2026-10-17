@@ -377,11 +377,11 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
         .assert_eq(&render(&request));
 }
 
-fn final_assistant_request(mode: GenerationPromptMode) -> ChatRequest {
+fn final_assistant_request(content: &str, mode: GenerationPromptMode) -> ChatRequest {
     let mut request = ChatRequest {
         messages: vec![
             ChatMessage::user("question"),
-            ChatMessage::assistant_text("```python\ndef fib(n):"),
+            ChatMessage::assistant_text(content),
         ],
         ..ChatRequest::for_test()
     };
@@ -390,37 +390,39 @@ fn final_assistant_request(mode: GenerationPromptMode) -> ChatRequest {
 }
 
 #[test]
-fn final_assistant_opens_new_turn_when_generation_prompt_enabled() {
-    let rendered = render(&final_assistant_request(
-        GenerationPromptMode::StartNewAssistant,
-    ));
-    assert!(
-        rendered.ends_with("def fib(n):<｜end▁of▁sentence｜><｜Assistant｜><think>"),
-        "{rendered}"
-    );
+fn final_assistant_starts_new_turn_when_generation_prompt_enabled() {
+    let rendered = [false, true].map(|thinking| {
+        let mut request =
+            final_assistant_request("answer", GenerationPromptMode::StartNewAssistant);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("thinking".into(), Value::Bool(thinking));
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>answer<｜end▁of▁sentence｜><｜Assistant｜></think>",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>answer<｜end▁of▁sentence｜><｜Assistant｜><think>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
 }
 
 #[test]
-fn final_assistant_opens_closed_thinking_turn_in_chat_mode() {
-    let mut request = final_assistant_request(GenerationPromptMode::StartNewAssistant);
-    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
-    assert!(render(&request).ends_with("def fib(n):<｜end▁of▁sentence｜><｜Assistant｜></think>"));
-}
-
-#[test]
-fn final_assistant_continuation_and_no_generation_prompt_are_unchanged() {
-    let cont = render(&final_assistant_request(
+fn final_assistant_prefill_continuation_and_closed_history_are_unchanged() {
+    let rendered = [
         GenerationPromptMode::ContinueFinalAssistant,
-    ));
-    assert!(
-        cont.ends_with("<｜Assistant｜><think></think>```python\ndef fib(n):"),
-        "{cont}"
-    );
-    let closed = render(&final_assistant_request(
         GenerationPromptMode::NoGenerationPrompt,
-    ));
-    assert!(
-        closed.ends_with("def fib(n):<｜end▁of▁sentence｜>"),
-        "{closed}"
-    );
+    ]
+    .map(|mode| render(&final_assistant_request("```python\ndef fib(n):", mode)));
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>```python\ndef fib(n):",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>```python\ndef fib(n):<｜end▁of▁sentence｜>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
 }
