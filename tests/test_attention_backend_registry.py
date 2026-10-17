@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from pathlib import Path
+
 import pytest
 import torch
 
+import vllm
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -319,3 +322,31 @@ def test_register_backend_with_string_name_decorator(_enum_is_mamba):
     assert member.get_class().get_name() == "DECORATED"
     member.clear_override()
     _remove_dynamic_member(enum_cls, member)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [b for b in (*AttentionBackendEnum, *MambaAttentionBackendEnum) if b.value],
+    ids=lambda b: b.name,
+)
+def test_registered_backend_module_exists(backend):
+    """Every registered path must point at a module that is actually shipped.
+
+    Paths resolve lazily, so a stale entry imports fine and only fails when the
+    backend is selected. Check the file instead of importing it, which keeps this
+    runnable without the device libraries each backend needs.
+    """
+    # Read the declared value rather than get_path(), which would follow a
+    # runtime override registered by another test in this module.
+    module = backend.value.rsplit(".", 1)[0]
+    assert module.startswith("vllm."), module
+    relative = Path(module.removeprefix("vllm.").replace(".", "/"))
+    package_dir = Path(vllm.__file__).parent
+    candidates = (
+        package_dir / f"{relative}.py",
+        package_dir / relative / "__init__.py",
+    )
+    assert any(c.exists() for c in candidates), (
+        f"{backend.name} points at {module}, which is not shipped: "
+        f"tried {[str(c) for c in candidates]}"
+    )
