@@ -340,6 +340,7 @@ steps:
 
 - label: ":nvidia: (B200) Spec Decode Draft Model Nightly"
   key: spec-decode-draft-model-nightly-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   optional: true
