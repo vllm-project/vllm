@@ -466,6 +466,16 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if (
+            device_capability == DeviceCapability(9, 0)
+            and kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and head_size == 512
+        ):
+            if block_size is not None and block_size % 64 != 0:
+                return "SM90 d512 FP8 KV requires a block size divisible by 64"
+            if use_sparse:
+                return "SM90 d512 FP8 KV does not support block sparsity"
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
@@ -481,16 +491,13 @@ class FlashAttentionBackend(AttentionBackend):
             and not flash_attn_supports_kv_cache_dtype(
                 kv_cache_dtype,
                 head_size=head_size,
-                head_size_v=head_size,
+                head_size_v=cls.head_size_v,
                 has_sinks=has_sink,
                 kv_cache_block_size=block_size,
                 supports_fa4_hd256=True,
             )
         ):
-            return (
-                "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
-                "on SM90, or FA4 on SM100"
-            )
+            return "FP8 KV requires FA3 (SM90), equal-d512 FA4 (SM90), or FA4 (SM100)."
         if (
             use_mm_prefix
             and get_flash_attn_version(
@@ -700,7 +707,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
         head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
@@ -708,6 +714,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
         )
+        self.aot_schedule = fa_version == 3
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
             self.headdim, head_size_v
         )
@@ -1147,9 +1154,8 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        # FA4's SM90 FP8-KV path consumes native FP16/BF16 Q and dequantizes
-        # FP8 K/V in-kernel. Other FA4 paths (notably SM100) still require Q,
-        # K, and V to have the same FP8 dtype.
+        # FA4's SM90 d512 FP8-KV path consumes native FP16/BF16 Q. Other FA4
+        # FP8 paths (notably SM100) require Q, K, and V to share an FP8 dtype.
         uses_sm90_fa4_fp8_kv_dequant = (
             self.vllm_flash_attn_version == 4
             and current_platform.is_device_capability_family(90)

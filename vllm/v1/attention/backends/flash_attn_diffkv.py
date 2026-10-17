@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_kv_cache_dtype,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
@@ -86,6 +87,19 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
         )
+        # An explicitly requested backend can bypass automatic selection.
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=self.alibi_slopes is not None,
+            head_size=self.head_size,
+            head_size_v=FlashAttentionDiffKVBackend.head_size_v,
+            has_sinks=self.sinks is not None,
+        ):
+            raise NotImplementedError(
+                "Unsupported FP8 Diff-KV configuration; use an unquantized KV cache."
+            )
         self.fa4_hd256 = False
 
     def do_kv_cache_update(
