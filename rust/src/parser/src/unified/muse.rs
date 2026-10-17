@@ -599,20 +599,18 @@ mod tests {
 
     /// A completion exercising every recipient kind and both boundary markers.
     fn full_completion() -> String {
-        format!(
-            " to=self{MESSAGE}plan it{EOM}{}{}{}",
-            segment("commentary", "working"),
-            format!(
-                "{START}assistant to=get_weather{MESSAGE}{}{EOM}",
-                atem(&[
-                    (
-                        "get_weather",
-                        &[("location", "Shanghai"), ("days", "1.5")][..]
-                    ),
-                    ("get_time", &[][..]),
-                ])
+        let commentary = segment("commentary", "working");
+        let calls = atem(&[
+            (
+                "get_weather",
+                &[("location", "Shanghai"), ("days", "1.5")][..],
             ),
-            format!("{START}assistant to=user{MESSAGE}done{EOT}"),
+            ("get_time", &[][..]),
+        ]);
+        format!(
+            " to=self{MESSAGE}plan it{EOM}{commentary}\
+             {START}assistant to=get_weather{MESSAGE}{calls}{EOM}\
+             {START}assistant to=user{MESSAGE}done{EOT}"
         )
     }
 
@@ -637,9 +635,9 @@ mod tests {
     #[test]
     fn muse_parses_self_commentary_user_segments() {
         let text = format!(
-            " to=self{MESSAGE}think step{EOM}{}{}",
+            " to=self{MESSAGE}think step{EOM}{}\
+             {START}assistant to=user{MESSAGE}final answer{EOT}",
             segment("commentary", "intermediate"),
-            format!("{START}assistant to=user{MESSAGE}final answer{EOT}"),
         );
 
         let output = test_parser().parse_complete(&text).unwrap();
@@ -755,15 +753,12 @@ mod tests {
     #[test]
     fn muse_parses_consecutive_tool_segments_across_eom() {
         let text = format!(
-            "{}{}",
+            "{}{START}assistant to=add{MESSAGE}{}{EOT}",
             segment(
                 "get_weather",
                 &atem(&[("get_weather", &[("location", "SF")][..])])
             ),
-            format!(
-                "{START}assistant to=add{MESSAGE}{}{EOT}",
-                atem(&[("add", &[("x", "2")][..])])
-            ),
+            atem(&[("add", &[("x", "2")][..])]),
         );
 
         let output = test_parser().parse_complete(&text).unwrap();
