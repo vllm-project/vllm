@@ -9,6 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import Any
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
@@ -678,6 +679,9 @@ def get_kv_cache_config_from_groups(
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
+    if envs.VLLM_ROCM_USE_AITER_ASM_SPARSE_MLA:
+        # The DeepSeek-V4 ASM sparse MLA RoPE pool takes 1/4 of the KV bytes.
+        available_memory = available_memory * 4 // 5
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks

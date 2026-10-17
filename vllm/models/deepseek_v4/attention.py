@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.models.deepseek_v4.amd import asm_sparse_mla
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
@@ -348,7 +349,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
+            asm_sparse_mla_layout=asm_sparse_mla.ENABLED,
         )
+        if asm_sparse_mla.ENABLED:
+            asm_sparse_mla.configure(vllm_config)
 
         # Register with compilation context for metadata lookup.
         compilation_config = vllm_config.compilation_config
@@ -785,6 +789,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The fused insert ops require int64 position_ids; the runner's positions
         # buffer is already int64, so no cast is needed.
         assert positions.dtype == torch.int64
+        if asm_sparse_mla.ENABLED:
+            # kv is the pre-norm kv here (see the ROCm _split_qkv_and_norm).
+            assert self.n_local_heads == self.padded_heads
+            return asm_sparse_mla.qk_insert(
+                self,
+                q,
+                kv,
+                positions,
+                swa_metadata.slot_mapping,
+                swa_metadata.num_decode_tokens,
+            )
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         cache_dtype = swa_kv_cache.dtype
 
@@ -848,6 +863,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if asm_sparse_mla.ENABLED and self.kv_cache.numel() > 0:
+            self._v4_geom = asm_sparse_mla.register(self.kv_cache)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
@@ -869,12 +886,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
+            alignment=(
+                512
+                if asm_sparse_mla.ENABLED
+                else (576 if uses_fp8_ds_mla_layout else 512)
+            ),
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
-            # head_size stays semantic (512).
-            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+            # head_size stays semantic (512). The ASM layout has 512B rows (448
+            # fp8 + 14 UE8M0 + pad) with the RoPE in a side pool.
+            state_content_bytes=(
+                (512 if asm_sparse_mla.ENABLED else 584)
+                if uses_fp8_ds_mla_layout
+                else None
+            ),
         )
 
 
@@ -915,7 +941,12 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
+            # The ASM layout needs the attention pages after it 512-aligned.
+            alignment=(
+                512
+                if asm_sparse_mla.ENABLED
+                else (576 if uses_fp8_ds_mla_layout else 512)
+            ),
         )
 
     def forward(self): ...

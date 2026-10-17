@@ -87,6 +87,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         packed_page_alignment: int = 576,
         packed_block_stride_alignment: int | None = None,
         bounded_replay: bool = False,
+        asm_sparse_mla_layout: bool = False,
     ):
         super().__init__()
         self.backend_cls = backend_cls or DeepseekSparseSWABackend
@@ -98,6 +99,11 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.cache_config = cache_config
         self.dtype = dtype
+        # aiter ASM sparse MLA: 512-byte rows (448 fp8 + 14 UE8M0 + pad), the
+        # RoPE lives in a side pool.
+        self.asm_sparse_mla_layout = asm_sparse_mla_layout
+        if asm_sparse_mla_layout:
+            packed_bytes_per_token = packed_page_alignment = 512
         self.packed_bytes_per_token = packed_bytes_per_token
         self.packed_page_alignment = packed_page_alignment
         self.packed_block_stride_alignment = packed_block_stride_alignment
@@ -116,6 +122,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if self.asm_sparse_mla_layout and self.kv_cache.numel() > 0:
+            from vllm.models.deepseek_v4.amd import asm_sparse_mla
+
+            self._v4_geom = asm_sparse_mla.register(self.kv_cache)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode

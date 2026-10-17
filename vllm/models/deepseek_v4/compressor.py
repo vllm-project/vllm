@@ -472,6 +472,15 @@ class DeepseekCompressor(nn.Module):
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 
+        geom = getattr(k_cache_layer, "_v4_geom", None)
+        if self.head_dim == 512 and geom is not None:
+            # aiter ASM sparse MLA layout: the RoPE goes to the side pool.
+            from vllm.models.deepseek_v4.amd import asm_sparse_mla
+
+            extra_kwargs = {
+                **extra_kwargs,
+                "rope_cache": asm_sparse_mla.rope_view(geom),
+            }
         compress_norm_rope_store_fn(
             state_cache=state_cache,
             num_actual=num_actual,
