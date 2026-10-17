@@ -109,7 +109,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
-        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe, is_online=True
+        )
 
     def create_weights(
         self,
