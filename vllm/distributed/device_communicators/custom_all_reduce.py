@@ -503,7 +503,8 @@ class CustomAllreduce:
             return False
         inp_size = inp.numel() * inp.element_size()
         # custom allreduce requires input byte size to be multiples of 16
-        if inp_size % 16 != 0:
+        # (batch-invariant mode pads such inputs, see custom_all_reduce)
+        if inp_size % 16 != 0 and not self.batch_invariant:
             return False
         if not is_weak_contiguous(inp):
             return False
@@ -551,6 +552,21 @@ class CustomAllreduce:
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
+        if self.batch_invariant and input.nbytes % 16 != 0:
+            # Small per-token tensors (e.g. a [num_tokens, 2] fp32 variance)
+            # are 16-byte aligned for some batch sizes and not for others.
+            # Falling back to NCCL for the unaligned sizes changes the
+            # reduction order, so pad them and keep the custom kernel.
+            numel = input.numel()
+            padded = torch.zeros(
+                numel + (-input.nbytes % 16) // input.element_size(),
+                dtype=input.dtype,
+                device=input.device,
+            )
+            padded[:numel].copy_(input.reshape(-1))
+            out = self.custom_all_reduce(padded)
+            assert out is not None
+            return out[:numel].view(input.shape)
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 return self.all_reduce(input, registered=self._capture_registered)

@@ -222,6 +222,41 @@ def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
 
 
 @pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_allreduce_unaligned_size_padded_under_batch_invariance(
+    batch_invariant: bool,
+) -> None:
+    """A per-token tensor that is only 16-byte aligned for some batch sizes
+    must not switch between the custom kernel and NCCL under batch
+    invariance; it is padded instead."""
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator.batch_invariant = batch_invariant
+    communicator._IS_CAPTURING = False
+    communicator._ptr = 0
+
+    # one token, two fp32 values: 8 bytes
+    unaligned = torch.arange(2, dtype=torch.float32).view(1, 2)
+    assert communicator.should_custom_ar(unaligned) is batch_invariant
+    if not batch_invariant:
+        assert communicator.custom_all_reduce(unaligned) is None
+        return
+
+    seen: list[torch.Tensor] = []
+
+    def fake_all_reduce(inp, *, out=None, registered=False):
+        seen.append(inp)
+        return inp * 2
+
+    communicator.all_reduce = fake_all_reduce  # type: ignore[method-assign]
+    out = communicator.custom_all_reduce(unaligned)
+    assert len(seen) == 1 and seen[0].nbytes % 16 == 0
+    assert out is not None and out.shape == unaligned.shape
+    torch.testing.assert_close(out, unaligned * 2)
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
 def test_custom_reduce_scatter_disabled_under_batch_invariance(
     monkeypatch, batch_invariant: bool
 ) -> None:
