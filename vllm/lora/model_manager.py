@@ -684,13 +684,15 @@ class LoRAModelManager:
                     )
                     model.loras[module_name] = lora
                 elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
-                    # Case for 3D moe model
+                    # Case for 3D moe model. Size by global experts because
+                    # _stack_moe_lora_weights reshapes by global_num_experts
+                    # and then slices this EP rank's experts.
                     # w2
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         module.w2_input_size,
                         module.w2_output_size,
-                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w2_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -700,8 +702,7 @@ class LoRAModelManager:
                         module_name,
                         module.w13_input_size,
                         module.w13_output_size,
-                        rank
-                        * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        rank * module.global_num_experts,  # rank*num_experts
                         module.w13_lora_a_stacked[0].dtype,
                         "cpu",
                     )
@@ -915,7 +916,8 @@ class LoRAModelManager:
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
-            lora_device = next(iter(first_lora.lora_a))
+            # Packed entries may hold None for sub-modules without a LoRA.
+            lora_device = next(t for t in first_lora.lora_a if t is not None).device
         else:
             lora_device = first_lora.lora_a.device
         # Execute pin_memory after LoRA weight merging, mainly because:
@@ -1005,6 +1007,9 @@ class LoRAModelManager:
                     gate_up_proj_lora.lora_b,
                     down_proj_lora.lora_b,
                 ]
+                # module_lora now owns the gate_up tensors, so drop the
+                # base_layer entry to avoid pinning them twice.
+                lora_model.loras.pop(module_name + ".base_layer", None)
             else:
                 # Some 3D MoE models haven't added the `is_3d_moe_weight`
                 # attribute yet, so fallback here
