@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import heapq
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from typing_extensions import override
 
@@ -12,6 +13,15 @@ from vllm.v1.kv_offload.cpu.policies.base import (
     order_request_keys,
 )
 
+_HeapEntry = tuple[tuple[int, int], OffloadKey]
+
+
+@dataclass(slots=True)
+class _RequestRank:
+    owner: object
+    cache_generation: int
+    rank: int
+
 
 class LRUCachePolicy(CachePolicy):
     """LRU caching policy with logical recency independent of transfer pinning.
@@ -21,6 +31,9 @@ class LRUCachePolicy(CachePolicy):
     evictable, it enters the heap with the order assigned by the request
     rather than its transfer-completion time.
 
+    Active requests share a provisional rank across batches, ordered by token
+    position so tails precede heads. Finalization commits the request's recency.
+
     A use is indicated by,
      - First time the key is added (store).
      - A request-scoped access.
@@ -29,16 +42,17 @@ class LRUCachePolicy(CachePolicy):
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
         self.chunks: dict[OffloadKey, ChunkStatus] = {}
-        self._ranks: dict[OffloadKey, int] = {}
+        self._ranks: dict[OffloadKey, tuple[int, int]] = {}
         self._evictable: set[OffloadKey] = set()
-        self._heap: list[tuple[int, OffloadKey]] = []
+        self._heap: list[_HeapEntry] = []
         self._next_rank = 0
+        self._cache_generation = 0
 
     def _assign_new_rank(self, key: OffloadKey) -> bool:
         if key not in self.chunks:
             return False
         self._next_rank += 1
-        self._ranks[key] = self._next_rank
+        self._ranks[key] = (self._next_rank, 0)
         return key in self._evictable
 
     def _push_evictable(self, key: OffloadKey) -> None:
@@ -47,7 +61,7 @@ class LRUCachePolicy(CachePolicy):
             (self._ranks[key], key),
         )
 
-    def _is_current(self, entry: tuple[int, OffloadKey]) -> bool:
+    def _is_current(self, entry: _HeapEntry) -> bool:
         rank, key = entry
         return key in self._evictable and self._ranks.get(key) == rank
 
@@ -59,6 +73,11 @@ class LRUCachePolicy(CachePolicy):
 
     def _update_recency(self, keys: Iterable[OffloadKey]) -> None:
         updated_evictable = [key for key in keys if self._assign_new_rank(key)]
+        self._update_heap(updated_evictable)
+
+    def _update_heap(self, updated_evictable: Sequence[OffloadKey]) -> None:
+        if not updated_evictable:
+            return
         # Rebuilding is linear and substantially cheaper than k heap pushes
         # for a long prefix. Small updates retain the incremental path.
         if len(updated_evictable) >= max(64, len(self._evictable) // 4):
@@ -77,7 +96,7 @@ class LRUCachePolicy(CachePolicy):
     def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
         self.chunks[key] = chunk
         self._next_rank += 1
-        self._ranks[key] = self._next_rank
+        self._ranks[key] = (self._next_rank, 0)
         if chunk.ref_cnt == 0:
             self._evictable.add(key)
             self._push_evictable(key)
@@ -91,6 +110,38 @@ class LRUCachePolicy(CachePolicy):
     @override
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         self._update_recency(reversed(list(keys)))
+
+    @override
+    def on_request_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        *,
+        inserted: bool = False,
+    ) -> None:
+        state = req_context.get_state(_RequestRank)
+        if (
+            state is None
+            or state.owner is not self
+            or state.cache_generation != self._cache_generation
+        ):
+            self._next_rank += 1
+            state = _RequestRank(self, self._cache_generation, self._next_rank)
+            req_context.set_state(state)
+        updated_evictable = []
+        for key in keys:
+            position = req_context.get_offload_key_position(key)
+            if position is None or key not in self.chunks:
+                continue
+            # All batches share one request rank; later positions precede
+            # earlier ones without revisiting the already observed prefix.
+            rank = (state.rank, -position)
+            if not inserted and self._ranks[key] >= rank:
+                continue
+            self._ranks[key] = rank
+            if key in self._evictable:
+                updated_evictable.append(key)
+        self._update_heap(updated_evictable)
 
     @override
     def on_request_finished(
@@ -110,6 +161,7 @@ class LRUCachePolicy(CachePolicy):
         self._evictable.clear()
         self._heap.clear()
         self._next_rank = 0
+        self._cache_generation += 1
 
     @override
     def evict(
@@ -118,9 +170,9 @@ class LRUCachePolicy(CachePolicy):
         if n == 0:
             return []
 
-        selected: list[tuple[tuple[int, OffloadKey], ChunkStatus]] = []
+        selected: list[tuple[_HeapEntry, ChunkStatus]] = []
         selected_keys: set[OffloadKey] = set()
-        deferred: list[tuple[int, OffloadKey]] = []
+        deferred: list[_HeapEntry] = []
         while self._heap and len(selected) < n:
             entry = heapq.heappop(self._heap)
             if not self._is_current(entry):

@@ -88,6 +88,22 @@ class CachePolicy(ABC):
         """
         self.touch(keys, req_context)
 
+    def on_request_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+        *,
+        inserted: bool = False,
+    ) -> None:
+        """Observe new request keys and successfully allocated store keys.
+
+        Keys first observed before allocation may not yet be resident. This
+        ``inserted`` is true only for newly allocated chunks. This hook can
+        maintain prefix order during a request without committing the
+        frequency access handled by ``on_request_finished``.
+        """
+        return
+
     def on_request_finished(
         self,
         key_groups: Sequence[Sequence[OffloadKey]],
