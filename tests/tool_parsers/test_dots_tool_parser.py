@@ -6,12 +6,14 @@ from collections.abc import Iterable
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.dots_tool_parser import DotsToolParser
 
@@ -39,7 +41,7 @@ def _request(tools: list[ChatCompletionToolsParam]) -> ChatCompletionRequest:
 def _stream(
     parser: DotsToolParser,
     chunks: Iterable[str],
-    request: ChatCompletionRequest,
+    request: ChatCompletionRequest | ResponsesRequest,
 ) -> list[DeltaMessage]:
     previous_text = ""
     messages: list[DeltaMessage] = []
@@ -273,3 +275,127 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
         '{"query": "chairs"}'
     )
     assert messages[-1].tool_calls == calls
+
+
+def test_non_stream_extract_with_parser_tools_and_none_request_tools() -> None:
+    tools = [_tool("search", {"query": {"type": "string"}})]
+    parser = DotsToolParser(MagicMock(), tools=tools)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+    )
+    text = (
+        "<dots_function_call>"
+        '<invoke name="search"><parameter name="query">chairs</parameter></invoke>'
+        "</dots_function_call>"
+    )
+
+    result = parser.extract_tool_calls(text, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "search"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"query": "chairs"}
+
+
+def test_non_stream_with_function_tool() -> None:
+    tool = FunctionTool(
+        name="search",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        type="function",
+    )
+    parser = DotsToolParser(MagicMock(), tools=[tool])
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+    )
+    text = (
+        "<dots_function_call>"
+        '<invoke name="search"><parameter name="query">chairs</parameter></invoke>'
+        "</dots_function_call>"
+    )
+
+    result = parser.extract_tool_calls(text, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "search"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"query": "chairs"}
+
+
+def test_streaming_with_function_tool_and_parser_tools() -> None:
+    tool = FunctionTool(
+        name="search",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        type="function",
+    )
+    parser = DotsToolParser(MagicMock(), tools=[tool])
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+    )
+    chunks = [
+        "<dots_function_call>",
+        '<invoke name="search"><parameter name="query">table</parameter></invoke>',
+        "</dots_function_call>",
+    ]
+
+    messages = _stream(parser, chunks, request)
+    calls = [call for message in messages for call in message.tool_calls]
+    assert len(calls) == 1
+    assert calls[0].function.name == "search"
+    assert json.loads(calls[0].function.arguments or "") == {"query": "table"}
+
+
+def test_non_stream_with_responses_request_function_tool() -> None:
+    tool = FunctionTool(
+        name="search",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        type="function",
+    )
+    parser = DotsToolParser(MagicMock())
+    request = ResponsesRequest(
+        model="test-model",
+        input=[{"role": "user", "content": "hi"}],
+        tools=[tool],
+    )
+    text = (
+        "<dots_function_call>"
+        '<invoke name="search"><parameter name="query">chairs</parameter></invoke>'
+        "</dots_function_call>"
+    )
+
+    result = parser.extract_tool_calls(text, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "search"
+    assert json.loads(result.tool_calls[0].function.arguments) == {"query": "chairs"}
+
+
+def test_streaming_with_responses_request_function_tool() -> None:
+    tool = FunctionTool(
+        name="search",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        type="function",
+    )
+    parser = DotsToolParser(MagicMock())
+    request = ResponsesRequest(
+        model="test-model",
+        input=[{"role": "user", "content": "hi"}],
+        tools=[tool],
+    )
+    chunks = [
+        "<dots_function_call>",
+        '<invoke name="search"><parameter name="query">table</parameter></invoke>',
+        "</dots_function_call>",
+    ]
+
+    messages = _stream(parser, chunks, request)
+    calls = [call for message in messages for call in message.tool_calls]
+    assert len(calls) == 1
+    assert calls[0].function.name == "search"
+    assert json.loads(calls[0].function.arguments or "") == {"query": "table"}
