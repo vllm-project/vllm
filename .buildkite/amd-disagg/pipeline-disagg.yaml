@@ -4,6 +4,10 @@
 # defaults to `vllm-router`
 #
 
+env:
+  # Spur reservation for the CI nodes; ignored while it is not active.
+  SBATCH_RESERVATION: "vllm-ci"
+
 steps:
 
 #--------------------------------------  mi350 · disagg 1P1D (TP8, 2 nodes) · SLURM  --------------------------------------#

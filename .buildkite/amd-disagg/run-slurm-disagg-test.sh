@@ -113,6 +113,19 @@ fi
 JOB_NAME="$(grep -oE '^#SBATCH[[:space:]]+--job-name=[^[:space:]]+' "${JOB_SCRIPT}" | sed -E 's/.*--job-name=//' | head -n1)"
 JOB_NAME="${JOB_NAME:-vllm-disagg-pd}"
 
+# Spur schedules onto reserved nodes only for jobs that name the reservation, and
+# a job naming a missing or ended one stays PENDING forever, so ask only while
+# the reservation is active.
+if [[ -n "${SBATCH_RESERVATION:-}" ]]; then
+    if scontrol show reservation "${SBATCH_RESERVATION}" 2>/dev/null | grep -q 'State=ACTIVE'; then
+        export SBATCH_RESERVATION
+        echo "[slurm-submit] reservation=${SBATCH_RESERVATION}" >&2
+    else
+        echo "[slurm-submit] reservation ${SBATCH_RESERVATION} is not active; submitting without it" >&2
+        unset SBATCH_RESERVATION
+    fi
+fi
+
 echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE} walltime=${TIME_LIMIT}"
 SUBMIT_OUT="$(sbatch --time="${TIME_LIMIT}" "${SUBMIT_SCRIPT}")"
 echo "${SUBMIT_OUT}"
