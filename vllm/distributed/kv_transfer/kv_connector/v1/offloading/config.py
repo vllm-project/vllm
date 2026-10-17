@@ -43,7 +43,7 @@ def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...
     )
 
 
-def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
+def group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     """Return the physical bytes occupied by one block of a cache group.
 
     Worker configs may retain ``UniformTypeKVCacheSpecs`` while scheduler
@@ -147,7 +147,7 @@ def build_offloading_config(
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
     elif kv_cache_config.num_blocks > 0:
         worker_kv_bytes_per_block = sum(
-            _group_kv_bytes_per_block(group) for _, group in selected_groups
+            group_kv_bytes_per_block(group) for _, group in selected_groups
         )
 
     single_group_spec = (

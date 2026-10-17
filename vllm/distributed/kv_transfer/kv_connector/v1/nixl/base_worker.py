@@ -59,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     get_representative_spec_type,
+    kv_lease_extension,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -585,11 +586,7 @@ class NixlBaseConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
-            "kv_lease_duration", 30
-        )
-        # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
-        self._lease_extension = kv_lease_duration * 2 // 3
+        self._lease_extension = kv_lease_extension(vllm_config.kv_transfer_config)
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(

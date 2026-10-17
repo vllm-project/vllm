@@ -29,6 +29,15 @@ from vllm.v1.worker.worker_base import CompilationTimes
 logger = init_logger(__name__)
 
 
+def set_dist_ident(init_method: str) -> None:
+    """Name this deployment's CPU communicator from its init method."""
+    os.environ["VLLM_DIST_IDENT"] = (
+        os.path.basename(init_method.removeprefix("file://"))
+        if init_method.startswith("file://")
+        else init_method.split(":")[-1]
+    )
+
+
 class CPUWorker(Worker):
     def __init__(
         self,
@@ -144,12 +153,7 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        init_method = self.distributed_init_method
-        os.environ["VLLM_DIST_IDENT"] = (
-            os.path.basename(init_method.removeprefix("file://"))
-            if init_method.startswith("file://")
-            else init_method.split(":")[-1]
-        )
+        set_dist_ident(self.distributed_init_method)
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,

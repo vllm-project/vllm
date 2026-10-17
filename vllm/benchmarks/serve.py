@@ -399,7 +399,7 @@ def _get_current_request_rate(
     return request_rate
 
 
-async def get_request(
+def get_request_delays(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
@@ -407,9 +407,9 @@ async def get_request(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
-) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
+) -> tuple[list[float], list[float]]:
+    """Send times of requests at a specified rate with OPTIONAL burstiness
+    and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
@@ -435,14 +435,14 @@ async def get_request(
         ramp_up_end_rps (optional):
             The ending request rate for ramp-up.
 
+    Returns:
+        Each request's send time in seconds after the first, and the request
+        rate in effect when it is sent.
+
     """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
     )
-    # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests, Iterable) and not isinstance(input_requests, list):
-        input_requests = list(input_requests)
-
     total_requests = len(input_requests)
     assert total_requests > 0, "No requests provided."
 
@@ -506,6 +506,32 @@ async def get_request(
             # from the trace.
             request_rates.append(0.0)
 
+    return delay_ts, request_rates
+
+
+async def get_request(
+    input_requests: list[SampleRequest],
+    request_rate: float,
+    burstiness: float = 1.0,
+    ramp_up_strategy: Literal["linear", "exponential"] | None = None,
+    ramp_up_start_rps: int | None = None,
+    ramp_up_end_rps: int | None = None,
+    self_timed: bool = False,
+) -> AsyncGenerator[tuple[SampleRequest, float], None]:
+    """Yield each request at its send time (see `get_request_delays`)."""
+    # Convert to list to get length for ramp-up calculations
+    if isinstance(input_requests, Iterable) and not isinstance(input_requests, list):
+        input_requests = list(input_requests)
+    delay_ts, request_rates = get_request_delays(
+        input_requests,
+        request_rate,
+        burstiness=burstiness,
+        ramp_up_strategy=ramp_up_strategy,
+        ramp_up_start_rps=ramp_up_start_rps,
+        ramp_up_end_rps=ramp_up_end_rps,
+        self_timed=self_timed,
+    )
+
     start_ts = time.time()
     for request_index, request in enumerate(input_requests):
         if delay_ts[request_index] > 0:
@@ -514,6 +540,51 @@ async def get_request(
             if sleep_interval_s > 0:
                 await asyncio.sleep(sleep_interval_s)
         yield request, request_rates[request_index]
+
+
+GENERATION_PERCENTILE_METRICS = "ttft,tpot,itl"
+
+
+def _percentile_word(p: float) -> str:
+    return str(int(p)) if int(p) == p else str(p)
+
+
+def metric_results(
+    metrics: BenchmarkMetrics, duration: float, goodput: bool
+) -> dict[str, Any]:
+    """A run's aggregate results, as `vllm bench serve` reports them."""
+    return {
+        "duration": duration,
+        "completed": metrics.completed,
+        "failed": metrics.failed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "request_throughput": metrics.request_throughput,
+        "request_goodput": metrics.request_goodput if goodput else None,
+        "output_throughput": metrics.output_throughput,
+        "total_token_throughput": metrics.total_token_throughput,
+        "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
+        "max_concurrent_requests": metrics.max_concurrent_requests,
+        "rtfx": metrics.rtfx,
+    }
+
+
+def percentile_metric_results(
+    name: str,
+    mean: float,
+    median: float,
+    std: float,
+    percentiles: list[tuple[float, float]],
+) -> dict[str, float]:
+    """One latency metric's results in ms, as `vllm bench serve` names them."""
+    result = {
+        f"mean_{name}_ms": mean,
+        f"median_{name}_ms": median,
+        f"std_{name}_ms": std,
+    }
+    for p, value in percentiles:
+        result[f"p{_percentile_word(p)}_{name}_ms"] = value
+    return result
 
 
 def calculate_metrics_for_embeddings(
@@ -577,6 +648,7 @@ def calculate_metrics(
     tokenizer: TokenizerLike | None,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    show_plot: bool = True,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -587,6 +659,7 @@ def calculate_metrics(
         tokenizer: The tokenizer to use.
         selected_percentiles: The percentiles to select.
         goodput_config_dict: The goodput configuration.
+        show_plot: Plot tokens and requests per second, if possible.
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
@@ -723,7 +796,7 @@ def calculate_metrics(
             max_output_tokens_per_s = float(np.max(tokens_per_second))
             max_concurrent_requests = int(np.max(concurrent_requests_per_second))
 
-        if TERM_PLOTLIB_AVAILABLE:
+        if show_plot and TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
 
             fig = tpl.figure()
@@ -738,7 +811,7 @@ def calculate_metrics(
                 title="Concurrent requests per second",
             )
             fig.show()
-        else:
+        elif show_plot:
             print("tip: install termplotlib and gnuplot to plot the metrics")
 
     metrics = BenchmarkMetrics(
@@ -1288,15 +1361,7 @@ async def benchmark(
     result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
         result = {
-            "duration": benchmark_duration,
-            "completed": metrics.completed,
-            "failed": metrics.failed,
-            "total_input_tokens": metrics.total_input,
-            "total_output_tokens": metrics.total_output,
-            "request_throughput": metrics.request_throughput,
-            "request_goodput": metrics.request_goodput if goodput_config_dict else None,
-            "output_throughput": metrics.output_throughput,
-            "total_token_throughput": metrics.total_token_throughput,
+            **metric_results(metrics, benchmark_duration, bool(goodput_config_dict)),
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
@@ -1306,9 +1371,6 @@ async def benchmark(
             "queue_times": [output.client_queue_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
-            "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
-            "max_concurrent_requests": metrics.max_concurrent_requests,
-            "rtfx": metrics.rtfx,
         }
     else:
         result = {
@@ -1392,13 +1454,17 @@ async def benchmark(
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         print("{:<40} {:<10.2f}".format(f"Mean {metric_name} (ms):", mean))
         print("{:<40} {:<10.2f}".format(f"Median {metric_name} (ms):", median))
-        result[f"mean_{metric_attribute_name}_ms"] = mean
-        result[f"median_{metric_attribute_name}_ms"] = median
-        result[f"std_{metric_attribute_name}_ms"] = std
         for p, value in percentiles:
-            p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
-            result[f"p{p_word}_{metric_attribute_name}_ms"] = value
+            print(
+                "{:<40} {:<10.2f}".format(
+                    f"P{_percentile_word(p)} {metric_name} (ms):", value
+                )
+            )
+        result.update(
+            percentile_metric_results(
+                metric_attribute_name, mean, median, std, percentiles
+            )
+        )
 
     if task_type == TaskType.GENERATION and tokenizer:
         process_one_metric("ttft", "TTFT", "Time to First Token")
@@ -2214,7 +2280,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 "For the old behavior, include --temperature=0."
             )
 
-        default_percentile_metrics = "ttft,tpot,itl"
+        default_percentile_metrics = GENERATION_PERCENTILE_METRICS
     else:
         sampling_params = {}
         default_percentile_metrics = "e2el"

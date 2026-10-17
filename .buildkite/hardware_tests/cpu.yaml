@@ -137,6 +137,35 @@ steps:
       pytest -x -v -s tests/models/language/generation tests/models/language/pooling tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 3
 
+- label: CPU-Simulated Forward Tests
+  key: cpu-simulated-forward-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/benchmarks/
+  - vllm/config/
+  - vllm/distributed/kv_transfer/
+  - vllm/engine/arg_utils.py
+  - vllm/platforms/cpu.py
+  - vllm/sampling_params.py
+  - vllm/triton_utils/
+  - vllm/v1/core/
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/metrics/
+  - vllm/v1/outputs.py
+  - vllm/v1/worker/
+  - tests/conftest.py
+  - tests/models/registry.py
+  - tests/benchmarks/sweep/test_simulate.py
+  - tests/v1/e2e/test_simulated_forward.py
+  - tests/v1/worker/simulated/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
+      TRITON_CPU_BACKEND=1 pytest -x -v -s tests/v1/worker/simulated tests/benchmarks/sweep/test_simulate.py tests/v1/e2e/test_simulated_forward.py"
+
 - label: CPU-Quantization Model Tests
   key: cpu-quantization-model-tests
   depends_on: []
