@@ -342,11 +342,20 @@ def create_server_socket(
     *,
     reuse_port: bool,
 ) -> socket.socket:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(addr[0]):
+    host, port = addr
+    # With no host, listen on all IPv4 and IPv6 addresses where supported.
+    dualstack = not host and socket.has_dualstack_ipv6()
+    if dualstack:
         family = socket.AF_INET6
+        addr = ("::", port)
+    elif is_valid_ipv6_address(host):
+        family = socket.AF_INET6
+    else:
+        family = socket.AF_INET
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    if dualstack:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if reuse_port:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
