@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.inputs import tokens_input
-from vllm.pooling_params import PoolingParams
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
+from vllm.pooling_params import LateInteractionParams, PoolingParams
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 
 
 def _make_context() -> PoolingServeContext:
@@ -94,6 +99,7 @@ async def test_flash_late_interaction_cleans_up_queries_on_failure(
     serving.engine_client.collective_rpc.assert_awaited_once_with(
         "release_late_interaction_query_cache",
         args=(["query-key"],),
+        wait_for_inflight_batches=True,
     )
 
 
@@ -103,9 +109,8 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
 ):
     serving = object.__new__(ServingScores)
     serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
-    prepare_generators = AsyncMock()
-    monkeypatch.setattr(serving, "_prepare_generators", prepare_generators)
-    monkeypatch.setattr(serving, "_collect_batch", AsyncMock())
+    collect_batch = AsyncMock()
+    monkeypatch.setattr(serving, "_collect_late_interaction_batch", collect_batch)
 
     first = _make_context()
     second = _make_context()
@@ -113,7 +118,7 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
         await serving._flash_late_interaction_encode_queries(context)
         await serving._flash_late_interaction_encode_docs(context)
 
-    prepared_contexts = [call.args[0] for call in prepare_generators.await_args_list]
+    prepared_contexts = [call.args[0] for call in collect_batch.await_args_list]
     first_query_key = _query_key(prepared_contexts[0])
     first_doc_key = _query_key(prepared_contexts[1])
     second_query_key = _query_key(prepared_contexts[2])
@@ -139,3 +144,126 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
     serving.engine_client.abort.assert_awaited_once_with(
         [*first.late_interaction_query_keys, *first_doc_request_ids]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retryable", [False, True])
+async def test_late_interaction_output_error_stops_pending_producers(
+    retryable, monkeypatch
+):
+    """An error output must stop the batch even while another request is pending."""
+    started, stopped, blocked = (asyncio.Event() for _ in range(3))
+
+    async def failing():
+        await started.wait()
+        yield PoolingRequestOutput(
+            request_id="failed",
+            outputs=PoolingOutput(torch.empty(0)),
+            prompt_token_ids=[1],
+            num_cached_tokens=0,
+            finished=True,
+            error=RequestError("failed", "scoring failed", retryable=retryable),
+        )
+
+    async def pending():
+        try:
+            started.set()
+            await blocked.wait()
+            yield  # pragma: no cover
+        finally:
+            stopped.set()
+
+    serving = object.__new__(ServingScores)
+    monkeypatch.setattr(
+        serving, "_prepare_generators", AsyncMock(return_value=[failing(), pending()])
+    )
+    error_type = RetryableRequestError if retryable else GenerationError
+    with pytest.raises(error_type, match="scoring failed"):
+        await asyncio.wait_for(
+            serving._collect_late_interaction_batch(_make_context()), timeout=5
+        )
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_stage", ["abort", "rpc"])
+async def test_repeated_cancellation_releases_requests_and_queries(
+    cleanup_stage, monkeypatch
+):
+    runner = LateInteractionRunner(enable_flash=False)
+    pending = set()
+    started, cleanup_entered, release = (asyncio.Event() for _ in range(3))
+    ctx = _make_context()
+
+    async def encode_queries(ctx):
+        ctx.late_interaction_query_keys = ["query"]
+        params = PoolingParams(
+            late_interaction_params=LateInteractionParams(
+                mode="cache_query", query_key="query", query_uses=1
+            )
+        )
+        runner.postprocess_pooler_output([torch.eye(2)], [params], ["query"], [True])
+
+    async def encode_docs(ctx):
+        # The RPC case stops before any document can consume the cached query.
+        if cleanup_stage == "abort":
+            ctx.late_interaction_doc_keys = ["doc"]
+            pending.add("doc")
+            runner.register_request(
+                "doc",
+                PoolingParams(
+                    late_interaction_params=LateInteractionParams(
+                        mode="score_doc", query_key="query"
+                    )
+                ),
+            )
+        started.set()
+        await asyncio.Event().wait()
+
+    async def abort(request_ids):
+        if cleanup_stage == "abort":
+            cleanup_entered.set()
+            await release.wait()
+        pending.difference_update(request_ids)
+        runner.on_requests_finished(request_ids)
+
+    async def collective_rpc(method, *, args, wait_for_inflight_batches=False):
+        if cleanup_stage == "rpc":
+            cleanup_entered.set()
+            await release.wait()
+        runner.release_queries(args[0])
+
+    serving = object.__new__(ServingScores)
+    serving.io_processor = Mock()
+    serving.engine_client = Mock(abort=abort, collective_rpc=collective_rpc)
+    monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=ctx))
+    monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
+    monkeypatch.setattr(
+        serving, "_flash_late_interaction_encode_queries", encode_queries
+    )
+    monkeypatch.setattr(serving, "_flash_late_interaction_encode_docs", encode_docs)
+    handler = asyncio.create_task(serving.flash_late_interaction())
+
+    async def cancel_twice():
+        await started.wait()
+        handler.cancel()
+        await cleanup_entered.wait()
+        handler.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait([handler])
+        with pytest.raises(asyncio.CancelledError):
+            handler.result()
+        assert not pending
+        assert not runner._query_cache
+        assert not runner._query_uses
+        assert not runner._doc_query_keys
+
+    try:
+        await asyncio.wait_for(cancel_twice(), timeout=5)
+    finally:
+        # Always unblock cleanup, including when an assertion or timeout fails.
+        release.set()
+        if not handler.done():
+            handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
