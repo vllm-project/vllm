@@ -1204,9 +1204,8 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        if request.has_encoder_inputs:
-                            self.encoder_cache_manager.free(request)
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
                         skip_request(request_queue)
                         continue
 
