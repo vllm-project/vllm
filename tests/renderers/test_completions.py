@@ -10,6 +10,8 @@ from typing import Any
 import pybase64
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
+from transformers import TokenizersBackend
 
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
@@ -17,6 +19,7 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -92,6 +95,26 @@ class DummyTokenizer:
         # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
         # unify the output type), so mirror a real tokenizer's BatchEncoding.
         return {"input_ids": self.encode(text, **kwargs)}
+
+
+def _cls_sep_tokenizer(**kwargs: Any) -> TokenizersBackend:
+    """A real HF tokenizer that wraps every prompt in `[CLS] ... [SEP]`."""
+    vocab = {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2}
+    vocab |= {word: i for i, word in enumerate("abcdefghij", start=len(vocab))}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        **kwargs,
+    )
+    return get_cached_tokenizer(tokenizer)
 
 
 def _build_renderer(
@@ -461,6 +484,35 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert len(results[0]["prompt_token_ids"]) == 5
         assert results[0]["prompt_token_ids"] == list(range(5))
+
+    @pytest.mark.parametrize("truncation_side", ["left", "right"])
+    def test_explicit_side_keeps_special_tokens(self, truncation_side):
+        """Truncating from an explicit side must keep the tokens that the
+        tokenizer adds, as the tokenizer's own truncation does."""
+        renderer = HfRenderer(
+            MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+            tokenizer=_cls_sep_tokenizer(),
+        )
+        text = "a b c d e f g h i j"
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side=truncation_side,
+                return_token_offsets=True,
+            ),
+        )
+
+        expected = _cls_sep_tokenizer(truncation_side=truncation_side)(
+            text, truncation=True, max_length=5, return_offsets_mapping=True
+        )
+        assert results[0]["prompt_token_ids"] == expected["input_ids"]
+        assert results[0]["prompt_token_offsets"] == expected["offset_mapping"]
 
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.
