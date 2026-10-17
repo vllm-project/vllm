@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native RDNA3 (gfx1100) MXFP4 fused-MoE experts backend.
+"""Native RDNA3 (gfx1100) / RDNA3.5 (gfx1151) MXFP4 fused-MoE experts backend.
 
 A modular ``FusedMoEExperts`` that drives the ``moe_mxfp4_gemm_rdna3`` HIP kernel
 (E2M1 weights + E8M0 group-32 scale, no zero point). Standard activation format:
@@ -10,8 +10,11 @@ per-expert bias and the weighted reduction — so it covers both the
 compressed-tensors MXFP4 MoE (no bias, SiLU) and GPT-OSS native-mxfp4 (per-expert
 bias + clamped SwiGLU-OAI) by reading everything from ``quant_config``.
 
-Registered as ``Mxfp4MoeBackend.RDNA3_MXFP4`` in the oracle and gated on gfx1100.
+Registered as ``Mxfp4MoeBackend.RDNA3_MXFP4`` in the oracle and gated on
+gfx1100/gfx1151.
 """
+
+import functools
 
 import torch
 
@@ -35,17 +38,30 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-def _select_block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
+@functools.cache
+def _use_wmma_tile() -> bool:
+    """gfx1151 (RDNA3.5 APU) runs the WMMA-16 tile 1.5-57x slower than the
+    scalar bsm=4 tile at every >=16-row MoE shape measured (DeepSeek-V4,
+    GPT-OSS-20B, Qwen3.5-A3B), with identical codegen to gfx1100."""
+    from vllm.platforms.rocm import on_gfx1151
+
+    return not on_gfx1151()
+
+
+def _select_block_size_m(
+    num_tokens: int, top_k: int, num_experts: int, use_wmma: bool = True
+) -> int:
     """Pick the GEMM tile from expected occupancy (avg tokens/expert).
 
     >=16-row steps fill the WMMA-16 tile (clustered routing fills it even on
-    256-expert models; also where prefill lives); sub-16 batches use a scalar
-    tile sized to occupancy (bsm=1 beats bsm=4 at low concurrency).
+    256-expert models; also where prefill lives), or bsm=4 where WMMA is slow;
+    sub-16 batches use a scalar tile sized to occupancy (bsm=1 beats bsm=4 at
+    low concurrency).
     """
     if num_experts <= 0 or top_k <= 0:
         return 1
     if num_tokens >= 16:
-        return 16
+        return 16 if use_wmma else 4
     tokens_per_expert = num_tokens * top_k / num_experts
     return 4 if tokens_per_expert >= 1.5 else 1
 
@@ -76,7 +92,7 @@ def repack_experts_rdna3(
 
 
 class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
-    """MXFP4 MoE experts on the native RDNA3 HIP kernel (gfx1100 only)."""
+    """MXFP4 MoE experts on the native RDNA3 HIP kernel (gfx1100/gfx1151)."""
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -88,9 +104,9 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
 
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx1100
+        from vllm.platforms.rocm import on_gfx1100, on_gfx1151
 
-        return on_gfx1100()
+        return on_gfx1100() or on_gfx1151()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -198,7 +214,7 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         device = hidden_states.device
 
         gne = global_num_experts if global_num_experts > 0 else E
-        block_size_m = _select_block_size_m(M, top_k, gne)
+        block_size_m = _select_block_size_m(M, top_k, gne, _use_wmma_tile())
         sti, eid, ntp = moe_align_block_size(topk_ids, block_size_m, gne, expert_map)
 
         # workspace2 holds the activation output (live across the down GEMM)

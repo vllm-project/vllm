@@ -38,10 +38,10 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return False, "not running on ROCm"
-        from vllm.platforms.rocm import on_gfx1100
+        from vllm.platforms.rocm import on_gfx1100, on_gfx1151
 
-        if not on_gfx1100():
-            return False, "RDNA3 gfx1100 WMMA required"
+        if not (on_gfx1100() or on_gfx1151()):
+            return False, "RDNA3 gfx1100/gfx1151 WMMA required"
         return True, None
 
     @classmethod
