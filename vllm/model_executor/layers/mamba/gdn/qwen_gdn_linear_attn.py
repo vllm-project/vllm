@@ -1070,9 +1070,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if self.enable_fused_gdn_spec_decode:
-            return self.forward_cuda(hidden_states)
-        if GDN_AITER_TRITON_AVAILABLE:
+        if GDN_AITER_TRITON_AVAILABLE and not self.enable_fused_gdn_spec_decode:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
