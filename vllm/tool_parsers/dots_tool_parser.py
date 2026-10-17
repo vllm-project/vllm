@@ -23,7 +23,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    is_complete_json,
+    partial_tag_overlap,
+)
 
 logger = init_logger(__name__)
 
@@ -81,46 +85,21 @@ class DotsToolParser(ToolParser):
     @staticmethod
     def _convert_param_value(value: str, param_type: Any) -> Any:
         if isinstance(param_type, list):
-            allows_null = any(
-                isinstance(item, str) and item.lower() == "null" for item in param_type
-            )
-            param_type = next((item for item in param_type if item != "null"), "string")
+            schema_types = [str(item) for item in param_type]
+        elif param_type is None:
+            schema_types = []
         else:
-            allows_null = isinstance(param_type, str) and param_type.lower() == "null"
-        if not isinstance(param_type, str):
-            param_type = str(param_type)
-        param_type = param_type.lower()
-
-        if value.lower() == "null":
-            return None if allows_null else value
-
-        if param_type in {"string", "str", "text"}:
-            return value
-        if param_type in {"integer", "int"}:
+            schema_types = [str(param_type)]
+        if not schema_types:
+            # Unresolvable schema: keep the previous lenient JSON fallback.
             try:
-                return int(value)
-            except (TypeError, ValueError):
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError, ValueError):
                 return value
-        if param_type in {"number", "float"}:
-            try:
-                number = float(value)
-                return int(number) if number.is_integer() else number
-            except (TypeError, ValueError):
-                return value
-        if param_type in {"boolean", "bool"}:
-            lowered = value.lower()
-            if lowered in {"true", "1"}:
-                return True
-            if lowered in {"false", "0"}:
-                return False
-            # Keep invalid boolean text for schema validation instead of
-            # silently reading it as False.
-            return value
-
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return value
+        # Shared helper: keeps a literal "null" for string params, nulls it
+        # when the schema allows null, and never emits non-finite floats
+        # (inf/nan) that would serialize as invalid JSON (#60516 review).
+        return coerce_to_schema_type(value, schema_types)
 
     def _resolve_param_type(
         self,

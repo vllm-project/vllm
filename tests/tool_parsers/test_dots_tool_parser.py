@@ -275,15 +275,34 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
     assert messages[-1].tool_calls == calls
 
 
-def test_convert_param_value_null_only_when_schema_allows(
+def test_convert_param_value_null_literal_kept_for_strings(
     parser: DotsToolParser,
 ) -> None:
+    # The dots bug: a string param the model wrote as the literal text "null"
+    # must not become JSON null.
     assert parser._convert_param_value("null", "string") == "null"
     assert parser._convert_param_value("Null", "string") == "Null"
+    # Nullable schemas still get the real null.
     assert parser._convert_param_value("null", ["string", "null"]) is None
-    assert parser._convert_param_value("null", "integer") == "null"
-    assert parser._convert_param_value("null", "boolean") == "null"
     assert parser._convert_param_value("null", "null") is None
+    # On other non-nullable scalars the shared coercer maps the text to JSON
+    # null (its trailing json.loads fallback); schema validation rejects it
+    # downstream either way.
+    assert parser._convert_param_value("null", "integer") is None
+    assert parser._convert_param_value("null", "boolean") is None
+
+
+def test_convert_param_value_number_never_emits_non_finite(
+    parser: DotsToolParser,
+) -> None:
+    # inf/nan are not valid JSON numbers; keep the raw text rather than emit
+    # `Infinity`/`NaN` into the arguments JSON.
+    assert parser._convert_param_value("inf", "number") == "inf"
+    assert parser._convert_param_value("Infinity", "number") == "Infinity"
+    assert parser._convert_param_value("-inf", "number") == "-inf"
+    assert parser._convert_param_value("nan", "number") == "nan"
+    assert parser._convert_param_value("5", "number") == 5
+    assert parser._convert_param_value("5.5", "number") == 5.5
 
 
 def test_convert_param_value_boolean_rejects_invalid_text(
