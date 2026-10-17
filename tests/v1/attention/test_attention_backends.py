@@ -434,6 +434,7 @@ def _test_backend_correctness(
     max_num_batched_tokens: int | None = None,
     layer_k_scale: float = 1.0,
     layer_v_scale: float = 1.0,
+    separate_kv_head_slots: bool = False,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using FlexAttention or an explicit attention-sink reference.
@@ -491,9 +492,18 @@ def _test_backend_correctness(
             num_speculative_tokens=num_speculative_tokens
         )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.attention_config.flashinfer_separate_kv_head_slots = (
+        separate_kv_head_slots
+    )
     device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
+    if separate_kv_head_slots:
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        with set_current_vllm_config(vllm_config):
+            kv_cache_spec = FlashInferBackend.customize_spec(kv_cache_spec)
+        assert kv_cache_spec.num_head_slots == 2 * kv_cache_spec.num_kv_heads
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -688,6 +698,16 @@ def _test_backend_correctness(
                 packed_cache, backend_layout
             )
 
+        if separate_kv_head_slots:
+            # [B, H, N, K|V] -> [B, K heads | V heads, N, D]: the same bytes a
+            # separate-K/V-slot page holds, cloned into the backend layout.
+            key_cache = kv_cache[..., :head_size]
+            value_cache = kv_cache[..., head_size:]
+            split_cache = torch.cat((key_cache, value_cache), dim=1)
+            kv_cache_for_backend = _clone_kv_cache_in_layout(
+                split_cache, backend_layout
+            )
+
         # FlashInfer reads the layout at plan time; set it to match
         # the physical order of the test cache.
         vllm_config.cache_config.kv_cache_layout = backend_layout.name
@@ -737,6 +757,43 @@ def _test_backend_correctness(
             atol=atol,
             msg=partial(error_msg, backend_name=backend_name),
         )
+
+
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC"])
+@pytest.mark.parametrize(
+    "batch_spec_name", ["small_decode", "small_prefill", "mixed_small"]
+)
+@pytest.mark.parametrize("model_dtype", [torch.bfloat16, torch.float16])
+def test_flashinfer_separate_kv_head_slots(
+    default_vllm_config,
+    layout: str,
+    batch_spec_name: str,
+    model_dtype: torch.dtype,
+):
+    """FlashInfer with K and V stored as separate head slots matches SDPA,
+    including the KV-cache write path (do_kv_cache_update)."""
+    if AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST:
+        pytest.skip("FlashInfer is not installed")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        batch_spec=BATCH_SPECS[batch_spec_name],
+        model="Qwen/Qwen3-0.6B",
+        backend_to_test=[AttentionBackendEnum.FLASHINFER],
+        mask_mod=causal_mask_mod,
+        layout=KVCacheLayout[layout],
+        model_dtype=model_dtype,
+        separate_kv_head_slots=True,
+    )
 
 
 @pytest.mark.parametrize("layout", ["BLHNC", "BHLNC"])
