@@ -446,6 +446,44 @@ def use_rocm_custom_paged_attention(
         )
 
 
+def _rocm_attn_uses_custom_paged_attention(
+    attn_selector_config: "AttentionSelectorConfig",
+    vllm_config: "VllmConfig | None",
+) -> bool:
+    """Selection-time copy of the gate in chunked_prefill_paged_decode() that
+    picks ROCM_ATTN's HIP paged-attention decode kernel. Without that kernel,
+    ROCM_ATTN decodes with a Triton kernel without split-KV, which is slower
+    than TRITON_ATTN."""
+    cfg = attn_selector_config
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None:
+        return True
+    assert vllm_config is not None
+    from vllm.config import CacheConfig
+
+    # --block-size if given, else the default. Hybrid models set the block size
+    # after backend selection and use a padded (non-native) KV cache layout.
+    block_size = cfg.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
+    has_native_layout = not model_config.is_hybrid
+    num_heads = model_config.get_num_attention_heads(vllm_config.parallel_config)
+    num_kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+
+    use_custom = not cfg.has_sink and use_rocm_custom_paged_attention(
+        qtype=cfg.dtype,
+        head_size=cfg.head_size,
+        block_size=block_size,
+        gqa_ratio=num_heads // num_kv_heads,
+        # CUDA graphs are captured with max_seq_len = max_model_len.
+        max_seq_len=model_config.max_model_len,
+        sliding_window=1 if cfg.has_sliding_window else 0,
+        kv_cache_dtype=cfg.kv_cache_dtype or "auto",
+    )
+    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    if not is_pow2 or not has_native_layout:
+        use_custom = False
+    return use_custom
+
+
 @cache
 def flash_attn_triton_available() -> bool:
     if not on_gfx1x():
@@ -704,6 +742,28 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # On RDNA4, swap TRITON_ATTN and ROCM_ATTN when ROCM_ATTN cannot use
+        # its HIP paged-attention decode kernel. Other RDNA parts (e.g. gfx1100,
+        # gfx1151) are not switched until TRITON_ATTN is tuned for them.
+        # fp8 KV cache and head_size <= 64 keep ROCM_ATTN: there TRITON_ATTN's
+        # prefill is slower than ROCM_ATTN's Triton fallback.
+        if (
+            on_rdna4()
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+            and not (attn_selector_config.kv_cache_dtype or "auto").startswith("fp8")
+            and attn_selector_config.head_size > 64
+            and not _rocm_attn_uses_custom_paged_attention(
+                attn_selector_config, vllm_config
+            )
+        ):
+            # Swap the two so every other backend keeps its position.
+            rocm_idx = backend_priorities.index(AttentionBackendEnum.ROCM_ATTN)
+            triton_idx = backend_priorities.index(AttentionBackendEnum.TRITON_ATTN)
+            backend_priorities[rocm_idx], backend_priorities[triton_idx] = (
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:

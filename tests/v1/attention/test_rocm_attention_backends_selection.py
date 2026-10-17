@@ -483,6 +483,85 @@ def test_standard_attention_backend_selection(
     assert backend_path == expected_backend_path
 
 
+def _rdna_model_config(
+    is_hybrid=False, num_heads=32, num_kv_heads=8, max_model_len=32768
+):
+    vllm_config = MagicMock()
+    vllm_config.model_config.attn_type = "decoder"
+    vllm_config.model_config.is_hybrid = is_hybrid
+    vllm_config.model_config.max_model_len = max_model_len
+    vllm_config.model_config.get_num_attention_heads.return_value = num_heads
+    vllm_config.model_config.get_num_kv_heads.return_value = num_kv_heads
+    return vllm_config
+
+
+@pytest.mark.parametrize(
+    "arch, selector_kwargs, model_kwargs, expected_backend",
+    [
+        # HIP paged-attention decode kernel used: ROCM_ATTN stays default.
+        ("rdna4", {}, {}, AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {}, {"max_model_len": 128 * 1024}, AttentionBackendEnum.ROCM_ATTN),
+        # No model config at selection time: unchanged.
+        ("rdna4", {"head_size": 256}, None, AttentionBackendEnum.ROCM_ATTN),
+        # Guarded: fp8 KV cache and head_size <= 64 keep ROCM_ATTN.
+        ("rdna4", {"head_size": 64}, {}, AttentionBackendEnum.ROCM_ATTN),
+        ("rdna4", {"kv_cache_dtype": "fp8"}, {}, AttentionBackendEnum.ROCM_ATTN),
+        (
+            "rdna4",
+            {"kv_cache_dtype": "fp8", "head_size": 256},
+            {},
+            AttentionBackendEnum.ROCM_ATTN,
+        ),
+        # HIP kernel not used: TRITON_ATTN is preferred.
+        ("rdna4", {"head_size": 96}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"head_size": 256}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"block_size": 32}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"dtype": torch.float32}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"has_sink": True}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {"has_sliding_window": True}, {}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {}, {"is_hybrid": True}, AttentionBackendEnum.TRITON_ATTN),
+        ("rdna4", {}, {"num_kv_heads": 32}, AttentionBackendEnum.TRITON_ATTN),
+        (
+            "rdna4",
+            {},
+            {"max_model_len": 256 * 1024},
+            AttentionBackendEnum.TRITON_ATTN,
+        ),
+        # Other archs (e.g. gfx1100, gfx1151, CDNA): unchanged.
+        ("other", {"head_size": 256}, {}, AttentionBackendEnum.ROCM_ATTN),
+    ],
+)
+def test_rdna_prefers_triton_attn_without_custom_paged_attention(
+    arch,
+    selector_kwargs,
+    model_kwargs,
+    expected_backend,
+    mock_get_cdna_version,
+    cleared_attention_selector_cache,
+    monkeypatch,
+):
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_rdna4", lambda: arch == "rdna4")
+    # use_rocm_custom_paged_attention() takes its RDNA branch.
+    monkeypatch.setattr(rocm, "on_cdna", lambda: False)
+    monkeypatch.setattr(rocm, "_ON_GFX1X", True)
+    kwargs = dict(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+    )
+    kwargs.update(selector_kwargs)
+    vllm_config = None if model_kwargs is None else _rdna_model_config(**model_kwargs)
+    with patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config):
+        backend_path = rocm.RocmPlatform.get_attn_backend_cls(
+            selected_backend=None,
+            attn_selector_config=AttentionSelectorConfig(**kwargs),
+        )
+    assert backend_path == expected_backend.get_path()
+
+
 @pytest.mark.parametrize("use_dcp", [False, True])
 @pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
