@@ -6,6 +6,7 @@ from vllm.v1.watermarking.gumbel import (
     DualKeyGumbelWatermarker,
     GumbelWatermarker,
 )
+from vllm.v1.watermarking.synthid import SynthIDWatermarker
 from vllm.v1.watermarking.watermarker import Watermarker
 
 
@@ -18,5 +19,9 @@ def create_watermarker(config: WatermarkConfig) -> Watermarker:
             config.context_width,
             config.prf,
             config.alpha,
+        )
+    if config.algorithm == "synthid_text":
+        return SynthIDWatermarker(
+            config.key, config.context_width, config.depth, config.prf
         )
     raise ValueError(f"Unknown watermarking algorithm: {config.algorithm}")

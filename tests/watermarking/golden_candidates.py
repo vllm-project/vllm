@@ -22,6 +22,7 @@ from vllm.config.watermarking import (
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
     GumbelWatermarkDetector,
+    SynthIDWatermarkDetector,
     WatermarkDetection,
     WatermarkDetector,
     create_prf,
@@ -47,6 +48,7 @@ WATERMARK_CONFIG_FIELDS = (
     "deduplicate_contexts",
     "deduplicate_contexts_max_history",
     "prf",
+    "depth",
     "allow_target_only_watermarking",
 )
 
@@ -93,6 +95,7 @@ class DeterministicGenerationFixture:
 @dataclass(frozen=True)
 class WatermarkingSchemeConfig:
     context_width: int = 4
+    depth: int = 32
     generation_alpha: float = 0.1
     detection_alpha: float = 0.1
     generation_deduplicate_contexts: WatermarkContextScope = "single_turn"
@@ -165,9 +168,25 @@ def _create_dual_key_gumbel_detector(
     )
 
 
+def _create_synthid_detector(
+    key: int,
+    config: WatermarkingSchemeConfig,
+    prf: WatermarkPRFName,
+) -> WatermarkDetector:
+    return SynthIDWatermarkDetector(
+        key=key,
+        context_width=config.context_width,
+        depth=config.depth,
+        p_value_threshold=config.p_value_threshold,
+        prf=prf,
+        deduplicate_contexts=config.detection_deduplicate_contexts,
+    )
+
+
 DETECTOR_FACTORIES = {
     "gumbel": _create_gumbel_detector,
     "dual_key_gumbel": _create_dual_key_gumbel_detector,
+    "synthid_text": _create_synthid_detector,
 }
 
 
@@ -185,23 +204,25 @@ class WatermarkingCandidate:
         prf_version = getattr(create_prf(self.prf, self.key), "version", None)
         if not isinstance(prf_version, str):
             raise ValueError(f"PRF {self.prf} does not define a version")
+        scheme_config = {
+            "context_width": self.scheme_config.context_width,
+            "depth": self.scheme_config.depth,
+            "generation_alpha": self.scheme_config.generation_alpha,
+            "detection_alpha": self.scheme_config.detection_alpha,
+            "generation_deduplicate_contexts": (
+                self.scheme_config.generation_deduplicate_contexts
+            ),
+            "generation_deduplicate_contexts_max_history": (
+                self.scheme_config.generation_deduplicate_contexts_max_history
+            ),
+            "detection_deduplicate_contexts": (
+                self.scheme_config.detection_deduplicate_contexts
+            ),
+            "p_value_threshold": self.scheme_config.p_value_threshold,
+        }
         return {
             "scheme": self.scheme,
-            "scheme_config": {
-                "context_width": self.scheme_config.context_width,
-                "generation_alpha": self.scheme_config.generation_alpha,
-                "detection_alpha": self.scheme_config.detection_alpha,
-                "generation_deduplicate_contexts": (
-                    self.scheme_config.generation_deduplicate_contexts
-                ),
-                "generation_deduplicate_contexts_max_history": (
-                    self.scheme_config.generation_deduplicate_contexts_max_history
-                ),
-                "detection_deduplicate_contexts": (
-                    self.scheme_config.detection_deduplicate_contexts
-                ),
-                "p_value_threshold": self.scheme_config.p_value_threshold,
-            },
+            "scheme_config": scheme_config,
             "prf": self.prf,
             "prf_version": prf_version,
             "key": str(self.key),
@@ -222,17 +243,18 @@ class WatermarkingCandidate:
 
         An allowlist rather than the whole dataclass, so a new production field
         is a deliberate golden change: WATERMARK_CONFIG_FIELDS names the fields
-        recorded here and test_goldens.py checks it still covers
-        WatermarkConfig. Keys exceed 2**53 and are decimal strings.
+        frozen here and test_goldens.py checks it covers WatermarkConfig
+        apart from the secret key. Keys exceed 2**53 and are decimal strings.
         """
         config = self._watermark_config()
         detector = self._detector()
         key_b_prf = getattr(detector, "key_b_prf", None)
         dual_key = self.scheme == "dual_key_gumbel"
+        watermark_config = {
+            field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
+        }
         return {
-            "watermark_config": {
-                field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
-            },
+            "watermark_config": watermark_config,
             "derived_keys": {
                 "key_a": str(derive_watermark_key(self.key, b"key_a"))
                 if dual_key
@@ -331,6 +353,7 @@ class WatermarkingCandidate:
             key=self.key,
             alpha=self.scheme_config.generation_alpha,
             context_width=self.scheme_config.context_width,
+            depth=self.scheme_config.depth,
             deduplicate_contexts=(self.scheme_config.generation_deduplicate_contexts),
             deduplicate_contexts_max_history=(
                 self.scheme_config.generation_deduplicate_contexts_max_history
@@ -424,6 +447,7 @@ def _candidate(
     prf: WatermarkPRFName,
     detection_key: int | None = None,
     context_width: int = 4,
+    depth: int = 32,
     generation_alpha: float = 0.1,
     detection_alpha: float | None = None,
     generation_deduplicate_contexts: WatermarkContextScope = "single_turn",
@@ -437,6 +461,7 @@ def _candidate(
         scheme=scheme,
         scheme_config=WatermarkingSchemeConfig(
             context_width=context_width,
+            depth=depth,
             generation_alpha=generation_alpha,
             detection_alpha=(
                 generation_alpha if detection_alpha is None else detection_alpha
@@ -456,6 +481,17 @@ def _candidate(
 
 
 WATERMARKING_CANDIDATES = (
+    _candidate(
+        "synthid-philox-key42-cw4-depth4", "synthid_text", 42, prf="philox", depth=4
+    ),
+    _candidate(
+        "synthid-philox-key42-cw4-depth4-wrong-key",
+        "synthid_text",
+        42,
+        prf="philox",
+        depth=4,
+        detection_key=43,
+    ),
     _candidate("gumbel-philox-key0-cw1", "gumbel", 0, prf="philox", context_width=1),
     _candidate("gumbel-philox-key42-cw4", "gumbel", 42, prf="philox"),
     _candidate(
@@ -878,8 +914,9 @@ def configured_prfs() -> set[str]:
 
 
 def configured_algorithm_prf_combinations() -> set[tuple[str, str]]:
+    # Goldens include detection, so only schemes with a detector belong here.
     return {
         (algorithm, prf)
-        for algorithm in configured_algorithms()
+        for algorithm in DETECTOR_FACTORIES
         for prf in configured_prfs()
     }
