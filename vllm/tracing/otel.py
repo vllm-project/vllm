@@ -34,6 +34,7 @@ try:
     from opentelemetry.semconv.resource import ResourceAttributes
     from opentelemetry.trace import (
         NonRecordingSpan,
+        Span,
         SpanKind,  # noqa: F401
         Tracer,
         set_tracer_provider,
@@ -55,6 +56,7 @@ except ImportError:
     SpanKind = Any  # type: ignore
     NonRecordingSpan = Any  # type: ignore
     ResourceAttributes = Any  # type: ignore
+    Span = Any  # type: ignore
 
 
 def is_otel_available() -> bool:

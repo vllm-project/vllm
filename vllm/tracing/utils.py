@@ -51,10 +51,6 @@ class SpanAttributes:
     GEN_AI_LATENCY_ENGINE_CALL = "gen_ai.latency.engine_call.ms"
     GEN_AI_LATENCY_POSTPROCESSING = "gen_ai.latency.postprocessing.ms"
 
-    GEN_AI_POOLING_EMBED_ENCODING_FORMAT = "gen_ai.pooling.embed.encoding.format"
-    GEN_AI_POOLING_EMBED_DTYPE = "gen_ai.pooling.embed.dtype"
-    GEN_AI_POOLING_EMBED_ENDIANNESS = "gen_ai.pooling.embed.endianness"
-
     # entrypoint attributes
     GEN_AI_PROCESS_ID = "vllm.process_id"
     GEN_AI_THREADING_ID = "vllm.threading_id"
