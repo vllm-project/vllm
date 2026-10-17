@@ -157,6 +157,14 @@ def test_parser_registration():
     assert parser_cls is MiniMaxM3ReasoningParser
 
 
+def test_contains_atomic_and_split_token_sequences():
+    contains = MiniMaxM3ReasoningParser._contains_token_sequence
+
+    assert contains([1, 2, 3], [2])
+    assert not contains([1, 2, 3], [4])
+    assert contains([1, 2, 3, 4], [2, 3])
+
+
 def test_nonstreaming_extracts_explicit_reasoning_block():
     parser, _ = make_parser()
     request = ChatCompletionRequest(messages=[], model="test-model")
