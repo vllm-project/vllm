@@ -46,7 +46,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -57,6 +56,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_fused_shared_expert_layers,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -444,10 +446,11 @@ class Glm4MoeModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
             self.layers,
             Glm4MoE,
             "mlp",
+            enable_eplb=enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -495,7 +498,7 @@ class Glm4MoeModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
