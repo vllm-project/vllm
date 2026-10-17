@@ -506,6 +506,50 @@ class TestParse:
             ("get_weather", json.dumps({"location": "SF"}))
         ]
 
+    # --- Issue #58825: malformed recipient containing <|channel|> ---
+
+    def test_issue_58825_malformed_recipient_not_tool(self, harmony_parser, chat_request):
+        """Recipient like assistant<|channel|>analysis must not become a tool call.
+
+        The malformed recipient contains the channel marker embedded in the
+        recipient string (e.g. a header like `to=assistant<|channel|>analysis`).
+        After _normalize_recipient strips the <|channel|> marker, the recipient
+        becomes "assistant" which is recognized as a non-function recipient.
+        """
+        response = [
+            assistant("I'm thinking...", "analysis").with_recipient(
+                "assistant<|channel|>analysis"),
+            assistant("Hello, world! What's up?", "final"),
+        ]
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=get_model_output_tokens(response),
+        )
+        assert reasoning == "I'm thinking..."
+        assert content == "Hello, world! What's up?"
+        assert tool_calls is None
+
+    def test_issue_58825_malformed_recipient_keeps_function_calls(self, harmony_parser, chat_request):
+        """Normal function recipients must still produce tool calls."""
+        raw = (
+            "<|channel|>analysis<|message|>Let me check the weather<|end|>"
+            "<|start|>assistant to=functions.get_weather"
+            "<|channel|>commentary"
+            '<|constrain|>json<|message|>{"location": "Tokyo"}<|end|>'
+            "<|start|>assistant<|channel|>final<|message|>Done<|end|>"
+        )
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(raw),
+        )
+        assert reasoning == "Let me check the weather"
+        assert content == "Done"
+        assert tool_call_tuples(tool_calls) == [
+            ("get_weather", json.dumps({"location": "Tokyo"}))
+        ]
+
 
 class TestParseDelta:
     def test_basic(self, gpt_oss_tokenizer, chat_request):
@@ -798,6 +842,84 @@ class TestParseDelta:
             (2, "tool_c", '{"c": 3}'),
         ]
         assert [tool.index for tool in tool_call_headers(third_delta)] == [2]
+
+    # --- Issue #58825: streaming path ---
+
+    def test_issue_58825_streaming_malformed_recipient_not_tool(
+        self, gpt_oss_tokenizer, chat_request
+    ):
+        parser = HarmonyParser(gpt_oss_tokenizer)
+
+        response = [
+            assistant("I'm thinking...", "analysis").with_recipient(
+                "assistant<|channel|>analysis"),
+            assistant("Hello, world! What's up?", "final"),
+        ]
+        delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=get_model_output_tokens(response),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "I'm thinking..."
+        assert delta.content == "Hello, world! What's up?"
+        assert not delta.tool_calls
+        assert_parser_is_reset(parser)
+
+    def test_issue_58825_streaming_keeps_function_calls(
+        self, gpt_oss_tokenizer, chat_request
+    ):
+        parser = HarmonyParser(gpt_oss_tokenizer)
+
+        delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=encode_output(
+                "<|channel|>analysis<|message|>Check<|end|>"
+                "<|start|>assistant to=functions.get_weather<|channel|>commentary"
+                '<|constrain|>json<|message|>{"location": "Tokyo"}<|call|>'
+                "<|start|>assistant<|channel|>final<|message|>Done<|end|>"
+            ),
+            request=chat_request,
+            finished=True,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "Check"
+        assert delta.content == "Done"
+        assert tool_call_entries(delta) == [
+            (0, "get_weather", '{"location": "Tokyo"}')
+        ]
+        assert_parser_is_reset(parser)
+
+
+class TestNormalizeRecipient:
+    @pytest.mark.parametrize(
+        ("recipient", "expected"),
+        [
+            (None, None),
+            ("assistant", "assistant"),
+            ("functions.get_weather", "functions.get_weather"),
+            ("get_weather", "get_weather"),
+            ("", ""),
+            # Existing behavior: strip <|constrain|>
+            ('final json<|constrain|>json', 'final json'),
+            ('final <|constrain|>json', 'final'),
+            ('<|constrain|>json', None),
+            # New behavior: strip <|channel|> (issue #58825)
+            ('assistant<|channel|>analysis', 'assistant'),
+            ('functions.get_weather<|channel|>commentary', 'functions.get_weather'),
+            ('get_weather<|channel|>commentary', 'get_weather'),
+            ('browser<|channel|>commentary', 'browser'),
+            ('assistant<|channel|>commentary', 'assistant'),
+            # Both control tokens present
+            ('assistant<|channel|>analysis<|constrain|>json', 'assistant'),
+            ('functions.get_weather<|channel|>commentary<|constrain|>json', 'functions.get_weather'),
+        ],
+    )
+    def test_normalize_recipient(self, recipient, expected):
+        assert HarmonyParser._normalize_recipient(recipient) == expected
 
 
 class TestProcessChunk:
