@@ -44,6 +44,23 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 double int8_max);
 
 #ifndef USE_ROCM
+namespace vllm::batch_invariant {
+void combine_topk_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& topk_indices,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
+                             int64_t window_size);
+
+void combine_c128_swa_decode(torch::stable::Tensor& combined_indices,
+                             torch::stable::Tensor& combined_lens,
+                             const torch::stable::Tensor& seq_lens,
+                             const torch::stable::Tensor& is_valid, int64_t M,
+                             int64_t N, int64_t top_k, int64_t compress_ratio,
+                             int64_t window_size);
+}  // namespace vllm::batch_invariant
+
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
