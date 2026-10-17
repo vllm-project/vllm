@@ -664,6 +664,7 @@ def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
         parallel_config=ParallelConfig(distributed_executor_backend="mp"),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         attention_config=AttentionConfig(),
+        compilation_config=CompilationConfig(),
         watermark_config=None,
         speculative_config=None,
         model_config=None,
@@ -1561,6 +1562,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         attention_config=AttentionConfig(),
+        compilation_config=CompilationConfig(),
         watermark_config=None,
         speculative_config=None,
         model_config=None,
@@ -1744,6 +1746,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
     """Only the async combination desyncs the grammar FSM (#45014), so plain
     PP>1 must stay usable on the V1 model runner."""
     config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
         parallel_config=ParallelConfig(
             pipeline_parallel_size=2,
             distributed_executor_backend="mp",
@@ -1762,6 +1765,25 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
     config.scheduler_config.async_scheduling = True
     unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
     assert "pipeline parallelism with async scheduling" in unsupported
+
+
+@pytest.mark.parametrize("prefill_sizes", [[], [8]])
+def test_v1_model_runner_rejects_prefill_capture_sizes(prefill_sizes):
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(
+            cudagraph_capture_sizes_prefill=prefill_sizes
+        ),
+        parallel_config=ParallelConfig(),
+        scheduler_config=SchedulerConfig.default_factory(),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
+        speculative_config=None,
+        model_config=None,
+        _dflash_needs_multi_kv_group=lambda: False,
+        _is_dflash_candidate_draft=lambda: False,
+    )
+    unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
+    assert "cudagraph_capture_sizes_prefill" in unsupported
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
