@@ -33,6 +33,32 @@ def poly_norm(
     return out
 
 
+def cuda_rms_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """VLLM's CUDA ``rms_norm`` / ``fused_add_rms_norm``, out of place.
+
+    Each row is normalized on its own, so the result does not depend on the
+    batch; a training-side replay can call the same kernels.
+    """
+    from vllm import _custom_ops as ops
+
+    if x.dtype != weight.dtype:
+        raise ValueError("CUDA RMSNorm requires matching activation and weight dtype")
+    if residual is None:
+        output = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+        ops.rms_norm(output, x, weight, eps)
+        return output
+    # fused_add_rms_norm works in place; copy so callers keep their inputs.
+    output = x.clone()
+    residual_out = residual.clone()
+    ops.fused_add_rms_norm(output, residual_out, weight, eps)
+    return output, residual_out
+
+
 # --8<-- [start:rms_norm]
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
@@ -137,6 +163,20 @@ class RMSNorm(CustomOp):
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"
         return s
+
+
+class CudaRMSNorm(RMSNorm):
+    """RMSNorm that keeps the CUDA kernels (``cuda_rms_norm``) under
+    VLLM_BATCH_INVARIANT instead of the batch-invariant Triton kernel."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if envs.VLLM_BATCH_INVARIANT:
+            return cuda_rms_norm(x, self.weight, self.variance_epsilon, residual)
+        return super().forward(x, residual)
 
 
 # --8<-- [start:gemma_rms_norm]

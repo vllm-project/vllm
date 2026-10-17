@@ -8,7 +8,16 @@
 
 import torch
 
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    pin_autotune_config,
+)
 from vllm.triton_utils import tl, triton
+
+_BATCH_INVARIANT_CONFIG = triton.Config(
+    {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+    num_stages=4,
+    num_warps=2,
+)
 
 
 @triton.autotune(
@@ -143,6 +152,9 @@ def _bmm_chunk_fwd_kernel(
         out,
         mask=(offs_m[:, None] < chunk_size) & (offs_n[None, :] < chunk_size),
     )
+
+
+pin_autotune_config(_bmm_chunk_fwd_kernel, _BATCH_INVARIANT_CONFIG)
 
 
 def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None):

@@ -1128,6 +1128,12 @@ def flashinfer_scaled_fp4_mm(
     )
 
 
+def _bmm_fp8_backend() -> str:
+    # "auto" may pick a different backend per problem shape, so a row's
+    # result could depend on the number of rows. Pin one backend under BI.
+    return "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto"
+
+
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1150,7 +1156,7 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        _bmm_fp8_backend(),
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:

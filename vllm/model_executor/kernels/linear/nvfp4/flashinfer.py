@@ -109,6 +109,22 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
         return out.view(*output_shape)
 
 
+class NemotronSharedNvFp4LinearKernel(FlashInferCuteDslNvFp4W4A16LinearKernel):
+    """Keep the shared expert's global-scale rounding aligned with Humming."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        scale = layer.weight_global_scale.detach().clone()
+        if scale.dtype != torch.float32 or scale.numel() != 1:
+            raise ValueError("Nemotron W4A16 requires a scalar FP32 global scale")
+        # Humming stores the inverse scale and inverts it again during packing.
+        effective_scale = 1.0 / (1.0 / scale)
+        super().process_weights_after_loading(layer)
+        with torch.no_grad():
+            layer.weight_global_scale.copy_(
+                effective_scale.reshape_as(layer.weight_global_scale)
+            )
+
+
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 

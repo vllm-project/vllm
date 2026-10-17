@@ -223,7 +223,10 @@ def matmul_kernel_descriptor_persistent(
 
 
 def matmul_descriptor_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Persistent matmul using tensor descriptors (Intel XPU fast path).
 
@@ -231,9 +234,11 @@ def matmul_descriptor_persistent(
         a: Input matrix [M, K], must be contiguous.
         b: Weight matrix [K, N] (standard layout — transposed internally).
         bias: Optional 1D bias vector [N].
+        out_dtype: Output dtype; defaults to the input dtype. The FP32
+            accumulator is rounded to it once, in the epilogue.
 
     Returns:
-        Output matrix [M, N] with dtype matching the inputs.
+        Output matrix [M, N].
 
     """
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -249,7 +254,7 @@ def matmul_descriptor_persistent(
     # Descriptor kernel expects B in [N, K] layout (K-contiguous).
     b_t = b.t().contiguous()
 
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
     # This path is XPU-only. _NUM_SMS is set by enable_batch_invariant_mode()
     # before torch.compile traces this function, so Dynamo can lift it
     # as a compile-time constant.
@@ -282,7 +287,10 @@ def matmul_descriptor_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -294,8 +302,9 @@ def matmul_persistent(
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype
-    # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    # The tile config follows the input dtype; out_dtype only changes the
+    # epilogue cast of the FP32 accumulator.
+    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -769,13 +778,13 @@ def mean_dim(
     return output
 
 
-def mm_batch_invariant(a, b, bias=None):
+def mm_batch_invariant(a, b, bias=None, out_dtype=None):
     if a.device.type == "xpu":
         # The descriptor kernel reads the bias at unit stride.
         if bias is not None:
             bias = bias.contiguous()
-        return matmul_descriptor_persistent(a, b, bias=bias)
-    return matmul_persistent(a, b, bias=bias)
+        return matmul_descriptor_persistent(a, b, bias=bias, out_dtype=out_dtype)
+    return matmul_persistent(a, b, bias=bias, out_dtype=out_dtype)
 
 
 def matmul_batch_invariant(a, b, *, out=None):

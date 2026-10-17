@@ -6,10 +6,17 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
+)
+from vllm.model_executor.layers.mamba.exact_replay import (
+    ExactReplayMetadata,
+    build_exact_replay_metadata,
+    exact_replay_spec_decode_layout,
 )
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -107,11 +114,93 @@ class Mamba2AttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Decode kernels take device offsets; ReplaySSM plans off CPU counts.
+        # Decode kernels take device offsets; ReplaySSM and batch-invariant
+        # exact replay plan off CPU counts.
+        if envs.VLLM_BATCH_INVARIANT:
+            return False
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return True
         return not vllm_config.cache_config.use_replayssm
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # In batch-invariant mode every SSD call starts at the sequence's last
+        # chunk boundary (exact replay, see exact_replay.py), so prefill,
+        # chunked prefill and decode produce the same bits.
+        return True
+
+    @classmethod
+    def check_batch_invariant_config(cls, vllm_config: VllmConfig) -> None:
+        """Reject engine settings the batch-invariant SSD path does not support.
+
+        Raises:
+            ValueError: for an unsupported setting, with the flag to change.
+
+        """
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
+        prefix = "VLLM_BATCH_INVARIANT=1 with Mamba2 layers"
+        if cache_config.use_replayssm:
+            raise ValueError(f"{prefix} is not supported together with --use-replayssm")
+        num_spec = vllm_config.num_speculative_tokens
+        if num_spec > 0:
+            if not envs.VLLM_USE_V2_MODEL_RUNNER:
+                # Exactness needs the rejection sampler to reject drafts at a
+                # chunk's last position, which only model runner V2 does.
+                raise ValueError(
+                    f"{prefix} supports speculative decoding only with "
+                    "VLLM_USE_V2_MODEL_RUNNER=1"
+                )
+            chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+            if chunk_size is not None and num_spec >= chunk_size:
+                raise ValueError(
+                    f"{prefix} needs fewer speculative tokens than the SSD "
+                    f"chunk size {chunk_size}, got {num_spec}"
+                )
+        if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(f"{prefix} requires --mamba-backend triton")
+        if parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(f"{prefix} currently requires PP=1")
+        if parallel_config.use_ubatching:
+            raise ValueError(
+                f"{prefix} does not support micro-batching (--enable-dbo or "
+                "--ubatch-size > 1)"
+            )
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError(f"{prefix} does not support KV connectors")
+
+
+def exact_replay_draft_chunk_size(vllm_config: VllmConfig) -> int | None:
+    """Chunk size whose last positions drafts must never be accepted at.
+
+    In batch-invariant mode a Mamba2 boundary state is folded as soon as a
+    chunk's last token is processed. For speculative decoding that token must
+    be one that is certain to be kept, so the rejection sampler rejects every
+    draft at position ``chunk_size - 1`` modulo ``chunk_size`` (see
+    ``exact_replay_spec_decode_layout``). None when this does not apply.
+    """
+    model_config = vllm_config.model_config
+    if (
+        not envs.VLLM_BATCH_INVARIANT
+        or vllm_config.num_speculative_tokens == 0
+        or not model_config.is_hybrid
+    ):
+        return None
+    return model_config.get_mamba_chunk_size()
+
+
+def exact_replay_decode_positions(
+    seq_lens: torch.Tensor, chunk_size: int, out: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Position of each decode row's token inside its partial chunk.
+
+    A decode row has one token without speculative decoding, so its computed
+    token count is the sequence length minus one. CUDA graph padding rows
+    have sequence length 0 and get position -1, which the decode kernels skip.
+    """
+    pos = torch.remainder(seq_lens - 1, chunk_size, out=out)
+    return pos.masked_fill_(seq_lens <= 0, -1)
 
 
 @dataclass
@@ -121,6 +210,16 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
+    # Exact-replay mode (None when disabled or when there are no such rows).
+    # Decode rows only need the position of their token inside the partial
+    # chunk; the tensor covers every row the decode kernels run over, padded
+    # rows included, and lives in a persistent buffer for CUDA graphs.
+    exact_replay_p: ExactReplayMetadata | None = None
+    exact_replay_pos_d: torch.Tensor | None = None
+    # With speculative decoding, `exact_replay_pos_d` is (rows, 1 + num_spec)
+    # and this holds each of those tokens' index among the decode tokens
+    # (see exact_replay_spec_decode_layout).
+    exact_replay_token_idx_d: torch.Tensor | None = None
 
     # Internal prefill checkpoints, one entry per prefill row. The chunk
     # index selects the varlen_states row holding the checkpoint state.
@@ -157,6 +256,77 @@ class Mamba2AttentionMetadataBuilder(
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
+        self.exact_replay: bool = envs.VLLM_BATCH_INVARIANT
+        if self.exact_replay:
+            # Decode rows run fixed-shape kernels, so decode-only full CUDA
+            # graphs work as usual; this buffer feeds them each row's position.
+            if self.num_spec_tokens == 0:
+                self.exact_replay_pos_d: torch.Tensor = torch.full(
+                    (self.decode_cudagraph_max_bs,),
+                    -1,
+                    dtype=torch.int32,
+                    device=device,
+                )
+            else:
+                shape = (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens)
+                self.exact_replay_pos_d = torch.full(
+                    shape, -1, dtype=torch.int32, device=device
+                )
+                self.exact_replay_token_idx_d: torch.Tensor = torch.full(
+                    shape, -1, dtype=torch.int64, device=device
+                )
+
+    def _exact_replay_decode_positions(
+        self,
+        common: Mamba2AttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> torch.Tensor:
+        """Positions for the rows that ``state_indices_tensor_d`` covers.
+
+        For full CUDA graphs the runner pads the batch and the base builder
+        pads the state indices with the null block, which other backends rely
+        on; padded rows get position -1 instead, so the decode kernels skip
+        them and never touch the null block's buffers or state.
+        """
+        num_decodes = common.num_decodes
+        assert common.state_indices_tensor_d is not None
+        num_rows = common.state_indices_tensor_d.shape[0]
+        seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+        if num_rows > self.decode_cudagraph_max_bs:
+            return exact_replay_decode_positions(seq_lens, self.chunk_size)
+        pos = self.exact_replay_pos_d[:num_rows]
+        exact_replay_decode_positions(seq_lens, self.chunk_size, out=pos[:num_decodes])
+        pos[num_decodes:].fill_(-1)
+        return pos
+
+    def _exact_replay_spec_decode_layout(
+        self,
+        common: Mamba2AttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Spec-decode counterpart of ``_exact_replay_decode_positions``."""
+        num_decodes = common.num_decodes
+        assert common.state_indices_tensor_d is not None
+        num_rows = common.state_indices_tensor_d.shape[0]
+        seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+        query_start_loc = common_attn_metadata.query_start_loc[: num_decodes + 1]
+        if num_rows > self.decode_cudagraph_max_bs:
+            return exact_replay_spec_decode_layout(
+                seq_lens, query_start_loc, self.num_spec_tokens, self.chunk_size
+            )
+        pos = self.exact_replay_pos_d[:num_rows]
+        token_idx = self.exact_replay_token_idx_d[:num_rows]
+        exact_replay_spec_decode_layout(
+            seq_lens,
+            query_start_loc,
+            self.num_spec_tokens,
+            self.chunk_size,
+            pos_out=pos[:num_decodes],
+            token_idx_out=token_idx[:num_decodes],
+        )
+        pos[num_decodes:].fill_(-1)
+        token_idx[num_decodes:].fill_(-1)
+        return pos, token_idx
 
     def build(
         self,
@@ -216,6 +386,43 @@ class Mamba2AttentionMetadataBuilder(
                 checkpoint_offsets_p,
             )
 
+        exact_replay_p = None
+        exact_replay_pos_d = None
+        exact_replay_token_idx_d = None
+        if self.exact_replay:
+            if common.num_decodes > 0 and self.num_spec_tokens > 0:
+                exact_replay_pos_d, exact_replay_token_idx_d = (
+                    self._exact_replay_spec_decode_layout(common, common_attn_metadata)
+                )
+            elif common.num_decodes > 0:
+                exact_replay_pos_d = self._exact_replay_decode_positions(
+                    common, common_attn_metadata
+                )
+            if common.num_prefills > 0:
+                # Derive per-row computed-token counts from CPU metadata only:
+                # `seq_lens_cpu_upper_bound` is exact for prefill rows, also
+                # with async speculative decoding, and it avoids the D2H sync
+                # of the deprecated `num_computed_tokens_cpu`.
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+                if seq_lens_cpu is None:
+                    raise ValueError(
+                        "VLLM_BATCH_INVARIANT=1 needs CPU sequence lengths in "
+                        "the attention metadata for Mamba2 layers"
+                    )
+                num_reqs = common.num_reqs
+                rows = slice(num_reqs - common.num_prefills, num_reqs)
+                query_lens = torch.diff(common_attn_metadata.query_start_loc_cpu)
+                # The metadata carries batch rows, not state slots, so the
+                # copy that `update_block_table` hands to the other KV cache
+                # groups of a hybrid model stays valid: each layer resolves its
+                # own slots from its state indices when it runs the SSD step.
+                exact_replay_p = build_exact_replay_metadata(
+                    (seq_lens_cpu[rows] - query_lens[rows]).tolist(),
+                    query_lens[rows].tolist(),
+                    self.chunk_size,
+                    common_attn_metadata.query_start_loc.device,
+                )
+
         return replace(
             common,
             prep_initial_states=prep_initial_states,
@@ -225,6 +432,9 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
             checkpoint_meta=checkpoint_meta,
+            exact_replay_p=exact_replay_p,
+            exact_replay_pos_d=exact_replay_pos_d,
+            exact_replay_token_idx_d=exact_replay_token_idx_d,
         )
 
     def update_block_table(
@@ -234,11 +444,22 @@ class Mamba2AttentionMetadataBuilder(
         slot_mapping: torch.Tensor,
     ) -> Mamba2AttentionMetadata:
         new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
-        if metadata.checkpoint_meta is None:
+        if metadata.checkpoint_meta is not None:
+            # Checkpoint destinations are block-table entries, so each group
+            # re-gathers its own rather than writing into the source group's.
+            new_metadata = replace(
+                new_metadata,
+                checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(
+                    blk_table
+                ),
+            )
+        pos = metadata.exact_replay_pos_d
+        if pos is None or pos.shape[0] > self.decode_cudagraph_max_bs:
             return new_metadata
-        # Checkpoint destinations are block-table entries, so each group
-        # re-gathers its own rather than writing into the source group's.
-        return replace(
-            new_metadata,
-            checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(blk_table),
-        )
+        # Full CUDA graphs of this group's layers read this builder's own
+        # persistent buffer, so refresh it from the metadata built by the
+        # first Mamba2 group's builder.
+        own = self.exact_replay_pos_d[: pos.shape[0]]
+        if own.data_ptr() != pos.data_ptr():
+            own.copy_(pos)
+        return replace(new_metadata, exact_replay_pos_d=own)
