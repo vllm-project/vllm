@@ -1285,6 +1285,8 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     return (
         current_platform.is_cuda()
         and bit == 4
