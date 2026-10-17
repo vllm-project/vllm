@@ -403,7 +403,7 @@ if (
     and envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     and get_cdna_version() > 2
 ):
-    os.environ["HIP_ONLINE_TUNING"] = "1"
+    os.environ.setdefault("HIP_ONLINE_TUNING", "1")
 
 
 @cache
