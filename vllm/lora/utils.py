@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
+    BaseClassificationHeadWithLoRA,
     BaseLayerWithLoRA,
     ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
@@ -31,6 +32,7 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
+    TokenClassificationHeadWithLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
@@ -148,8 +150,15 @@ def from_layer_classification(
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: PreTrainedConfig | None = None,
-) -> ClassificationHeadWithLoRA:
-    instance_layer = ClassificationHeadWithLoRA(layer)
+    *,
+    is_token_level: bool = False,
+) -> BaseClassificationHeadWithLoRA:
+    head_cls = (
+        TokenClassificationHeadWithLoRA
+        if is_token_level
+        else ClassificationHeadWithLoRA
+    )
+    instance_layer = head_cls(layer)
     instance_layer.create_lora_weights(max_loras, lora_config, model_config)
     return instance_layer
 

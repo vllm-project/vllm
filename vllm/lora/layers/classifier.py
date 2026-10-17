@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from .replicated_linear import ReplicatedLinearWithLoRA
 
 
-class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
+class BaseClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
@@ -42,10 +42,6 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         )
         # Zero marks an unused slot; positive values are unpadded label counts.
         self.full_module_num_labels = [0] * max_loras
-        self._output_lora_indices: tuple[int, ...] = ()
-
-    def set_output_mapping(self, slot_indices: tuple[int, ...]) -> None:
-        self._output_lora_indices = slot_indices
 
     def reset_module_to_save(self, index: int) -> None:
         self.full_weight_stacked[index].zero_()
@@ -66,6 +62,20 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
             self.full_bias_stacked[index, :num_labels].copy_(bias, non_blocking=True)
         self.full_module_num_labels[index] = num_labels
         self.full_module_enabled[index] = True
+
+
+class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PreTrainedConfig | None = None,
+    ) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        self._output_lora_indices: tuple[int, ...] = ()
+
+    def set_output_mapping(self, slot_indices: tuple[int, ...]) -> None:
+        self._output_lora_indices = slot_indices
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor | list[torch.Tensor]:
         # TODO base_result maybe don't need compute truly.
@@ -125,3 +135,35 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
             output = output.reshape(original_shape)
 
         return output
+
+
+class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        output = super().forward(input_)
+        output = output[0] if isinstance(output, tuple) else output
+        adapter_output = torch.zeros(
+            (1, output.size(0), self.output_size),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        self.punica_wrapper.add_shrink(
+            adapter_output,
+            input_.to(self.full_weight_stacked.dtype),
+            (self.full_weight_stacked[:, :, : self.output_size],),
+            1.0,
+        )
+        indices = self.punica_wrapper.token_lora_indices
+        assert indices.size(0) == output.size(0), (
+            "Token classification rows do not match LoRA token mapping"
+        )
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & self.full_module_enabled[safe_indices]
+        adapter_output = adapter_output[0].to(output.dtype) + self.full_bias_stacked[
+            safe_indices, : self.output_size
+        ].to(output.dtype)
+        return torch.where(use_full.unsqueeze(-1), adapter_output, output)
+
+    def _apply_lora_to_output(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
+        return super()._apply_lora_to_output(x.to(self.lora_a_stacked[0].dtype), output)
