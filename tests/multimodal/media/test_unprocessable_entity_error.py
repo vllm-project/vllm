@@ -191,3 +191,30 @@ class TestErrorResponse:
 
         assert response.error.message == "Test error message"
         assert response.error.code == 422
+
+    def test_disabled_local_media_returns_400(self):
+        connector = MediaConnector()
+        with pytest.raises(ValueError) as exc_info:
+            connector.fetch_image("file:///tmp/vllm-disallowed-image.png")
+
+        response = create_error_response(exc_info.value)
+        assert response.error.code == HTTPStatus.BAD_REQUEST.value
+        assert response.error.type == "BadRequestError"
+        assert (
+            "Cannot load local files without `--allowed-local-media-path`."
+            in response.error.message
+        )
+
+    @pytest.mark.asyncio
+    async def test_disabled_local_media_async_returns_400(self):
+        connector = MediaConnector()
+        with pytest.raises(ValueError) as exc_info:
+            await connector.fetch_image_async("file:///tmp/vllm-disallowed-image.png")
+
+        response = create_error_response(exc_info.value)
+        assert response.error.code == HTTPStatus.BAD_REQUEST.value
+        assert response.error.type == "BadRequestError"
+        assert (
+            "Cannot load local files without `--allowed-local-media-path`."
+            in response.error.message
+        )
