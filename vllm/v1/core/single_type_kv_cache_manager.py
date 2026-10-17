@@ -1183,13 +1183,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        # Like a local hit, an external hit only provides the attended window.
-        # Retained blocks below it would never be written, yet would be cached.
+        # External hits include the MTP replay tail, but not EAGLE proof blocks.
+        # Do not cache extra retained blocks that the connector never writes.
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
         num_unattended_blocks = (
-            max(0, num_total_computed_tokens - self.sliding_window + 1)
+            max(
+                0,
+                num_total_computed_tokens
+                - self.sliding_window
+                - self.extra_retained_tokens
+                + 1,
+            )
             // self.block_size
         )
         req_blocks = self.req_to_blocks[request_id]

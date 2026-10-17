@@ -561,7 +561,8 @@ def test_side_storage_moves_with_owner_group_blocks():
     assert worker.region_names[region] == "layer.1.side"
     assert worker.region_group_ids[region] == 1
     assert worker._is_region_replicated(region)
-    assert worker.src_blocks_data[-4:, :2].tolist() == [
+    local_descs = expand_strided_descs(worker.src_blocks_data)
+    assert local_descs[-4:, :2].tolist() == [
         [side.data_ptr() + 32 * block, 32] for block in range(4)
     ]
 

@@ -220,3 +220,49 @@ def test_real_triton_kernel_override_end_to_end() -> None:
         "out_ptr",
         "BLOCK",
     )
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_cpu_slot_mapping_override(monkeypatch, block_size):
+    import torch
+
+    from vllm.utils.cpu_triton_utils import _compute_slot_mapping_kernel_impl
+    from vllm.v1.worker.block_table import ComputeSlotMappingKernel
+
+    owner = ComputeSlotMappingKernel()
+    monkeypatch.setattr(
+        owner, "kernel", KernelOverride(owner.kernel, _compute_slot_mapping_kernel_impl)
+    )
+    query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+    positions = torch.tensor([0, 1], dtype=torch.int64)
+    block_table = torch.tensor([[3, 4]], dtype=torch.int32)
+    slot_mapping = torch.empty(4, dtype=torch.int64)
+    calls = []
+    monkeypatch.setattr(
+        torch.ops._C,
+        "compute_slot_mapping_kernel_impl",
+        lambda *args: calls.append(args),
+        raising=False,
+    )
+    owner(
+        num_reqs=1,
+        num_tokens=2,
+        max_num_tokens=4,
+        query_start_loc=query_start_loc,
+        positions=positions,
+        block_table=block_table,
+        block_table_stride=2,
+        slot_mapping=slot_mapping,
+        kv_cache_block_size=block_size,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+    )
+    assert len(calls) == 1
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            calls[0][:4], (query_start_loc, positions, block_table, slot_mapping)
+        )
+    )
+    assert calls[0][4] == block_size

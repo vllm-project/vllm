@@ -294,6 +294,10 @@ class TestTurboQuantKVCacheSpec:
             head_size_v=128,
             num_kv_heads=4,
             sliding_window=None,
+            kv_cache_requires_zeroing=False,
+            kv_cache_extra_budget_page_size_bytes=0,
+            kv_cache_extra_budget_fixed_size_bytes=0,
+            kv_cache_prefix_recompute_tokens=0,
             get_attn_backend=lambda: TurboQuantAttentionBackend,
         )
         vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
