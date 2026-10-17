@@ -27,6 +27,7 @@ with contextlib.suppress(ImportError):
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -105,9 +106,10 @@ def _get_backend_priorities(
                 ]
             else:
                 # BF16 KV Cache
-                # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+                # Prefer FA4, then FlashInfer at low head counts (FlashMLA uses padding)
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                         AttentionBackendEnum.FLASHMLA_SPARSE,
                     ]
@@ -413,26 +415,6 @@ class CudaPlatformBase(Platform):
                 )
 
         return valid_backends_priorities, invalid_reasons
-
-    @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
-        index_kpool = getattr(
-            vllm_config.model_config.hf_text_config, "index_kpool", None
-        )
-        if not index_kpool or index_kpool <= 1:
-            return None
-        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-
-        # kpool paged-MQA indexer: the storage block (block_size /
-        # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool times a legal pool page.
-        page = min(PAGED_MQA_PAGE_SIZES)
-        if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
-            page = max(PAGED_MQA_PAGE_SIZES)
-        return index_kpool * page
 
     @classmethod
     def get_attn_backend_cls(
@@ -821,7 +803,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        try:
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        except pynvml.NVMLError:
+            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
+            # device-level NVML memory query - nvidia-smi reports [N/A] for
+            # memory.total there. Fall back to the same source
+            # NonNvmlCudaPlatform reads.
+            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
     @with_nvml_context
