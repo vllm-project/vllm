@@ -7,6 +7,7 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import functools
 from typing import Any
 
 import torch
@@ -291,6 +292,7 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    CAN_CLAMP_3D_SWA: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -322,10 +324,27 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+        if (
+            CAN_CLAMP_3D_SWA
+            and SLIDING_WINDOW > 0
+            and CHUNK_LOOKBACK == -1
+            and USE_CAUSAL
+            and not (USE_PER_SEQ_CAUSAL or USE_MM_PREFIX or USE_R_SWA)
+        ):
+            start_tile_idx = tl.maximum(
+                0,
+                (seq_len - cur_batch_query_len - SLIDING_WINDOW + 1) // TILE_SIZE,
+            )
+        else:
+            start_tile_idx = 0
+        active_tiles = tl.maximum(0, num_tiles - start_tile_idx)
+        tiles_per_segment = tl.maximum(1, cdiv_fn(active_tiles, NUM_SEGMENTS_PER_SEQ))
+        segm_start_tile = start_tile_idx + segm_idx * tiles_per_segment
+        if segm_start_tile >= num_tiles:
             return
     else:
+        start_tile_idx = 0
         tiles_per_segment = 0
 
     # Number of valid query rows in this block (used by TD descriptor
@@ -421,6 +440,7 @@ def kernel_unified_attention(
         MAX_MM_RANGES,
         mm_prefix_range_ptr,
         seq_idx,
+        start_tile_idx=start_tile_idx,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -719,6 +739,7 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -738,10 +759,24 @@ def reduce_segments(
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+    if SLIDING_WINDOW > 0:
+        query_start_len = tl.load(query_start_len_ptr + seq_idx)
+        query_end_len = tl.load(query_start_len_ptr + seq_idx + 1)
+        cur_batch_query_len = query_end_len - query_start_len
+        start_tile_idx = tl.maximum(
+            0,
+            (seq_len - cur_batch_query_len - SLIDING_WINDOW + 1) // TILE_SIZE,
+        )
+    else:
+        start_tile_idx = 0
+    active_tiles = tl.maximum(0, num_tiles - start_tile_idx)
+    tiles_per_segment = tl.maximum(1, cdiv_fn(active_tiles, num_segments))
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    act_num_segments = tl.minimum(
+        num_segments, cdiv_fn(active_tiles, tiles_per_segment)
+    )
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -760,6 +795,7 @@ def reduce_segments(
     valid_segment = segm_mask & (segm_expsum > 0) & (segm_max != float("-inf"))
     segm_max = tl.where(valid_segment, segm_max, float("-inf"))
     overall_max = tl.max(segm_max)
+    overall_max = tl.where(overall_max > float("-inf"), overall_max, 0.0)
 
     # load and rescale segment exp sums
     segment_scale = tl.where(valid_segment, tl.exp(segm_max - overall_max), 0.0)
@@ -797,6 +833,18 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
+@functools.lru_cache(maxsize=8)
+def _get_device_max_smem(device_idx: int) -> int:
+    if not (current_platform.is_cuda() and torch.cuda.is_available()):
+        return 65536
+    props = torch.cuda.get_device_properties(device_idx)
+    return getattr(
+        props,
+        "shared_memory_per_block_optin",
+        getattr(props, "shared_memory_per_block", 65536),
+    )
+
+
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     """Detect Gemma3 models via unique (head_size, sliding_window) signature.
 
@@ -807,15 +855,22 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _is_gemma4_swa(head_size: int, sliding_window: int) -> bool:
+    """Detect Gemma 4 sliding-window attention (head_size=256, window=512 or 1024)."""
+    return head_size == 256 and sliding_window in (512, 1024)
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization."""
-    if _is_gemma3_attention(head_size, sliding_window):
-        # Gemma3: use 32 for decode (default is 16)
+    """Select tile size with Gemma3/4-specific optimization."""
+    if _is_gemma3_attention(head_size, sliding_window) or _is_gemma4_swa(
+        head_size, sliding_window
+    ):
+        # Gemma3 and Gemma4: use 32 for decode (default is 16)
         return 32
 
     # Default behavior
@@ -964,21 +1019,98 @@ def unified_attention(
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
 
-    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
-    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
-    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
-    tuned_large_head = (
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    dev_idx = q.device.index if q.device.index is not None else 0
+    max_smem = _get_device_max_smem(dev_idx)
+
+    # Require max_seqlen_q >= max(16, 32 // num_queries_per_kv) so short-query
+    # batches (e.g. MTP speculative verify with q=4) do not pad BLOCK_M=16 -> 32
+    # with masked-out rows.
+    min_q_for_large_head = max(16, 32 // num_queries_per_kv)
+    has_decode_tail = num_seqs > 1 and (q.shape[0] - max_seqlen_q) < (num_seqs - 1) * 16
+    # In 2D mode, grid size along dim 0 and 1 is total_num_q_blocks * num_kv_heads.
+    # To maintain sufficient grid occupancy across SMs for head_size=512 tuning
+    # (BLOCK_M=32, TILE_SIZE=64), require q.shape[0] * num_kv_heads >= 2048 (or
+    # q.shape[0] * q.shape[1] >= 8192 when num_kv_heads == 1). Small shapes below
+    # this threshold fallback to default TILE_SIZE=32 to maximize CTA parallelism.
+    enough_hd512_ctas = q.shape[0] * num_kv_heads >= 2048 or (
+        num_kv_heads == 1 and q.shape[0] * q.shape[1] >= 8192
+    )
+
+    # Select prefill tile size and warp count for head_size 256 and 512 based on
+    # device shared memory.
+    tuned_large_head = False
+    is_gemma4_large_head = head_size == 512 or _is_gemma4_swa(
+        head_size, sliding_window_val
+    )
+    if (
+        is_gemma4_large_head
+        and max_seqlen_q >= min_q_for_large_head
+        and num_queries_per_kv <= 16
+        and q.element_size() <= 2
+    ):
+        # Blackwell Datacenter (B100/B200/GB200/B300) with TMEM
+        if current_platform.is_device_capability_family(100):
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 2
+                TILE_SIZE_PREFILL = 128
+                tuned_large_head = True
+            elif head_size == 512 and enough_hd512_ctas:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 2
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+        # Hopper SM90 H100/H200, Ampere SM80 A100/A30, Orin SM87
+        elif max_smem >= 160000:
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 128
+                tuned_large_head = True
+            elif head_size == 512 and enough_hd512_ctas:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+        # Blackwell SM120/121 RTX 5090, Ada SM89 L4/4090, Ampere SM86 3090/A10
+        elif max_smem >= 100000:
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+            elif head_size == 512 and enough_hd512_ctas and not has_decode_tail:
+                BLOCK_M = 32
+                launch_num_warps = 4
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 32
+                tuned_large_head = True
+        # Volta SM70 V100 — 98,304 B SMEM
+        elif max_smem >= 96000 and head_size == 256:
+            BLOCK_M = 32
+            launch_num_warps = 8
+            launch_num_stages = 1
+            TILE_SIZE_PREFILL = 64
+            tuned_large_head = True
+    elif (
         head_size == 256
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
         and current_platform.is_device_capability_family(100)
-    )
-    if tuned_large_head:
+    ):
         BLOCK_M = 32
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
         launch_num_warps = 8
         launch_num_stages = 2
+        TILE_SIZE_PREFILL = 128
+        tuned_large_head = True
+
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -991,8 +1123,6 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
-
     # Compute chunked block size from sliding window if needed.
     chunk_size = -1
     if sliding_window_val > 0 and chunk_lookback > -1:
@@ -1001,17 +1131,17 @@ def unified_attention(
     elif sliding_window_val <= 0:
         chunk_lookback = -1
 
-    TILE_SIZE_PREFILL = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=True
-    )
+    if not tuned_large_head:
+        TILE_SIZE_PREFILL = _get_tile_size(
+            head_size, sliding_window_val, q.element_size(), is_prefill=True
+        )
+        if head_size == 512 and max_smem < 160000:
+            if max_smem < 96000:
+                TILE_SIZE_PREFILL = 16
+            launch_num_stages = 1
     TILE_SIZE_DECODE = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
-
-    # Wider KV tile for the tuned large-head path (see above). Only the 2D
-    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
-    if tuned_large_head:
-        TILE_SIZE_PREFILL = 128
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1088,6 +1218,26 @@ def unified_attention(
     )
     if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
+        use_3d = False
+
+    can_clamp_3d_swa = (
+        _is_gemma4_swa(head_size, sliding_window_val)
+        and sliding_window_val > 0
+        and chunk_lookback == -1
+        and use_causal
+        and not (use_per_seq_causal or use_mm_prefix or use_rswa)
+    )
+
+    # For short sliding windows where the window is smaller than the sequence
+    # length, keep 3D segmented decode (which clamps segments to the active
+    # window) for small batches, and switch to 2D once the active 2D decode
+    # CTAs (num_seqs * num_kv_heads) reach 128.
+    if (
+        use_3d
+        and can_clamp_3d_swa
+        and sliding_window_val < max_seqlen_k
+        and num_seqs * num_kv_heads >= 128
+    ):
         use_3d = False
 
     # The kernel signature is the same for 2D and 3D — only the launch
@@ -1204,6 +1354,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        CAN_CLAMP_3D_SWA=can_clamp_3d_swa,
         **launch_kwargs,
     )
 
@@ -1227,4 +1378,5 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            SLIDING_WINDOW=sliding_window_val if can_clamp_3d_swa else 0,
         )
