@@ -296,6 +296,46 @@ def test_v2_thinking_budget_clamps_oversized_budget():
     assert torch.all(out == 0)
 
 
+def test_v2_thinking_budget_stops_after_forced_end_sequence_complete():
+    """Once the complete forced end sequence is in the tail, stop forcing.
+
+    With distinct forced/natural end markers the natural-end early return never
+    fires, so without this guard the prefix-match alignment shifts after the
+    whole sequence is emitted and the kernel re-forces the first end token
+    forever (a repetition loop once the budget is exhausted).
+    """
+    req_states = _make_req_states([1, START, 10, 11, 12, END_A, END_B], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[13], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_does_not_restart_after_forced_end_sequence():
+    """Forcing must not restart once the forced end sequence has been emitted.
+
+    With distinct forced/natural end markers, a tail check alone stops forcing
+    only on the step right after the sequence; one ordinary token later the
+    budget still looks exhausted and the whole sequence would be forced again.
+    The completed forced sequence has to end reasoning like the natural marker.
+    """
+    req_states = _make_req_states(
+        [1, START, 10, 11, 12, END_A, END_B, 50], prompt_len=1
+    )
+    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[50], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
 def test_v2_thinking_budget_continues_end_prefix_from_prompt():
     """A resumed prompt ending with a partial forced-end marker must not
     restart the marker sequence and duplicate its first token."""
