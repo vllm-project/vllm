@@ -750,6 +750,34 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
 
+    def build_chat_params(
+        self,
+        request: Any,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+        default_template_kwargs: dict[str, Any] | None,
+        tool_dicts: list[dict[str, Any]] | None = None,
+    ) -> ChatParams:
+        """The chat params that preprocess_chat renders ``request`` with."""
+        mm_config = self.model_config.multimodal_config
+        default_template_kwargs = merge_kwargs(
+            default_template_kwargs,
+            dict(
+                tools=tool_dicts,
+                tokenize=(
+                    is_mistral_tokenizer(self.renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
+            ),
+        )
+        return request.build_chat_params(
+            default_template, default_template_content_format
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+        )
+
     async def preprocess_chat(
         self,
         request: Any,
@@ -769,26 +797,14 @@ class OnlineRenderer:
             media_io_kwargs=getattr(request, "media_io_kwargs", None),
             trust_request_mm_kwargs=self.trust_request_mm_kwargs,
         )
-        mm_config = self.model_config.multimodal_config
-
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=(
-                    is_mistral_tokenizer(renderer.tokenizer)
-                    or self.model_config.enable_prompt_embeds
-                ),
-            ),
-        )
 
         tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            default_template, default_template_content_format
-        ).with_defaults(
+        chat_params = self.build_chat_params(
+            request,
+            default_template,
+            default_template_content_format,
             default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            tool_dicts,
         )
 
         reuse_ids = _reused_prompt_token_ids(request, renderer, messages)

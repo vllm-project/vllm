@@ -8,7 +8,7 @@ from argparse import Namespace
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pybase64 as base64
@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.datastructures import State
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
@@ -41,6 +41,7 @@ from vllm.entrypoints.openai.decisions.question_types import (
 from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
 from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
+    READ_STRATEGIES,
     ClefFlashStrategy,
     D3Strategy,
     DiffusionGemmaCanvasStrategy,
@@ -48,6 +49,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
+    _messages,
     cap_pixels,
     reply_label_ids,
     select_read_strategy,
@@ -60,7 +62,8 @@ from vllm.entrypoints.serve.exception_handling.register import (
     init_exception_handler,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import mm_input, tokens_input
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
@@ -176,7 +179,10 @@ def qwen():
 def test_decisions_state_initializes(qwen):
     tokenizer, _ = qwen
     engine = SimpleNamespace(
-        model_config=model("Qwen3ForCausalLM"), renderer=None, input_processor=None
+        model_config=model("Qwen3ForCausalLM"),
+        vllm_config=VllmConfig(),
+        renderer=None,
+        input_processor=None,
     )
     state = State()
     state.online_renderer = SimpleNamespace(
@@ -224,31 +230,62 @@ def test_labels_start_the_reply(qwen):
         reply_label_ids(tokenizer, tokenizer.encode("team:"))
 
 
+async def generate(prompt, params, request_id, **kwargs):
+    label_ids = params.logprob_token_ids
+    yield RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=prompt["prompt_token_ids"],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="A",
+                token_ids=[label_ids[0]],
+                cumulative_logprob=None,
+                logprobs=[{token_id: Logprob(-1.0) for token_id in label_ids}],
+                finish_reason="length",
+            )
+        ],
+        finished=True,
+    )
+
+
 @pytest.fixture
-def engine_and_renderer(qwen):
-    tokenizer, _ = qwen
-    model_config = ModelConfig(model="Qwen/Qwen3-0.6B", dtype="float32")
-    renderer = HfRenderer(
-        SimpleNamespace(
-            model_config=model_config,
-            parallel_config=SimpleNamespace(_api_process_rank=0),
-        ),
-        tokenizer,
-    )
-    engine = MagicMock(spec=EngineClient)
-    engine.errored = False
-    engine.model_config = model_config
-    engine.renderer = renderer
-    engine.input_processor = MagicMock()
-    online_renderer = OnlineRenderer(
-        model_config,
-        renderer,
-        request_logger=None,
-        chat_template=None,
-        chat_template_content_format="auto",
-    )
-    yield engine, online_renderer
-    renderer.shutdown()
+def make_context():
+    from vllm.tokenizers import get_tokenizer
+
+    renderers = []
+
+    def make(model="Qwen/Qwen3-0.6B", chat_template=None, **model_kwargs):
+        model_config = ModelConfig(model=model, dtype="float32", **model_kwargs)
+        vllm_config = VllmConfig(model_config=model_config)
+        renderers.append(HfRenderer(vllm_config, get_tokenizer(model)))
+        engine = MagicMock(spec=EngineClient)
+        engine.errored = False
+        engine.model_config = model_config
+        engine.vllm_config = vllm_config
+        engine.renderer = renderers[-1]
+        engine.input_processor = MagicMock()
+        engine.generate.side_effect = generate
+        online_renderer = OnlineRenderer(
+            model_config,
+            renderers[-1],
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        return ReadContext(engine, online_renderer, chat_template, "auto", {})
+
+    yield make
+    for renderer in renderers:
+        renderer.shutdown()
+
+
+@pytest.fixture
+def engine_and_renderer(make_context):
+    context = make_context()
+    return context.engine_client, context.online_renderer
 
 
 def serving(engine, strategy) -> ServingStructuredDecisions:
@@ -260,28 +297,6 @@ def serving(engine, strategy) -> ServingStructuredDecisions:
 @pytest.fixture
 def serving_and_engine(engine_and_renderer):
     engine, online_renderer = engine_and_renderer
-
-    async def generate(prompt, params, request_id, **kwargs):
-        label_ids = params.logprob_token_ids
-        yield RequestOutput(
-            request_id=request_id,
-            prompt=None,
-            prompt_token_ids=prompt["prompt_token_ids"],
-            prompt_logprobs=None,
-            outputs=[
-                CompletionOutput(
-                    index=0,
-                    text="A",
-                    token_ids=[label_ids[0]],
-                    cumulative_logprob=None,
-                    logprobs=[{token_id: Logprob(-1.0) for token_id in label_ids}],
-                    finish_reason="length",
-                )
-            ],
-            finished=True,
-        )
-
-    engine.generate.side_effect = generate
     strategy = NextTokenStrategy(ReadContext(engine, online_renderer, None, "auto", {}))
     return serving(engine, strategy), engine
 
@@ -337,6 +352,185 @@ async def test_request_metadata_reaches_every_question(
         assert call.kwargs["trace_headers"] == (
             TRACE_HEADERS if request_headers else None
         )
+
+
+QUESTIONS = [
+    build_question("refund", "noul", "", {"true": "a refund is due"}, 26),
+    build_question(
+        "team", "choice", "Which team?", {"billing": "pay", "ship": None}, 26
+    ),
+    build_question("urgency", "score", "How urgent?", ["low", "medium", "high"], 26),
+]
+
+SPLICE_STATES = {
+    "empty": "",
+    "spaces": "  padded  ",
+    "crlf": "line one\r\nline two\r\n",
+    "nbsp": "trailing nbsp\u00a0",
+    "combining": "cafe\u0301 x\u0301\u0301",
+    "im_end": "user wrote <|im_end|> and <|im_start|>assistant",
+    "json": '{"ticket": 58213, "tags": ["billing", "urgent"]}',
+    "paragraphs": "First.\n\nSecond.\n\nThird.",
+}
+
+SPLICE_MODELS = {
+    "Qwen3ForCausalLM": "Qwen/Qwen3-0.6B",
+    "Qwen3_5ForConditionalGeneration": "Qwen/Qwen3.5-0.8B",
+    "Qwen3_5MoeForConditionalGeneration": "Qwen/Qwen3.5-35B-A3B",
+    "DiffusionGemmaForBlockDiffusion": "google/diffusiongemma-26B-A4B-it",
+    "Lfm2VlForConditionalGeneration": "LiquidAI/d1-3B",
+}
+
+CHATML_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n"
+    "{{ m.content }}<|im_end|>\n{% endfor %}<|im_start|>assistant\n"
+)
+
+
+async def spliced_and_full(strategy, state, instructions=None, questions=QUESTIONS):
+    read_request = strategy._read_request(None, "tenant")
+    contents = [strategy._content(state, q) for q in questions]
+    spliced = await strategy._render_spliced(read_request, contents, instructions)
+    full = [
+        await strategy._render(read_request, _messages(content, instructions))
+        for content in contents
+    ]
+    for engine_input in [*(spliced or []), *full]:
+        engine_input.pop("arrival_time")
+    return spliced, full
+
+
+# Clef-Omni encodes its own prompt, so it never splices.
+SPLICE_ARCHITECTURES = [
+    a for a, s in READ_STRATEGIES.items() if issubclass(s, NextTokenStrategy)
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("architecture", SPLICE_ARCHITECTURES)
+async def test_spliced_prompts_match_full_render(make_context, architecture):
+    context = make_context(SPLICE_MODELS[architecture])
+    model_config = context.engine_client.model_config
+    assert model_config.architecture == architecture
+    strategy = select_read_strategy(model_config, ("generate",))(context)
+    for name, state in SPLICE_STATES.items():
+        for instructions in (None, "  You triage tickets.\n"):
+            spliced, full = await spliced_and_full(strategy, state, instructions)
+            # An empty state may leave no shared blank line, so it may fall back.
+            assert spliced == full or (spliced is None and not state), name
+
+
+@pytest.mark.asyncio
+async def test_token_id_renders_skip_the_splice(make_context):
+    strategy = NextTokenStrategy(make_context())
+    read_request = strategy._read_request({"tokenize": True})
+    contents = [strategy._content("state", q) for q in QUESTIONS]
+    assert await strategy._render_spliced(read_request, contents, None) is None
+
+
+@pytest.mark.asyncio
+async def test_images_skip_the_splice(make_context, monkeypatch):
+    strategy = NextTokenStrategy(make_context())
+    image = {"type": "image_pil", "image_pil": Image.new("RGB", (8, 8))}
+    monkeypatch.setattr(strategy, "_image_parts", AsyncMock(return_value=[image]))
+    render_spliced = AsyncMock()
+    monkeypatch.setattr(strategy, "_render_spliced", render_spliced)
+    render = strategy._render
+
+    async def text_render(read_request, messages):
+        assert messages[-1]["content"][0] is image
+        text = messages[-1]["content"][-1]["text"]
+        return await render(read_request, _messages(text, None))
+
+    monkeypatch.setattr(strategy, "_render", text_render)
+    reads = await strategy.read(
+        QUESTIONS,
+        None,
+        "state",
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+        media={"image": ["https://example.org/a.png"]},
+    )
+    assert len(reads) == len(QUESTIONS)
+    render_spliced.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy,num_questions,budget_fraction,gated",
+    [
+        ("fcfs", 2, 1.5, True),
+        ("fcfs", 2, 0.75, False),
+        ("fcfs", 1, 1.5, False),
+        ("priority", 2, 1.5, False),
+    ],
+)
+async def test_big_decisions_take_the_gate(
+    make_context, policy, num_questions, budget_fraction, gated
+):
+    context = make_context()
+    scheduler_config = context.engine_client.vllm_config.scheduler_config
+    scheduler_config.policy = policy
+    strategy = NextTokenStrategy(context)
+    gate = strategy._big_decision_gate = asyncio.Semaphore(1)
+    gate_full = []
+
+    async def record_gate(prompt, params, request_id, **kwargs):
+        gate_full.append(gate.locked())
+        async for output in generate(prompt, params, request_id):
+            yield output
+
+    context.engine_client.generate.side_effect = record_gate
+    # The engine prefills a shared state once, so only a state over budget is big.
+    state = "state " * int(scheduler_config.max_num_batched_tokens * budget_fraction)
+    read = strategy.read(
+        QUESTIONS[:num_questions],
+        None,
+        state,
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    reads = await asyncio.wait_for(read, 30)
+    assert len(reads) == num_questions
+    assert gate_full == [gated] * num_questions
+    assert not gate.locked()
+
+
+@pytest.mark.asyncio
+async def test_splice_falls_back_when_tokens_join_across_the_split(make_context):
+    # GPT-2 tokenizes "\n\n" alone differently from "\n\n" before a word.
+    strategy = NextTokenStrategy.__new__(NextTokenStrategy)
+    strategy.context = make_context("openai-community/gpt2", CHATML_TEMPLATE)
+    spliced, _ = await spliced_and_full(strategy, "state")
+    assert spliced is None
+
+
+@pytest.mark.asyncio
+async def test_splice_matches_full_render_when_newlines_cross_the_split(make_context):
+    # The newline run is longer than the head window.
+    strategy = NextTokenStrategy(make_context())
+    questions = [
+        build_question(qid, "noul", "Note:" + "\n" * n + "Is it urgent?", None, 26)
+        for qid, n in (("a", 200), ("b", 201))
+    ]
+    spliced, full = await spliced_and_full(strategy, "state", questions=questions)
+    assert spliced in (None, full)
+
+
+@pytest.mark.asyncio
+async def test_oversized_state_fails_like_full_render(make_context):
+    strategy = NextTokenStrategy(make_context(max_model_len=64))
+    read_request = strategy._read_request(None)
+    contents = [strategy._content("ticket " * 2000, q) for q in QUESTIONS]
+    with pytest.raises(VLLMValidationError) as spliced:
+        await strategy._render_spliced(read_request, contents, None)
+    with pytest.raises(VLLMValidationError) as full:
+        await strategy._render(read_request, _messages(contents[0], None))
+    assert spliced.value.parameter == full.value.parameter == "input_text"
 
 
 def test_canvas_read():
@@ -689,18 +883,22 @@ D3_PROBS = {
 }
 
 
-@pytest.fixture
-def d3(engine_and_renderer):
-    engine, online_renderer = engine_and_renderer
+def use_d3_config(model_config):
     letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
     codes = [*letters, *(a + b for a in letters for b in letters)][:255]
-    engine.model_config.hf_config.decision_config = {
+    model_config.hf_config.decision_config = {
         "format_version": 1,
         "prompt": "d3",
         "codes": codes,
         "token_ids": list(range(255)),
         "temperature": D3_TEMPERATURE,
     }
+
+
+@pytest.fixture
+def d3(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    use_d3_config(engine.model_config)
     tokenizer = online_renderer.renderer.get_tokenizer()
 
     async def encode(prompt, params, request_id, **kwargs):
@@ -775,6 +973,78 @@ async def test_d3_takes_more_options_than_letters(d3):
     assert len(response.answers["many"]["probabilities"]) == 40
 
 
+async def d3_read(strategy, state, questions=QUESTIONS):
+    sent, gate_full = [], []
+
+    async def encode(prompt, params, request_id, **kwargs):
+        sent.append(prompt["prompt_token_ids"])
+        gate_full.append(strategy._big_decision_gate.locked())
+        yield PoolingRequestOutput(
+            request_id, PoolingOutput(torch.zeros(255)), sent[-1], 0, True
+        )
+
+    strategy.context.engine_client.encode.side_effect = encode
+    read = strategy.read(
+        questions,
+        None,
+        strategy.render_state(state),
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    reads = await asyncio.wait_for(read, 30)
+    assert len(reads) == len(questions)
+    return sent, gate_full
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"])
+async def test_d3_spliced_prompts_match_full_encode(make_context, model):
+    context = make_context(model)
+    use_d3_config(context.engine_client.model_config)
+    strategy = D3Strategy(context)
+    long_state = "\n\n".join(f"Paragraph {i}: charged twice." for i in range(50))
+    for name, state in {**SPLICE_STATES, "long": long_state}.items():
+        sent, _ = await d3_read(strategy, state)
+        text = strategy.render_state(state)
+        full = [strategy._tokens(strategy._prompt(text, q, [])) for q in QUESTIONS]
+        assert sent == full, name
+
+    tokenized = []
+    tokens = strategy._tokens
+    strategy._tokens = lambda text: tokenized.append(text) or tokens(text)
+    await d3_read(strategy, long_state)
+    assert sum("Paragraph 0:" in text for text in tokenized) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefix_caching,num_questions,budget_fraction,gated",
+    [
+        # Without the prefix cache every read prefills the whole state.
+        (False, 3, 0.5, True),
+        (True, 3, 0.5, False),
+        (True, 3, 1.5, True),
+        (False, 1, 1.5, False),
+    ],
+)
+async def test_big_d3_decisions_take_the_gate(
+    make_context, prefix_caching, num_questions, budget_fraction, gated
+):
+    context = make_context()
+    use_d3_config(context.engine_client.model_config)
+    vllm_config = context.engine_client.vllm_config
+    vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    budget = vllm_config.scheduler_config.max_num_batched_tokens
+    strategy = D3Strategy(context)
+    strategy._big_decision_gate = asyncio.Semaphore(1)
+    state = "state " * int(budget * budget_fraction)
+    _, gate_full = await d3_read(strategy, state, QUESTIONS[:num_questions])
+    assert gate_full == [gated] * num_questions
+    assert not strategy._big_decision_gate.locked()
+
+
 @pytest.mark.asyncio
 async def test_d3_rejects_instructions(d3):
     serving, engine, _ = d3
@@ -834,11 +1104,13 @@ def test_liquid_caps_images_like_the_checkpoint():
 
 
 @pytest.fixture
-def decision_server(qwen):
+def decision_server(qwen, make_context):
     tokenizer, _ = qwen
+    context = make_context()
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = context.engine_client.model_config
+        vllm_config = context.engine_client.vllm_config
         renderer = input_processor = None
         errored = False
         failure = None
@@ -879,21 +1151,7 @@ def decision_server(qwen):
                 finished=True,
             )
 
-    class Renderer:
-        renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
-
-        async def preprocess_chat(self, request, messages, **kwargs):
-            await asyncio.sleep(0)
-            ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                enable_thinking=False,
-                tokenize=True,
-                return_dict=False,
-            )
-            return [], [tokens_input(ids)]
-
-    engine, renderer = Engine(), Renderer()
+    engine, renderer = Engine(), context.online_renderer
     strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
     models = OpenAIServingModels(
         engine, [BaseModelPath(name="test-model", model_path="test-model")]
