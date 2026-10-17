@@ -31,6 +31,7 @@ from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
 from vllm.envs import enable_envs_cache
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -70,6 +71,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
+    EngineCoreRequestError,
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
@@ -1942,6 +1944,13 @@ class EngineCoreProc(EngineCore):
                             # drops the stale entry, client resends with data).
                             self._handle_mm_cache_miss(req, e)
                             continue
+                        except VLLMValidationError as e:
+                            # Note(arpera):
+                            # Currently we validate in engine core
+                            # only if request uses the same structured output backend
+                            # as engine core latched
+                            self._handle_request_validation_error(req, e)
+                            continue
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
@@ -2093,6 +2102,33 @@ class EngineCoreProc(EngineCore):
             "Unexpected error pre-processing request %s", request.request_id
         )
         self._send_error_outputs_to_client([request.request_id], request.client_index)
+
+    def _handle_request_validation_error(
+        self, request: EngineCoreRequest, error: VLLMValidationError
+    ) -> None:
+        logger.info(
+            "Request %s failed validation: %s", request.request_id, error
+        )
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                            request_error=EngineCoreRequestError(
+                                code="validation_error",
+                                message=str(error),
+                            ),
+                        )
+                    ],
+                ),
+            )
+        )
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
