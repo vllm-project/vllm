@@ -45,6 +45,8 @@ const PYTHON_ONLY: &[&str] = &[
     "--plot-timeline",
     "--timeline-itl-thresholds",
     // misc python-side controls
+    "--cancellation-delay",
+    "--cancellation-rate",
     "--hf-name",
     "--no-stream",
     "--probe-request-rate",
