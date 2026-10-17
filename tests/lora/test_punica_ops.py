@@ -639,3 +639,49 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+def test_torch_ops_respect_no_lora_index():
+    """The torch ops (CPU path) must treat lora index -1 as "no lora".
+
+    Regression for #62225: negative indexing silently selected the last
+    stacked slot, so base-model requests batched with LoRA requests were
+    served the adapter's output.
+    """
+    import vllm.lora.ops.torch_ops as torch_ops
+
+    set_random_seed(0)
+    slots, in_dim, out_dim, rank = 2, 3, 5, 2
+    lora_a = torch.randn(slots, 1, rank, in_dim) * 0.1
+    lora_b = torch.randn(slots, 1, out_dim, rank) * 0.1
+    x = torch.randn(4, in_dim)
+    indices = torch.tensor([-1, 0, 1, -1])
+
+    # shrink: inactive rows carry no adapter activations.
+    buf = torch.full((4, rank), 7.0)
+    torch_ops.bgmv_shrink(x, lora_a, buf, indices, 1.0)
+    assert buf[0].abs().sum().item() == 0
+    assert buf[3].abs().sum().item() == 0
+
+    # expand add_inputs=True: inactive rows stay untouched, active rows
+    # match a manual two-stage matmul.
+    y = torch.full((4, out_dim), 3.0)
+    torch_ops.bgmv_expand(buf, lora_b, y, indices, add_inputs=True)
+    assert torch.equal(y[0], torch.full((out_dim,), 3.0))
+    assert torch.equal(y[3], torch.full((out_dim,), 3.0))
+    ref = (x[1] @ lora_a[0, 0].T) @ lora_b[0, 0].T
+    assert torch.allclose(y[1] - 3.0, ref.to(y.dtype), atol=1e-5)
+
+    # expand add_inputs=False: inactive rows keep their prior values.
+    y2 = torch.full((4, out_dim), 5.0)
+    torch_ops.bgmv_expand(buf, lora_b, y2, indices, add_inputs=False)
+    assert torch.equal(y2[0], torch.full((out_dim,), 5.0))
+    assert torch.allclose(y2[1], ref.to(y2.dtype), atol=1e-5)
+
+    # expand_slice, both write modes.
+    y3 = torch.full((4, out_dim), 9.0)
+    torch_ops.bgmv_expand_slice(buf, lora_b, y3, indices, 0, out_dim, add_inputs=False)
+    assert torch.equal(y3[0], torch.full((out_dim,), 9.0))
+    y4 = torch.full((4, out_dim), 1.0)
+    torch_ops.bgmv_expand_slice(buf, lora_b, y4, indices, 0, out_dim, add_inputs=True)
+    assert torch.equal(y4[3], torch.full((out_dim,), 1.0))
