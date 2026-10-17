@@ -4,49 +4,56 @@
 
 The CUDA kernel in csrc only builds for CUDA 13, so on ROCm every Qwen3.5 GDN layer's
 speculative-decode step runs the unfused path: ~8 small copy/cat/fill kernels around the
-recurrent kernel plus the gated RMSNorm. This kernel does the post-conv work in one launch.
-One program per request and value head reads q/k/v, the output gate and a/b in place from the
-projections, runs the gated delta-rule update over the request's tokens (same state reads and
-writes as ``fused_sigmoid_gating_delta_rule_update``: start from the state of the last accepted
-token, store the state after every token, slot index <= 0 means no state), applies the gated
-RMSNorm and writes the out_proj input.
+recurrent kernel plus the gated RMSNorm. This does the post-conv work in two launches.
+The update kernel reads q/k/v and a/b in place from the projections and runs the gated
+delta-rule update over each request's tokens (same state reads and writes as
+``fused_sigmoid_gating_delta_rule_update``: start from the state of the last accepted token,
+store the state after every token, slot index <= 0 means no state). Like that kernel it tiles
+the value dimension, so a small batch still fills the GPU; every tile writes its outputs and
+their sum of squares. The epilogue then applies the gated RMSNorm, the only step that needs
+the whole value dimension, and writes the out_proj input.
 """
+
+import functools
 
 import torch
 
 from vllm.triton_utils import tl, triton
 
 
+@functools.cache
+def _num_cus(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
 @triton.jit
-def _fused_gdn_decode_post_conv_mtp_kernel(
+def _gdn_mtp_update_kernel(
     mixed_qkv,
     b,
     a,
-    z,
     A_log,
     dt_bias,
-    norm_weight,
     state,
     state_indices,
     cu_seqlens,
     num_accepted_tokens,
     out,
+    sum_sq,
     stride_qkv_row,
     stride_b_row,
     stride_a_row,
-    stride_z_row,
     stride_state_slot,
     stride_indices_row,
     num_indices_per_row,
     scale,
-    eps,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
-    SIGMOID_GATE: tl.constexpr,
+    BV: tl.constexpr,
 ):
-    i_n, i_hv = tl.program_id(0), tl.program_id(1)
+    i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    NV: tl.constexpr = V // BV
     i_h = i_hv // (HV // H)
     bos = tl.load(cu_seqlens + i_n).to(tl.int64)
     num_tokens = tl.load(cu_seqlens + i_n + 1).to(tl.int64) - bos
@@ -54,22 +61,23 @@ def _fused_gdn_decode_post_conv_mtp_kernel(
         return
 
     o_k = tl.arange(0, K)
-    o_v = tl.arange(0, V)
+    o_v = i_v * BV + tl.arange(0, BV)
     p_out = out + (bos * HV + i_hv) * V + o_v
+    p_sum_sq = sum_sq + (bos * HV + i_hv) * NV + i_v
     accepted = tl.load(num_accepted_tokens + i_n).to(tl.int64)
     p_src = state_indices + i_n * stride_indices_row + accepted - 1
     has_src = (accepted > 0) & (accepted <= num_indices_per_row)
     src = tl.load(p_src, mask=has_src, other=0).to(tl.int64)
     if src <= 0:
         for t in range(num_tokens):
-            tl.store(p_out + t * HV * V, tl.zeros([V], dtype=out.dtype.element_ty))
+            tl.store(p_out + t * HV * V, tl.zeros([BV], dtype=out.dtype.element_ty))
+            tl.store(p_sum_sq + t * HV * NV, 0.0)
         return
 
     p_state = i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     b_h = tl.load(state + src * stride_state_slot + p_state).to(tl.float32)
     neg_A = -tl.exp(tl.load(A_log + i_hv).to(tl.float32))
     bias = tl.load(dt_bias + i_hv).to(tl.float32)
-    w = tl.load(norm_weight + o_v).to(tl.float32)
     for t in range(num_tokens):
         row = bos + t
         p_qkv = mixed_qkv + row * stride_qkv_row
@@ -86,21 +94,49 @@ def _fused_gdn_decode_post_conv_mtp_kernel(
         b_v = (b_v - tl.sum(b_h * b_k[None, :], 1)) * beta
         b_h += b_v[:, None] * b_k[None, :]
         # Rounded like the unfused path, whose recurrent kernel stores it first.
-        b_o = tl.sum(b_h * b_q[None, :], 1).to(out.dtype.element_ty).to(tl.float32)
-
-        b_z = tl.load(z + row * stride_z_row + i_hv * V + o_v).to(tl.float32)
-        if SIGMOID_GATE:
-            gate = tl.sigmoid(b_z)
-        else:
-            gate = b_z * tl.sigmoid(b_z)
-        rstd = tl.rsqrt(tl.sum(b_o * b_o) / V + eps)
-        y = b_o * rstd * w * gate
-        tl.store(p_out + t * HV * V, y.to(out.dtype.element_ty))
+        b_o = tl.sum(b_h * b_q[None, :], 1).to(out.dtype.element_ty)
+        tl.store(p_out + t * HV * V, b_o)
+        b_o = b_o.to(tl.float32)
+        tl.store(p_sum_sq + t * HV * NV, tl.sum(b_o * b_o))
 
         dst = tl.load(state_indices + i_n * stride_indices_row + t).to(tl.int64)
         if dst > 0:
             p_dst = state + dst * stride_state_slot + p_state
             tl.store(p_dst, b_h.to(state.dtype.element_ty))
+
+
+@triton.jit
+def _gdn_mtp_gated_rmsnorm_kernel(
+    out,
+    sum_sq,
+    z,
+    norm_weight,
+    cu_seqlens,
+    stride_z_row,
+    eps,
+    HV: tl.constexpr,
+    V: tl.constexpr,
+    NV: tl.constexpr,
+    SIGMOID_GATE: tl.constexpr,
+):
+    i_n, i_hv, t = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+    if t >= tl.load(cu_seqlens + i_n + 1).to(tl.int64) - bos:
+        return
+
+    row = bos + t
+    o_v = tl.arange(0, V)
+    p_out = out + (row * HV + i_hv) * V + o_v
+    b_o = tl.load(p_out).to(tl.float32)
+    p_sum_sq = sum_sq + (row * HV + i_hv) * NV + tl.arange(0, NV)
+    rstd = tl.rsqrt(tl.sum(tl.load(p_sum_sq)) / V + eps)
+    b_z = tl.load(z + row * stride_z_row + i_hv * V + o_v).to(tl.float32)
+    if SIGMOID_GATE:
+        gate = tl.sigmoid(b_z)
+    else:
+        gate = b_z * tl.sigmoid(b_z)
+    w = tl.load(norm_weight + o_v).to(tl.float32)
+    tl.store(p_out, (b_o * rstd * w * gate).to(out.dtype.element_ty))
 
 
 def fused_gdn_decode_post_conv_mtp_triton(
@@ -127,33 +163,53 @@ def fused_gdn_decode_post_conv_mtp_triton(
     HV, V = out.shape[-2:]
     K = state.shape[-1]
     H = (mixed_qkv.shape[-1] - HV * V) // (2 * K)
-    _fused_gdn_decode_post_conv_mtp_kernel[(cu_seqlens.numel() - 1, HV)](
+    num_requests = cu_seqlens.numel() - 1
+    # Tile V only while the GPU needs more programs: 32 rows per program while there are fewer
+    # (request, value head) pairs than CUs, 64 up to 4x the CUs, else one tile per value head
+    # (tuned on MI300X and MI350X).
+    heads, num_cus = num_requests * HV, _num_cus(out.device)
+    BV = 32 if heads < num_cus else 64 if heads <= 4 * num_cus else V
+    sum_sq = torch.empty(
+        (out.shape[0], HV, V // BV), dtype=torch.float32, device=out.device
+    )
+    _gdn_mtp_update_kernel[(V // BV, num_requests, HV)](
         mixed_qkv,
         b,
         a,
-        output_gate,
         A_log,
         dt_bias,
-        norm_weight,
         state,
         state_indices,
         cu_seqlens,
         num_accepted_tokens,
         out,
+        sum_sq,
         mixed_qkv.stride(0),
         b.stride(0),
         a.stride(0),
-        output_gate.stride(0),
         state.stride(0),
         state_indices.stride(0),
         state_indices.shape[1],
         scale,
-        norm_eps,
         H=H,
         HV=HV,
         K=K,
         V=V,
-        SIGMOID_GATE=output_gate_activation == "sigmoid",
+        BV=BV,
         num_warps=4,
+    )
+    _gdn_mtp_gated_rmsnorm_kernel[(num_requests, HV, state_indices.shape[1])](
+        out,
+        sum_sq,
+        output_gate,
+        norm_weight,
+        cu_seqlens,
+        output_gate.stride(0),
+        norm_eps,
+        HV=HV,
+        V=V,
+        NV=V // BV,
+        SIGMOID_GATE=output_gate_activation == "sigmoid",
+        num_warps=2,
     )
     return out
