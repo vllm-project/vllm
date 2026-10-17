@@ -55,6 +55,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -1105,7 +1106,7 @@ class MuseGlimmerMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        x = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
