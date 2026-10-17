@@ -9,6 +9,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -309,7 +312,26 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        if (
+            current_platform.is_device_capability_family(120)
+            and config.weight_shape[0] % 128 != 0
+        ):
+            return (
+                False,
+                "SM12x CUTLASS block FP8 requires the weight output "
+                f"dimension to be divisible by 128, got "
+                f"{config.weight_shape[0]}.",
+            )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        params = self._get_layer_params(layer)
+        if params.block_scale.dtype == torch.float8_e8m0fnu:
+            replace_parameter(
+                layer, params.block_scale_attr, _upcast_e8m0_to_fp32(params.block_scale)
+            )
 
     def apply_block_scaled_mm(
         self,
