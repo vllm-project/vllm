@@ -827,6 +827,14 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            canvas_tokens = self._final_prefill_spec_tokens(
+                request,
+                request.num_computed_tokens,
+                num_new_tokens,
+                min(token_budget, input_budget - draft_slots),
+            )
+            num_new_tokens += len(canvas_tokens)
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -907,6 +915,8 @@ class Scheduler(SchedulerInterface):
             prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
+            if canvas_tokens:
+                scheduled_spec_decode_tokens[request_id] = canvas_tokens
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
@@ -1155,6 +1165,7 @@ class Scheduler(SchedulerInterface):
                 duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
+                canvas_tokens = []
 
                 # SWA bounded replay: recompute the tail of the hit without
                 # rewriting its cached KV. An async load replays once the KV
@@ -1272,6 +1283,14 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                    canvas_tokens = self._final_prefill_spec_tokens(
+                        request,
+                        num_computed_tokens,
+                        num_new_tokens,
+                        request_token_budget,
+                    )
+                    num_new_tokens += len(canvas_tokens)
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1434,6 +1453,8 @@ class Scheduler(SchedulerInterface):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                if canvas_tokens:
+                    scheduled_spec_decode_tokens[request_id] = canvas_tokens
                 # Must use the SAME predicate as the deferral gate in the
                 # waiting loop (`num_computed_tokens < num_tokens - 1`).
                 # Stamping on `< num_prompt_tokens` instead let a request with
@@ -1690,6 +1711,15 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _final_prefill_spec_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+        token_budget: int,
+    ) -> list[int]:
+        return []
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER

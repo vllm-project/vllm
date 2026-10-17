@@ -7,6 +7,7 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
@@ -88,7 +89,9 @@ def create_scheduler(
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
+    diffusion_single_pass_reads: bool = False,
     scheduler_cls: type[Scheduler] | None = None,
+    device_config: DeviceConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -202,9 +205,13 @@ def create_scheduler(
     if diffusion_canvas_length is not None:
         # A diffusion checkpoint declares its canvas in the HF config.
         model_config.hf_config.canvas_length = diffusion_canvas_length
-        diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
+        diffusion_config = DiffusionConfig(
+            canvas_length=diffusion_canvas_length,
+            single_pass_reads=diffusion_single_pass_reads,
+        )
 
     vllm_config = VllmConfig(
+        device_config=device_config or DeviceConfig(),
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
