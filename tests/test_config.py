@@ -148,6 +148,32 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
     assert config.scheduler_config.disable_chunked_mm_input is expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-specific test")
+@pytest.mark.parametrize(
+    ("pin_memory", "expected"),
+    [(False, CUDAGraphMode.NONE), (True, CUDAGraphMode.PIECEWISE)],
+)
+def test_cpu_offload_without_pinned_memory_disables_cudagraphs(
+    monkeypatch, pin_memory, expected
+):
+    from vllm.platforms.cuda import CudaPlatform
+
+    monkeypatch.setattr(
+        CudaPlatform, "is_pin_memory_available", classmethod(lambda cls: pin_memory)
+    )
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+        offload_config=SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=1)),
+        parallel_config=SimpleNamespace(worker_cls="test-worker"),
+        model_config=None,
+        scheduler_config=SimpleNamespace(),
+    )
+
+    CudaPlatform.check_and_update_config(config)
+
+    assert config.compilation_config.cudagraph_mode == expected
+
+
 def _sampling_replay_config(
     *,
     return_sampling_mask: bool = True,
