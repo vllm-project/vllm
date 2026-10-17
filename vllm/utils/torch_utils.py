@@ -749,6 +749,25 @@ def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     return t.pin_memory() if is_pin_memory_available() else t
 
 
+def sync_copy_to_cpu(t: torch.Tensor) -> torch.Tensor:
+    """Blocking `t.cpu()` that does not stall other threads' CUDA calls.
+
+    A synchronous D2H copy into pageable memory holds the CUDA driver's
+    context lock until the stream's earlier work finishes, so every other
+    thread's launches, copies and event records wait too. Waiting on an
+    event does not hold that lock. Like `t.cpu()`, this waits for all work
+    queued on the current stream.
+    """
+    if not t.is_cuda or not is_pin_memory_available():
+        return t.cpu()
+    out = torch.empty(t.shape, dtype=t.dtype, device="cpu", pin_memory=True)
+    out.copy_(t, non_blocking=True)
+    event = torch.cuda.Event(blocking=True)
+    event.record()
+    event.synchronize()
+    return out
+
+
 def make_ndarray_with_pad(
     x: list[list[T]],
     pad: T,
