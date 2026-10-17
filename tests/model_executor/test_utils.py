@@ -161,6 +161,36 @@ def test_replace_parameter_does_not_rebind_plain_function_attribute() -> None:
     assert layer.weight.scale_for(3) == 6
 
 
+def test_gemma4_mtp_gather_cache_keeps_pointer_and_new_values(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models import gemma4_mtp
+    from vllm.model_executor.utils import register_derived_buffer
+
+    model = object.__new__(gemma4_mtp.Gemma4MTP)
+    torch.nn.Module.__init__(model)
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+    model.masked_embedding = SimpleNamespace(vocab_size=3)
+    register_derived_buffer(model, "_stable_full_lm_head_weight")
+    monkeypatch.setattr(gemma4_mtp, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        gemma4_mtp,
+        "tensor_model_parallel_all_gather",
+        lambda weight, dim: torch.cat((weight, weight), dim=dim),
+    )
+    first = model._get_full_lm_head_weight()
+    pointer = first.data_ptr()
+    for value in (1.0, 3.0, 1.0):
+        with torch.no_grad():
+            model.lm_head.weight.fill_(value)
+        model.post_weights_reload()
+        result = model._get_full_lm_head_weight()
+        assert result is first
+        assert result.data_ptr() == pointer
+        torch.testing.assert_close(result, torch.full((3, 2), value))
+    assert "_stable_full_lm_head_weight" not in model.state_dict()
+
+
 def test_replace_parameter_preserves_bound_method_attribute() -> None:
     """A callable already bound to another object must keep pointing at that
     object after replacement.
