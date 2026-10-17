@@ -35,6 +35,34 @@ class InputBuffers:
         )
 
 
+def make_num_logits_per_req(
+    num_reqs: int,
+    num_draft_tokens: np.ndarray | None,
+    num_bonus_tokens: int,
+) -> np.ndarray:
+    """Return how many logits rows each request owns.
+
+    A request contributes ``num_bonus_tokens`` rows plus one row per draft
+    token. Speculative decoding therefore has more logits rows than requests,
+    and an lm_head LoRA has to be repeated across that width.
+
+    Args:
+        num_reqs: Number of requests in the batch.
+        num_draft_tokens: Draft tokens scheduled for each request, or None
+            when the batch has no draft rows.
+        num_bonus_tokens: Newly sampled tokens per request. This is 1 for
+            ordinary decoding and larger when the model samples multiple
+            tokens per step.
+
+    Returns:
+        int32 array of shape ``[num_reqs]``.
+
+    """
+    if num_draft_tokens is None:
+        return np.full(num_reqs, num_bonus_tokens, dtype=np.int32)
+    return np.asarray(num_draft_tokens + num_bonus_tokens, dtype=np.int32)
+
+
 @dataclass
 class InputBatch:
     # batch_idx -> req_id
@@ -122,6 +150,10 @@ class InputBatch:
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] logits rows per request (bonus tokens + drafts). The lm_head
+    # LoRA mapping repeats each request id by this count.
+    num_logits_per_req: np.ndarray | None = None
 
     @classmethod
     def make_dummy(
@@ -214,6 +246,7 @@ class InputBatch:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            num_logits_per_req=make_num_logits_per_req(num_reqs, None, 1),
             has_structured_output_reqs=False,
             prompt_lens=None,
             max_query_len=max_query_len,
