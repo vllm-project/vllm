@@ -3588,6 +3588,15 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_draft_context_window_requires_dflash_or_dspark():
+    with pytest.raises(ValidationError, match="draft_context_window is only"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=3,
+            draft_context_window=32768,
+        )
+
+
 def _watermarked_vllm_config() -> VllmConfig:
     config = object.__new__(VllmConfig)
     config.watermark_config = WatermarkConfig(key=42)
