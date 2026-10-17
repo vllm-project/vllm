@@ -361,14 +361,20 @@ def find_matching_patterns(
     if matches:
         return [set(matches)]
 
-    proj_name = layer_name.split(".")[-1]
-    if proj_name not in fused_mapping:
+    # Find which fused layer the full layer name refers to.
+    fused_name = next(
+        (
+            name
+            for name in fused_mapping
+            if layer_name == name or layer_name.endswith(f".{name}")
+        ),
+        None,
+    )
+    if fused_name is None:
         return [set()]
 
-    shard_names = [
-        layer_name.replace(proj_name, shard_proj_name)
-        for shard_proj_name in fused_mapping[proj_name]
-    ]
+    parent = layer_name.removesuffix(fused_name)
+    shard_names = [parent + shard_name for shard_name in fused_mapping[fused_name]]
     per_shard_matches = [
         {
             pattern
