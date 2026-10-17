@@ -32,9 +32,8 @@ def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
 # kernel and move as one when cmake/external_projects/tml_fa4.cmake is bumped.
 #
 # SM12x is listed as unsupported rather than allow-listing the architectures
-# that work: SM8x also lacks a paged-KV FA4 forward, but Inkling's shared Triton
-# relative-attention kernels have been shown to serve it end-to-end (#55078), so
-# it is left open for that path.
+# that work: SM8x also lacks a paged-KV FA4 forward, but is left open for the
+# Triton relative-attention fallback proposed in #55078.
 _NO_PAGED_KV_MAJORS = (12,)
 _SHEARED_BIAS_MAJORS = (10, 11)
 _SPLIT_KV_MAJORS = (10, 11)
