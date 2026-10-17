@@ -292,9 +292,12 @@ class NixlBaseConnectorWorker:
         Each Nx5 strided desc covers one region, so slicing it slices every block.
         """
         fa_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
-        fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
+        fa_num_splits = (
+            len(plan.source_ranks_per_group[fa_idx]) if fa_idx is not None else 1
+        )
 
         starts = self._strided_desc_starts(src_blocks_data)
         num_descs = int(src_blocks_data[:, 4].sum())
@@ -2119,11 +2122,18 @@ class NixlBaseConnectorWorker:
             "Remote KV cache base addresses must not be empty."
         )
         fa_group_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            (i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)),
+            None,
         )
         # SPLIT regions read their head slice from this many remote ranks at a
-        # per-rank offset; REPLICATE regions read the whole block once.
-        split_reads = len(plan.source_ranks_per_group[fa_group_idx])
+        # per-rank offset; REPLICATE regions read the whole block once. Without
+        # an attention group (e.g. Mamba-only) no FA desc is ever read, but each
+        # must still fit in one remote block.
+        split_reads = (
+            len(plan.source_ranks_per_group[fa_group_idx])
+            if fa_group_idx is not None
+            else len(plan.all_source_ranks)
+        )
         region_num_blocks = nixl_agent_meta.region_num_blocks or [
             nixl_agent_meta.num_blocks
         ] * len(nixl_agent_meta.kv_caches_base_addr)
