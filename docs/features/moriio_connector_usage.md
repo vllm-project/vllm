@@ -153,6 +153,9 @@ In WRITE mode, the prefill and decode instances can use different tensor-paralle
 
 The number of KV heads must be a multiple or a divisor of each TP size. Both instances must advertise their KV head and recurrent-state layouts in the MoRIIO handshake, so they must run a vLLM version with this support; otherwise a transfer between different TP sizes fails with an error naming the layer.
 
+!!! note
+    On a single node with the xGMI backend, a larger decode TP size does not work yet: MoRI cannot open a session from a prefill rank to memory on a decode rank's second or later visible GPU when the prefill rank sees fewer GPUs, and the transfer fails with an error naming the decode rank. A larger prefill TP size works on xGMI, and the RDMA backend is not affected.
+
 ### Transport configuration
 
 MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.
