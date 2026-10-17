@@ -819,7 +819,7 @@ def test_idle_graph_capture_waits_for_traffic_and_runs_one_item():
     core.scheduler.pause_state = PauseState.UNPAUSED
     core.model_executor.is_sleeping = False
     core._sleep_graph_pending = True
-    core.model_executor.collective_rpc.return_value = [2]
+    core.model_executor.collective_rpc.return_value = [(False, 2)]
     assert core._run_sleep_graph_capture() is False
     core.model_executor.collective_rpc.assert_not_called()
     core._sleep_graph_traffic = True
@@ -828,6 +828,38 @@ def test_idle_graph_capture_waits_for_traffic_and_runs_one_item():
     assert core._sleep_graph_pending
     core.scheduler.has_requests.return_value = True
     assert core._run_sleep_graph_capture() is False
+
+
+def test_idle_graph_capture_rank_failure_converges_all_ranks(monkeypatch):
+    """One rank's recapture failure must discard graphs on every rank."""
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    # Rank 1 hit a recoverable allocation failure and already discarded its
+    # graphs; rank 0 captured fine and still has pending descriptors.
+    core.model_executor.collective_rpc.return_value = [(False, 2), (True, 0)]
+    assert core._run_sleep_graph_capture() is True
+    calls = [c.args[0] for c in core.model_executor.collective_rpc.call_args_list]
+    assert calls == ["recapture_sleep_graph", "discard_sleep_graphs"]
+    # Pending stays cleared until the next full wake re-arms it: no request
+    # may observe asymmetric graph availability across ranks.
+    assert not core._sleep_graph_pending
+    assert core._sleep_graph_error is None
+
+
+def test_idle_graph_capture_all_done_clears_pending(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.return_value = [(False, 0), (False, 0)]
+    assert core._run_sleep_graph_capture() is True
+    calls = [c.args[0] for c in core.model_executor.collective_rpc.call_args_list]
+    assert calls == ["recapture_sleep_graph"]
+    assert not core._sleep_graph_pending
 
 
 def test_idle_graph_capture_failure_blocks_later_resume(monkeypatch):

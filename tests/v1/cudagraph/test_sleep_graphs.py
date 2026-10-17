@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-GPU end-to-end coverage of graph-discard sleep and idle recapture."""
+"""End-to-end coverage of graph-discard sleep and idle recapture."""
 
 import json
 import os
 import time
 
+from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 
 
@@ -42,7 +43,9 @@ def _graph_snapshot(worker):
     }
 
 
-def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
+def _run_discard_recapture_rounds(
+    monkeypatch, tensor_parallel_size: int, distributed_executor_backend: str
+):
     """Exercise real graphs, partial wake and outputs through the public API."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # The local test probe is a callable RPC, never exposed by the server API.
@@ -59,6 +62,8 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
         enable_sleep_mode=True,
         enable_prefix_caching=False,
         async_scheduling=False,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
         compilation_config={
             "mode": 0,
             "cudagraph_mode": "FULL",
@@ -77,12 +82,13 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
         return [o.outputs[0].token_ids for o in llm.generate(prompts, params)]
 
     def snapshot():
-        return llm.collective_rpc(_graph_snapshot)[0]
+        # One result per rank; TP ranks must never diverge on graph state.
+        return llm.collective_rpc(_graph_snapshot)
 
     try:
         reference = generate()
         initial = snapshot()
-        assert initial["graphs"] > 0 and all(reference)
+        assert all(rank["graphs"] > 0 for rank in initial) and all(reference)
         rounds = int(os.environ.get("SLEEP_GRAPH_TEST_ROUNDS", "2"))
         for iteration in range(rounds):
             before = snapshot()
@@ -90,40 +96,59 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
             llm.sleep(level=1)
             sleep_s = time.perf_counter() - started
             asleep = snapshot()
-            assert asleep["graphs"] == 0
-            assert asleep["free_bytes"] > before["free_bytes"]
+            assert all(rank["graphs"] == 0 for rank in asleep)
+            assert all(
+                rank["free_bytes"] > prev["free_bytes"]
+                for rank, prev in zip(asleep, before, strict=True)
+            )
             llm.sleep(level=1)
             tags = ["weights", "kv_cache"]
             if iteration % 2:
                 tags.reverse()
             llm.wake_up(tags=tags[:1])
-            assert snapshot()["graphs"] == 0
+            assert all(rank["graphs"] == 0 for rank in snapshot())
             started = time.perf_counter()
             llm.wake_up(tags=tags[1:])
             final_tag_wake_s = time.perf_counter() - started
             awake = snapshot()
-            assert awake["graphs"] == 0
+            assert all(rank["graphs"] == 0 for rank in awake)
             started = time.perf_counter()
             assert generate() == reference
             eager_s = time.perf_counter() - started
             first = snapshot()
-            assert first["replays"] == awake["replays"]
+            assert all(
+                rank["replays"] == prev["replays"]
+                for rank, prev in zip(first, awake, strict=True)
+            )
             deadline = time.monotonic() + 120
-            while first["graphs"] < initial["graphs"]:
+            while any(
+                rank["graphs"] < prev["graphs"]
+                for rank, prev in zip(first, initial, strict=True)
+            ):
                 assert time.monotonic() < deadline, "Idle recapture did not finish"
                 time.sleep(0.05)
                 first = snapshot()
+            # Ranks recapture the same descriptors in lockstep.
+            assert len({rank["graphs"] for rank in first}) == 1
             started = time.perf_counter()
             assert generate() == reference
             graph_s = time.perf_counter() - started
             final = snapshot()
-            assert final["replays"] > first["replays"]
-            assert final["pid"] == initial["pid"]
+            assert all(
+                rank["replays"] > prev["replays"]
+                for rank, prev in zip(final, first, strict=True)
+            )
+            assert all(
+                rank["pid"] == prev["pid"]
+                for rank, prev in zip(final, initial, strict=True)
+            )
             print(
                 "SLEEP_GRAPH_RESULT "
                 + json.dumps(
                     {
                         "model": model,
+                        "tensor_parallel_size": tensor_parallel_size,
+                        "backend": distributed_executor_backend,
                         "iteration": iteration,
                         "timestamp": time.time(),
                         "sleep_s": sleep_s,
@@ -140,3 +165,19 @@ def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
             )
     finally:
         llm.llm_engine.engine_core.shutdown()
+
+
+def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
+    _run_discard_recapture_rounds(monkeypatch, 1, "uni")
+
+
+@multi_gpu_test(num_gpus=2)
+def test_graph_discard_sleep_tensor_parallel(monkeypatch):
+    """TP2: graphs embed cross-rank collectives; discard/recapture must hold."""
+    _run_discard_recapture_rounds(monkeypatch, 2, "mp")
+
+
+@multi_gpu_test(num_gpus=2)
+def test_graph_discard_sleep_tensor_parallel_ray(monkeypatch):
+    """TP2 on the ray executor: same lockstep discard/recapture contract."""
+    _run_discard_recapture_rounds(monkeypatch, 2, "ray")

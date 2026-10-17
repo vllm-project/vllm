@@ -59,7 +59,22 @@ def test_graph_discard_preserves_workspaces_and_avoids_driver_pressure(
         driver_allocation.assert_not_called()
 
 
-@pytest.mark.parametrize("unsupported", [None, "tp", "compile", "inproc", "checkpoint"])
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        None,
+        "tp",
+        "tp_ray",
+        "pp",
+        "dp",
+        "ep",
+        "eplb",
+        "compile",
+        "inproc",
+        "checkpoint",
+        "external_launcher",
+    ],
+)
 def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupported):
     from vllm.config import CompilationMode, CUDAGraphMode
     from vllm.v1.worker.gpu.sleep_graphs import validate_graph_sleep
@@ -73,8 +88,10 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
     mc.quantization = None
     mc.architectures = ["Qwen3ForCausalLM"]
     pc = config.parallel_config
-    pc.world_size = pc.data_parallel_size = 1
+    pc.tensor_parallel_size = 1
+    pc.data_parallel_size = pc.pipeline_parallel_size = 1
     pc.prefill_context_parallel_size = pc.decode_context_parallel_size = 1
+    pc.enable_expert_parallel = pc.enable_eplb = False
     pc.distributed_executor_backend = "uni"
     pc.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
     pc.use_ubatching = config.scheduler_config.async_scheduling = False
@@ -90,18 +107,38 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
     monkeypatch.setattr("vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", True)
     monkeypatch.delenv("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", raising=False)
     if unsupported == "tp":
-        pc.world_size = 2
+        pc.tensor_parallel_size = 2
+        pc.distributed_executor_backend = "mp"
+    elif unsupported == "tp_ray":
+        pc.tensor_parallel_size = 8
+        pc.distributed_executor_backend = "ray"
+    elif unsupported == "pp":
+        pc.tensor_parallel_size = 2
+        pc.pipeline_parallel_size = 2
+    elif unsupported == "dp":
+        pc.data_parallel_size = 2
+    elif unsupported == "ep":
+        pc.tensor_parallel_size = 2
+        pc.distributed_executor_backend = "mp"
+        pc.enable_expert_parallel = True
+    elif unsupported == "eplb":
+        pc.tensor_parallel_size = 2
+        pc.distributed_executor_backend = "mp"
+        pc.enable_expert_parallel = True
+        pc.enable_eplb = True
+    elif unsupported == "external_launcher":
+        pc.distributed_executor_backend = "external_launcher"
     elif unsupported == "compile":
         config.compilation_config.mode = CompilationMode.VLLM_COMPILE
     elif unsupported == "inproc":
         monkeypatch.setattr("vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", False)
     elif unsupported == "checkpoint":
         monkeypatch.setenv("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", "1")
-    if unsupported:
+    if unsupported in (None, "tp", "tp_ray"):
+        validate_graph_sleep(config)
+    else:
         with pytest.raises(ValueError, match="Graph-discard sleep requires"):
             validate_graph_sleep(config)
-    else:
-        validate_graph_sleep(config)
 
 
 @pytest.mark.parametrize("poisoned", [False, True])
@@ -122,8 +159,23 @@ def test_graph_recapture_oom_requires_a_healthy_device(monkeypatch, poisoned):
             worker.recapture_sleep_graph()
         manager.discard_full_graphs.assert_not_called()
     else:
-        assert worker.recapture_sleep_graph() == 0
+        assert worker.recapture_sleep_graph() == (True, 0)
         manager.discard_full_graphs.assert_called_once()
+
+
+def test_discard_sleep_graphs_converges_a_rank_to_eager(monkeypatch):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    worker = object.__new__(Worker)
+    worker.model_runner = MagicMock()
+    monkeypatch.setattr("torch.accelerator.empty_cache", lambda: None)
+    manager = worker.model_runner.cudagraph_manager
+
+    worker.discard_sleep_graphs()
+    manager.discard_full_graphs.assert_called_once()
+
+    worker.model_runner.cudagraph_manager = None
+    worker.discard_sleep_graphs()  # no manager: a rank without graphs is a no-op
 
 
 def test_cumem_is_the_default_registered_backend():

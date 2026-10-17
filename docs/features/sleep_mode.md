@@ -240,13 +240,25 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
 ```
 
 The initial prototype requires Linux/CUDA, the V2 runner in a local EngineCore
-process, one GPU, the `uni` executor and `cumem` backend. Only unquantized
-`Qwen3ForCausalLM` and `Qwen3MoeForCausalLM` models with FULL graphs and no
-`torch.compile` are accepted. Additional weight offloaders, KV transfer,
-microbatching, LoRA, speculative decoding, live weight updates and communicator
-suspension are excluded. Level 0 retains its existing behavior. Level 2,
-selective KV discard and another sleep after a partial wake are rejected.
-Partial wake does not permit inference or recapture until all memory is awake.
+process and the `cumem` backend. Tensor parallelism is supported through the
+`uni`, `mp` and `ray` executors (validated with single-node `mp` and `ray`
+TP2; multi-node Ray placement shares the same executor path but is not yet
+exercised); data, pipeline and context parallelism, expert parallelism and
+EPLB are rejected.
+Only unquantized `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM` models with FULL
+graphs and no `torch.compile` are accepted. Additional weight offloaders, KV
+transfer, microbatching, LoRA, speculative decoding, live weight updates and
+communicator suspension are excluded. Level 0 retains its existing behavior.
+Level 2, selective KV discard and another sleep after a partial wake are
+rejected. Partial wake does not permit inference or recapture until all memory
+is awake.
+
+Under tensor parallelism, every rank discards and recaptures graphs in
+lockstep through the executor's collective RPCs: the graphs embed cross-rank
+collectives, so ranks must never diverge on graph availability. If a capture
+fails with a recoverable allocation error on any rank, the engine discards
+graphs on all ranks within the same idle boundary and serves eagerly until the
+next full wake, which re-arms recapture from the full pending set.
 
 Graph destruction does not guarantee that the CUDA driver returns its cached
 physical memory. vLLM does not request driver cache reclamation or explicitly
