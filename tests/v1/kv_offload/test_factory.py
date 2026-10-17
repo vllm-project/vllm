@@ -14,6 +14,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    StoreMode,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -102,6 +103,19 @@ class SingleArgExternalOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         raise NotImplementedError
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "store_mode"),
+    [({}, StoreMode.EAGER), ({"store_mode": "eager"}, StoreMode.EAGER)],
+)
+def test_spec_reads_store_mode(extra_config: dict[str, Any], store_mode: StoreMode):
+    assert _create_spec(extra_config=extra_config).store_mode is store_mode
+
+
+def test_unknown_store_mode_raises():
+    with pytest.raises(ValueError, match="is not a valid StoreMode"):
+        _create_spec(extra_config={"store_mode": "unknown"})
 
 
 def test_pre_registered_specs_can_be_imported():

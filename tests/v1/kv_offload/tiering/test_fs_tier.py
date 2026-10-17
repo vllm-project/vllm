@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -933,7 +934,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
-        assert manager.prepare_store(keys, _CTX) is not None
+        assert manager.prepare_store(keys, _CTX, StoreTrigger.ON_COMPUTE) is not None
         manager.complete_store(keys, _CTX)  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []
