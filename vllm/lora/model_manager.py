@@ -871,8 +871,7 @@ class LoRAModelManager:
                             module_name,
                         )
                     )
-                    for module in packed_module_names:
-                        lora_model.loras.pop(module, None)
+                    self._pop_packed_sub_loras(lora_model, packed_module_names)
                     continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
@@ -891,8 +890,7 @@ class LoRAModelManager:
             # entries that were loaded but did not contribute to the
             # packed result. Without this they would keep extra CPU
             # memory alive after pack_moe.
-            for module in packed_module_names:
-                lora_model.loras.pop(module, None)
+            self._pop_packed_sub_loras(lora_model, packed_module_names)
 
         for lora in lora_model.loras.values():
             lora.optimize()
@@ -1231,7 +1229,51 @@ class LoRAModelManager:
                     "For the pool model, successfully loaded the LoRA weights "
                     "after removing the prefix 'model.'."
                 )
+        if not lora_model.check_lora_name(org_module_name):
+            text_name = self._get_text_lora_name(lora_model, module_name)
+            if text_name is not None:
+                org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def _pop_packed_sub_loras(
+        self, lora_model: LoRAModel, module_names: list[str]
+    ) -> None:
+        for module in module_names:
+            lora_model.loras.pop(module, None)
+            if text_name := self._get_text_lora_name(lora_model, module):
+                lora_model.loras.pop(text_name)
+
+    def _get_text_lora_name(
+        self, lora_model: LoRAModel, module_name: str
+    ) -> str | None:
+        for name in self._get_text_lora_names(module_name):
+            if lora_model.check_lora_name(name):
+                logger.info_once(
+                    "Loaded text-only LoRA weights for the language model of a "
+                    "multimodal model."
+                )
+                return name
+        return None
+
+    def _get_text_lora_names(self, module_name: str) -> list[str]:
+        """Names a text-only adapter uses for a language-model module.
+
+        Adapters trained on the text-only `*ForCausalLM` (e.g. PEFT on
+        `Qwen3_5ForCausalLM`) name modules `model.layers.*` / `lm_head`, while
+        multimodal wrappers mount the language model under a prefix such as
+        `language_model.` or `llm.`. If the prefix holds a `*ForCausalLM`, the
+        text name is the remainder; if it holds a bare decoder, it is the
+        remainder under `model.`.
+        """
+        if not getattr(self, "supports_mm", False):
+            return []
+        lm_prefix = self.mm_mapping.language_model[0].rstrip(".") + "."
+        if not module_name.startswith(lm_prefix):
+            return []
+        name = module_name.removeprefix(lm_prefix)
+        if name.startswith(("model.", "lm_head")):
+            return [name]
+        return [f"model.{name}", name]
 
     def _get_module_to_save_weights(
         self, lora_model: LoRAModel, module_name: str
