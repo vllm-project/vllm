@@ -17,6 +17,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.pp_transport import (
+    make_empty_intermediate_tensors_factory as make_empty_intermediate_tensors_factory,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
@@ -25,7 +28,6 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
-from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -950,22 +952,6 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         name.startswith(missing_layer_name)
         for missing_layer_name in get_pp_missing_layer_names(model)
     )
-
-
-def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
-    def make_empty_intermediate_tensors(
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                key: torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
-                for key in keys
-            }
-        )
-
-    return make_empty_intermediate_tensors
 
 
 def maybe_prefix(prefix: str, name: str) -> str:
