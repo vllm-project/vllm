@@ -128,6 +128,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
                 parallel_config=SimpleNamespace(
                     data_parallel_size=local_engine_count,
                     assigned_physical_gpu_ids=None,
+                    enable_elastic_ep=False,
                     use_ray=False,
                 ),
             ),

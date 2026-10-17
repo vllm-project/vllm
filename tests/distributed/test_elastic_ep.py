@@ -16,7 +16,7 @@ from ..evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def cleanup_ray_between_tests():
     """Force-stop any lingering Ray processes between tests."""
     subprocess.run(["ray", "stop", "--force"], timeout=30, capture_output=True)
@@ -25,6 +25,7 @@ def cleanup_ray_between_tests():
 
 
 MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+MP_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 NUM_GSM8K_QUESTIONS = 256
 EXPECTED_ACCURACY = 0.58
@@ -32,13 +33,15 @@ ACCURACY_TOL = 0.08
 DEFAULT_ALL2ALL_BACKEND = "allgather_reducescatter"
 
 
-def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:
+def _send_scale_command(
+    server: RemoteOpenAIServer, new_dp_size: int, timeout: int = 300
+) -> bool:
     url = server.url_for("scale_elastic_ep")
     payload = {"new_data_parallel_size": new_dp_size}
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=300)
+        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
@@ -46,14 +49,16 @@ def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:
 
 def _traffic_loop(
     server: RemoteOpenAIServer,
+    model: str,
     dp_rank: int | None,
     ready: threading.Barrier,
     stop: threading.Event,
     finished: threading.Event,
     is_probe: bool = False,
+    request_timeout: int = 120,
 ) -> list[tuple[float, float, int | None, str | None]]:
     url = server.url_for("is_scaling_elastic_ep" if is_probe else "v1/completions")
-    payload = {"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 4}
+    payload = {"model": model, "prompt": "Hello", "max_tokens": 4}
     headers = None if dp_rank is None else {"X-data-parallel-rank": str(dp_rank)}
     request_payload = None if is_probe else payload
     responses = []
@@ -63,7 +68,7 @@ def _traffic_loop(
         phase = None
         try:
             response = requests.post(
-                url, json=request_payload, headers=headers, timeout=120
+                url, json=request_payload, headers=headers, timeout=request_timeout
             )
             status_code = response.status_code
             if is_probe and status_code == 200:
@@ -73,7 +78,7 @@ def _traffic_loop(
         responses.append((request_start, time.perf_counter(), status_code, phase))
         if status_code == 200 and (not is_probe or phase in ("idle", "completed")):
             if not is_ready:
-                ready.wait(timeout=120)
+                ready.wait(timeout=request_timeout)
                 is_ready = True
             if finished.is_set():
                 return responses
@@ -98,6 +103,9 @@ def _scale_with_traffic(
     source_dp_size: int,
     new_dp_size: int,
     traffic_mode: str,
+    model: str = MODEL_NAME,
+    request_timeout: int = 120,
+    scale_timeout: int = 300,
 ) -> None:
     traffic_clients: list[int | None] = []
     if traffic_mode == "light":
@@ -112,17 +120,27 @@ def _scale_with_traffic(
     with ThreadPoolExecutor(max_workers=len(clients)) as executor:
         futures = [
             executor.submit(
-                _traffic_loop, server, rank, ready, stop, finished, is_probe
+                _traffic_loop,
+                server,
+                model,
+                rank,
+                ready,
+                stop,
+                finished,
+                is_probe,
+                request_timeout,
             )
             for rank, is_probe in clients
         ]
         try:
-            ready.wait(timeout=120)
+            ready.wait(timeout=request_timeout)
             start_time = time.perf_counter()
-            assert _send_scale_command(server, new_dp_size)
+            assert _send_scale_command(server, new_dp_size, timeout=scale_timeout)
             scale_seconds = time.perf_counter() - start_time
             finished.set()
-            probe_result, *results = [future.result(timeout=120) for future in futures]
+            probe_result, *results = [
+                future.result(timeout=request_timeout) for future in futures
+            ]
         finally:
             stop.set()
 
@@ -153,12 +171,19 @@ def _scale_with_traffic(
     )
 
 
-def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
+def _run_gsm8k_eval(
+    server: RemoteOpenAIServer,
+    stage: str,
+    max_concurrency: int | None = None,
+    request_timeout_seconds: float = 600,
+) -> dict[str, float | int]:
     assert server.port is not None
     result = evaluate_gsm8k(
         num_questions=NUM_GSM8K_QUESTIONS,
         host=f"http://{server.host}",
         port=server.port,
+        max_concurrency=max_concurrency,
+        request_timeout_seconds=request_timeout_seconds,
     )
     accuracy = result["accuracy"]
     print(
@@ -169,7 +194,16 @@ def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
         f"[{stage}] GSM8K accuracy {accuracy:.3f} is below "
         f"expected threshold {EXPECTED_ACCURACY}"
     )
-    return accuracy
+    return result
+
+
+def _assert_scaled_accuracy(
+    initial: dict[str, float | int], scaled: dict[str, float | int], stage: str
+) -> None:
+    assert scaled["accuracy"] >= initial["accuracy"] - ACCURACY_TOL, (
+        f"{stage} accuracy {scaled['accuracy']:.3f} dropped more than "
+        f"{ACCURACY_TOL} below initial accuracy {initial['accuracy']:.3f}"
+    )
 
 
 def _base_serve_args(
@@ -177,13 +211,15 @@ def _base_serve_args(
     max_dp_size: int = 4,
     enforce_eager: bool = False,
     all2all_backend: str = DEFAULT_ALL2ALL_BACKEND,
+    dp_backend: str = "ray",
+    redundant_experts: int = 0,
 ) -> list[str]:
     args = [
         "--trust-remote-code",
         "--tensor-parallel-size",
         "1",
         "--gpu-memory-utilization",
-        "0.8",
+        "0.8" if dp_backend == "ray" else "0.9",
         "--max-model-len",
         "4096",
         "--enable-expert-parallel",
@@ -194,15 +230,15 @@ def _base_serve_args(
         str(max_dp_size),
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
-        "0",
+        str(redundant_experts),
         "--eplb-config.use_async",
-        "true",
+        "true" if dp_backend == "ray" else "false",
         "--eplb-config.step_interval",
         "300",
         "--eplb-config.window_size",
         "5",
         "--data-parallel-backend",
-        "ray",
+        dp_backend,
         "--data-parallel-size",
         str(dp_size),
         "--api-server-count",
@@ -212,7 +248,7 @@ def _base_serve_args(
     ]
 
     leader_address = os.environ.get("LEADER_ADDRESS")
-    if leader_address:
+    if leader_address and dp_backend == "ray":
         args.extend(["--data-parallel-address", leader_address])
     if enforce_eager:
         args.append("--enforce-eager")
@@ -237,7 +273,10 @@ def _base_serve_args(
 )
 @multi_gpu_test(num_gpus=4)
 def test_elastic_ep_scaling(
-    enforce_eager: bool, traffic_mode: str, all2all_backend: str
+    enforce_eager: bool,
+    traffic_mode: str,
+    all2all_backend: str,
+    cleanup_ray_between_tests,
 ):
     from vllm.distributed.eplb.eplb_communicator import has_nixl
     from vllm.utils.import_utils import has_nixl_ep
@@ -261,30 +300,148 @@ def test_elastic_ep_scaling(
         vllm_serve_args,
         max_wait_seconds=1200,
     ) as server:
-        initial_accuracy = _run_gsm8k_eval(server, "Initial")
+        initial = _run_gsm8k_eval(server, "Initial")
 
         _scale_with_traffic(server, initial_dp_size, target_dp_size, traffic_mode)
-        scale_up_accuracy = _run_gsm8k_eval(server, "After scale up")
-        assert scale_up_accuracy >= initial_accuracy - ACCURACY_TOL, (
-            f"Scale up accuracy {scale_up_accuracy:.3f} dropped more than "
-            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
-        )
+        scaled_target = _run_gsm8k_eval(server, "After scale up")
+        _assert_scaled_accuracy(initial, scaled_target, "Scale up")
 
         _scale_with_traffic(server, target_dp_size, initial_dp_size, traffic_mode)
-        scale_down_accuracy = _run_gsm8k_eval(server, "After scale down")
-        assert scale_down_accuracy >= initial_accuracy - ACCURACY_TOL, (
-            f"Scale down accuracy {scale_down_accuracy:.3f} dropped more than "
-            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
-        )
+        scaled_source = _run_gsm8k_eval(server, "After scale down")
+        _assert_scaled_accuracy(initial, scaled_source, "Scale down")
 
         print("\nAccuracy Summary:")
-        print(f"  Initial:    {initial_accuracy:.3f}")
+        print(f"  Initial:    {initial['accuracy']:.3f}")
         print(
-            f"  Scale up:   {scale_up_accuracy:.3f} "
-            f"(diff: {scale_up_accuracy - initial_accuracy:+.3f})"
+            f"  Scale up:   {scaled_target['accuracy']:.3f} "
+            f"(diff: {scaled_target['accuracy'] - initial['accuracy']:+.3f})"
         )
         print(
-            f"  Scale down: {scale_down_accuracy:.3f} "
-            f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
+            f"  Scale down: {scaled_source['accuracy']:.3f} "
+            f"(diff: {scaled_source['accuracy'] - initial['accuracy']:+.3f})"
         )
         print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
+
+
+def _run_mp_gsm8k_eval(
+    server: RemoteOpenAIServer, stage: str, dp_size: int
+) -> dict[str, float | int]:
+    result = _run_gsm8k_eval(
+        server, stage, max_concurrency=32 * dp_size, request_timeout_seconds=1800
+    )
+    assert result["num_questions"] == NUM_GSM8K_QUESTIONS
+    assert result["invalid_rate"] <= 0.05, f"{stage}: {result}"
+    assert result["tokens_per_second"] > 0, f"{stage}: {result}"
+    assert result["questions_per_second"] > 0, f"{stage}: {result}"
+    print(
+        f"[{stage}] output_tokens_per_second={result['tokens_per_second']:.3f} "
+        f"questions_per_second={result['questions_per_second']:.3f}"
+    )
+    return result
+
+
+def _smoke_mp_ranks(server: RemoteOpenAIServer, dp_size: int) -> None:
+    for rank in range(dp_size):
+        response = requests.post(
+            server.url_for("v1/completions"),
+            headers={"X-data-parallel-rank": str(rank)},
+            json={
+                "model": MP_MODEL_NAME,
+                "prompt": "What is 2 + 2?",
+                "max_tokens": 32,
+                "temperature": 0,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        assert response.json()["choices"][0]["text"], f"Empty response from rank {rank}"
+
+
+@pytest.mark.parametrize(
+    ("enforce_eager", "traffic_mode"),
+    [
+        pytest.param(True, "none", id="eager_none"),
+        pytest.param(True, "light", id="eager_light"),
+        pytest.param(True, "heavy", id="eager_heavy"),
+        pytest.param(False, "heavy", id="cuda_graphs_heavy"),
+    ],
+)
+@multi_gpu_test(num_gpus=4)
+def test_elastic_ep_mp_scaling(enforce_eager: bool, traffic_mode: str) -> None:
+    if not current_platform.is_cuda():
+        pytest.skip("Single-node MP Elastic EP integration requires CUDA")
+
+    args = _base_serve_args(
+        enforce_eager=enforce_eager,
+        dp_backend="mp",
+    )
+    with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
+        _smoke_mp_ranks(server, 2)
+        initial = _run_mp_gsm8k_eval(server, "Initial", 2)
+
+        _scale_with_traffic(
+            server,
+            2,
+            4,
+            traffic_mode,
+            model=MP_MODEL_NAME,
+            request_timeout=360 if not enforce_eager else 120,
+            scale_timeout=1200,
+        )
+        _smoke_mp_ranks(server, 4)
+        scaled_target = _run_mp_gsm8k_eval(server, "After scale up", 4)
+        _assert_scaled_accuracy(initial, scaled_target, "Scale up")
+
+        _scale_with_traffic(
+            server,
+            4,
+            2,
+            traffic_mode,
+            model=MP_MODEL_NAME,
+            request_timeout=360 if not enforce_eager else 120,
+            scale_timeout=1200,
+        )
+        _smoke_mp_ranks(server, 2)
+        scaled_source = _run_mp_gsm8k_eval(server, "After scale down", 2)
+        _assert_scaled_accuracy(initial, scaled_source, "Scale down")
+
+
+@multi_gpu_test(num_gpus=4)
+def test_elastic_ep_mp_scaled_vs_cold() -> None:
+    if not current_platform.is_cuda():
+        pytest.skip("Single-node MP Elastic EP integration requires CUDA")
+
+    args = _base_serve_args(enforce_eager=True, dp_backend="mp")
+    with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
+        initial = _run_mp_gsm8k_eval(server, "Initial", 2)
+        _scale_with_traffic(
+            server, 2, 4, "none", model=MP_MODEL_NAME, scale_timeout=1200
+        )
+        scaled_target = _run_mp_gsm8k_eval(server, "Scaled DP4", 4)
+        _scale_with_traffic(
+            server, 4, 2, "none", model=MP_MODEL_NAME, scale_timeout=1200
+        )
+        scaled_source = _run_mp_gsm8k_eval(server, "Scaled DP2", 2)
+        assert scaled_target["accuracy"] >= initial["accuracy"] - ACCURACY_TOL
+        assert scaled_source["accuracy"] >= initial["accuracy"] - ACCURACY_TOL
+
+    cold_target_args = _base_serve_args(
+        dp_size=4, enforce_eager=True, dp_backend="mp", redundant_experts=128
+    )
+    with RemoteOpenAIServer(
+        MP_MODEL_NAME, cold_target_args, max_wait_seconds=2400
+    ) as server:
+        cold_target = _run_mp_gsm8k_eval(server, "Cold DP4", 4)
+
+    with RemoteOpenAIServer(MP_MODEL_NAME, args, max_wait_seconds=2400) as server:
+        cold_source = _run_mp_gsm8k_eval(server, "Cold DP2", 2)
+
+    for label, scaled, cold in (
+        ("DP4", scaled_target, cold_target),
+        ("DP2", scaled_source, cold_source),
+    ):
+        assert scaled["accuracy"] >= cold["accuracy"] - ACCURACY_TOL, label
+        for metric in ("questions_per_second", "tokens_per_second"):
+            ratio = scaled[metric] / cold[metric]
+            print(f"[{label}] scaled/cold {metric}={ratio:.3f}")
+            assert ratio >= 0.85, f"{label} scaled/cold {metric}={ratio:.3f}"
