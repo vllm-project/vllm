@@ -62,6 +62,8 @@ class BaseSpeculator(ABC):
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    # Whether propose() reads the target's attention metadata / slot mappings.
+    needs_target_attn_metadata: bool = True
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

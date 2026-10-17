@@ -1908,7 +1908,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 block_tables,
                 slot_mappings,
-                cg_mode=batch_desc.cg_mode,
+                batch_desc,
+                dp_sync_state,
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
@@ -2060,6 +2061,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
+
+        speculator = self.speculator
+        if ubatch_state and speculator and speculator.needs_target_attn_metadata:
+            # Draft prefill reuses the target's full-batch attention metadata.
+            attn_metadata, slot_mappings_by_layer = ubatch_state.build_full_batch_attn()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
