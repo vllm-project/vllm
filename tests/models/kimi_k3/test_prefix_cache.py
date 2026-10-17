@@ -52,8 +52,12 @@ BASE_ARGS = [
 ]
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="Kimi-K3 NVIDIA kernels require the SM100 family",
+    not (
+        current_platform.supports_mx()
+        if current_platform.is_rocm()
+        else current_platform.is_device_capability_family(100)
+    ),
+    reason="Kimi-K3 needs the SM100 family, or native MX support on ROCm",
 )
 
 SPEC_CONFIG = {
@@ -173,7 +177,7 @@ DEPLOYMENTS = {
 
 def _known_failure(name: str, mode: Mode) -> str | None:
     deployment = DEPLOYMENTS[name]
-    if mode.spec and deployment.decode.dcp > 1:
+    if mode.spec and deployment.decode.dcp > 1 and current_platform.is_cuda():
         return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
     return None
 
@@ -457,7 +461,7 @@ def mooncake_store(tmp_path, monkeypatch) -> Iterator[None]:
                 {
                     "metadata_server": "P2PHANDSHAKE",
                     "master_server_address": f"127.0.0.1:{port}",
-                    "protocol": "rdma",
+                    "protocol": os.getenv("MOONCAKE_PROTOCOL", "rdma"),
                     "device_name": os.getenv("MOONCAKE_DEVICE_NAME", "mlx5_12"),
                     "global_segment_size": "4GB",
                     "local_buffer_size": "1GB",
