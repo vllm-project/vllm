@@ -96,6 +96,8 @@ def test_forward_mqa_prepares_triton_sparse_mla_inputs(
     impl.sinks = torch.randn(num_heads, generator=gen).to(device)
     impl.kv_cache_dtype = kv_cache_dtype
     impl.topk_indices_buffer = topk_indices.to(device)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
     impl.use_aiter_sparse_mla = True
     layer = SimpleNamespace(
         _q_scale=torch.tensor([0.02], device=device),
@@ -169,6 +171,11 @@ def test_paged_prefill_indices_match_gathered_prefill(
     from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 
     rocm = importlib.import_module(f"vllm.models.{model}.amd.rocm")
+    builder_cls = (
+        rocm.DeepseekV41ROCMAiterSparseSWAMetadataBuilder
+        if model == "deepseek_v41"
+        else rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder
+    )
     device = torch.device("cuda")
     gen = torch.Generator().manual_seed(compress_ratio)
     window, width, block_size, max_model_len = 16, 32, 16, 128
@@ -231,9 +238,7 @@ def test_paged_prefill_indices_match_gathered_prefill(
         monkeypatch.setattr(
             rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: enabled
         )
-        return rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
-            swa_spec, ["swa"], vllm_config, device
-        ).build(0, common)
+        return builder_cls(swa_spec, ["swa"], vllm_config, device).build(0, common)
 
     assert build(enabled=False).prefill_swa_ragged_indices is None
     md = build(enabled=True)

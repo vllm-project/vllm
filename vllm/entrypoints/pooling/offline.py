@@ -129,7 +129,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
+            ctx=OfflineOutputsContext(outputs=outputs, late_chunking=ctx.late_chunking)
         )
         return outputs
 
@@ -325,8 +325,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            chat_template: The chat template to use for the scoring. If None, we
-                use the model's default chat template.
+            chat_template: The chat template to use for scoring. If None, use
+                the chat template passed to the LLM constructor.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
