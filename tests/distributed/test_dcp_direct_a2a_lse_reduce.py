@@ -842,8 +842,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         dtype = _dtype_from_name(env["TEST_DTYPE"])
         lse_dtype = _dtype_from_name(env["TEST_LSE_DTYPE"])
         is_lse_base_on_e = env["LSE_BASE_E"] == "1"
-        # Match Kimi-K3's six heads per DCP rank.
-        heads_per_rank, head_dim, max_num_tokens = 6, 512, 128
+        heads_per_rank = int(env.get("TEST_HEADS_PER_RANK", "6"))
+        head_dim, max_num_tokens = 512, 128
         total_heads = world_size * heads_per_rank
         active_ubatch = [0]
         dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
@@ -956,7 +956,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             query_start_loc = torch.cat(
                 (
                     query_lens_tensor.new_zeros(1),
-                    query_lens_tensor.cumsum(0),
+                    query_lens_tensor.cumsum(0, dtype=torch.int32),
                 )
             )
             empty_rows = torch.repeat_interleave(seq_lens == 0, query_lens_tensor)
@@ -1006,13 +1006,22 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             assert not torch.isnan(actual.float()).any()
             _assert_close(actual, expected, dtype)
 
-        cases = ((1, False), (17, True), (128, True))
+        # Include partially filled four-head CTAs and larger output grids.
+        cases = (
+            (1, False),
+            (3, True),
+            (31, True),
+            (32, True),
+            (33, True),
+            (128, True),
+        )
         for iteration, (num_tokens, padded) in enumerate(cases):
             check(num_tokens, iteration, padded)
         check_empty_shards(
             query_lens=[1, 3, 2, *([1] * (world_size - 1))],
             iteration=len(cases),
         )
+        check_empty_shards(query_lens=[32, 32, 32, 32], iteration=len(cases) + 1)
         generator = torch.Generator(device=device)
         generator.manual_seed(4321 + rank)
         partial_output_storage = torch.randn(
@@ -1040,6 +1049,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         with torch.cuda.graph(graph):
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
         for _ in range(3):
+            partial_output.normal_(generator=generator)
+            partial_lse.normal_(generator=generator)
             graph.replay()
         torch.accelerator.synchronize()
 
@@ -1081,14 +1092,21 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         ),
     ],
 )
-def test_distributed_direct_a2a_matches_reference(world_size: int):
+@pytest.mark.parametrize(
+    "heads_per_rank,dtype_name,is_base_e",
+    [(6, "bfloat16", False), (16, "float16", True)],
+)
+def test_distributed_direct_a2a_matches_reference(
+    world_size: int, heads_per_rank: int, dtype_name: str, is_base_e: bool
+):
     _distributed_run(
         _distributed_direct_a2a_worker,
         world_size=world_size,
         extra_env={
-            "TEST_DTYPE": "bfloat16",
+            "TEST_DTYPE": dtype_name,
             "TEST_LSE_DTYPE": "bfloat16",
-            "LSE_BASE_E": "0",
+            "LSE_BASE_E": str(int(is_base_e)),
+            "TEST_HEADS_PER_RANK": str(heads_per_rank),
         },
     )
 
