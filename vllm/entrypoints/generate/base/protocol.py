@@ -293,6 +293,8 @@ def validate_structured_outputs_structural_tag(
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = False
     continuous_usage_stats: bool | None = False
+    # None defers to the server's --enable-stream-obfuscation.
+    include_obfuscation: bool | None = None
 
 
 class FunctionDefinition(OpenAIBaseModel):

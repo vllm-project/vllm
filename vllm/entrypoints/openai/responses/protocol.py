@@ -212,6 +212,11 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     )
 
 
+class ResponseStreamOptions(OpenAIBaseModel):
+    # None defers to the server's --enable-stream-obfuscation.
+    include_obfuscation: bool | None = None
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -260,6 +265,7 @@ class ResponsesRequest(OpenAIBaseModel):
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: bool | None = True
     stream: bool | None = False
+    stream_options: ResponseStreamOptions | None = None
     temperature: float | None = None
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"

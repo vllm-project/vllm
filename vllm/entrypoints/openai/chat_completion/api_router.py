@@ -24,6 +24,10 @@ from vllm.entrypoints.serve.utils.api_utils import (
 )
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
 from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
+from vllm.entrypoints.serve.utils.sse_obfuscation import (
+    should_obfuscate,
+    with_sse_obfuscation,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -79,8 +83,15 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     args = getattr(raw_request.app.state, "args", None)
     keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
+    include_obfuscation = should_obfuscate(
+        getattr(request.stream_options, "include_obfuscation", None),
+        getattr(args, "enable_stream_obfuscation", False),
+    )
     return StreamingResponse(
-        content=with_sse_keep_alive(generator, float(keep_alive_interval)),
+        content=with_sse_keep_alive(
+            with_sse_obfuscation(generator, include_obfuscation),
+            float(keep_alive_interval),
+        ),
         media_type="text/event-stream",
     )
 
