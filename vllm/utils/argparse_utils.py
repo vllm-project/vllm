@@ -26,6 +26,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_NEGATIVE_DECIMAL = re.compile(r"-(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
 
 def human_readable_int(value: str) -> int:
     """Parse human-readable integers like '1k', '2M', etc.
@@ -459,7 +461,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     regular_args_seen.add(arg_name)
                 continue
 
-            if processed_arg.startswith("-") and "." in processed_arg:
+            if (
+                processed_arg.startswith("-")
+                and "." in processed_arg
+                and not _NEGATIVE_DECIMAL.fullmatch(processed_arg)
+            ):
                 if "=" in processed_arg:
                     processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
