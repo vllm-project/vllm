@@ -159,6 +159,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self._active_lora_slots: frozenset[int] = frozenset()
+        self._active_lora_slots_for_logits: frozenset[int] = frozenset()
 
     def _update_base_metadata(
         self,
@@ -167,6 +169,20 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
+        lora_id_to_index = {
+            lora_id: index
+            for index, lora_id in enumerate(lora_index_to_id)
+            if lora_id is not None
+        }
+
+        def active_slots(lora_ids: tuple[int, ...]) -> frozenset[int]:
+            return frozenset(
+                lora_id_to_index[lora_id] for lora_id in set(lora_ids) if lora_id > 0
+            )
+
+        self._active_lora_slots = active_slots(mapping.index_mapping)
+        self._active_lora_slots_for_logits = active_slots(mapping.prompt_mapping)
+
         (
             base_indices,
             sampler_indices,
@@ -190,6 +206,16 @@ class PunicaWrapperBase(PunicaWrapperABC):
         )
 
         self.indices_len[:] = indices_len
+
+    def has_active_lora(
+        self, enabled_lora_slots: set[int], *, for_logits: bool = False
+    ) -> bool:
+        active_slots = (
+            self._active_lora_slots_for_logits
+            if for_logits
+            else self._active_lora_slots
+        )
+        return not active_slots.isdisjoint(enabled_lora_slots)
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
         (

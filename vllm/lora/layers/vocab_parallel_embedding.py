@@ -76,6 +76,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.should_skip_lora():
+            return self.base_layer.forward(x)
+
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
