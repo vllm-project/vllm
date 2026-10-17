@@ -6,7 +6,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
-from functools import partial, reduce
+from functools import cache, partial, reduce
 from typing import Any
 
 from vllm.config import SpeculativeConfig, VllmConfig
@@ -1290,6 +1290,8 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    *,
+    get_metadata_memory: Callable[[int], int] | None = None,
 ) -> int:
     """Binary search for the maximum model length that fits in available memory.
     Returns 0 if even 1 token doesn't fit.
@@ -1302,9 +1304,14 @@ def _estimate_max_model_len_from_groups(
 
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
+        effective_memory = available_memory
+        if get_metadata_memory is not None:
+            effective_memory -= get_metadata_memory(model_len)
+            if effective_memory < 0:
+                return False
         if hisparse_enabled:
             try:
-                num_blocks = available_memory // _pool_bytes_per_block_from_builder(
+                num_blocks = effective_memory // _pool_bytes_per_block_from_builder(
                     builder, vllm_config, kv_cache_groups
                 )
                 builder.get_kv_cache_config_from_groups(
@@ -1314,7 +1321,7 @@ def _estimate_max_model_len_from_groups(
                 return False
         return (
             _max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
-            <= available_memory
+            <= effective_memory
         )
 
     try:
@@ -1339,6 +1346,7 @@ def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
     available_memory: list[int],
+    get_metadata_memory: Callable[[int], tuple[int, ...]] | None = None,
 ) -> None:
     """When max_model_len is set to -1, this function estimates the largest
     context length that can be supported with the available GPU memory.
@@ -1351,6 +1359,8 @@ def _auto_fit_max_model_len(
         projected_groups_per_worker: KV cache groups projected to each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+        get_metadata_memory: Optional per-worker reservations at each candidate
+            context length, deducted while checking feasibility.
 
     """
     original_max = vllm_config.model_config.max_model_len
@@ -1367,15 +1377,26 @@ def _auto_fit_max_model_len(
     # Find the max_model_len that fits across all workers.
     auto_fit_max = original_max
     limiting_worker_mem = available_memory[0]
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    for worker_index, (groups, avail_mem) in enumerate(
+        zip(projected_groups_per_worker, available_memory)
+    ):
         if not groups:
             continue
+        reservation = (
+            (lambda length, i=worker_index: get_metadata_memory(length)[i])
+            if get_metadata_memory is not None
+            else None
+        )
         worker_max = _estimate_max_model_len_from_groups(
-            builder, vllm_config, groups, avail_mem
+            builder, vllm_config, groups, avail_mem, get_metadata_memory=reservation
         )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
-            limiting_worker_mem = avail_mem
+            limiting_worker_mem = (
+                avail_mem - reservation(worker_max)
+                if reservation is not None and worker_max > 0
+                else avail_mem
+            )
 
     if auto_fit_max <= 0:
         raise ValueError(
@@ -1462,6 +1483,9 @@ def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
+    estimate_metadata_memory: (
+        Callable[[list[KVCacheGroupSpec], int], list[int]] | None
+    ) = None,
 ) -> list[KVCacheConfig]:
     """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
@@ -1487,6 +1511,8 @@ def get_kv_cache_configs(
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
+        estimate_metadata_memory: Per-worker persistent metadata reservations
+            at a candidate context length. Used only with automatic KV budgets.
 
     Returns:
         The generated KVCacheConfigs for each worker.
@@ -1581,20 +1607,91 @@ def get_kv_cache_configs(
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
+    base_check_memory = check_memory
+    get_reservations: Callable[[int], tuple[int, ...]] | None = None
+    if (
+        estimate_metadata_memory is not None
+        and vllm_config.cache_config.kv_cache_memory_bytes is None
+        and override is None
+    ):
+
+        @cache
+        def reservations(model_len: int) -> tuple[int, ...]:
+            values = tuple(estimate_metadata_memory(global_kv_cache_groups, model_len))
+            if len(values) != len(available_memory):
+                raise ValueError("Metadata reservation count must match worker count")
+            if any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in values
+            ):
+                raise ValueError("Metadata reservations must be non-negative integers")
+            return values
+
+        if any(reservations(vllm_config.model_config.max_model_len)):
+            get_reservations = reservations
+
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
-            builder, vllm_config, projected_groups_per_worker, check_memory
+            builder,
+            vllm_config,
+            projected_groups_per_worker,
+            check_memory,
+            get_reservations,
+        )
+
+    reserved_memory = [0] * len(available_memory)
+    if get_reservations is not None:
+        reserved_memory = list(get_reservations(vllm_config.model_config.max_model_len))
+        available_memory = [
+            available - reserved
+            for available, reserved in zip(available_memory, reserved_memory)
+        ]
+        check_memory = [
+            available - reserved
+            for available, reserved in zip(base_check_memory, reserved_memory)
+        ]
+        logger.info(
+            "Reserved attention metadata memory per worker: %s GiB",
+            [format_gib(reserved) for reserved in reserved_memory],
         )
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
+    for worker_index, (groups, avail_mem) in enumerate(
+        zip(projected_groups_per_worker, check_memory)
+    ):
         if not groups:
             continue
+        estimate_for_error: Callable[[int], int] = partial(
+            _estimate_max_model_len_from_groups, builder, vllm_config, groups
+        )
+        if get_reservations is not None:
+            if avail_mem <= 0:
+                raise ValueError(
+                    "No usable KV cache memory remains after reserving attention "
+                    "metadata and one null block. Reduce max_model_len or "
+                    "max_num_batched_tokens, or increase gpu_memory_utilization."
+                )
+
+            def estimate_for_error(
+                _adjusted_memory: int,
+                i: int = worker_index,
+                worker_groups: list[KVCacheGroupSpec] = groups,
+            ) -> int:
+                # The diagnostic receives an already-adjusted budget. Search
+                # against the original base to avoid subtracting twice.
+                return _estimate_max_model_len_from_groups(
+                    builder,
+                    vllm_config,
+                    worker_groups,
+                    base_check_memory[i],
+                    get_metadata_memory=lambda length: get_reservations(length)[i],
+                )
+
         _check_enough_kv_cache_memory(
             avail_mem,
             partial(_max_memory_usage_bytes_from_groups, builder, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, builder, vllm_config, groups),
+            estimate_for_error,
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
@@ -1633,7 +1730,8 @@ def get_kv_cache_configs(
             min_num_blocks,
         )
 
-    for kv_cache_config in kv_cache_configs:
+    for kv_cache_config, metadata_memory in zip(kv_cache_configs, reserved_memory):
+        kv_cache_config.metadata_memory_bytes = metadata_memory
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_cache_config.kv_cache_groups,
             vllm_config.parallel_config.tensor_parallel_size,
