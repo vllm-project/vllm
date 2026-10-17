@@ -194,6 +194,26 @@ def _recv(worker: KVChecksumWorker, blocks=BLOCKS):
     return record.checksums["req"]
 
 
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_only_the_first_worker_passes_on_received_checksums(tp_rank):
+    """Every consumer worker's connector receives the producer's checksums;
+    the scheduler needs them once."""
+    worker = _worker(
+        _config(_group(_spec(2))),
+        {_name(0): _cache(_logical_kv(heads=2))},
+        tp_rank=tp_rank,
+        tp_size=2,
+    )
+    results = _results("req")
+    results.kv_checksums = {"req": b"checksums"}
+    pending = worker.post_forward(results, set())
+    if tp_rank == 0:
+        assert _finish(pending).received == {"req": b"checksums"}
+    else:
+        # Nothing else to report this step.
+        assert pending is None
+
+
 @pytest.mark.parametrize("token_major", [False, True])
 def test_checksum_matches_definition(token_major):
     logical = _logical_kv(heads=2)

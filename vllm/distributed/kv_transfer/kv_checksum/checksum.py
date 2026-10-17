@@ -136,9 +136,9 @@ class KVChecksumRecord:
     skipped_groups: frozenset[int]
     fingerprints: dict[int, int]
     received: dict[str, bytes] = field(default_factory=dict)
-    """Producer checksums this worker's connector received with finished
-    loads, per request, from connectors that carry them in their own
-    messages."""
+    """Producer checksums of loads, per request, received by connectors that
+    carry them in their own messages; reported by the first worker only (PP
+    and TP rank 0), as every worker receives them."""
 
 
 def num_valid_tokens(position: int, block_size: int, num_tokens: int) -> int:

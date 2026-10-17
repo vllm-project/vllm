@@ -73,29 +73,37 @@ class KVChecksumPayload:
 
     def to_bytes(self) -> bytes:
         groups = [
-            (group_id, fingerprint, block_size, start, values.astype("<u8").tobytes())
+            (
+                group_id,
+                fingerprint,
+                block_size,
+                start,
+                # Encoded straight from the array's memory.
+                np.ascontiguousarray(values, dtype="<u8").data,
+            )
             for group_id, (fingerprint, block_size, start, values) in (
                 self.groups.items()
             )
         ]
-        body = msgspec.msgpack.encode((self.tp_size, self.num_tokens, groups))
-        return msgspec.msgpack.encode((_PAYLOAD_VERSION, body))
+        return msgspec.msgpack.encode(
+            (_PAYLOAD_VERSION, self.tp_size, self.num_tokens, groups)
+        )
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "KVChecksumPayload":
-        """Decode a payload.
+        """Decode a payload; its checksums are views of ``data``.
 
         Raises:
             ValueError: If ``data`` is not a payload of this version.
 
         """
         try:
-            version, body = msgspec.msgpack.decode(data, type=tuple[int, bytes])
+            msg_type = tuple[int, int, int, list[tuple[int, int, int, int, memoryview]]]
+            version, tp_size, num_tokens, groups = msgspec.msgpack.decode(
+                data, type=msg_type
+            )
             if version != _PAYLOAD_VERSION:
                 raise ValueError(f"unsupported version {version}")
-            tp_size, num_tokens, groups = msgspec.msgpack.decode(
-                body, type=tuple[int, int, list[tuple[int, int, int, int, bytes]]]
-            )
             return cls(
                 tp_size,
                 num_tokens,
@@ -262,7 +270,7 @@ class KVChecksumScheduler:
         """
         num_tokens = request.num_computed_tokens
         num_prompt_tokens = request.num_prompt_tokens
-        if num_tokens - num_scheduled_tokens < num_prompt_tokens <= num_tokens:
+        if not num_tokens - num_scheduled_tokens < num_prompt_tokens <= num_tokens:
             return
         params = request.kv_transfer_params
         if not params or not params.get("do_remote_decode"):
@@ -341,7 +349,6 @@ class KVChecksumScheduler:
                 pending = self._sends.get(req_id) or self._recvs.get(req_id)
                 if pending is not None:
                     pending.reports[worker] = (groups, record)
-            # Every worker of the consumer may receive the same checksums.
             for req_id, data in record.received.items():
                 pending = self._recvs.get(req_id)
                 if pending is not None and pending.expected is None:
@@ -381,7 +388,7 @@ class KVChecksumScheduler:
         data = payload.to_bytes()
         self._to_send[request.request_id] = data
         if kv_transfer_params is not None:
-            encoded = base64.b64encode(data).decode()
+            encoded = base64.b64encode_as_string(data)
             kv_transfer_params[KV_TRANSFER_PARAMS_KEY] = encoded
 
     def take_kv_checksums_to_send(self) -> dict[str, bytes]:

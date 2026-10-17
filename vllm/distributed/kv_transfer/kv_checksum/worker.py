@@ -727,8 +727,8 @@ class KVChecksumWorker:
         Args:
             transfer_results: The connector's transfer results of this step:
                 the loads it finished (failed ones are not checked) and the
-                producer checksums it received with them, passed on to the
-                scheduler.
+                producer checksums it received, which the first worker passes
+                on to the scheduler.
             finished_req_ids: Requests that ended, e.g. aborted while loading.
 
         Returns:
@@ -750,7 +750,9 @@ class KVChecksumWorker:
             self.tp_rank,
             self._skipped_groups,
             self._fingerprints,
-            transfer_results.kv_checksums,
+            # Every worker's connector receives the producer's checksums, so
+            # the first worker passes them on for all.
+            transfer_results.kv_checksums if self.pp_rank == self.tp_rank == 0 else {},
         )
         self._compute(loaded, pending, self._recv_plans)
         self._compute(self._reqs_to_send, pending, self._send_plans)
