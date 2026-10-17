@@ -1262,6 +1262,7 @@ def test_v41_pcp_ring_links_match_request_positions(
     )
     builder = SimpleNamespace(
         capacity=capacity,
+        tail_size=1,
         device=torch.device("cpu"),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_seqs=len(lengths))
@@ -1324,8 +1325,11 @@ def _build_pcp_ring_metadata(ranks, all_gather, spec, config, device, monkeypatc
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
 @pytest.mark.parametrize("pcp_size", [2, 4])
-def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
-    """Pairs split across PCP chunks and decode owner changes keep exact latents."""
+@pytest.mark.parametrize("num_speculative_tokens", [0, 5])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
+    pcp_size, num_speculative_tokens, monkeypatch
+):
+    """Cross-rank pairs and rejection rollback preserve the reference latents."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41 import compressor as compressor_module
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
@@ -1345,18 +1349,25 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
-        speculative_config=None,
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens
+        )
+        if num_speculative_tokens
+        else None,
     )
     spec = CircularBufferSpec(
         block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
     )
     starts = np.zeros(2, dtype=np.int32)
-    for lengths, prefilling in [
+    steps = [
         ([7, 3], [True, True]),
         ([9, 1], [True, False]),
         ([1, 1], [False, False]),
         ([1, 1], [False, False]),
-    ]:
+    ]
+    if num_speculative_tokens:
+        steps[2:] = [([6, 6], [False, False])] * 4
+    for step, (lengths, prefilling) in enumerate(steps):
         lengths = np.array(lengths, dtype=np.int32)
         query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
         qsl = torch.from_numpy(query_start).to(device)
@@ -1468,6 +1479,9 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
         for state in rank_states[1:]:
             torch.testing.assert_close(state, rank_states[0], rtol=0, atol=0)
         starts += lengths
+        if num_speculative_tokens and step >= 2:
+            # Alternate odd/even accepted prefixes, including first-draft rejection.
+            starts -= lengths - np.array([1, 2] if step % 2 == 0 else [3, 1])
 
 
 def _on_gfx950() -> bool:
