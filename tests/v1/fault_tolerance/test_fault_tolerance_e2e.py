@@ -190,13 +190,11 @@ def _apply_ft(server, instruction: str, params: dict | None = None) -> dict:
 
 def _kill_worker_process(server) -> None:
     """SIGKILL only the worker proc, leaving EngineCore and API server alive."""
-    workers = []
-    for p in psutil.Process(server.proc.pid).children(recursive=True):
-        # Skip descendants that already exited: cmdline() raises ZombieProcess
-        # if unreaped, NoSuchProcess if reaped. A dead worker still fails below.
-        with contextlib.suppress(psutil.ZombieProcess, psutil.NoSuchProcess):
-            if "Worker" in " ".join(p.cmdline()):
-                workers.append(p)
+    workers = [
+        p
+        for p in psutil.Process(server.proc.pid).children(recursive=True)
+        if "Worker" in " ".join(p.cmdline())
+    ]
     assert len(workers) == 1, f"expected 1 worker proc, found: {workers}"
     workers[0].kill()
 

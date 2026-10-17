@@ -417,9 +417,7 @@ class ApertusToolParser(ToolParser):
 
         """
         try:
-            # An exponent can change a number's already-streamed representation.
-            flags = Allow.ALL if is_final else Allow.ALL & ~Allow.NUM
-            parsed, _ = partial_json_loads(json_str, flags)
+            parsed, _ = partial_json_loads(json_str, Allow.ALL)
             if not isinstance(parsed, list):
                 parsed = [parsed] if parsed else []
         except Exception:

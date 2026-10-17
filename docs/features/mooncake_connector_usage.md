@@ -14,6 +14,12 @@ Install mooncake through pip: `uv pip install mooncake-transfer-engine-cuda13`.
 
 vLLM defaults to CUDA 13. On a CUDA 12 environment install `mooncake-transfer-engine` instead — the two are the same release built against different CUDA majors, and the wrong one fails to import with `libcudart.so.<major>: cannot open shared object file`.
 
+On ROCm, install `mooncake-transfer-engine-rocm>=0.3.13` instead, or run
+`uv pip install -r requirements/kv_connectors_rocm.txt` from a source checkout.
+Mooncake is optional for source installations and included in the ROCm Docker
+images. Its prebuilt ROCm wheels currently support Python 3.10–3.13; use one of
+those versions when enabling Mooncake.
+
 Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
 ## Usage

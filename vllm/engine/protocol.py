@@ -61,10 +61,6 @@ class EngineClient(ABC):
     def errored(self) -> bool: ...
 
     @property
-    def should_keep_api_server_alive(self) -> bool:
-        return False
-
-    @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
 
@@ -265,12 +261,6 @@ class EngineClient(ABC):
     ) -> None:
         """Scale the engine."""
         raise NotImplementedError
-
-    async def get_external_elastic_ep_status(
-        self,
-    ) -> dict[str, str | int | None] | None:
-        """Return shared external Elastic EP operation status, if enabled."""
-        return None
 
     async def collective_rpc(
         self,

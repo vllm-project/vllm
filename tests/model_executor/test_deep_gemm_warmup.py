@@ -123,12 +123,19 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
     threshold (1 for 128 experts), so the forward actually reaches the kernel."""
     dg = SimpleNamespace(
         get_bf16_mega_gate_config=lambda m, *_: {"num_sms": -(-m // 16)},
+        get_block_m_for_mega_moe=lambda *_: 16,
     )
     monkeypatch.setattr(deep_gemm_warmup, "_import_deep_gemm", lambda: dg)
     monkeypatch.setattr(deep_gemm_warmup, "_mega_moe_uses_mega_gate", lambda _: True)
+    monkeypatch.setattr(
+        deep_gemm_warmup, "get_ep_group", lambda: SimpleNamespace(world_size=8)
+    )
+    buffer = SimpleNamespace(num_max_tokens_per_rank=64)
     module = SimpleNamespace(
         gate=SimpleNamespace(input_size=4096, output_size=128),
-        experts=SimpleNamespace(top_k=6, get_block_m=lambda num_tokens: 16),
+        experts=SimpleNamespace(
+            top_k=6, num_experts=128, get_symm_buffer=lambda: buffer
+        ),
         use_sequence_parallel=False,
     )
     assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]

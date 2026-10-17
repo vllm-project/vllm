@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+HF_PARSER = "hf"
+
 
 class ParserManager:
     """Provides a unified Parser by composing reasoning and tool parser adapters."""
@@ -102,7 +104,7 @@ class ParserManager:
         enable_auto_tools: bool = False,
         model_name: str | None = None,
         is_harmony: bool = False,
-        tool_strict_level: str | None = None,
+        tool_strict_level: str = "auto",
         tokenizer: TokenizerLike | None = None,
     ) -> type[Parser] | None:
         """Get a Parser that handles both reasoning and tool parsing.
@@ -117,13 +119,10 @@ class ParserManager:
             is_harmony: Whether the selected model uses the Harmony format.
                         If True, HarmonyParser is always returned.
             tool_strict_level: Server-side floor for tool-call structural
-                tags (``--tool-strict-level``), or ``None`` for the tool
-                parser's default level.
+                tags (``--tool-strict-level``).
             tokenizer: Tokenizer the composed parser is validated against
-                at startup (see :meth:`validate_parser_tokenizer`), including
-                its `response_template` metadata when a response-template
-                parser is selected. ``None`` skips the check (e.g.
-                ``skip_tokenizer_init``).
+                at startup (see :meth:`validate_parser_tokenizer`). ``None``
+                skips the check (e.g. ``skip_tokenizer_init``).
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -156,7 +155,7 @@ class ParserManager:
         enable_auto_tools: bool,
         model_name: str | None,
         is_harmony: bool,
-        tool_strict_level: str | None,
+        tool_strict_level: str,
         tokenizer: TokenizerLike | None,
     ) -> type[Parser] | None:
         if not tool_parser_name and not reasoning_parser_name:
@@ -170,11 +169,7 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        strict_level = (
-            None
-            if tool_strict_level is None
-            else ToolStrictLevel.from_name(tool_strict_level)
-        )
+        strict_level = ToolStrictLevel.from_name(tool_strict_level)
 
         if is_harmony:
             from vllm.parser.harmony import HarmonyParser
@@ -184,40 +179,39 @@ class ParserManager:
             HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
 
-        from vllm.parser.response_template import (
-            response_template_parser_cls,
-            validate_tokenizer_response_template,
-        )
-
-        template_parsers = {
-            response_template_parser_cls(parser_cls)
-            for parser_cls in (reasoning_parser_cls, tool_parser_cls)
-            if parser_cls is not None
-        }
-        template_parser_cls = next(iter(template_parsers - {None}), None)
-        if template_parser_cls is not None:
-            if len(template_parsers) > 1:
+        if HF_PARSER in (reasoning_parser_name, tool_parser_name):
+            if {reasoning_parser_name, tool_parser_name} - {
+                HF_PARSER,
+                None,
+                "",
+            }:
                 raise TypeError(
-                    f"--reasoning-parser {reasoning_parser_name} and "
-                    f"--tool-call-parser {tool_parser_name} cannot be combined"
+                    "The hf parser cannot be combined with other "
+                    "reasoning or tool call parsers"
                 )
+            from vllm.parser.response_template import (
+                ResponseTemplateParser,
+                validate_tokenizer_response_template,
+            )
+
             if tokenizer is not None:
                 validate_tokenizer_response_template(
                     tokenizer,
-                    reasoning_parser=reasoning_parser_name,
-                    # Without auto tool choice, no tool parser is selected.
-                    tool_parser=tool_parser_name if tool_parser_cls else None,
+                    reasoning=reasoning_parser_cls is not None,
+                    tools=tool_parser_cls is not None,
                 )
-            return type(
-                template_parser_cls.__name__,
-                (template_parser_cls,),
-                {
-                    "reasoning_parser_cls": reasoning_parser_cls,
-                    "tool_parser_cls": tool_parser_cls,
-                    "tool_strict_level": strict_level,
-                    "_enable_auto_tools": enable_auto_tools,
-                },
-            )
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+            auto_tools = enable_auto_tools
+
+            class _ResponseTemplateParser(ResponseTemplateParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+                _enable_auto_tools = auto_tools
+
+            return _ResponseTemplateParser
 
         if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
             from vllm.parser.kimi_k3 import KimiK3Parser

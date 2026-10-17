@@ -125,9 +125,7 @@ def minimax_m3_use_aiter_sparse_pa(
         raise ValueError(
             "MiniMax M3 AITER sparse paged attention requires "
             f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
-            "unless the AITER indexer emits the attend's page table. It is not "
-            "in use here; the 'MiniMax M3 indexer: AITER unavailable' log line "
-            "says why."
+            "unless the indexer emits the attend's page table."
         )
     return requested
 

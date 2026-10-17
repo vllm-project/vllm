@@ -40,7 +40,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from .mm_preprocess import (
-    COMPRESS_PAD_TO,
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -79,24 +78,6 @@ def _make_deepseek_v4_vl_weights_mapper(
     )
 
 
-def stream_language_model_first(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterable[tuple[str, torch.Tensor]]:
-    """Yield ``language_model.*`` weights as they arrive, then the rest.
-
-    Keeps the language model's weights in one contiguous group without
-    materializing the stream. Deferred weights are cloned so they do not keep
-    the loader's per-shard storage alive until the end of the load.
-    """
-    rest = []
-    for name, tensor in weights:
-        if name.startswith("language_model."):
-            yield name, tensor
-        else:
-            rest.append((name, tensor.clone()))
-    yield from rest
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekV4VLMultiModalProcessor,
     info=DeepseekV4VLProcessingInfo,
@@ -124,10 +105,6 @@ class DeepseekV4ForConditionalGeneration(
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
     supports_tower_connector_lora = True
-    # Image spans widen the sparse-SWA window in-kernel and the placeholder
-    # starts with a compressor-alignment pad
-    mm_prefix_clamp_sliding_window = True
-    mm_prefix_span_leading_pad_modulus = COMPRESS_PAD_TO
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -352,7 +329,7 @@ class DeepseekV4ForConditionalGeneration(
         if child_finalizes:
             # A child which finalizes inside load_weights must see all of its
             # weights in one contiguous delegation from AutoWeightsLoader.
-            mapped = stream_language_model_first(mapped)
+            mapped = iter(sorted(mapped, key=lambda x: x[0]))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
         self._weights_finalized = child_finalizes

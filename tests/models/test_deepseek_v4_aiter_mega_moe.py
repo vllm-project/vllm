@@ -110,31 +110,6 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w2 == 10 * expert + 3)
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "tokens_across_dp, expected",
-    [([4, 128], "decode"), ([4, 129], "prefill")],
-)
-def test_runtime_selected_by_max_tokens_across_dp(
-    monkeypatch, tokens_across_dp, expected
-):
-    experts = _make_experts(monkeypatch)
-    experts._runtimes = [(128, "decode"), (4096, "prefill")]
-    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
-    monkeypatch.setattr(
-        mega_moe_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(
-            dp_metadata=SimpleNamespace(
-                num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp)
-            )
-        ),
-    )
-    # Every rank must take the same runtime, so a small local batch still gets
-    # the prefill runtime when another DP rank is over the decode capacity.
-    assert experts.select_runtime(4) == expected
-
-
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 def test_shared_expert_route_appended(monkeypatch):
     experts = _make_experts(

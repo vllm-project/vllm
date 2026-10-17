@@ -1,2 +1,2 @@
-tblib
-lm_eval[api]
+# Mooncake transfer engine for KV cache offloading/transfer (ROCm build).
+mooncake-transfer-engine-rocm >= 0.3.13

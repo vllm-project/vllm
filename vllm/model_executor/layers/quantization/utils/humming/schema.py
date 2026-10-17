@@ -322,6 +322,22 @@ def check_and_fallback_input_schema(
     input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
 
+    def is_compatible(candidate: "HummingInputSchema") -> bool:
+        check_weight_schema = weight_schema
+        if (
+            candidate.a_dtype in (None, humming_dtypes.float16, humming_dtypes.bfloat16)
+            and weight_schema.b_dtype == humming_dtypes.float4e2m1
+            and weight_group_size == 16
+            and weight_schema.bs_dtype
+            in (None, humming_dtypes.float16, humming_dtypes.bfloat16)
+        ):
+            # Humming rejects folded NVFP4 scales despite A16 software dequant
+            # supporting them. Relax only this check, preserving kernel metadata.
+            check_weight_schema = dataclasses.replace(
+                weight_schema, bs_dtype=humming_dtypes.float8e4m3
+            )
+        return candidate.is_compatible_with(check_weight_schema, param_dtype)
+
     def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
         if dtype is None or dtype.num_bits == 16:
             return False
@@ -333,7 +349,7 @@ def check_and_fallback_input_schema(
         is_fp8_deprecated = dtype.num_bits < 16 and 100 <= sm_version < 120
         return is_int4_deprecated or is_int8_deprecated or is_fp8_deprecated
 
-    if input_schema.is_compatible_with(weight_schema, param_dtype):
+    if is_compatible(input_schema):
         if not allow_fallback:
             if is_deprecated(a_dtype):
                 msg = f"Humming {a_dtype} activation is slow on SM{sm_version} now."
@@ -390,7 +406,7 @@ def check_and_fallback_input_schema(
                 input_scale_dtype=scale_dtype,
                 input_quant_mode=quant_mode,
             )
-            if candidate.is_compatible_with(weight_schema, param_dtype):
+            if is_compatible(candidate):
                 return candidate
 
     raise ValueError(

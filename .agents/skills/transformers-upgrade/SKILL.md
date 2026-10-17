@@ -121,9 +121,6 @@ For each deleted config:
 Deleted processors follow the same steps in
 `vllm/transformers_utils/processors/__init__.py`.
 
-Before merging, rebase and grep again for the old field names: PRs that land
-in between still read them.
-
 Done when every line of the inventory output is deleted, or kept with a
 reason that meets the bar in step 2. The PR also carries the config diff
 results and evals for any changed values.
@@ -131,15 +128,13 @@ results and evals for any changed values.
 ## Upstreaming hazards
 
 Upstream configs are `@strict` dataclasses. Checkpoint keys upstream does not
-declare survive as plain attributes, but only when the checkpoint sets them.
-Defaults that only vLLM sets, and values vLLM derives, vanish.
+declare survive as plain attributes. Defaults that only vLLM sets, and values
+vLLM derives, vanish.
 
 | Hazard | Signal | Fix |
 | --- | --- | --- |
 | Upstream consumes legacy keys | `__post_init__` pops keys the model reads (`deepseek_v4` `compress_ratios`) | Read the upstream replacement (`layer_types`, `mlp_layer_types`, per-layer `rope_parameters`) |
 | Renamed or dropped fields | Diff shows `<MISSING>` for a field the model reads | Read the upstream name; derive dropped flags from what implies them (`enable_moe_block` from `num_experts`) |
-| Undeclared field without a default | `config.x` raises `AttributeError` for configs that omit `x`, e.g. minimal test configs (A.X-K1 `scoring_func`). Dumps of real checkpoints miss it | Upstream ignoring `x` usually means vLLM can stop reading it; if vLLM truly needs it, read `getattr(config, "x", <old default>)` |
-| Top-level config stops forwarding | The vendored top-level config forwarded reads to `text_config`; upstream does not. `getattr(config, "x", default)` silently takes the default, e.g. on MTP draft configs from `SpeculativeConfig.hf_config_override`, which the dumps do not build | Read from `get_text_config()`; grep `getattr` reads of every field, including speculative-decoding paths |
 | Type check on the config | `ctx.get_hf_config(SomeConfig)` relies on the vendored base class | Accept the upstream class too, e.g. a `Cosmos3ProcessingInfo` overriding `get_hf_config` |
 | Remote code takes over | Checkpoint `config.json` has `auto_map`; with `--trust-remote-code`, the hub class replaces the native one once vLLM stops registering its own | Check the remote class loads; if not, register the upstream class for that `model_type` |
 | Read-only upstream fields | Properties or derived fields break subclasses and `hf_overrides` (`nemotron_h` `hybrid_override_pattern`) | Override the source field (`layers_block_type`) instead |
@@ -164,10 +159,10 @@ Version gates from the inventory need a decision:
 - **Patches citing a Transformers issue or PR:**
     - Delete the patch when its fix is in the floor release.
     - For an issue, find the PR that closed it and check that PR. A closed
-      issue is not a fixed one: issues get closed while the bug is still in
-      the release.
+      issue is not a fixed one: #43329 was closed while the bug was still in
+      5.16.1.
     - Re-run the patched behaviour before deleting. A fix in the release does
-      not always cover vLLM's path: Emu3's processor gained BOS upstream, but
+      not always cover vLLM's path: #47924 made Emu3's processor add BOS, but
       vLLM tokenizes without the processor.
     - Links that only explain a design choice (e.g. a float32 RoPE note) are
       not patches; leave them.
@@ -181,11 +176,3 @@ Version gates from the inventory need a decision:
 
 Add `tests/models/test_initialization.py -k "<archs>"` where a GPU is
 available, and a model eval for any model whose resolved config changed.
-
-Models in `vllm/models/` are high priority: whenever their config or model
-code changes, run GSM8k (`tests/evals/gsm8k/`) and GPQA Diamond
-(`tests/evals/gpt_oss/`) on `main` and the branch, even when the dumps show
-no diff, and put both scores in the PR. FlashInfer autotuning picks kernel
-tactics afresh on every server start, which moved DeepSeek-V4-Flash GSM8k by
-about 1 point; pass `--kernel-config '{"enable_flashinfer_autotune": false}'`
-to both servers so greedy outputs are comparable.
