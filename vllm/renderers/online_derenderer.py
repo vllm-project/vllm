@@ -834,6 +834,9 @@ class OnlineDerenderer:
         total_completion_tokens = 0
         index = 0
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_token_ids = (
+            completion_request is not None and completion_request.return_token_ids
+        )
 
         for gen, pt, seed_ids_override in zip(
             generate_responses, prompt_tokens_list, prompt_token_ids_list
@@ -877,6 +880,7 @@ class OnlineDerenderer:
                         finish_reason=choice.finish_reason,
                         stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
+                        token_ids=choice.token_ids if return_token_ids else None,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
@@ -942,6 +946,9 @@ class OnlineDerenderer:
         updated_state = state
 
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_token_ids = (
+            completion_request is not None and completion_request.return_token_ids
+        )
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -982,6 +989,7 @@ class OnlineDerenderer:
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
