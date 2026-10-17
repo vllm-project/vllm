@@ -217,9 +217,6 @@ class ShardedStateLoader(BaseModelLoader):
         state_dict = self._filter_subtensors(model.state_dict())
         counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):
-            # If loading with LoRA enabled, additional padding may
-            # be added to certain parameters. We only load into a
-            # narrowed view of the parameter data.
             param = state_dict[key]
             if param.dtype != tensor.dtype:
                 logger.warning(
@@ -229,19 +226,19 @@ class ShardedStateLoader(BaseModelLoader):
                     tensor.dtype,
                     param.dtype,
                 )
-            param_data = param.data
-            param_shape = param.shape
-            for dim, size in enumerate(tensor.shape):
-                if size < param_shape[dim]:
-                    param_data = param_data.narrow(dim, 0, size)
-            if tensor.shape != param_shape:
-                logger.warning(
-                    "loading tensor of shape %s into parameter '%s' of shape %s",
-                    tensor.shape,
-                    key,
-                    param_shape,
+            if tensor.shape != param.shape:
+                # Loading a smaller shard into a narrowed view of the
+                # parameter would leave the rest of it uninitialized.
+                raise ValueError(
+                    f"Shape mismatch for {key!r}: the checkpoint has "
+                    f"{tuple(tensor.shape)}, the model expects "
+                    f"{tuple(param.shape)}. A sharded_state checkpoint must "
+                    "be loaded with the parallel layout it was saved with "
+                    "(tensor/pipeline parallel size, --mm-encoder-tp-mode, "
+                    "...). Re-save it with the current configuration or "
+                    "load the original checkpoint with --load-format auto."
                 )
-            param_data.copy_(tensor)
+            param.data.copy_(tensor)
             state_dict.pop(key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(
