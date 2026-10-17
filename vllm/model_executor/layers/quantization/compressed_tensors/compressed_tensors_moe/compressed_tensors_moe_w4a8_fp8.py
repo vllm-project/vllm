@@ -48,6 +48,15 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             "Only symmetric quantization is supported for W4A8 MoE"
         )
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
+        if (
+            moe.hidden_dim % self.group_size != 0
+            or moe.intermediate_size_per_partition % self.group_size != 0
+        ):
+            raise ValueError(
+                f"Group size ({self.group_size}) must evenly divide both "
+                f"hidden size ({moe.hidden_dim}) and intermediate size per "
+                f"partition ({moe.intermediate_size_per_partition})."
+            )
 
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
             config=self.moe,
@@ -66,11 +75,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # requirement for CUTLASS reorder_tensor
-        assert hidden_size % 256 == 0, f"{hidden_size=} must be divisible by 256"
-        assert intermediate_size_per_partition % 256 == 0, (
-            f"{intermediate_size_per_partition=} must be divisible by 256"
-        )
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
