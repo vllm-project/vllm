@@ -172,6 +172,7 @@ class RequestOutput:
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
+        num_computed_tokens: int | None = None,
         *,
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -197,6 +198,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.num_cache_creation_tokens = num_cache_creation_tokens
+        self.num_computed_tokens = num_computed_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
 

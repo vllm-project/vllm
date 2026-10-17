@@ -14,6 +14,7 @@ from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     MMPayload,
     PerRequestMetrics,
+    PromptProgress,
     StopParam,
     StreamOptions,
     resolve_return_mm_kwargs_alias,
@@ -68,6 +69,7 @@ class CompletionRequest(OpenAIBaseModel):
     stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_progress: bool | None = False
     suffix: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -423,6 +425,7 @@ class CompletionRequest(OpenAIBaseModel):
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
+            return_progress=self.return_progress or False,
         )
 
     @model_validator(mode="before")
@@ -740,6 +743,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_progress: PromptProgress | None = None
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
