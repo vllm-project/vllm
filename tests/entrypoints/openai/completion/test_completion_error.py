@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +17,8 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import GenerationError, VLLMValidationError
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.logprobs import Logprob
+from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -307,6 +309,76 @@ def test_completion_metrics_carries_both_timing_and_spec_decode():
     assert response.metrics.time_to_first_token_ms == pytest.approx(500.0)
     assert response.metrics.speculative_decoding is not None
     assert response.metrics.speculative_decoding.num_spec_steps == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("opt_in", [False, True])
+async def test_completion_weight_versions(stream: bool, opt_in: bool):
+    """Each choice gets its spans on its final output, even with no tokens."""
+    expected = [{"version": "v1", "start": 0, "end": 2}]
+    spans = [WeightVersionSpan(**span) for span in expected]
+
+    def output(index, token_ids, finish_reason=None, weight_versions=None):
+        return CompletionOutput(
+            index=index,
+            text="x" * len(token_ids),
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=finish_reason,
+            weight_versions=weight_versions,
+        )
+
+    # Choice 1 is aborted before its first token.
+    final = [output(1, [], "abort", [])]
+    if stream:
+        steps = [[output(0, [100])], [output(0, [101], "length", spans), *final]]
+    else:
+        steps = [[output(0, [100, 101], "length", spans), *final]]
+
+    async def mock_generate(*args, **kwargs):
+        for i, outputs in enumerate(steps):
+            yield RequestOutput(
+                request_id="test-id",
+                prompt="Test prompt",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=outputs,
+                finished=i == len(steps) - 1,
+            )
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        n=2,
+        stream=stream,
+        return_weight_versions=opt_in,
+    )
+    response = await _build_serving_completion(mock_engine).create_completion(request)
+
+    if stream:
+        finals = {}
+        async for line in response:
+            payload = line.removeprefix("data: ").strip()
+            if payload == "[DONE]":
+                continue
+            for choice in json.loads(payload)["choices"]:
+                if choice.get("finish_reason"):
+                    finals[choice["index"]] = choice
+                else:
+                    assert choice.get("weight_versions") is None
+        got = [finals[i].get("weight_versions") for i in (0, 1)]
+    else:
+        got = [choice["weight_versions"] for choice in response.model_dump()["choices"]]
+    assert got == ([expected, []] if opt_in else [None, None])
 
 
 def _build_online_renderer_for_completion(
@@ -841,6 +913,45 @@ def test_logprobs_minus_one_allowed():
     assert request.logprobs == -1
 
 
+def _minimal_serving_completion() -> OpenAIServingCompletion:
+    """A serving object with only what `_create_completion_logprobs` reads."""
+    serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+    serving.return_tokens_as_token_ids = False
+    return serving
+
+
+@pytest.mark.parametrize(
+    ("num_output_top_logprobs", "expected"),
+    [(-1, 3), (1, 2), (2, 3)],
+)
+def test_completion_logprobs_honors_requested_count(
+    num_output_top_logprobs: int, expected: int
+):
+    """`logprobs=-1` asks for every logprob, so none may be filtered out.
+
+    The validator accepts -1 and the sampler expands it to the vocabulary, so
+    dropping the candidates here would return an empty `top_logprobs` for every
+    position while still charging for the full computation.
+    """
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_ids: f"tok{token_ids[0]}"
+    step_logprobs = {
+        10: Logprob(logprob=-0.1, decoded_token="a"),
+        11: Logprob(logprob=-0.2, decoded_token="b"),
+        12: Logprob(logprob=-0.3, decoded_token="c"),
+    }
+
+    logprobs = _minimal_serving_completion()._create_completion_logprobs(
+        token_ids=[10],
+        top_logprobs=[step_logprobs],
+        num_output_top_logprobs=num_output_top_logprobs,
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.top_logprobs is not None
+    assert len(logprobs.top_logprobs[0]) == expected
+
+
 def test_logprobs_below_minus_one_rejected():
     """Values more negative than -1 stay invalid."""
     with pytest.raises(Exception, match="must be a positive value or -1"):
@@ -849,6 +960,20 @@ def test_logprobs_below_minus_one_rejected():
             prompt="Test prompt",
             max_tokens=10,
             logprobs=-2,
+        )
+
+
+@pytest.mark.parametrize("max_tokens", [5, 0])
+def test_beam_search_echo_logprobs_rejected(max_tokens):
+    """Beam search does not compute prompt logprobs, so echo + logprobs is rejected."""
+    with pytest.raises(VLLMValidationError, match="not supported with beam search"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=max_tokens,
+            use_beam_search=True,
+            echo=True,
+            logprobs=1,
         )
 
 
