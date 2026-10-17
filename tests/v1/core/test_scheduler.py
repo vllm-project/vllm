@@ -7930,7 +7930,7 @@ class TestSinglePassReads:
             pytest.param(
                 {}, {"extra_args": {"diffusion_canvas_length": 4}}, 4, id="narrow"
             ),
-            pytest.param({"max_model_len": 17}, {}, 8, id="max-model-len-edge"),
+            pytest.param({"max_model_len": 16}, {}, 8, id="max-model-len-edge"),
         ],
         indirect=["scheduler", "read"],
     )
@@ -7978,7 +7978,7 @@ class TestSinglePassReads:
                 {},
                 id="token-budget",
             ),
-            pytest.param({"max_model_len": 16}, {}, id="max-model-len"),
+            pytest.param({"max_model_len": 15}, {}, id="max-model-len"),
         ],
         indirect=True,
     )
