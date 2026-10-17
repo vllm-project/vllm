@@ -395,7 +395,7 @@ def test_sparse_autotune_respects_cache_selection(
     else:
         managed.assert_not_called()
         reload.assert_not_called()
-        assert legacy.call_count == (1 if rank == 0 else 0)
+        assert legacy.call_count == 1  # every rank tunes its sparse calls
         world.broadcast_object.assert_called_once_with(
             b"cached" if rank == 0 else None, src=0
         )

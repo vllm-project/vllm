@@ -250,41 +250,26 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     def tune() -> contextlib.AbstractContextManager:
         return flashinfer_autotune(True, **autotune_kwargs)
 
+    # Every rank tunes its own sparse calls: FlashInfer's SM120 sparse-MLA
+    # calibration and refine_cpb measure the local device and persist under
+    # its device key, not in the cache file the leader shares below.
     with torch.inference_mode():
         warmup_executed = True
-        if is_leader:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-                v2_runner = cast("V2GPUModelRunner", runner)
-                warmup_executed = run_mixed_prefill_decode_warmup(
-                    v2_runner,
-                    worker.execute_model,
-                    worker.sample_tokens,
-                    num_tokens,
-                    mixed_step_context=autotune_sparse_mla_only(tune),
-                    req_id_prefix="_sparse_mla_v2_warmup",
-                )
-            else:
-                with autotune_sparse_mla_only(tune):
-                    runner._dummy_run(**dummy_run_kwargs)
+        if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
+            v2_runner = cast("V2GPUModelRunner", runner)
+            warmup_executed = run_mixed_prefill_decode_warmup(
+                v2_runner,
+                worker.execute_model,
+                worker.sample_tokens,
+                num_tokens,
+                mixed_step_context=autotune_sparse_mla_only(tune),
+                req_id_prefix="_sparse_mla_v2_warmup",
+            )
         else:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-                v2_runner = cast("V2GPUModelRunner", runner)
-                warmup_executed = run_mixed_prefill_decode_warmup(
-                    v2_runner,
-                    worker.execute_model,
-                    worker.sample_tokens,
-                    num_tokens,
-                    req_id_prefix="_sparse_mla_v2_warmup",
-                )
-            else:
+            with autotune_sparse_mla_only(tune):
                 runner._dummy_run(**dummy_run_kwargs)
         if warmup_executed and refine_tokens:
-            # Non-leaders replay the leader's buckets to keep collectives aligned.
-            with (
-                autotune_sparse_mla_only(tune)
-                if is_leader
-                else contextlib.nullcontext()
-            ):
+            with autotune_sparse_mla_only(tune):
                 for bucket in refine_tokens:
                     _run_sparse_mla_refine_bucket(worker, bucket)
 

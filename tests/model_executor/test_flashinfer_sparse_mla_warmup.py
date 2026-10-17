@@ -173,7 +173,7 @@ def test_managed_path_tunes_sparse_calls_on_every_rank(
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_legacy_path_tunes_sparse_calls_on_leader(worker, monkeypatch, rank):
+def test_legacy_path_tunes_sparse_calls_on_every_rank(worker, monkeypatch, rank):
     _world(monkeypatch, rank=rank, world_size=2)
     legacy = Mock(return_value=nullcontext())
     monkeypatch.setattr(warmup, "flashinfer_autotune", legacy)
@@ -184,14 +184,14 @@ def test_legacy_path_tunes_sparse_calls_on_leader(worker, monkeypatch, rank):
 
     warmup.flashinfer_sparse_mla_decode_autotune_warmup(worker)
 
-    leader = rank == 0
-    assert runs == [(16, leader), (1, leader), (4, leader), (16, leader), (64, leader)]
-    assert len(factories) == (2 if leader else 0)
+    # SM120 sparse-MLA calibration persists per device, so non-leaders tune too.
+    assert runs == [(16, True), (1, True), (4, True), (16, True), (64, True)]
+    assert len(factories) == 2
     legacy.assert_not_called()
     for factory in factories:
         with factory():
             pass
-    assert legacy.call_args_list == len(factories) * [call(True)]
+    assert legacy.call_args_list == 2 * [call(True)]
 
 
 @pytest.mark.parametrize(
