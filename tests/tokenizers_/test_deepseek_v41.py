@@ -11,8 +11,8 @@ from typing import cast
 import pytest
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
-from vllm.entrypoints.chat_utils import BaseMultiModalItemTracker
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.renderers.chat_utils import BaseMultiModalItemTracker
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.params import ChatParams
 from vllm.renderers.registry import RENDERER_REGISTRY
