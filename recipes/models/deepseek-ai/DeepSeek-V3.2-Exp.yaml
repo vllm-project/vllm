@@ -1,0 +1,183 @@
+meta:
+  title: "DeepSeek-V3.2-Exp"
+  slug: "deepseek-v3.2-exp"
+  provider: "DeepSeek"
+  description: "Experimental DeepSeek-V3.2 preview with sparse attention (MQA-like logits) and FP8 KV cache; architecture matches DeepSeek-V3.1 except for the sparse attention mechanism."
+  date_added: 2025-09-29
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "Sparse attention MoE with FP8 KV cache and strong GSM8K score (~0.96)"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-V3.1"
+    - "deepseek-ai/DeepSeek-V3.2"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V3.2-Exp"
+  min_vllm_version: "0.12.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "671B"
+  active_parameters: "37B"
+  context_length: 163840
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies:
+  - note: "DeepGEMM pinned build for MQA logits (FP8 MoE kernels)"
+    command: "uv pip install git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3 --no-build-isolation"
+
+features:
+  tool_calling:
+    description: "Enable tool calling with DeepSeek V3.2 chat template support."
+    args:
+      - "--tokenizer-mode"
+      - "deepseek_v32"
+      - "--tool-call-parser"
+      - "deepseek_v32"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Dynamic thinking mode via chat_template_kwargs, same as DeepSeek-V3.1."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 805
+    description: "Native FP8 weights on 8xH200 (or H20, or 8xB200) with FP8 KV cache default"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+
+hardware_overrides:
+  amd:
+    # V3.2-Exp uses sparse attention → --block-size 1 + bfloat16 KV cache.
+    extra_args:
+      - "--block-size"
+      - "1"
+      - "--kv-cache-dtype"
+      - "bfloat16"
+      - "--max-num-batched-tokens"
+      - "32768"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-V3.2-Exp is a sparse-attention MoE preview. Its main architecture is similar to
+  DeepSeek-V3.1, with a sparse attention mechanism. This guide covers deployment on NVIDIA
+  Hopper/Blackwell GPUs and AMD MI300X / MI325X / MI355X GPUs.
+
+  ## Prerequisites
+
+  - **Hardware**: 8x H200/H20/B200 (CUDA) or 8x MI300X / MI325X / MI355X (ROCm)
+  - **vLLM**: Current stable release
+  - **DeepGEMM** (CUDA only): Required for MQA logits computation (and optionally for MoE)
+
+  ### CUDA
+  ```bash
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  uv pip install git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3 --no-build-isolation
+  ```
+
+  ### ROCm (MI300X, MI325X, MI355X)
+  Requires Python 3.12, ROCm 7.2.1, and glibc >= 2.35. If your environment does not
+  meet these requirements, use the Docker-based setup described in the
+  [documentation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/#pre-built-images).
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  Note: DeepGEMM is used both for MoE and for MQA logits computation. It is required for
+  MQA logits on CUDA. To disable the MoE path only, set `VLLM_USE_DEEP_GEMM=0`. Some users
+  report better performance with `VLLM_USE_DEEP_GEMM=0` (e.g. on H20), and this also skips
+  the long warmup.
+
+  ## Launching DeepSeek-V3.2-Exp
+
+  ### 8xH200 / 8xH20 (CUDA)
+
+  Using the recommended EP/DP mode:
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3.2-Exp -dp 8 --enable-expert-parallel
+  ```
+
+  Using tensor parallel:
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3.2-Exp -tp 8
+  ```
+
+  ### 8xB200 (CUDA)
+
+  Same as 8xH200 / 8xH20.
+
+  ### 8xMI300X / MI325X / MI355X (ROCm)
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_MOE=1
+
+  vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
+    --tensor-parallel-size 8 \
+    --max-num-batched-tokens 32768 \
+    --trust-remote-code \
+    --kv-cache-dtype bfloat16 \
+    --block-size 1
+  ```
+
+  ## Accuracy Benchmarking
+
+  ```bash
+  lm-eval --model local-completions --tasks gsm8k \
+    --model_args model=deepseek-ai/DeepSeek-V3.2-Exp,base_url=http://127.0.0.1:8000/v1/completions,num_concurrent=100,max_retries=3,tokenized_requests=False
+  ```
+
+  Reported GSM8K score: `0.9591` (5-shot) and `0.9538` (20-shot).
+
+  ## Performance Tips
+
+  1. The kernels are mainly optimized for TP=1, so it is recommended to run this model
+     under EP/DP mode (e.g. DP=8, EP=8, TP=1). If you hit any errors or hangs, try tensor
+     parallel instead. Simple TP works and is more robust, but the performance is not optimal.
+  2. The default config uses a custom `fp8` KV cache. You can also use `bfloat16` KV cache
+     by specifying `kv_cache_dtype=bfloat16`. FP8 allows more tokens to be cached but incurs
+     quantization/dequantization overhead. Use `bfloat16` for short requests and `fp8` for
+     long requests.
+
+  ## Troubleshooting
+
+  - **`CUDA error (flashmla-src/csrc/smxx/mla_combine.cu:201): invalid configuration argument`**:
+    This may be caused by too large a batch size. Try `--max-num-seqs 256` or smaller
+    (default is 1024).
+  - For thinking-mode toggling, refer to the DeepSeek-V3.1 recipe (`deepseek-ai/DeepSeek-V3.1`).
+
+  ## References
+
+  - [DeepSeek-V3.2-Exp on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp)
+  - [End-to-end tutorial (Jupyter Notebook)](https://github.com/vllm-project/recipes/blob/main/DeepSeek/DeepSeek_v3_2_vLLM_getting_started_guide.ipynb)

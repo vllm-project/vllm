@@ -62,7 +62,7 @@ class PenaltiesState(LogitsProcessor):
     def apply_staged_writes(self) -> None:
         if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(
-                self._new_penalties_reqs, dtype=torch.int32, device=self.device
+                self._new_penalties_reqs, dtype=torch.int64, device=self.device
             )
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
