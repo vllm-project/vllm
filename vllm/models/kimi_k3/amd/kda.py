@@ -326,6 +326,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor | QuantizedActivation,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        return self.o_proj(self.forward_core(hidden_states, positions))[0]
+
+    def forward_core(
+        self,
+        hidden_states: torch.Tensor | QuantizedActivation,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """The layer up to o_proj's input, [tokens, local heads * head_dim]."""
         projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
         num_tokens = projected_qkvgfab.shape[0]
 
@@ -358,8 +366,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             beta=beta,
             core_attn_out=core_attn_out,
         )
-        core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        return self.o_proj(core_attn_out)[0]
+        return rearrange(core_attn_out, "1 n h d -> n (h d)")
 
     @eager_break_during_capture
     def _forward(

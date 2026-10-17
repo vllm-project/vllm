@@ -58,6 +58,7 @@ from vllm.model_executor.offloader import (
     set_offloader,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.models.common.mono.layer import account_step
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -2088,6 +2089,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            mono_kernel_stats=(
+                None
+                if dummy_run
+                else account_step(batch_desc.num_tokens, batch_desc.cg_mode)
+            ),
         )
 
         if not self.is_last_pp_rank:
@@ -2118,6 +2124,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        mono_kernel_stats = self.execute_model_state.mono_kernel_stats
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2191,6 +2198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
+            mono_kernel_stats=mono_kernel_stats,
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:
@@ -2205,6 +2213,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            step_health=(
+                self.model.step_health() if hasattr(self.model, "step_health") else None
+            ),
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
@@ -2432,6 +2443,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    mono_kernel_stats: dict[str, int] | None = None
 
 
 class BatchReqState(NamedTuple):

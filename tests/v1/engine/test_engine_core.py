@@ -792,3 +792,15 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def test_log_error_detail_keeps_the_model_error():
+    """A failed step's error reaches the engine as itself, even when the
+    scheduler's stats raise while the failure is being logged."""
+    core = MagicMock()
+    core.scheduler.make_stats.side_effect = KeyError("req-0")
+    with (
+        pytest.raises(RuntimeError, match="model failed"),
+        EngineCore.log_error_detail(core, MagicMock()),
+    ):
+        raise RuntimeError("model failed")

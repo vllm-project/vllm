@@ -155,11 +155,13 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      - vllm/models/common/mono/
+      - tests/models/common/mono/
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
-      - pytest -v -s models/kimi_k3
+      - pytest -v -s models/kimi_k3 models/common/mono
 
 - label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
@@ -287,3 +289,20 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) Kimi-K3 MonoKernel'
+  key: kimi-k3-mono-decode-numerics-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/amd/
+  - vllm/models/common/mono/
+  - tests/models/kimi_k3/amd_mono/
+  - tests/models/common/mono/
+  commands:
+  - pytest -v -s tests/models/kimi_k3/amd_mono tests/models/common/mono

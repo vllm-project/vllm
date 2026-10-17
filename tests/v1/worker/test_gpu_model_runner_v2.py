@@ -400,3 +400,33 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+
+
+@pytest.mark.parametrize("words", [[0, 0], [0, 1]])
+def test_async_output_fails_a_step_the_model_reports_unhealthy(monkeypatch, words):
+    """A step whose model health words are set must not return its tokens."""
+    from contextlib import nullcontext
+
+    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.worker.gpu import async_utils
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock())
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+    output = async_utils.AsyncOutput(
+        ModelRunnerOutput(["request"], {"request": 0}),
+        SamplerOutput(
+            torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
+        ),
+        torch.tensor([1]),
+        Mock(),
+        Mock(),
+        check_ep_fault=False,
+        pending_aux_output=None,
+        step_health=torch.tensor(words, dtype=torch.int32),
+    )
+    if any(words):
+        with pytest.raises(RuntimeError, match="MonoKernel step failed"):
+            output.get_output()
+    else:
+        assert output.get_output().sampled_token_ids == [[7]]
