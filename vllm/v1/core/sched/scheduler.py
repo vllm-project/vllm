@@ -583,6 +583,26 @@ class Scheduler(SchedulerInterface):
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
+
+        # Multi-module MTP wants no chunk to end within `num_prefill_lookahead`
+        # of the end of the prompt (see `_reserve_prefill_lookahead`), which
+        # used to shorten the Mamba-aligned end chosen above: the request was
+        # left just short of the boundary, and the next step (start mid-block,
+        # stop at the boundary) was shortened to zero tokens, forever. Decide
+        # it here instead, giving up the checkpoint inside the window: finish
+        # the prefill if that crosses no boundary from mid-block, else stop at
+        # the last block boundary before the window. If neither exists, keep
+        # the aligned end: the next chunk finishes the prefill, and the drafter
+        # reads sampled tokens once rather than the slot state being poisoned.
+        window_start = request.num_tokens - self.num_prefill_lookahead
+        if window_start < end < request.num_tokens:
+            aligned_end = window_start // block_size * block_size
+            if start + num_new_tokens >= request.num_tokens and (
+                start % block_size == 0 or next_block_boundary >= request.num_tokens
+            ):
+                end = request.num_tokens
+            elif aligned_end > start:
+                end = aligned_end
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
@@ -611,8 +631,16 @@ class Scheduler(SchedulerInterface):
         boundary closer to the end than that would make it fall back to
         sampled drafts, permanently polluting the trailing modules' KV caches.
         Either finish the prefill or leave at least num_prefill_lookahead for
-        the next chunk. No-op for eagle-family drafters (lookahead 1).
+        the next chunk. No-op for eagle-family drafters (lookahead 1). A
+        Mamba-aligned chunk end is kept: `_mamba_block_aligned_split` already
+        moved it out of the window wherever a block boundary allowed it.
         """
+        if (
+            self.need_mamba_block_aligned_split
+            and (num_computed_tokens + num_new_tokens) % self.cache_config.block_size
+            == 0
+        ):
+            return num_new_tokens
         remaining = request.num_tokens - num_computed_tokens - num_new_tokens
         if 0 < remaining < self.num_prefill_lookahead:
             num_new_tokens -= self.num_prefill_lookahead - remaining

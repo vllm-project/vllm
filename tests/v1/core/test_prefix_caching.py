@@ -2632,6 +2632,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
+        num_prefill_lookahead=0,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_shared_prefix_checkpoint=False,
