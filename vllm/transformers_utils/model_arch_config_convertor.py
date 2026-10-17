@@ -859,6 +859,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
+    "step5_mtp": Step3p5MTPModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
 }

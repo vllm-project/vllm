@@ -70,6 +70,9 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    if model_arch.startswith("Step5") and not current_platform.is_rocm():
+        pytest.skip("Step-5 is only supported on ROCm")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None

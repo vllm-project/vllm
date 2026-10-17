@@ -58,6 +58,7 @@ MTPModelTypes = Literal[
     "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "step5_mtp",
     "hy_v3_mtp",
     "hy_v4_mtp",
     "gemma4_mtp",
@@ -984,6 +985,18 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
+        if hf_config.model_type in ("step5", "step5_vl"):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "step5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step5MTP"]})
+
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
@@ -1357,7 +1370,7 @@ class SpeculativeConfig:
                     if (
                         self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
+                        not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
@@ -1917,7 +1930,7 @@ class SpeculativeConfig:
             self.method == "mtp"
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
-            == "step3p5_mtp"
+            in ("step3p5_mtp", "step5_mtp")
         )
 
     def use_eagle(self) -> bool:

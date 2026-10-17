@@ -636,6 +636,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Step3VLForConditionalGeneration` | Step3-VL | T + I<sup>+</sup> | `stepfun-ai/step3` | | ✅︎ |
 | `StepVLForConditionalGeneration` | Step3-VL-10B | T + I<sup>+</sup> | `stepfun-ai/Step3-VL-10B` | | ✅︎ |
 | `Step3p7ForConditionalGeneration` | Step-3.7-Flash | T + I<sup>+</sup> | `stepfun-ai/Step-3.7-Flash` | | ✅︎ |
+| `Step5ForConditionalGeneration` | Step-5 | T + I<sup>+</sup> | `stepfun-ai/Step-5-Preview` | | |
 | `UltravoxModel` | Ultravox | T + A<sup>E+</sup> | `fixie-ai/ultravox-v0_5-llama-3_2-1b` | ✅︎ | ✅︎ |
 | `UnlimitedOCRForCausalLM` | Unlimited-OCR | T + I<sup>+</sup> | `baidu/Unlimited-OCR`, etc. | ✅︎ | ✅︎ |
 
@@ -709,6 +710,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`
     checkpoints such as `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16` accept text,
     image and video only.
+
+!!! note
+    For `Step5ForConditionalGeneration`, only ROCm is supported for now, and it
+    requires `--moe-backend triton` and a BF16 KV cache. Use
+    `--attention-backend ROCM_AITER_UNIFIED_ATTN` for long contexts. The
+    checkpoint ships three MTP layers, enabled with
+    `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
 
 !!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
