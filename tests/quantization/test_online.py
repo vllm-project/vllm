@@ -44,6 +44,8 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -159,6 +161,82 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 NVFP4_MOE_MODEL_NAME = "RedHatAI/Qwen3-30B-A3B-NVFP4"
 MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
+
+
+@pytest.mark.parametrize(
+    "method_cls,backend_attr,backend,converter_path",
+    [
+        pytest.param(
+            Fp8PerTensorOnlineMoEMethod,
+            "fp8_backend",
+            Fp8MoeBackend.HUMMING,
+            "vllm.model_executor.layers.fused_moe.oracle.fp8."
+            "convert_to_fp8_moe_kernel_format",
+            id="fp8",
+        ),
+        pytest.param(
+            Mxfp8OnlineMoEMethod,
+            "fp8_backend",
+            Fp8MoeBackend.HUMMING,
+            "vllm.model_executor.layers.fused_moe.oracle.fp8."
+            "convert_to_fp8_moe_kernel_format",
+            id="mxfp8",
+        ),
+        pytest.param(
+            Mxfp4OnlineMoEMethod,
+            "mxfp4_backend",
+            Mxfp4MoeBackend.HUMMING,
+            "vllm.model_executor.layers.quantization.online.mxfp4."
+            "convert_weight_to_mxfp4_moe_kernel_format",
+            id="mxfp4",
+        ),
+    ],
+)
+def test_online_moe_stages_quantized_weights_for_humming(
+    method_cls,
+    backend_attr: str,
+    backend,
+    converter_path: str,
+    monkeypatch,
+) -> None:
+    method = object.__new__(method_cls)
+    setattr(method, backend_attr, backend)
+    method.weight_scale_name = "weight_scale"
+    method.experts_cls = None
+    method.moe = SimpleNamespace(use_mxfp4_w4a4_dsv4=False)
+    method.get_fused_moe_quant_config = Mock(return_value=None)
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "w13_weight",
+        torch.nn.Parameter(torch.empty(2, 8, 4, dtype=torch.bfloat16)),
+    )
+    layer.register_parameter(
+        "w2_weight",
+        torch.nn.Parameter(torch.empty(2, 4, 4, dtype=torch.bfloat16)),
+    )
+    is_mxfp4 = method_cls is Mxfp4OnlineMoEMethod
+    weight_dtype = torch.uint8 if is_mxfp4 else torch.float8_e4m3fn
+    scale_dtype = (
+        torch.float32 if method_cls is Fp8PerTensorOnlineMoEMethod else torch.uint8
+    )
+    packed_factor = 2 if is_mxfp4 else 1
+    w13 = torch.empty(2, 8, 4 // packed_factor, dtype=weight_dtype)
+    w2 = torch.empty(2, 4, 4 // packed_factor, dtype=weight_dtype)
+    w13_scale = torch.empty(2, 8, 1, dtype=scale_dtype)
+    w2_scale = torch.empty(2, 4, 1, dtype=scale_dtype)
+
+    def convert(**kwargs):
+        state = layer.state_dict()
+        assert state["w13_weight"].data_ptr() == w13.data_ptr()
+        assert state["w2_weight"].data_ptr() == w2.data_ptr()
+        assert state["w13_weight_scale"].data_ptr() == w13_scale.data_ptr()
+        assert state["w2_weight_scale"].data_ptr() == w2_scale.data_ptr()
+        converted = (w13, w2, w13_scale, w2_scale)
+        return (*converted, None, None) if is_mxfp4 else converted
+
+    monkeypatch.setattr(converter_path, convert)
+    method._setup_kernel(layer, w13, w2, w13_scale, w2_scale, None, None)
 
 
 @pytest.mark.parametrize(
