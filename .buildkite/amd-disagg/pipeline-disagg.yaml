@@ -15,7 +15,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -24,7 +24,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -33,7 +33,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -42,7 +42,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -51,7 +51,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -60,7 +60,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -69,7 +69,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -78,7 +78,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -87,7 +87,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -96,7 +96,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -105,7 +105,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -114,7 +114,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -125,7 +125,7 @@ steps:
 - label: "DeepSeek-V3-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -134,7 +134,7 @@ steps:
 - label: "DeepSeek-V3-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -143,7 +143,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -152,7 +152,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -161,7 +161,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -170,7 +170,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -179,7 +179,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -188,7 +188,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -197,7 +197,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-2P2D-TP8-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -206,7 +206,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-2P2D-TP8-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -217,7 +217,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -226,7 +226,7 @@ steps:
 - label: "DeepSeek-V3-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -235,7 +235,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -244,7 +244,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -253,7 +253,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -262,7 +262,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -271,7 +271,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -280,7 +280,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -289,7 +289,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -298,7 +298,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -307,7 +307,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-proxy"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -316,7 +316,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-1P1D-EP8/DP8-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 2
   concurrency_group: "amd-disagg/mi350/2node"
   commands:
@@ -327,7 +327,7 @@ steps:
 - label: "DeepSeek-V3-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -336,7 +336,7 @@ steps:
 - label: "DeepSeek-R1-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -345,7 +345,7 @@ steps:
 - label: "Kimi-K2.5-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -354,7 +354,7 @@ steps:
 - label: "Kimi-K2.6-MXFP4-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -363,7 +363,7 @@ steps:
 #- label: "MiniMax-M3-MXFP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-proxy"
 #  agents:
 #    queue: amd_mi350_ainic
-#  timeout_in_minutes: 180
+#  timeout_in_minutes: 270
 #  concurrency: 1
 #  concurrency_group: "amd-disagg/mi350/4node"
 #  commands:
@@ -372,7 +372,7 @@ steps:
 - label: "MiniMax-M3-MXFP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
@@ -381,7 +381,7 @@ steps:
 #- label: "GLM-5.2-FP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-proxy"
 #  agents:
 #    queue: amd_mi350_ainic
-#  timeout_in_minutes: 180
+#  timeout_in_minutes: 270
 #  concurrency: 1
 #  concurrency_group: "amd-disagg/mi350/4node"
 #  commands:
@@ -390,7 +390,7 @@ steps:
 - label: "GLM-5.2-FP8-PD-2P2D-EP16/DP16-WideEP-MoRIIO-vllm-router"
   agents:
     queue: amd_mi350_ainic
-  timeout_in_minutes: 180
+  timeout_in_minutes: 270
   concurrency: 1
   concurrency_group: "amd-disagg/mi350/4node"
   commands:
