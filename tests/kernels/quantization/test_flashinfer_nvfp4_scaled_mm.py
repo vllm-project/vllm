@@ -18,8 +18,12 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCutlassNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import relu_squared_nvfp4_quant
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    pad_nvfp4_weight_for_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
@@ -97,6 +101,42 @@ def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     assert actual.shape == (*token_shape, output_size)
     assert actual.dtype == x.dtype
     torch.testing.assert_close(actual.reshape(expected.shape), expected)
+
+
+@pytest.mark.parametrize("shape", [(1, 1344), (17, 5376), (129, 48)])
+@pytest.mark.parametrize("with_bias", [False, True])
+@torch.inference_mode()
+def test_cutedsl_relu2_prequantized_bypasses_quantizer(monkeypatch, shape, with_bias):
+    """The CuTe-DSL consumer preserves output and padding without requantizing."""
+    from vllm.model_executor.kernels.linear.nvfp4 import flashinfer as consumer_module
+
+    supported, reason = FlashInferCuteDslNvFp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    m, k = shape
+    x = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
+    n = 130  # Exercise output slicing as well as activation K padding.
+    w = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
+    layer = torch.nn.Module()
+    layer.input_global_scale_inv = torch.tensor(64.0, device="cuda")
+    weight_scale_inv = torch.tensor(512.0, device="cuda")
+    weight, layer.weight_scale = ops.scaled_fp4_quant(w, weight_scale_inv)
+    layer.weight, _ = pad_nvfp4_weight_for_cutlass(weight)
+    layer.input_size_per_partition = k
+    layer.output_size_per_partition = n
+    layer.alpha = 1.0 / (layer.input_global_scale_inv * weight_scale_inv)
+    kernel = FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearLayerConfig())
+    activation = torch.compile(lambda value: torch.square(torch.relu(value)))
+    bias = torch.randn(n, device="cuda", dtype=x.dtype) if with_bias else None
+    expected = kernel.apply_weights(layer, activation(x), bias)
+    qa = relu_squared_nvfp4_quant(x, layer)
+
+    def reject_requant(*args, **kwargs):
+        raise AssertionError("CuTe-DSL requantized an existing QuantizedActivation")
+
+    monkeypatch.setattr(consumer_module, "scaled_fp4_quant", reject_requant)
+    actual = kernel.apply_weights(layer, qa, bias)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def get_ref_results(
