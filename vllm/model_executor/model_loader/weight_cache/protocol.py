@@ -253,7 +253,13 @@ def hash_rope_parameters(model_config: ModelConfig) -> str:
         # JSON distinguishes 10000 from 10000.0, but RoPE does not.
         return int(value) if isinstance(value, float) and value.is_integer() else value
 
-    parameters = getattr(model_config.hf_text_config, "rope_parameters", None)
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
     payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 

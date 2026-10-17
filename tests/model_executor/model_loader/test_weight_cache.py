@@ -478,13 +478,15 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
 @pytest.mark.parametrize(
     "case",
     [
-        (False, "yarn", 10000.0, 2.0, 0, None),
-        (False, "deepseek_yarn", 10000, 2, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 2, 0, None),
-        (True, "yarn", 10000, 2, 0, None),
-        (True, "deepseek_yarn", 1000000, 2, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 4, 0, "rope_parameters_hash"),
-        (True, "deepseek_yarn", 10000, 2, 1, "tp_rank"),
+        (False, "yarn", 10000.0, 2.0, 512, 0, None),
+        (False, "deepseek_yarn", 10000, 2, 512, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 2, 512, 0, None),
+        (True, "yarn", 10000, 2, 512, 0, None),
+        (True, "deepseek_yarn", 1000000, 2, 512, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 4, 512, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 2, 512, 1, "tp_rank"),
+        (False, "yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
+        (True, "deepseek_yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
     ],
 )
 def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
@@ -505,7 +507,7 @@ def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
         hash_rope_parameters,
     )
 
-    is_reload, rope_type, theta, factor, rank, mismatch = case
+    is_reload, rope_type, theta, factor, max_position, rank, mismatch = case
     rope = dict(rope_type="yarn", rope_theta=10000, factor=2)
     config = (
         Qwen3VLConfig(text_config={"rope_parameters": rope})
@@ -521,6 +523,7 @@ def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
         skip_tokenizer_init=True,
         max_model_len=128,
     )
+    model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
     server.cache_config = WeightCacheKey.from_model_config(model_config, 1, 0)
     rope = model_config.hf_text_config.rope_parameters
@@ -528,6 +531,7 @@ def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
     rope["rope_type"] = "deepseek_yarn"
     server.loaded_rope_parameters_hash = hash_rope_parameters(model_config)
     rope.update(rope_type=rope_type, rope_theta=theta, factor=factor)
+    model_config.hf_text_config.max_position_embeddings = max_position
     server.model = torch.nn.Module()
     server.model.register_buffer("rotary_cache", torch.ones(2), persistent=False)
     server.role, server.global_rank = "target", 0
