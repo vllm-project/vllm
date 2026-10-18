@@ -841,6 +841,7 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    positional: tuple[torch.Tensor, torch.Tensor, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -848,8 +849,18 @@ def compute_global_topk_indices_and_lens(
     1. Block-table lookup (local index → global slot id)
     2. Valid-entry counting (topk_lens per token)
     3. Masking padding tokens to length 0
+
+    With ``positional = (query_start_loc, seq_lens, compress_ratio)`` a token's
+    length is ``min((pos + 1) // compress_ratio, topk)`` from its position, as
+    ``combine_topk_swa_indices`` gives prefill rows, instead of the valid count;
+    -1 holes stay masked in place.
     """
     num_tokens = topk_indices.shape[0]
+    query_start_loc, seq_lens, compress_ratio = (
+        positional
+        if positional is not None
+        else (token_to_req_indices, token_to_req_indices, 0)
+    )
     global_topk_indices = torch.empty_like(topk_indices)
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
@@ -864,6 +875,9 @@ def compute_global_topk_indices_and_lens(
         block_table.stride(0),
         block_size,
         is_valid_token,
+        query_start_loc,
+        seq_lens,
+        COMPRESS_RATIO=compress_ratio,
         TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
@@ -882,6 +896,9 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_table_stride: tl.constexpr,
     block_size: tl.constexpr,
     is_valid_token_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    COMPRESS_RATIO: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -916,6 +933,11 @@ def _compute_global_topk_indices_and_lens_kernel(
         )
         count += tl.sum(is_valid.to(tl.int32), axis=0)
 
+    if COMPRESS_RATIO > 0:
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_len = tl.load(query_start_loc_ptr + req_idx + 1) - query_start
+        pos = tl.load(seq_lens_ptr + req_idx) - query_len + token_idx - query_start
+        count = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, topk), 0)
     # Zero out length for padding tokens.
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
