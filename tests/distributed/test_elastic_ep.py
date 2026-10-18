@@ -247,6 +247,8 @@ def _base_serve_args(
         "/is_scaling_elastic_ep",
     ]
 
+    if dp_backend == "mp":
+        args.append("--no-enable-prefix-caching")
     leader_address = os.environ.get("LEADER_ADDRESS")
     if leader_address and dp_backend == "ray":
         args.extend(["--data-parallel-address", leader_address])
