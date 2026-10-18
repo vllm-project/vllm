@@ -42,13 +42,15 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+ROCM_GFX1250 = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx950, on_gfx1250
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
+    ROCM_GFX1250 = on_gfx1250()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -1568,6 +1570,15 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_TRITON_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "act_type": "mxfp4",
+        "rtol": 1.0,
+        "percent": 0.8,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "requires_gfx1250": True,
+    },
 }
 
 
@@ -1607,6 +1618,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config.get("requires_gfx1250") and not ROCM_GFX1250:
+        pytest.skip(f"Backend {backend_name} requires GFX1250")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config

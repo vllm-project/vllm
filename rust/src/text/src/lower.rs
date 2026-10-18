@@ -1339,6 +1339,47 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_enforces_bad_words_limits() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("blocked", 300)
+            .with_regular_token(" blocked", 301);
+        let lower = |bad_words: Option<Vec<String>>, bad_words_token_ids: Vec<Vec<u32>>| {
+            lower_sampling_params(
+                SamplingParams {
+                    bad_words,
+                    bad_words_token_ids: Some(bad_words_token_ids),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                3,
+                &tokenizer,
+            )
+        };
+
+        lower(None, vec![vec![7; 8]; 128]).unwrap();
+        for (bad_words, raw, expected) in [
+            (
+                None,
+                vec![vec![7]; 129],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                Some(vec!["blocked".to_string()]),
+                vec![vec![7]; 127],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                None,
+                vec![vec![7; 1025]],
+                "Too many total bad word tokens: 1025. The max is 1024.",
+            ),
+        ] {
+            assert_eq!(lower(bad_words, raw).unwrap_err().to_string(), expected);
+        }
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_logit_bias() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
