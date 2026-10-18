@@ -948,6 +948,30 @@ def _process_utility_output(
             )
 
 
+# Keys in an _engine_status entry that the client writes itself rather than
+# receiving from the engine core (see AsyncMPClient.handle_fault).
+_CLIENT_OWNED_STATUS_KEYS = ("last_ft_request_id", "ft_error")
+
+
+def _update_engine_status(
+    engine_status: dict[int, dict], engine_index: int, payload: dict
+) -> None:
+    """Apply an FT status push to the client's per-engine status cache.
+
+    The engine core republishes its whole payload on every push, so the
+    engine-owned keys are replaced. The client also writes its own diagnostics
+    into the same entry, and those are not in the push, so carry them over
+    instead of dropping them.
+    """
+    previous = engine_status.get(engine_index)
+    entry = dict(payload)
+    if previous is not None:
+        for key in _CLIENT_OWNED_STATUS_KEYS:
+            if key in previous:
+                entry.setdefault(key, previous[key])
+    engine_status[engine_index] = entry
+
+
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
@@ -1233,8 +1257,10 @@ class AsyncMPClient(MPClient):
                             if not _self:
                                 return
                             if outputs.utility_output.result is not None:
-                                _self._engine_status[outputs.engine_index] = (
-                                    outputs.utility_output.result.result
+                                _update_engine_status(
+                                    _self._engine_status,
+                                    outputs.engine_index,
+                                    outputs.utility_output.result.result,
                                 )
                         else:
                             _process_utility_output(
