@@ -147,7 +147,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         kv_cache_spec: MambaSpec,
     ) -> int | None:
         del kv_cache_spec
-        return min(max_decode_query_len(vllm_config), 8)
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+            MAX_FUSED_GDN_MTP_TOKENS,
+        )
+
+        return min(
+            max_decode_query_len(vllm_config), MAX_FUSED_GDN_MTP_TOKENS
+        )
 
     reorder_batch_threshold: int = 1
 
