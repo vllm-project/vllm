@@ -986,25 +986,6 @@ def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
         assert qwen_frames.shape[0] >= 4
 
 
-def test_opencv_decodes_to_count_frames_when_demux_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """When the demux-only counting pass is unavailable, the loader falls
-    back to counting frames with a sequential decode pass."""
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
-        monkeypatch.setattr(
-            OpenCVVideoBackendMixin, "_count_frames_demux", lambda data: 0
-        )
-
-        webm_data = create_live_webm_video(num_frames=20, fps=10)
-        loader = VIDEO_LOADER_REGISTRY.load("opencv")
-        frames, metadata = loader.load_bytes(webm_data, backend="opencv")
-        assert frames.shape[0] == 20
-        assert metadata["total_num_frames"] == 20
-        assert metadata["duration"] == pytest.approx(2.0)
-
-
 # ============================================================================
 # Frame Recovery Tests
 # ============================================================================

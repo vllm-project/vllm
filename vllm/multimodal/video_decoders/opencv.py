@@ -103,7 +103,7 @@ class OpenCVVideoBackendMixin:
     def get_video_metadata(data: bytes) -> VideoSourceMetadata:
         """Read the source metadata, recovering it when the header lacks it.
 
-        Opens its own capture, so the frame-counting fallback may read the
+        Opens its own capture, so the frame-counting pass may read the
         stream to its end without affecting frame sampling.
         """
         cap = OpenCVVideoBackendMixin.open_video_capture(data)
@@ -112,12 +112,8 @@ class OpenCVVideoBackendMixin:
         if total_frames_num <= 0:
             # Streamed WebM/MKV and raw H.264 carry no frame count in their
             # headers; the FFMPEG backend reports a bogus negative value.
-            # Count frames via a demux-only pass first, without decoding.
+            # Count frames via a demux-only pass, without decoding.
             total_frames_num = OpenCVVideoBackendMixin._count_frames_demux(data)
-            if total_frames_num == 0:
-                # Fall back to counting frames with a sequential decode pass.
-                while cap.grab():
-                    total_frames_num += 1
             if total_frames_num == 0:
                 raise ValueError("Could not determine the number of video frames")
             duration = total_frames_num / original_fps if original_fps > 0 else 0
