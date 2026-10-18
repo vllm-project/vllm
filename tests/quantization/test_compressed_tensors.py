@@ -18,7 +18,7 @@ from compressed_tensors.quantization import (
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
-from vllm.config import set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic128Sym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -82,6 +83,48 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def _compressed_tensors_actorder_config(actorder):
+    return {
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 4,
+                    "type": "int",
+                    "strategy": "group",
+                    "group_size": 128,
+                    "symmetric": True,
+                    "dynamic": False,
+                    "actorder": actorder,
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
+)
+def test_compressed_tensors_rejects_runtime_activation_order(actorder):
+    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+        CompressedTensorsConfig.from_config(
+            _compressed_tensors_actorder_config(actorder)
+        )
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.STATIC, ActivationOrdering.WEIGHT, False, None]
+)
+def test_compressed_tensors_accepts_preordered_weights(actorder):
+    config = CompressedTensorsConfig.from_config(
+        _compressed_tensors_actorder_config(actorder)
+    )
+    assert config.target_scheme_map["Linear"]["weights"].actorder == (
+        actorder.value if isinstance(actorder, ActivationOrdering) else None
+    )
 
 
 @pytest.mark.parametrize(
@@ -271,15 +314,6 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
             None,
             8,
             True,
-            False,
-        ),
-        (
-            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-            "group",
-            128,
-            8,
-            False,
-            True,
         ),
     ],
 )
@@ -287,7 +321,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
     not current_platform.is_cuda(), reason="The tests are skipped on non-CUDA platform."
 )
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
+    model, strategy, group, pack_factor, symmetric = wNa16_args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -302,7 +336,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
-            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
@@ -542,8 +575,7 @@ def test_compressed_tensors_fp8_block_enabled(
     reason="This test is not for non-CUDA platforms",
 )
 def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
-    """
-    Integration test for MoE layer ignore functionality with a real model.
+    """Integration test for MoE layer ignore functionality with a real model.
 
     This test would verify that when loading a compressed-tensors quantized
     MoE model where some MoE layers are in the ignore list, those layers
@@ -555,7 +587,6 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     - Config with ignore list containing specific MoE layers
     - Multiple MoE layers where some are quantized and some are not
     """
-
     # model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only" # CT 12.3
     model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"  # CT 12.2
 
@@ -926,35 +957,6 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         assert output
 
 
-@pytest.mark.parametrize(
-    "actorder,group_size,part,full,expected",
-    [
-        # actorder="group" with real grouping: must load full-K w2 scales and,
-        # when sharded (part != full), report is_k_full=False.
-        (ActivationOrdering.GROUP, 32, 64, 128, (True, 128, False)),
-        # actorder="group" but unsharded (part == full): full scales, k_full.
-        (ActivationOrdering.GROUP, 32, 128, 128, (True, 128, True)),
-        # actorder="group" with channel-wise (group_size == -1): no full load.
-        (ActivationOrdering.GROUP, -1, 64, 128, (False, 64, False)),
-        # "static"/"weight" reorder at quant time -> shard normally + k_full.
-        # Regression: static actorder under TP must keep is_k_full=True so the
-        # Marlin kernel never gets the invalid (group_size=16, is_k_full=0).
-        ("static", 32, 64, 128, (False, 64, True)),
-        ("weight", 32, 64, 128, (False, 64, True)),
-        (None, 32, 64, 128, (False, 64, True)),
-    ],
-)
-def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
-        CompressedTensorsWNA16MoEMethod,
-    )
-
-    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
-        actorder, group_size, part, full
-    )
-    assert result == expected
-
-
 @pytest.mark.parametrize("num_bits", range(2, 9))
 def test_humming_supports_compressed_tensors_wna16_quant_key(num_bits):
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -1019,3 +1021,144 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def _mxfp4_moe_layer(monkeypatch, input_activations):
+    from types import SimpleNamespace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization import mxfp4
+
+    # Exercise scheme routing and allocation without selecting a GPU kernel.
+    monkeypatch.setattr(
+        mxfp4,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.NONE, None),
+    )
+    weights = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "group",
+        "group_size": 32,
+        "symmetric": True,
+        "dynamic": False,
+    }
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    # Name targets only match if the layer's own checkpoint
+                    # projection names are used for the lookup.
+                    "targets": [r"re:.*experts\.\d+\.w\d+$"],
+                    "weights": weights,
+                    "input_activations": input_activations,
+                }
+            },
+        }
+    )
+    return RoutedExperts(
+        "model.layers.0.ffn.experts",
+        torch.bfloat16,
+        make_dummy_moe_config(num_experts=2, hidden_dim=64, intermediate_size=32),
+        quant_config,
+        expert_map_manager=SimpleNamespace(
+            local_num_experts=2,
+            placement_strategy="linear",
+            expert_map=None,
+            expert_mask=None,
+            routing_tables=None,
+            map_global_to_local=lambda index: index,
+        ),
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name="w3",
+    )
+
+
+def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
+    """MXFP4 weights with dynamic FP8 inputs load compressed-tensors names but
+    otherwise behave as the native MXFP4 method, so its backends, padding and
+    monolithic support are not reimplemented."""
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 8,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 128,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, Mxfp4MoEMethod)
+    assert not layer.quant_method.supports_pre_processed_weights
+    # The checkpoint's FP8 activations reach backends such as Humming that
+    # would otherwise default to BF16 activations.
+    assert layer.quant_method.activation_key == kFp8Dynamic128Sym
+    assert {"w13_weight_packed", "w2_weight_packed"} <= dict(
+        layer.named_parameters()
+    ).keys()
+    w13 = layer.w13_weight_packed
+
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight is w13
+    assert not hasattr(layer, "w13_weight_packed")
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FP8 x MXFP4 linear kernels need CUDA"
+)
+def test_mxfp4_linear_with_fp8_inputs_requests_fp8_activations():
+    """Dense MXFP4 layers with dynamic FP8 inputs (e.g. GLM-5.3 dense MLPs)
+    must not be routed as W4A4."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+        CompressedTensorsW4A8Mxfp4,
+    )
+
+    weights = QuantizationArgs(
+        num_bits=4, type="float", strategy="group", group_size=32, symmetric=True
+    )
+    inputs = QuantizationArgs(
+        num_bits=8,
+        type="float",
+        strategy="group",
+        group_size=128,
+        symmetric=True,
+        dynamic=True,
+    )
+    config = CompressedTensorsConfig.from_config(
+        {"format": "mxfp4-pack-quantized", "config_groups": {}}
+    )
+    with set_current_vllm_config(VllmConfig()):
+        scheme = config._get_scheme_from_parts(weights, inputs)
+
+    assert isinstance(scheme, CompressedTensorsW4A8Mxfp4)
+    assert scheme.kernel.config.activation_quant_key == kFp8Dynamic128Sym
+
+
+def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
+    """Only FP8 inputs take the shared path; W4A4 keeps its own kernels."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 4,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 32,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)

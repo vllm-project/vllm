@@ -1,0 +1,20 @@
+model_name: "nvidia/GLM-5.2-NVFP4"
+accuracy_threshold: 0.90
+tolerance: 0.0
+num_questions: 1319
+num_fewshot: 5
+max_tokens: 256
+max_concurrency: 32
+request_timeout_seconds: 1800
+startup_max_wait_seconds: 1200
+server_args: >-
+  --tensor-parallel-size 4
+  --max-model-len 8192
+  --max-num-seqs 32
+  --max-num-batched-tokens 4096
+  --enforce-eager
+  --kv-cache-dtype bfloat16
+  --attention-config '{"hisparse_config":{}}'
+  --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":32}}'
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"

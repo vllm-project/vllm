@@ -9,7 +9,7 @@ specific op module it needs, e.g.::
 
 which triggers that op's ``@register_kernel`` as an import side effect.
 
-Tools that need the full registry (e.g. scripts/autotune_helion_kernels.py)
+Tools that need the full registry (e.g. tools/autotune_helion_kernels.py)
 call ``import_all_ops()`` to force every op module to register.
 """
 
@@ -22,6 +22,7 @@ def import_all_kernels() -> list[str]:
 
     Returns:
         The fully-qualified module names that were imported.
+
     """
     imported: list[str] = []
     for module_info in pkgutil.iter_modules(__path__):

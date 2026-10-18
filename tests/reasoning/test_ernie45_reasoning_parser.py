@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -13,7 +13,7 @@ REASONING_MODEL_NAME = "baidu/ERNIE-4.5-21B-A3B-Thinking"
 
 
 @pytest.fixture(scope="module")
-def ernie45_tokenizer():
+def ernie45_tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PConnector proxy server for OffloadingConnector + TieringOffloadingSpec.
+"""P2PConnector proxy server for OffloadingConnector + TieringOffloadingSpec.
 
 Unlike NixlConnector (which returns remote_host/remote_port in the prefill
 response), OffloadingConnector does not embed connector coordinates in its

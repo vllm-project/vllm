@@ -1,4 +1,18 @@
 group: CRCR Report
+# Only image-build-cpu: this step must always run.
+#
+# It was briefly gated on the build's long pole (lm-eval-large-models-4xh100)
+# so the agent would not idle. That backfired on the first nightly to use it,
+# build 91191: the long pole OOMed, hung, and was cancelled -- and a cancelled
+# dependency propagates past `allow_dependency_failure`, so the step went
+# `waiting_failed` and that nightly got no CRCR row at all. Nothing in this
+# pipeline sets timeout_in_minutes (the pipeline default and org maximum are
+# both unset), so a hung job has no terminal state to reach either: gating on
+# any single job can suppress the report indefinitely.
+#
+# The bound now lives in the script, measured from the build's created_at, so
+# the report lands within CRCR_MAX_BUILD_AGE_S of the build starting whatever
+# else happens.
 depends_on:
   - image-build-cpu
 steps:
@@ -7,7 +21,10 @@ steps:
     if: build.env("TORCH_NIGHTLY") == "1"
     soft_fail: true
     allow_dependency_failure: true
-    timeout_in_minutes: 15
+    # The script polls from the start of the build now, so this covers the whole
+    # wait. It sits above the script's own build-age deadline (7h) so the script
+    # sends its partial report rather than being killed with nothing sent.
+    timeout_in_minutes: 480
     device: cpu-small
     commands:
       - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
