@@ -1397,6 +1397,45 @@ def test_deep_gemm_mega_moe_rows_ignore_batch(
     )
 
 
+def test_mega_gate_precompile_sweeps_per_top_k_until_it_succeeds(monkeypatch):
+    """Each routing setup gets its own sweep of smaller M, and a sweep that
+    fails is not recorded as done."""
+    import vllm.models.deepseek_v4.nvidia.model as v4
+
+    calls: list[tuple[int, int]] = []
+
+    def record(x, weight, top_k, **kwargs):
+        calls.append((top_k, len(x)))
+
+    monkeypatch.setattr(v4, "_MEGA_GATE_WARMED_M", {})
+    monkeypatch.setattr(v4, "bf16_mega_gate", record)
+    x, weight = torch.zeros(4, 8), torch.zeros(16, 8)
+    gate_kwargs = dict(
+        scoring_func="sqrtsoftplus",
+        routed_scaling_factor=1.5,
+        ep_rank=0,
+        bias=None,
+        image_bias=None,
+    )
+    per_token = dict(
+        image_token_mask=None, fix_routing_mask=None, unmapped_topk_idx=None
+    )
+    v4._compile_mega_gate_configs(x, weight, 6, gate_kwargs, per_token)
+    v4._compile_mega_gate_configs(x, weight, 8, gate_kwargs, per_token)
+    v4._compile_mega_gate_configs(x, weight, 8, gate_kwargs, per_token)
+    assert calls == [(6, 1), (6, 2), (6, 3), (8, 1), (8, 2), (8, 3)]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(v4, "bf16_mega_gate", fail)
+    with pytest.raises(RuntimeError, match="compile failed"):
+        v4._compile_mega_gate_configs(x, weight, 4, gate_kwargs, per_token)
+    monkeypatch.setattr(v4, "bf16_mega_gate", record)
+    v4._compile_mega_gate_configs(x, weight, 4, gate_kwargs, per_token)
+    assert calls[-3:] == [(4, 1), (4, 2), (4, 3)]
+
+
 @requires_sm100
 def test_deep_gemm_mega_gate_rows_ignore_batch_when_deterministic():
     """VLLM_BI_MEGA_GATE routes every batch through Mega Gate, so with

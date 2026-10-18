@@ -217,17 +217,25 @@ def _compile_mega_gate_configs(
     """Batch invariance routes every M through bf16_mega_gate, whose tile
     config follows M and JIT-compiles on first use (~2 s, a serving stall);
     run every smaller M once when the gate first sees a larger batch."""
-    key = (weight.shape, *(v is None for v in per_token.values()))
+    key = (
+        weight.shape,
+        top_k,
+        *(
+            v if isinstance(v, (bool, int, float, str)) else v is None
+            for v in gate_kwargs.values()
+        ),
+        *(v is None for v in per_token.values()),
+    )
     done = _MEGA_GATE_WARMED_M.get(key, 0)
     num_tokens = hidden_states.shape[0]
     if num_tokens <= done or torch.cuda.is_current_stream_capturing():
         return
-    _MEGA_GATE_WARMED_M[key] = num_tokens
     for m in range(done + 1, num_tokens):
         sliced: dict[str, typing.Any] = {
             k: None if v is None else v[:m] for k, v in per_token.items()
         }
         bf16_mega_gate(hidden_states[:m], weight, top_k, **gate_kwargs, **sliced)
+    _MEGA_GATE_WARMED_M[key] = num_tokens
 
 
 class DeepseekV4MoE(nn.Module):
