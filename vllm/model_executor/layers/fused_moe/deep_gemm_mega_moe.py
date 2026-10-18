@@ -623,6 +623,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         )
         symm_buffer = self._symm_buffers.get(key)
         if symm_buffer is None:
+            # Symmetric memory is mapped with cuMemCreate, outside the caching
+            # allocator: blocks it caches (the profile run can hold most of the
+            # GPU there) must go back to the driver first.
+            torch.accelerator.empty_cache()
             args = (
                 group,
                 self.num_experts,
