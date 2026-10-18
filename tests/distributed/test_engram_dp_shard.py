@@ -332,6 +332,8 @@ def _check_shared_storage_lifetime_and_failures(failure):
         return result
 
     with pytest.MonkeyPatch.context() as patch:
+        # Exercise the /dev/shm path even where FABRIC cuMem tables are used.
+        patch.setattr(engram_ops, "_fabric_host_tables_supported", lambda: False)
         patch.setattr(
             engram_ops,
             "tempfile",

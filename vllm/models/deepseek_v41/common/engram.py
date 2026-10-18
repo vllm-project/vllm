@@ -42,6 +42,7 @@ import weakref
 from contextlib import ExitStack
 
 import numpy as np
+import psutil
 import torch
 from torch import nn
 
@@ -769,18 +770,47 @@ def gather_engram_hashes(
     return dp_group.all_gather(hash_ids, dim=0)
 
 
+def _fabric_host_tables_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import (
+        fabric_host_tables_supported,
+    )
+
+    return fabric_host_tables_supported()
+
+
 class DPSharedEngramStorage:
-    """Registered host weights shared by a node-local DP group with one writer."""
+    """Host weights shared by a node-local DP group with one writer: host-NUMA
+    cuMem where FABRIC handles work, else a registered /dev/shm mapping."""
 
     def __init__(
         self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
     ) -> None:
         self.group = group
         weight_bytes = num_rows * dim
-        storage = self._allocate(weight_bytes + weight_bytes // block_size)
-        self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
-        self.weight_scale_inv = storage[weight_bytes:].view(-1, dim // block_size)
+        num_bytes = weight_bytes + weight_bytes // block_size
+
+        def split(storage: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
+            return weight, storage[weight_bytes:].view(-1, dim // block_size)
+
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
+        # Rank 0 picks the backing so every rank runs the same collectives.
+        fabric = group.broadcast_object(
+            _fabric_host_tables_supported() if group.rank_in_group == 0 else None
+        )
+        self.backing = "cuMem" if fabric else "/dev/shm"
+        if fabric:
+            from vllm.models.deepseek_v41.nvidia.ops.engram_host_table import (
+                allocate_fabric_host_table,
+            )
+
+            storage, device_storage = allocate_fabric_host_table(num_bytes, group)
+            self._views = split(device_storage)
+        else:
+            storage = self._allocate(num_bytes)
+        self.weight, self.weight_scale_inv = split(storage)
 
     def _allocate(self, num_bytes: int) -> torch.Tensor:
         """Map and register one physical allocation across a node-local DP group."""
@@ -874,7 +904,7 @@ class DPSharedEngramStorage:
 
 
 def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
-    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
+    """Whether co-located DP replicas exist and can hold the full tables."""
     if get_engram_dp_size() == 1:
         logger.warning_once(
             "Engram DP replicas are not co-located on one node; "
@@ -889,7 +919,10 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     # Only the leader allocates, so every replica follows its check.
     error = None
     if group.rank_in_group == 0:
-        if not os.path.isdir(SHM_PATH):
+        if _fabric_host_tables_supported():
+            if num_bytes > psutil.virtual_memory().available:
+                error = f"{num_bytes / 2**30:.1f} GiB exceeds available host memory"
+        elif not os.path.isdir(SHM_PATH):
             error = f"{SHM_PATH} is not mounted"
         else:
             try:
@@ -1024,7 +1057,9 @@ class ParallelEngramEmbedding(nn.Module):
                 self.part_num_embeddings,
                 dim,
                 self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
-                "shared across DP replicas" if dp_shared_memory else "per rank",
+                f"shared across DP replicas via {self._shared_memory.backing}"
+                if self._shared_memory is not None
+                else "per rank",
             )
 
     def _get_shard_info(self) -> tuple[int, int]:
