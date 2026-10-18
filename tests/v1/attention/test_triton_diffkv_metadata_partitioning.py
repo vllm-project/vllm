@@ -8,7 +8,6 @@ kernel stubbed, and the launcher's 3D/2D partition dispatch with both kernels
 stubbed.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -159,7 +158,6 @@ def test_build_attaches_partition_buffers_and_threshold(env):
         NUM_PAR_SOFTMAX_SEGMENTS,
         next_power_of_2(HEAD_SIZE_V),
     )
-    assert not meta.use_cascade
     assert meta.num_actual_tokens == 2
     assert meta.max_query_len == 1
     assert meta.query_start_loc is env.common.query_start_loc
@@ -245,24 +243,6 @@ def test_forward_rejects_output_scale(env, monkeypatch):
             meta,
             output,
             output_scale=torch.ones(1),
-        )
-
-
-def test_forward_rejects_cascade_metadata(env, monkeypatch):
-    monkeypatch.setattr(diffkv_backend, "unified_attention_diffkv", lambda **_: None)
-    impl = _make_impl()
-    meta = dataclasses.replace(env.builder.build(0, env.common), use_cascade=True)
-    output = torch.ones(4, 16, HEAD_SIZE_V)
-    kv_cache = torch.zeros(NUM_BLOCKS, 8, BLOCK_SIZE, HEAD_SIZE_QK + HEAD_SIZE_V)
-    with pytest.raises(AssertionError, match="Cascade attention"):
-        impl.forward(
-            None,
-            torch.zeros(4, 16, HEAD_SIZE_QK),
-            None,
-            None,
-            kv_cache,
-            meta,
-            output,
         )
 
 

@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
@@ -40,7 +41,7 @@ def _on_gfx950() -> bool:
 # architectures take the fallback decode kernel, so its tests are skipped there.
 requires_split_decode_arch = pytest.mark.skipif(
     not _on_split_decode_arch(),
-    reason="split-K decode kernel is only tuned for AMD gfx942/gfx950",
+    reason="split-K decode and the V4.1 combine tests need an AMD gfx942/gfx950",
 )
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(),
@@ -69,7 +70,7 @@ def enable_aiter_mqa(monkeypatch):
 def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     column_scales, monkeypatch, enable_aiter_mqa
 ) -> None:
-    """The vLLM AITER dispatch preserves ragged masking and per-token scales."""
+    """The vLLM AITER dispatch honors ragged intervals and per-token scales."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
@@ -107,7 +108,7 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     valid = (positions >= starts[:, None]) & (positions < ends[:, None])
     assert actual.shape == expected.shape
     assert actual.dtype == torch.float32
-    assert torch.equal(torch.isneginf(actual), ~valid)
+    assert not torch.isneginf(actual[valid]).any()
     torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
 
 
@@ -424,6 +425,37 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     torch.testing.assert_close(actual_lens, expected_lens)
 
 
+@pytest.mark.parametrize("width", [16, 640, 2176])
+@pytest.mark.parametrize("num_queries", [1, 70, 1000])
+@torch.inference_mode()
+def test_build_ragged_indices_from_dense_drops_invalid_entries(
+    width: int, num_queries: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        build_ragged_indices_from_dense,
+    )
+
+    device = torch.device("cuda")
+    set_random_seed(width + num_queries)
+    num_rows = 5000
+    indices = torch.randint(0, num_rows + 100, (num_queries, width))
+    indices[torch.rand(num_queries, width) < 0.3] = -1
+    lengths = torch.randint(0, width + 8, (num_queries,))
+
+    flat, indptr = build_ragged_indices_from_dense(
+        indices.to(device, torch.int32),
+        lengths.to(device, torch.int32),
+        num_rows=num_rows,
+    )
+
+    # Each row keeps its in-range entries within its length, in order.
+    expected = [
+        [x for x in row[:n] if 0 <= x < num_rows]
+        for row, n in zip(indices.tolist(), lengths.tolist())
+    ]
+    assert _rows_from_ragged(flat, indptr) == expected
+
+
 @torch.inference_mode()
 def test_combine_topk_swa_indices_adds_image_visibility() -> None:
     from vllm.models.deepseek_v4.amd.rocm import combine_topk_swa_indices
@@ -564,6 +596,195 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+NOPE_ONLY_HEAD_DIM = 512
+
+
+def _nope_only_ragged_inputs(
+    kv_lens: list[int], num_heads: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build a GLM-like 512+0 NoPE decode batch with ragged KV segments."""
+    num_kv = 4096
+    kv = (
+        torch.randn(num_kv, NOPE_ONLY_HEAD_DIM, dtype=torch.bfloat16, device=device)
+        * 0.125
+    )
+    q = (
+        torch.randn(
+            len(kv_lens),
+            num_heads,
+            NOPE_ONLY_HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    rows = [torch.randperm(num_kv)[:length].tolist() for length in kv_lens]
+    indices, indptr = _ragged_from_rows(rows, device)
+    return q, kv, indices, indptr
+
+
+# Lengths below the split count leave splits empty; non-multiples force a tail.
+_NOPE_ONLY_KV_LENS = [0, 1, 3, 37, 129, 2048]
+
+
+@requires_split_decode_arch
+@pytest.mark.parametrize("num_splits", [2, 32])
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_sparse_attn_decode_bf16_split_k_matches_ragged(
+    num_splits: int, with_sink: bool
+) -> None:
+    """Split-K decode must reproduce the single-workgroup ragged kernel."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_bf16_triton,
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    set_random_seed(0)
+    num_heads = 16
+    q, kv, indices, indptr = _nope_only_ragged_inputs(
+        _NOPE_ONLY_KV_LENS, num_heads, device
+    )
+    attn_sink = (
+        torch.randn(num_heads, dtype=torch.float32, device=device)
+        if with_sink
+        else None
+    )
+    scale = NOPE_ONLY_HEAD_DIM**-0.5
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+    )
+    actual = _rocm_sparse_attn_decode_ragged_bf16_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_ONLY_HEAD_DIM,
+        rope_head_dim=0,
+        num_splits=num_splits,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
+    device = torch.device("cuda")
+    set_random_seed(7)
+    head_dim = nope_dim + rope_dim
+    return dict(
+        q=torch.randn(3, 3, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        kv=torch.randn(5, head_dim, dtype=torch.bfloat16, device=device) * 0.125,
+        indices=torch.tensor([0, 2, 1, 3, 4], dtype=torch.int32, device=device),
+        indptr=torch.tensor([0, 2, 5, 5], dtype=torch.int32, device=device),
+        scale=head_dim**-0.5,
+        attn_sink=torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device),
+        nope_head_dim=nope_dim,
+        rope_head_dim=rope_dim,
+    )
+
+
+# 448+64 is DeepSeek V4/V4.1, 512+64 is V3.2, and 256+0 stands in for the
+# NoPE-only layouts where the destination spans the whole head dim.
+SPARSE_PREFILL_DIMS = [(NOPE_HEAD_DIM, ROPE_HEAD_DIM), (512, 64), (256, 0)]
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_matches_allocated(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    allocated = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)
+
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], nope_dim, dtype=q.dtype, device=q.device)
+    returned = _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    assert returned is dest
+    torch.testing.assert_close(dest, allocated[..., :nope_dim], atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize(("nope_dim", "rope_dim"), SPARSE_PREFILL_DIMS)
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_view_leaves_neighbors_untouched(
+    nope_dim: int, rope_dim: int
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(nope_dim, rope_dim)
+    q = kwargs["q"]
+    num_queries, num_heads = q.shape[0], q.shape[1]
+
+    buffer = torch.full(
+        (num_queries + 4, num_heads + 2, nope_dim),
+        -7.0,
+        dtype=q.dtype,
+        device=q.device,
+    )
+    dest = buffer[2 : 2 + num_queries, :num_heads]
+    assert not dest.is_contiguous()
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :nope_dim]
+    torch.testing.assert_close(dest, expected, atol=0.0, rtol=0.0)
+
+    untouched = torch.ones_like(buffer, dtype=torch.bool)
+    untouched[2 : 2 + num_queries, :num_heads] = False
+    assert torch.all(buffer[untouched] == -7.0)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_out_casts_to_dest_dtype(
+    out_dtype: torch.dtype,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(512, 64)
+    q = kwargs["q"]
+    dest = torch.empty(q.shape[0], q.shape[1], 512, dtype=out_dtype, device=q.device)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _rocm_sparse_attn_prefill_ragged_triton(**kwargs)[..., :512]
+    assert dest.dtype == out_dtype
+    torch.testing.assert_close(dest.float(), expected.float(), atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_sparse_attn_prefill_head_dim_wide_out_keeps_rope_rows() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    kwargs = _sparse_prefill_ragged_inputs(NOPE_HEAD_DIM, ROPE_HEAD_DIM)
+    q = kwargs["q"]
+    dest = torch.empty_like(q)
+    _rocm_sparse_attn_prefill_ragged_triton(**kwargs, out=dest)
+
+    expected = _ref_sparse_prefill_ragged(
+        q, kwargs["kv"], [[0, 2], [1, 3, 4], []], kwargs["scale"], kwargs["attn_sink"]
+    )
+    torch.testing.assert_close(dest, expected, atol=2e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     ("num_queries", "on_gfx950", "expected"),
     [(1023, True, False), (1024, True, True), (1024, False, False)],
@@ -686,10 +907,11 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     output = torch.empty_like(q)
     dense_fallback_calls = 0
 
-    def fake_dense_fallback(*args, **kwargs):
+    def fake_dense_fallback(*args, out, **kwargs):
         nonlocal dense_fallback_calls
         dense_fallback_calls += 1
-        return torch.zeros_like(q)
+        out.zero_()
+        return out
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
@@ -964,6 +1186,21 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(1, 1, 128, 8192) == 32
     assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 4
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
+    assert mod._decode_gfx950_num_splits(4, 1, 2048.0, 0.0, 32) == 32
+
+
+def test_sparse_decode_bf16_num_splits_floor_and_tile_clamp(monkeypatch) -> None:
+    """Short rows skip splitting, and splits never exceed the tiles they walk."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "_decode_num_splits", lambda *args: 32)
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 32)
+
+    floor = mod._SPARSE_DECODE_BF16_MIN_SPLIT_LEN
+    block_k = mod._SPARSE_DECODE_BF16_BLOCK_K
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor - 1) == 1
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor) == floor // block_k
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, 2048) == 32
 
 
 @requires_split_decode_arch
@@ -1746,6 +1983,272 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+@torch.inference_mode()
+def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
+    """Replay V4.1 ROCm decode after device-only query reallocation."""
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.models.deepseek_v41.amd.rocm import (
+        DeepseekV41ROCMAiterMLASparseMetadataBuilder,
+        DeepseekV41ROCMAiterSparseSWAMetadataBuilder,
+        compute_global_topk_ragged_indices_and_indptr,
+    )
+    from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+
+    device = torch.device("cuda")
+    num_reqs = 3
+    upper_query_len = 6
+    graph_tokens = num_reqs * upper_query_len
+    block_size = 128
+    compress_ratio = 2
+    compressed_block_size = block_size // compress_ratio
+
+    vllm_config = create_vllm_config(
+        model_name="facebook/opt-125m",
+        max_model_len=1024,
+        block_size=block_size,
+        max_num_seqs=num_reqs,
+        max_num_batched_tokens=graph_tokens,
+        hf_config_override={
+            "compress_ratios": [0, 1, 2],
+            "index_topk": 8,
+            "sliding_window": 32,
+        },
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=upper_query_len - 1,
+        parallel_drafting=False,
+        enable_adaptive_verification=True,
+        use_dspark=lambda: True,
+    )
+    mla_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.bfloat16,
+        tokens_per_state=compress_ratio,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.uint8,
+        sliding_window=32,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    mla_builder = DeepseekV41ROCMAiterMLASparseMetadataBuilder(
+        mla_spec, ["c2a"], vllm_config, device
+    )
+    swa_builder = DeepseekV41ROCMAiterSparseSWAMetadataBuilder(
+        swa_spec, ["c2a"], vllm_config, device
+    )
+    assert (
+        mla_builder.get_cudagraph_support(vllm_config, mla_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+    assert (
+        swa_builder.get_cudagraph_support(vllm_config, swa_spec)
+        == AttentionCGSupport.ALWAYS
+    )
+
+    seq_lens = torch.tensor([100, 110, 120], dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    query_start_loc_cpu = torch.arange(
+        0, graph_tokens + 1, upper_query_len, dtype=torch.int32
+    )
+    block_table = torch.arange(num_reqs, dtype=torch.int32, device=device).view(
+        num_reqs, 1
+    )
+
+    def build_metadata(query_lens: list[int]):
+        query_lens_tensor = torch.tensor(query_lens, dtype=torch.int32, device=device)
+        query_start_loc = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32, device=device),
+                query_lens_tensor.cumsum(0),
+            ]
+        )
+        active_tokens = sum(query_lens)
+        slot_mapping = torch.full((graph_tokens,), -1, dtype=torch.int64, device=device)
+        slot_mapping[:active_tokens] = torch.arange(
+            active_tokens, dtype=torch.int64, device=device
+        )
+        common = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=graph_tokens,
+            max_query_len=upper_query_len,
+            max_seq_len=int(seq_lens_cpu.max()),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+        return (
+            mla_builder.build_for_cudagraph_capture(common),
+            swa_builder.build_for_cudagraph_capture(common),
+        )
+
+    mla_metadata, swa_metadata = build_metadata([6, 6, 6])
+    metadata_ptrs = (
+        mla_metadata.req_id_per_token.data_ptr(),
+        mla_metadata.slot_mapping.data_ptr(),
+        swa_metadata.token_to_req_indices.data_ptr(),
+        swa_metadata.decode_swa_ragged_indices.data_ptr(),
+        swa_metadata.decode_swa_ragged_indptr.data_ptr(),
+    )
+
+    topk_indices = (
+        torch.arange(8, dtype=torch.int32, device=device)
+        .expand(graph_tokens, -1)
+        .contiguous()
+    )
+    torch.manual_seed(23)
+    num_heads = 16
+    q = (
+        torch.randn(
+            graph_tokens,
+            num_heads,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    swa_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(
+            num_reqs * block_size,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125,
+        block_size,
+        use_fnuz=False,
+    )
+    compressed_cache = _pack_fp8_ds_mla_cache(
+        torch.randn(
+            num_reqs * compressed_block_size,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125,
+        compressed_block_size,
+        use_fnuz=False,
+    )
+    attn_sink = torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
+    out = torch.empty_like(q)
+    monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 1)
+
+    def build_topk_ragged(mla_md, swa_md):
+        return compute_global_topk_ragged_indices_and_indptr(
+            topk_indices,
+            swa_md.token_to_req_indices,
+            mla_md.block_table,
+            compressed_block_size,
+            swa_md.is_valid_token,
+        )
+
+    def run_decode(mla_md, swa_md) -> None:
+        topk_ragged_indices, topk_ragged_indptr, topk_lens = build_topk_ragged(
+            mla_md, swa_md
+        )
+        mod.rocm_sparse_attn_decode(
+            q=q,
+            kv_cache=compressed_cache,
+            swa_k_cache=swa_cache,
+            swa_only=False,
+            topk_indices=None,
+            topk_lens=topk_lens,
+            swa_indices=swa_md.decode_swa_indices,
+            swa_lens=swa_md.decode_swa_lens,
+            swa_ragged_indices=swa_md.decode_swa_ragged_indices,
+            swa_ragged_indptr=swa_md.decode_swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=HEAD_DIM**-0.5,
+            head_dim=HEAD_DIM,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            output=out,
+            extra_cache_nan_free=True,
+        )
+
+    def reference(mla_md, swa_md) -> torch.Tensor:
+        topk_ragged_indices, topk_ragged_indptr, _ = build_topk_ragged(mla_md, swa_md)
+        return _ref_sparse_decode_ragged(
+            q=q,
+            main_cache=swa_cache,
+            main_rows=_rows_from_ragged(
+                swa_md.decode_swa_ragged_indices,
+                swa_md.decode_swa_ragged_indptr,
+            ),
+            scale=HEAD_DIM**-0.5,
+            attn_sink=attn_sink,
+            block_size=block_size,
+            extra_cache=compressed_cache,
+            extra_rows=_rows_from_ragged(
+                topk_ragged_indices,
+                topk_ragged_indptr,
+            ),
+            extra_block_size=compressed_block_size,
+        )
+
+    run_decode(mla_metadata, swa_metadata)
+    torch.accelerator.synchronize()
+    expected_full = reference(mla_metadata, swa_metadata)
+    torch.testing.assert_close(out, expected_full, atol=2e-2, rtol=2e-2)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_decode(mla_metadata, swa_metadata)
+    torch.accelerator.synchronize()
+    captured_full = out.clone()
+
+    reallocated_mla, reallocated_swa = build_metadata([2, 6, 4])
+    assert metadata_ptrs == (
+        reallocated_mla.req_id_per_token.data_ptr(),
+        reallocated_mla.slot_mapping.data_ptr(),
+        reallocated_swa.token_to_req_indices.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indices.data_ptr(),
+        reallocated_swa.decode_swa_ragged_indptr.data_ptr(),
+    )
+    expected_owners = torch.tensor(
+        [0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2],
+        dtype=torch.int32,
+        device=device,
+    )
+    torch.testing.assert_close(reallocated_mla.req_id_per_token[:12], expected_owners)
+    torch.testing.assert_close(
+        reallocated_swa.token_to_req_indices[:12], expected_owners
+    )
+    assert reallocated_swa.is_valid_token[:12].all()
+    assert not reallocated_swa.is_valid_token[12:].any()
+    torch.testing.assert_close(
+        reallocated_swa.decode_swa_lens[12:],
+        torch.zeros(6, dtype=torch.int32, device=device),
+    )
+
+    expected_reallocated = reference(reallocated_mla, reallocated_swa)
+    run_decode(reallocated_mla, reallocated_swa)
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
+    assert not torch.equal(captured_full, expected_reallocated)
+
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, expected_reallocated, atol=2e-2, rtol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
 # ---------------------------------------------------------------------------
@@ -2170,3 +2673,159 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
     torch.testing.assert_close(
         gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
     )
+
+
+def _combine_topk_swa_indices_torch(
+    topk_indices,
+    query_start_loc,
+    seq_lens,
+    gather_lens,
+    window_size,
+    compress_ratio,
+    topk,
+    M,
+    N,
+):
+    """The Torch path this kernel replaces, copied from before the switch.
+
+    Kept verbatim so the reference cannot drift toward the kernel.
+    """
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        _SPARSE_PREFILL_TOPK_ALIGNMENT,
+    )
+
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens = topk_indices.shape[0]
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
+    )
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+
+    # query_start_loc may have a non-zero base for a narrowed mixed batch.
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    req_ids = torch.repeat_interleave(
+        torch.arange(seq_lens.shape[0], device=seq_lens.device), query_lens
+    )
+    query_starts = query_start_loc[:-1] - query_start_loc[0]
+    token_offsets = torch.arange(num_tokens, device=seq_lens.device) - (
+        torch.repeat_interleave(query_starts, query_lens)
+    )
+    positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
+
+    logical_topk_width = min(topk, topk_indices.shape[1])
+    topk_lens = torch.minimum(
+        (positions + 1) // compress_ratio,
+        torch.full_like(positions, logical_topk_width),
+    ).clamp_min(0)
+    topk_offsets = torch.arange(logical_topk_width, device=seq_lens.device)
+    topk_mask = topk_offsets[None, :] < topk_lens[:, None]
+    topk_values = topk_indices[:, :logical_topk_width].to(torch.int32)
+    topk_valid = topk_mask & (topk_values >= 0) & (topk_values < N)
+    combined_indices[:, :logical_topk_width] = torch.where(
+        topk_valid,
+        topk_values + (M * req_ids).to(torch.int32)[:, None],
+        -1,
+    )
+
+    swa_lens = torch.minimum(
+        positions + 1, torch.full_like(positions, window_size)
+    ).clamp_min(0)
+    swa_offsets = torch.arange(window_size, device=seq_lens.device)
+    swa_mask = swa_offsets[None, :] < swa_lens[:, None]
+    swa_columns = topk_lens[:, None] + swa_offsets[None, :]
+    gather_starts = seq_lens - gather_lens
+    swa_values = (
+        M * req_ids[:, None]
+        + N
+        + swa_offsets[None, :]
+        + positions[:, None]
+        - swa_lens[:, None]
+        + 1
+        - gather_starts[req_ids, None]
+    ).to(torch.int32)
+    rows = torch.arange(num_tokens, device=seq_lens.device)[:, None].expand_as(
+        swa_columns
+    )
+    flat_dst = rows[swa_mask] * combined_topk + swa_columns[swa_mask]
+    combined_indices.view(-1).index_copy_(0, flat_dst, swa_values[swa_mask])
+    combined_lens.copy_((topk_lens + swa_lens).to(torch.int32))
+    return combined_indices, combined_lens
+
+
+def _v41_combine_case(case, window):
+    dev = "cuda"
+    ratio, topk = 2, 512
+    if case == "seq_len_below_query_len":
+        qsl = torch.tensor([0, 64], dtype=torch.int32, device=dev)
+        sl = torch.tensor([32], dtype=torch.int32, device=dev)
+        rows = 64
+    elif case == "seq_len_zero":
+        # The warmup batch: every pos is negative, so both lengths clamp to 0.
+        qsl = torch.tensor([0, 32, 64], dtype=torch.int32, device=dev)
+        sl = torch.zeros(2, dtype=torch.int32, device=dev)
+        rows = 64
+    elif case == "compress_ratio_zero":
+        qsl = torch.tensor([0, 4, 8], dtype=torch.int32, device=dev)
+        sl = torch.tensor([4, 4], dtype=torch.int32, device=dev)
+        rows, ratio, topk = 8, 0, 0
+    elif case == "nonzero_base":
+        # Prefill rows of a mixed batch: query_start_loc starts past the decodes.
+        qsl = torch.tensor([32, 64, 128], dtype=torch.int32, device=dev)
+        sl = torch.tensor([48, 80], dtype=torch.int32, device=dev)
+        rows = 96
+    else:
+        qsl = torch.tensor([0, 32, 96], dtype=torch.int32, device=dev)
+        sl = torch.tensor([48, 80], dtype=torch.int32, device=dev)
+        rows = 96
+    # What the SWA builder gathers: the query plus up to window - 1 rows before it.
+    gl = torch.minimum(sl, qsl[1:] - qsl[:-1] + window - 1)
+    set_random_seed(0)
+    ti = torch.randint(0, 4096, (rows, max(topk, 1)), dtype=torch.int32)
+    if case == "invalid_topk":
+        # Failed candidates stay -1 instead of pointing into another request.
+        ti[:, ::7] = -1
+    return ti.to(dev), qsl, sl, gl, window, ratio, topk, 100000, 4096
+
+
+@requires_split_decode_arch
+@pytest.mark.parametrize(
+    "case,window",
+    [
+        ("seq_len_below_query_len", 128),
+        ("seq_len_zero", 128),
+        ("compress_ratio_zero", 128),
+        ("nonzero_base", 128),
+        ("invalid_topk", 128),
+        ("plain", 64),
+        ("plain", 128),
+        ("plain", 256),
+    ],
+)
+def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
+    from vllm.models.deepseek_v41.amd.rocm import combine_topk_swa_indices
+
+    args = _v41_combine_case(case, window)
+    got_indices, got_lens = combine_topk_swa_indices(*args)
+    ref_indices, ref_lens = _combine_topk_swa_indices_torch(*args)
+    assert torch.equal(got_lens, ref_lens), (
+        f"lens differ: ref={ref_lens.tolist()} got={got_lens.tolist()}"
+    )
+    assert torch.equal(got_indices, ref_indices)
+
+
+def test_v41_rocm_combine_uses_shared_kernel() -> None:
+    """ROCm prefill takes the shared combine, so it inherits the replay bound."""
+    from vllm.models.deepseek_v41.amd import rocm
+    from vllm.models.deepseek_v41.common.ops import cache_utils
+
+    assert rocm.combine_topk_swa_indices is cache_utils.combine_topk_swa_indices

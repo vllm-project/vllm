@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -184,7 +184,7 @@ class K2HorizonToolParser(ToolParser):
         tool_choice = request.tool_choice
         if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
             return tool_choice.function.name
-        if isinstance(tool_choice, ToolChoiceFunction):
+        if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
             return tool_choice.name
         return None
 
