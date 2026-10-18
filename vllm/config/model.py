@@ -351,6 +351,14 @@ class ModelConfig:
     e.g. `{"GlmMoeDsaForCausalLM":
     "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
     argument is for development and debugging purposes only."""
+    enable_tpsp: bool = False
+    """Attempt paired TP/SP projections above a fixed or profiled threshold.
+    Incompatible with pipeline parallelism and target-hidden-state speculation."""
+    tpsp_microchunk_tokens: int | None = None
+    """Fix the TPSP microchunk size in global tokens. The backend rounds this up
+    to its per-rank row granularity and capacity instead of selecting a size."""
+    tpsp_threshold_tokens: int | None = None
+    """Fix the TPSP activation threshold in global tokens instead of selecting it."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -1059,6 +1067,11 @@ class ModelConfig:
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
                 "Example: max_model_len=2048"
+            )
+        if self.enable_tpsp and not self.using_transformers_backend():
+            raise ValueError(
+                "--enable-tpsp requires the Transformers modeling backend. "
+                "Set --model-impl transformers."
             )
         if self.enable_prompt_embeds and self.is_encoder_decoder:
             # No encoder-decoder model accepts `inputs_embeds`; their decoders

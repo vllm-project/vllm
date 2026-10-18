@@ -311,10 +311,11 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
         }                                                                  \
       });
 
-void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
-                        torch::stable::Tensor& residual,  // [..., hidden_size]
-                        std::optional<torch::stable::Tensor> weight,
-                        double epsilon) {
+void fused_add_rms_norm_with_stream(
+    torch::stable::Tensor& input,     // [..., hidden_size]
+    torch::stable::Tensor& residual,  // [..., hidden_size]
+    std::optional<torch::stable::Tensor> weight, double epsilon,
+    void* stream_ptr) {
   STD_TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   STD_TORCH_CHECK(residual.stride(-1) == 1);
   if (weight.has_value()) {
@@ -340,7 +341,7 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
-  const cudaStream_t stream = get_current_cuda_stream();
+  const cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   constexpr int vector_width = 8;
   constexpr int req_alignment_bytes = vector_width * 2;
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
@@ -370,4 +371,12 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
       LAUNCH_FUSED_ADD_RMS_NORM(0, false);
     }
   }
+}
+
+void fused_add_rms_norm(torch::stable::Tensor& input,
+                        torch::stable::Tensor& residual,
+                        std::optional<torch::stable::Tensor> weight,
+                        double epsilon) {
+  fused_add_rms_norm_with_stream(input, residual, weight, epsilon,
+                                 get_current_cuda_stream());
 }

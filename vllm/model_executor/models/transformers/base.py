@@ -18,7 +18,7 @@
 
 import os
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -136,6 +136,19 @@ class Base(
         self.pp_group = get_pp_group()
         self.tp_group = get_tp_group()
 
+        if self.model_config.enable_tpsp:
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError("--enable-tpsp requires pipeline_parallel_size=1.")
+            speculative_config = vllm_config.speculative_config
+            if speculative_config is not None and (
+                speculative_config.use_eagle()
+                or speculative_config.uses_extract_hidden_states()
+            ):
+                raise ValueError(
+                    "--enable-tpsp is incompatible with speculative decoding "
+                    "methods requiring target hidden states."
+                )
+
         # Attrs for weight loading (see self.load_weights)
         self.ignore_unexpected_prefixes: list[str] = []
         """Ignore unexpected weights whose qualname starts with these prefixes."""
@@ -189,6 +202,19 @@ class Base(
         self.recursive_replace()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
+
+        self.tpsp_adapter = None
+        if self.model_config.enable_tpsp:
+            from .tpsp_dense_adapter import TransformersDenseTPSP
+            from .tpsp_runtime import (
+                UnsupportedTPSPModelError,
+                UnsupportedTPSPNormError,
+            )
+
+            try:
+                self.tpsp_adapter = TransformersDenseTPSP(self.model, vllm_config)
+            except (UnsupportedTPSPModelError, UnsupportedTPSPNormError) as exc:
+                logger.warning("Transformers TPSP using regular forward: %s", exc)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -789,15 +815,24 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        outputs = self.model(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            use_cache=False,
-            position_ids=positions,
-            return_dict=False,
-            **self._output_aux_hidden_states_kwargs,
-            **kwargs,
-        )
+        with ExitStack() as stack:
+            if self.tpsp_adapter is not None:
+                if inputs_embeds is not None:
+                    num_tokens = inputs_embeds.shape[-2]
+                elif input_ids is not None:
+                    num_tokens = input_ids.numel()
+                else:
+                    num_tokens = positions.numel()
+                stack.enter_context(self.tpsp_adapter.forward_context(num_tokens))
+            outputs = self.model(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                use_cache=False,
+                position_ids=positions,
+                return_dict=False,
+                **self._output_aux_hidden_states_kwargs,
+                **kwargs,
+            )
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
@@ -818,6 +853,10 @@ class Base(
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        if self.tpsp_adapter is not None:
+            self.tpsp_adapter.profile()
 
     @staticmethod
     def check_version(min_version: str, feature: str):
