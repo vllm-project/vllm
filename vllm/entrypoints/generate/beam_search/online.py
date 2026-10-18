@@ -20,6 +20,7 @@ from vllm.utils.async_utils import collect_from_async_generator
 from .utils import (
     BeamSearchSequence,
     create_sort_beams_key_function,
+    get_beam_search_eos_token_ids,
 )
 
 
@@ -72,11 +73,10 @@ class BeamSearchOnlineMixin(ABC):
             sampling_params, self.engine_client.input_processor.vllm_config
         )
         allowed = set(params.allowed_token_ids) if params.allowed_token_ids else None
-        sampling_params.update_from_generation_config(
+        eos_token_ids = get_beam_search_eos_token_ids(
             self.engine_client.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        eos_token_ids = sampling_params.all_stop_token_ids
         sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
         all_beams = [
             BeamSearchSequence(

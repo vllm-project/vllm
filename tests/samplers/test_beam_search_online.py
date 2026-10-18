@@ -169,6 +169,7 @@ async def test_beam_search_respects_generation_config_eos(
     result.outputs[0].logprobs = [{11: Logprob(-0.1)}]
     should_stop = config_eos is not None and not ignore_eos
     expected_tokens = [11] if should_stop else [11, 11, 11]
+    engine_params: list[SamplingParams] = []
 
     if offline:
         offline_serving = _OfflineServing()
@@ -177,14 +178,20 @@ async def test_beam_search_respects_generation_config_eos(
             "_beam_search_step",
             BeamSearchOfflineMixin._beam_search_step,
         )
+
+        def render_and_run_requests(*, params, **kwargs):
+            engine_params.extend(params)
+            return [result]
+
         monkeypatch.setattr(
-            offline_serving, "_render_and_run_requests", lambda **_: [result]
+            offline_serving, "_render_and_run_requests", render_and_run_requests
         )
         beam = offline_serving.beam_search(cast(list, [prompt]), params)[0].sequences[0]
         assert beam.tokens == [1, *expected_tokens]
     else:
 
-        async def generate(*args, **kwargs):
+        async def generate(engine_prompt, sampling_params, *args, **kwargs):
+            engine_params.append(sampling_params)
             yield result
 
         online_serving = _AsyncServing()
@@ -195,6 +202,11 @@ async def test_beam_search_respects_generation_config_eos(
         assert output.token_ids == expected_tokens
         assert output.finish_reason == ("stop" if should_stop else "length")
         assert output.stop_reason == (11 if should_stop else None)
+
+    # The engine validates stop_token_ids against the vocab before it applies
+    # the generation config, so the config EOS ids must not be copied into them.
+    assert engine_params
+    assert all(not p.stop_token_ids for p in engine_params)
 
 
 @pytest.mark.asyncio

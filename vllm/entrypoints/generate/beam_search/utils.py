@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import Any
 
 from vllm.inputs import (
     DecoderOnlyEngineInput,
@@ -13,6 +14,7 @@ from vllm.inputs import (
 )
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 
 
 @dataclass
@@ -161,3 +163,17 @@ def create_sort_beams_key_function(eos_token_ids: set[int], length_penalty: floa
         )
 
     return sort_beams_key
+
+
+def get_beam_search_eos_token_ids(
+    generation_config: dict[str, Any], eos_token_id: int | None
+) -> set[int]:
+    """Return the token ids that end generation: the tokenizer EOS plus the
+    generation config's ``eos_token_id``.
+
+    This uses a separate SamplingParams so the params sent to the engine keep
+    their own ``stop_token_ids`` and are validated as before.
+    """
+    params = SamplingParams()
+    params.update_from_generation_config(generation_config, eos_token_id)
+    return params.all_stop_token_ids

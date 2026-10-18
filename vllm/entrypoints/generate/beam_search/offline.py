@@ -27,6 +27,7 @@ from .utils import (
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
+    get_beam_search_eos_token_ids,
 )
 
 logger = init_logger(__name__)
@@ -127,11 +128,10 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 params.structured_outputs, tokenizer
             )
 
-        base_sampling_params.update_from_generation_config(
+        eos_token_ids = get_beam_search_eos_token_ids(
             self.llm_engine.input_processor.generation_config_fields,
             tokenizer.eos_token_id,
         )
-        eos_token_ids = base_sampling_params.all_stop_token_ids
         sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
         instances: list[BeamSearchInstance] = []
 
