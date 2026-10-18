@@ -110,8 +110,8 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     monkeypatch.setattr("builtins.__import__", guard_aiter_sampling_import)
 
     sampler = topk_topp_sampler.TopKTopPSampler()
-    logits = torch.randn(2, 8)
-    k = torch.full((2,), 2, dtype=torch.int32)
+    logits = torch.randn(2, 8, device=DEVICE_TYPE)
+    k = torch.full((2,), 2, dtype=torch.int32, device=DEVICE_TYPE)
     generators = {0: torch.Generator(device=logits.device).manual_seed(0)}
 
     token_ids, logits_to_return = sampler(logits, generators, k, None)
