@@ -745,7 +745,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
-        gated_output, conv_input = ple_gate(
+        gated_output, conv_input = torch.ops.vllm.qwen4_exp_ple_gate(
             key,
             value,
             hidden_states,
@@ -849,6 +849,28 @@ def qwen4_exp_ple_short_conv(
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
     layer._short_conv(inputs, residual, outer_residual)
+
+
+def _ple_gate_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the gate output shapes for AMD graph tracing."""
+    return torch.empty_like(hidden), torch.empty_like(hidden)
+
+
+# Keep the AMD gate opaque to Dynamo while reusing the shared Triton kernel.
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_gate",
+    op_func=ple_gate,
+    mutates_args=[],
+    fake_impl=_ple_gate_fake,
+)
 
 
 direct_register_custom_op(
