@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -69,6 +70,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    deregister_nixl_memory,
     register_nixl_memory,
     validate_sharded_rdt_settings,
 )
@@ -87,7 +89,51 @@ logger = init_logger(__name__)
 
 
 class HostStagingAllocationError(RuntimeError):
-    """Pinned host receive-buffer allocation or registration failed."""
+    """A host receive slot could not be allocated, page-locked or registered."""
+
+
+def _alloc_page_locked_slot(nbytes: int) -> torch.Tensor:
+    """One exact-size host receive slot: a pageable ``torch.empty`` page-locked
+    whole from its storage base with ``cudaHostRegister``, then NIXL-registered.
+
+    Torch's pinned allocator is bypassed on purpose: it rounds every request up
+    to a power of two and keeps freed blocks cached, so the pool would occupy
+    more than the documented ``lanes x K x slot bytes`` and never give it back.
+    Any failure leaves nothing registered: a nonzero ``cudaHostRegister`` code
+    (the wrapper returns codes and never raises) is raised with its error text,
+    and a NIXL failure unregisters the page-locked range before re-raising.
+    """
+    cudart = CudaRTLibrary()
+    buffer = torch.empty(nbytes, dtype=torch.uint8, device="cpu")
+    storage = buffer.untyped_storage()
+    base, size = storage.data_ptr(), storage.nbytes()
+    code = cudart.cudaHostRegister(base, size, 0)
+    if code != 0:
+        cudart.cudaGetLastError()
+        raise RuntimeError(
+            f"cudaHostRegister({size} bytes) returned CUDA error {code}: "
+            f"{cudart.cudaGetErrorString(code)}"
+        )
+    try:
+        register_nixl_memory(buffer)
+    except Exception:
+        _host_unregister(cudart, base)
+        raise
+    return buffer
+
+
+def _host_unregister(cudart: CudaRTLibrary, base: int) -> None:
+    """Undo ``cudaHostRegister`` on ``base``. A failure is logged, not raised:
+    this runs on shutdown and inside the init rollback."""
+    code = cudart.cudaHostUnregister(base)
+    if code != 0:
+        cudart.cudaGetLastError()
+        logger.warning(
+            "cudaHostUnregister(%#x) returned CUDA error %d: %s",
+            base,
+            code,
+            cudart.cudaGetErrorString(code),
+        )
 
 
 @dataclass(frozen=True)
@@ -401,6 +447,12 @@ class ShardedRDTWeightTransferEngine(
         self._lanes = 1
         self._pool_geometry: tuple[StagingDevice, int, int] | None = None
         self._dest_buffers: list[dict[torch.dtype, torch.Tensor]] = [{}]
+        # (slot, old tensor) pairs a re-init grow replaced, released once that
+        # init commits: a rollback puts them back, so they must stay registered.
+        self._retired_slots: list[tuple[int, torch.Tensor]] = []
+        # Host slots whose NIXL deregistration failed: possibly still registered,
+        # so they stay page-locked and referenced for the process lifetime.
+        self._parked_host_slots: list[torch.Tensor] = []
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
         # Generation counters guarding the events (see _ensure_proc_worker).
         self._slot_queued: list[int] = []
@@ -523,6 +575,11 @@ class ShardedRDTWeightTransferEngine(
             # Start the background post-processing worker (pull/process pipelining).
             self._ensure_proc_worker()
         except Exception:
+            # The restore below drops every slot this attempt built; give their
+            # host memory back first. Slots a re-init grow replaced are restored,
+            # not released, so they stay page-locked and NIXL-registered.
+            self._release_attempt_slots(old_dest_slot_contents)
+            self._retired_slots = []
             old_name_to_plan.clear()
             old_name_to_plan.update(old_name_to_plan_contents)
             old_name_meta.clear()
@@ -562,6 +619,8 @@ class ShardedRDTWeightTransferEngine(
                 self._slot_cv,
             ) = old_worker_refs
             raise
+        # Committed: the slots a re-init grow replaced left the pool for good.
+        self._release_retired_slots()
 
     def _configure_ring(
         self, init_info: ShardedRDTWeightTransferInitInfo
@@ -810,8 +869,10 @@ class ShardedRDTWeightTransferEngine(
             buffer = self._dest_buffers[slot].get(torch.uint8)
             if buffer is None or buffer.numel() < alloc:
                 self._dest_buffers[slot][torch.uint8] = self._alloc_receive_buffer(
-                    alloc
+                    alloc, pool_total=self._num_slots * alloc
                 )
+                if buffer is not None and self._staging_device == "host":
+                    self._retired_slots.append((slot, buffer))
 
         # (b) producer serve rings — max bytes this consumer pulls from each
         # bound producer, plus the per-producer plan digest a producer sharing
@@ -837,11 +898,16 @@ class ShardedRDTWeightTransferEngine(
             [nb // (1 << 20) for nb in serve_bytes],
         )
 
-    def _alloc_receive_buffer(self, nbytes: int) -> torch.Tensor:
+    def _alloc_receive_buffer(
+        self, nbytes: int, *, pool_total: int | None = None
+    ) -> torch.Tensor:
         """Allocate and register one receive buffer in the selected staging mode.
 
-        This is the sole allocation seam for init preregistration and the
-        defensive grow path in ``_issue_pull``.
+        This is the sole allocation seam for init preregistration, which sizes
+        every slot to ``nbytes`` and passes the exact ``pool_total`` the failure
+        message names, and for the defensive grow path in ``_issue_pull``, which
+        omits it because only one slot is regrown while the others keep their
+        size, so the message names that slot's bytes alone.
         """
         if self._staging_device == "gpu":
             buffer = torch.empty(nbytes, dtype=torch.uint8, device=self.device)
@@ -849,23 +915,108 @@ class ShardedRDTWeightTransferEngine(
             return buffer
 
         try:
-            buffer = torch.empty(
-                nbytes,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=True,
-            )
-            register_nixl_memory(buffer)
+            return _alloc_page_locked_slot(nbytes)
         except Exception as error:
-            requested = self._num_slots * nbytes
             raise HostStagingAllocationError(
-                "staging_device='host' could not allocate and register pinned "
-                f"receive memory: {self._num_slots} slots "
-                f"({self._lanes} lane(s) x K={self._ring_depth}) x "
-                f"{nbytes} requested bytes = {requested} bytes per worker: "
-                f"{error}"
+                "staging_device='host' could not "
+                f"{self._host_alloc_request(nbytes, pool_total)}; each slot "
+                "is pageable host memory page-locked whole with "
+                "cudaHostRegister and registered with NIXL, with no "
+                f"pinned-allocator rounding or caching: {error}"
             ) from error
-        return buffer
+
+    def _host_alloc_request(self, nbytes: int, pool_total: int | None) -> str:
+        """What the failed host allocation was for, with the pool geometry."""
+        geometry = (
+            f"{self._num_slots} slots ({self._lanes} lane(s) x K={self._ring_depth})"
+        )
+        if pool_total is None:
+            return (
+                f"regrow one receive slot of its {geometry} pool to {nbytes} "
+                "bytes, exactly (the other slots keep their size)"
+            )
+        return (
+            f"build its receive pool: {geometry} x {nbytes} bytes = "
+            f"{pool_total} bytes per worker, exactly"
+        )
+
+    def _release_host_slot(self, buffer: torch.Tensor) -> None:
+        """Give one host slot back: NIXL deregistration, then
+        ``cudaHostUnregister`` on the storage base, then forget the cached dtype
+        views so dropping the tensor frees the pageable storage.
+
+        A slot whose NIXL deregistration fails may still be registered, so it
+        is never handed back to the allocator: it is reported at error level,
+        kept page-locked (no ``cudaHostUnregister``) and parked on
+        ``_parked_host_slots`` for the process lifetime. One slot's bytes
+        leaked loudly beats a freed range a registration still covers.
+
+        Never raises: it runs on shutdown and inside the init rollback, where a
+        failure must not mask the caller's state.
+        """
+        storage = buffer.untyped_storage()
+        base = storage.data_ptr()
+        try:
+            deregister_nixl_memory(buffer)
+        except Exception:
+            logger.exception(
+                "NIXL deregistration of a host receive slot failed (base %#x, "
+                "%d bytes); the slot stays page-locked and parked, never freed",
+                base,
+                storage.nbytes(),
+            )
+            self._parked_host_slots.append(buffer)
+            self._forget_cached_targets(buffer)
+            return
+        try:
+            _host_unregister(CudaRTLibrary(), base)
+        except Exception:
+            logger.exception("cudaHostUnregister of a host receive slot failed")
+        self._forget_cached_targets(buffer)
+
+    def _forget_cached_targets(self, buffer: torch.Tensor) -> None:
+        """Drop the cached dtype views carved out of ``buffer``."""
+        stale = [
+            key
+            for key, (ptr, _views) in self._targets_cache.items()
+            if ptr == buffer.data_ptr()
+        ]
+        for key in stale:
+            del self._targets_cache[key]
+
+    def _release_attempt_slots(
+        self, kept: list[dict[torch.dtype, torch.Tensor]]
+    ) -> None:
+        """Release the host slots a failed init attempt built: every tensor in
+        the pool that is not among ``kept``, the contents the rollback restores.
+        """
+        if self._staging_device != "host":
+            return
+        kept_ids = {id(buffer) for contents in kept for buffer in contents.values()}
+        for buffers in self._dest_buffers:
+            for buffer in buffers.values():
+                if id(buffer) not in kept_ids:
+                    self._release_host_slot(buffer)
+
+    def _release_retired_slots(self) -> None:
+        """Release the host slots a committed re-init grow replaced, once the
+        last scatter out of each has run."""
+        retired, self._retired_slots = self._retired_slots, []
+        for slot, buffer in retired:
+            self._wait_slot_consumed(slot)
+            self._release_host_slot(buffer)
+
+    def _wait_slot_consumed(self, slot: int) -> None:
+        """Block until every scatter out of ``slot`` has run: the generation
+        handshake ``_issue_pull`` performs (while the worker is alive to publish
+        done counts), then the slot's read-done event."""
+        if slot >= len(self._slot_read_done):
+            return  # no worker yet: nothing has read the slot
+        if self._proc_thread is not None:
+            with self._slot_cv:
+                while self._slot_done[slot] < self._slot_queued[slot]:
+                    self._slot_cv.wait(timeout=1.0)
+        self._slot_read_done[slot].synchronize()
 
     def _global_worker_index(self) -> int:
         """This worker's stable, distinct global index across the inference fleet:
@@ -1002,10 +1153,15 @@ class ShardedRDTWeightTransferEngine(
             # Size ONCE with headroom: Ray's desc cache is keyed by data_ptr and
             # outlives its tensor, so a regrowth can false-hit a recycled pointer
             # and skip registering the new extent -> NIXL_ERR_NOT_FOUND.
+            replaced = buffer
             buffer = self._alloc_receive_buffer(
                 buffer_alloc_bytes(cur, self._buffer_presize)
             )
             buffers[torch.uint8] = buffer
+            if replaced is not None and self._staging_device == "host":
+                # The read-done wait above drained every scatter out of the old
+                # slot, so its host memory goes back now.
+                self._release_host_slot(replaced)
         targets = self._pull_targets(chunk, slot, buffer)
         # One produce RPC serves the whole packed chunk, since the group's owner
         # holds every slice. The buffer view must stay strongly referenced through
@@ -1746,6 +1902,15 @@ class ShardedRDTWeightTransferEngine(
             self._quant_thread = None
             self._quant_queue = None
             self._quant_stream = None
+        # Give every host slot back (NIXL deregistration, then cudaHostUnregister)
+        # before the pool is dropped below; GPU slots keep their process-lifetime
+        # NIXL registration as before.
+        if self._staging_device == "host":
+            for slot, buffers in enumerate(self._dest_buffers):
+                self._wait_slot_consumed(slot)
+                for buffer in buffers.values():
+                    self._release_host_slot(buffer)
+        self._retired_slots = []
         self._slot_read_done = []
         self._router = None
         # Drop strong references to baked modules so the model can be freed.
@@ -1754,8 +1919,9 @@ class ShardedRDTWeightTransferEngine(
         self._live_names.clear()
         # Drop the cached plan (holds _Scatter refs to the baked layers).
         self._cached_plan = None
-        # Release the receive buffers (their NIXL registration is pinned for the
-        # process lifetime; freeing the tensors just drops our strong refs).
+        # Drop the receive buffers: GPU slots keep their NIXL registration for the
+        # process lifetime (dropping the tensors just drops our strong refs);
+        # host slots were released above.
         self._dest_buffers = [{} for _ in range(self._num_slots)]
 
 

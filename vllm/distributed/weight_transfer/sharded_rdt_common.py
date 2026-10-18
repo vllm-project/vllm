@@ -147,6 +147,18 @@ def register_nixl_memory(tensor: torch.Tensor) -> None:
     ray_register_nixl_memory(tensor)
 
 
+def deregister_nixl_memory(tensor: torch.Tensor) -> None:
+    """Drop the registration ``register_nixl_memory`` holds for ``tensor``."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import (
+        deregister_nixl_memory as ray_deregister_nixl_memory,
+    )
+
+    ray_deregister_nixl_memory(tensor)
+
+
 def assign_producer_indices(
     num_producers: int, num_consumers: int, consumer_idx: int
 ) -> list[int]:

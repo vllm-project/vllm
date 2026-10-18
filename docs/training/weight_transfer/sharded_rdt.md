@@ -56,15 +56,15 @@ A trainer rank need not hold the whole model. Each one declares what it holds th
 
 ### Receive staging and concurrent stage streams
 
-`staging_device` selects where each inference worker's receive slots live. `"gpu"` (the default) receives directly into GPU memory. `"host"` uses NIXL-registered pinned host memory, then enqueues the scatter into the model's GPU parameters asynchronously on a CUDA stream. A slot is not reused until that asynchronous copy has consumed it.
+`staging_device` selects where each inference worker's receive slots live. `"gpu"` (the default) receives directly into GPU memory. `"host"` uses host memory that is page-locked with `cudaHostRegister` and registered with NIXL, then enqueues the scatter into the model's GPU parameters asynchronously on a CUDA stream. A slot is not reused until that asynchronous copy has consumed it.
 
-`stages_in_flight` (S) is the maximum number of independent, owner-connected trainer stage streams a worker pulls from concurrently. The effective lane count is `min(S, stream_count)`, with at least one lane, and each lane owns `num_rdt_buffers` (K) slots. The receive-pool memory per worker is therefore approximately:
+`stages_in_flight` (S) is the maximum number of independent, owner-connected trainer stage streams a worker pulls from concurrently. The effective lane count is `min(S, stream_count)`, with at least one lane, and each lane owns `num_rdt_buffers` (K) slots. The receive-pool memory per worker is therefore exactly:
 
 ```text
 min(S, stream_count) * K * rounded_slot_size
 ```
 
-The pool is allocated in GPU memory for GPU staging or pinned host memory for host staging. Increasing S or K is an explicit memory-for-throughput tradeoff and can exhaust the selected allocator; the engine reports the allocation failure instead of silently reducing concurrency or changing staging modes.
+where `rounded_slot_size` is the largest packed chunk the worker pulls, rounded up to a multiple of 256 MiB (or the `buffer_presize_gb` floor, if larger). The pool is allocated in GPU memory for GPU staging. For host staging each slot is pageable host memory of exactly `rounded_slot_size` bytes, page-locked whole with `cudaHostRegister` and registered with NIXL; torch's pinned allocator, which rounds every request up to a power of two and caches freed blocks, is not involved, so the formula is the page-locked footprint with no rounding caveat and no hidden host cache. Whenever a host slot is dropped (on shutdown, on a regrow, or when a re-init replaces or rolls it back) it is NIXL-deregistered and unregistered first, so its memory returns to the system; a slot whose NIXL deregistration fails is kept page-locked and reported, never freed. Increasing S or K is an explicit memory-for-throughput tradeoff and can exhaust the selected allocator or the page-lockable memory; the engine reports the allocation or registration failure, with the exact bytes it asked for, instead of silently reducing concurrency, falling back to pageable memory or changing staging modes.
 
 Sync 0 always runs serially with one lane and one pull in flight while both endpoints finish registration. Pipelining starts with sync 1. The defaults, `staging_device="gpu"` and `stages_in_flight=1`, preserve the existing GPU path and issue, drain, and free order.
 
@@ -90,7 +90,7 @@ vllm serve my-model \
 Everything else — which producers exist, how the model splits into layer groups, the ownership table — arrives from the trainer at the init handshake.
 
 !!! warning "Size the receive buffers before choosing `gpu_memory_utilization`"
-    With GPU staging, each worker holds `min(stages_in_flight, stream_count) * num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom can OOM during initialization even though model profiling succeeded. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding. Host staging moves this pool to pinned host memory but has the same sizing tradeoff.
+    With GPU staging, each worker holds `min(stages_in_flight, stream_count) * num_rdt_buffers` receive buffers, each large enough for the biggest single slice batch it pulls. Like NCCL and NIXL internals, they do **not** count against `gpu_memory_utilization`, so a fraction that leaves no headroom can OOM during initialization even though model profiling succeeded. The buffer size is driven by the largest atomic slice — for an untied vocab matrix on a worker that holds it unsliced, that is the whole embedding. Host staging moves this pool to host memory page-locked with `cudaHostRegister` and registered with NIXL, exactly `min(stages_in_flight, stream_count) * num_rdt_buffers * rounded_slot_size` bytes per worker, with the same sizing tradeoff.
 
 ## Trainer Side
 
