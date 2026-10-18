@@ -13,7 +13,7 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde_json::Value;
@@ -38,6 +38,7 @@ use crate::routes::openai::chat_completions::types::{
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
+use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
     ToolCallDelta, Usage,
@@ -45,7 +46,7 @@ use crate::routes::openai::utils::types::{
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
@@ -99,7 +100,7 @@ pub async fn chat_completions(
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
-        Sse::new(sse_stream).into_response()
+        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
         let response = match collect_chat_completion(
             chat_stream,
@@ -128,6 +129,7 @@ async fn collect_chat_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_per_request_metrics,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -158,6 +160,7 @@ async fn collect_chat_completion(
         logprobs,
         token_ids,
         usage,
+        timestamps,
         finish_reason,
         kv_transfer_params,
         ec_transfer_params,
@@ -202,6 +205,8 @@ async fn collect_chat_completion(
     } else {
         None
     };
+    let metrics = enable_per_request_metrics
+        .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count));
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -236,6 +241,7 @@ async fn collect_chat_completion(
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
         }],
         usage: Some(usage),
+        metrics,
         system_fingerprint: None,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
@@ -254,6 +260,7 @@ async fn chat_completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_per_request_metrics,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -324,7 +331,20 @@ async fn chat_completion_chunk_stream(
                     ));
                 }
             }
-            Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
+            Ok(ChatEvent::BlockDelta {
+                kind,
+                delta,
+                token_count,
+                ..
+            }) => {
+                // The count is per-delta and follows the decoder clock; it is
+                // fed even when the reasoning delta itself is hidden from the
+                // client (`include_reasoning=false`).
+                if matches!(kind, AssistantBlockKind::Reasoning)
+                    && let Some(token_count) = token_count
+                {
+                    continuous_usage.add_reasoning_tokens(token_count);
+                }
                 let include_delta =
                     include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning);
                 if include_delta {
@@ -415,6 +435,7 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::Done {
                 usage: final_usage,
+                timestamps,
                 finish_reason,
                 ..
             }) => {
@@ -433,6 +454,9 @@ async fn chat_completion_chunk_stream(
                     final_usage.prompt_token_count,
                     final_usage.output_token_count,
                 );
+                // Converge the running reasoning count onto the authoritative
+                // terminal value.
+                continuous_usage.set_reasoning_tokens(final_usage.reasoning_tokens);
 
                 if let Some(pending_chunk) = pending_chunk.as_mut()
                     && let Some(chunk) = pending_chunk.take_chunk(&envelope)
@@ -456,9 +480,16 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if include_usage {
+                    let metrics = enable_per_request_metrics.then(|| {
+                        PerRequestMetrics::from_timestamps(
+                            timestamps,
+                            final_usage.output_token_count,
+                        )
+                    });
                     y.yield_ok(usage_chunk(
                         &envelope,
                         Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
+                        metrics,
                     ))
                     .await;
                 }
@@ -480,9 +511,11 @@ async fn chat_completion_chunk_stream(
 fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
+    metrics: Option<PerRequestMetrics>,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
+    chunk.metrics = metrics.map(Into::into);
     chunk
 }
 
@@ -806,15 +839,30 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use serde_json::json;
     use vllm_chat::{
-        AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
+        AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, ChatTokenUsage,
+        FinishReason,
     };
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
-        ApiServerOptions, ResponseOptions, StreamResponseEnvelope, block_delta_chunk,
-        chat_completion_chunk_stream, final_chunk,
+        ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
+        block_delta_chunk, chat_completion_chunk_stream, final_chunk,
     };
+
+    /// Terminal usage with the given engine-level counts and zero reasoning tokens.
+    fn done_usage(
+        prompt_tokens: usize,
+        output_tokens: usize,
+        cached_tokens: usize,
+    ) -> ChatTokenUsage {
+        vllm_llm::TokenUsage {
+            prompt_token_count: prompt_tokens,
+            output_token_count: output_tokens,
+            cached_token_count: cached_tokens,
+        }
+        .into()
+    }
 
     fn stream_envelope() -> Arc<StreamResponseEnvelope> {
         Arc::new(StreamResponseEnvelope::new(
@@ -913,6 +961,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -929,10 +978,12 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 1,
+                usage: done_usage(1, 1, 1),
+                timestamps: vllm_llm::RequestTimestamps {
+                    queued_ts: 10.0,
+                    scheduled_ts: 10.2,
+                    first_token_ts: 10.5,
+                    last_token_ts: 11.0,
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -947,6 +998,7 @@ mod tests {
             1,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
+                enable_per_request_metrics: true,
                 ..Default::default()
             },
             ResponseOptions {
@@ -978,6 +1030,10 @@ mod tests {
                 .map(|details| details.cached_tokens),
             Some(1)
         );
+        assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
+        let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
+        assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
     }
 
     #[tokio::test]
@@ -995,6 +1051,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1011,11 +1068,8 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1059,19 +1113,18 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::BlockDelta {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 2,
-                    cached_token_count: 0,
-                },
+                usage: done_usage(1, 2, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1115,6 +1168,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1133,6 +1187,7 @@ mod tests {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1149,11 +1204,8 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 2,
-                    cached_token_count: 0,
-                },
+                usage: done_usage(1, 2, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1226,6 +1278,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1267,6 +1320,7 @@ mod tests {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1283,11 +1337,8 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 4,
-                    cached_token_count: 0,
-                },
+                usage: done_usage(1, 4, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1365,11 +1416,8 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -1409,5 +1457,209 @@ mod tests {
             chunks[2].choices[0].delta.tool_calls.as_ref().unwrap()[0].id,
             None
         );
+    }
+
+    /// Measured reasoning-token count of one chunk's continuous usage.
+    fn chunk_reasoning_tokens(chunk: &ChatCompletionStreamResponse) -> Option<usize> {
+        chunk
+            .usage
+            .as_ref()
+            .map(|usage| usage.completion_tokens_details.reasoning_tokens)
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_reasoning_tokens_with_continuous_usage() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![7, 8, 9].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(2),
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: None,
+                token_ids: vec![20, 21],
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                // A stray text-side count must not pollute reasoning usage.
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 3,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 2,
+                },
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // Role, reasoning delta, text delta, finish-reason chunk, usage chunk.
+        assert_eq!(chunks.len(), 5);
+        // The role chunk reports reasoning tokens from 0 onwards.
+        let role_usage = chunks[0].usage.as_ref().expect("role chunk usage");
+        assert_eq!(role_usage.prompt_tokens, 3);
+        assert_eq!(role_usage.completion_tokens, Some(0));
+        assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
+        // The reasoning delta contributes its per-delta measured count, fed by
+        // the `BlockDelta` itself rather than the sampled-clock `LogprobsDelta`.
+        assert_eq!(chunk_reasoning_tokens(&chunks[1]), Some(2));
+        assert_eq!(
+            chunks[1].usage.as_ref().and_then(|usage| usage.completion_tokens),
+            Some(2)
+        );
+        // The text delta's own count does not pollute reasoning usage, and the
+        // terminal usage chunk converges onto the authoritative final counts.
+        assert_eq!(chunk_reasoning_tokens(&chunks[2]), Some(2));
+        let final_usage = chunks[4].usage.as_ref().expect("final usage chunk");
+        assert_eq!(final_usage.prompt_tokens, 3);
+        assert_eq!(final_usage.completion_tokens, Some(3));
+        assert_eq!(chunk_reasoning_tokens(&chunks[4]), Some(2));
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_reasoning_tokens_when_reasoning_hidden() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(2),
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 1,
+                        output_token_count: 2,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 2,
+                },
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // The reasoning text stays hidden...
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.choices.iter().all(|choice| choice.delta.reasoning.is_none()))
+        );
+        // ...but the count is still reported, from 0 on the role chunk up to
+        // the converged final usage.
+        assert_eq!(chunk_reasoning_tokens(&chunks[0]), Some(0));
+        let final_usage = chunks.last().unwrap().usage.as_ref().expect("final usage chunk");
+        assert_eq!(final_usage.completion_tokens, Some(2));
+        assert_eq!(final_usage.completion_tokens_details.reasoning_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_zero_reasoning_tokens_without_reasoning() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+                token_count: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(1, 1, 0),
+                timestamps: Default::default(),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        // Reasoning-token details are always reported; a stream without
+        // reasoning simply reports 0 on every usage payload.
+        for chunk in &chunks {
+            let usage = chunk.usage.as_ref().expect("usage");
+            assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
+            let json = serde_json::to_value(usage).expect("usage serializes");
+            assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+        }
     }
 }

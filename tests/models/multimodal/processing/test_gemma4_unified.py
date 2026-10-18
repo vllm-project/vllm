@@ -6,9 +6,13 @@ from collections.abc import Mapping
 import pytest
 import torch
 from PIL import Image as PILImage
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
-from vllm.model_executor.models.gemma4_mm import Gemma4ImagePixelInputs
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4ImagePixelInputs,
+    _dummy_audio_num_samples,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -204,3 +208,41 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+def test_dummy_audio_length_falls_back_for_the_unified_extractor():
+    """The unified audio feature extractor does not define ``fft_length``.
+
+    ``Gemma4DummyInputsBuilder.get_dummy_mm_data`` read that attribute
+    unconditionally, so memory profiling raised ``AttributeError`` for every
+    unified Gemma 4 deployment in which audio is the modality with the largest
+    per-item token count -- which is the case as soon as ``audio_seq_length``
+    is raised above the video budget.
+    """
+
+    class _UnifiedFeatureExtractor:
+        sampling_rate = 16000
+
+    class _UnifiedProcessor:
+        feature_extractor = _UnifiedFeatureExtractor()
+        audio_seq_length = 3000
+        audio_ms_per_token = 40
+
+    # 3000 tokens * 40 ms = 120 s at 16 kHz
+    assert _dummy_audio_num_samples(_UnifiedProcessor()) == 120 * 16000
+
+
+def test_dummy_audio_length_still_uses_fft_length_for_the_tower_extractor():
+    """The mel/tower extractor keeps its existing behaviour."""
+
+    class _TowerFeatureExtractor(Gemma4AudioFeatureExtractor):
+        def __init__(self):  # noqa: D107 - bypass the real feature-extractor init
+            self.fft_length = 512
+            self.sampling_rate = 16000
+
+    class _TowerProcessor:
+        feature_extractor = _TowerFeatureExtractor()
+        audio_seq_length = 750
+        audio_ms_per_token = 40
+
+    assert _dummy_audio_num_samples(_TowerProcessor()) == 512
