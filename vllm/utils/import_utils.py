@@ -663,6 +663,10 @@ def check_torchcodec_available():
     """Whether the optional `torchcodec` package is available."""
     try:
         import torchcodec  # noqa: F401
+    except OSError as e:
+        # A native library of torchcodec cannot load, e.g. a build for another
+        # CUDA version. Report it as unavailable, like a missing FFmpeg.
+        raise RuntimeError(f"torchcodec cannot load its native library: {e}") from None
     except RuntimeError as e:
         # torchcodec will raise RuntimeError during import instead
         # of ImportError when system ffmpeg unavailable, with a

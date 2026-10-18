@@ -39,8 +39,10 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
+except (ImportError, OSError, RuntimeError) as exc:
     # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+    # OSError: a native library of torchcodec cannot load, e.g. a build for
+    # another CUDA version (libnvrtc.so.13 missing).
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:
