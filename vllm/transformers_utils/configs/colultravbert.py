@@ -86,7 +86,7 @@ class ColUltraVBertConfig(PreTrainedConfig):
             vision_config = SiglipVisionConfig(**vision_config)
 
         self.text_config = text_config
-        self.vision_config = vision_config
+        self.vision_config: SiglipVisionConfig = vision_config
         self.image_token_id = image_token_id
         self.pixel_shuffle_factor = pixel_shuffle_factor
         self.connector_norm = connector_norm

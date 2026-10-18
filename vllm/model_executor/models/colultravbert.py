@@ -378,6 +378,8 @@ class ColUltraVBertProcessingInfo(Idefics3ProcessingInfo):
 
 
 class ColUltraVBertDummyInputsBuilder(Idefics3DummyInputsBuilder):
+    info: ColUltraVBertProcessingInfo
+
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -396,6 +398,8 @@ class ColUltraVBertDummyInputsBuilder(Idefics3DummyInputsBuilder):
 
 
 class ColUltraVBertMultiModalProcessor(Idefics3MultiModalProcessor):
+    info: ColUltraVBertProcessingInfo
+
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
@@ -403,7 +407,9 @@ class ColUltraVBertMultiModalProcessor(Idefics3MultiModalProcessor):
     ) -> BatchFeature:
         # Each image tiles at its own capped longest edge, which the HF
         # processor only takes per call.
-        images = ImageProcessorItems(hf_data["images"])
+        images = self.info.parse_mm_data(
+            {"image": hf_data["images"]}, validate=False
+        ).get_items("image", ImageProcessorItems)
         outputs = []
         for i in range(len(images)):
             size = images.get_image_size(i)
