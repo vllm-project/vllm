@@ -287,6 +287,7 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "ClefFlashForJointSchema": ("clef_flash", "ClefFlashForJointSchema"),
     "ClefOmniForJointSchema": ("clef_omni", "ClefOmniForJointSchema"),
     "ModernBertForTokenClassification": (
         "modernbert",

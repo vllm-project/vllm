@@ -130,6 +130,33 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | options per `choice` | 26 |
 | levels per `score` | 10 |
 
+## Clef-Flash
+
+[Clef-Flash](https://huggingface.co/Cloudflare/clef-flash) uses a Qwen3.5-9B
+backbone and a joint schema head to score all questions in one forward pass.
+vLLM detects the head and serves the checkpoint as a pooling model.
+
+```bash
+vllm serve Cloudflare/clef-flash --max-model-len 16384
+```
+
+Send requests to `/v1/systemone` using `state` and `questions`, as in the
+examples above. `choice`, `noul` and `score` questions are supported.
+
+- Text and JSON states use the checkpoint's fixed prompt. JSON is compact
+  with sorted keys. `instructions` returns 400; `chat_template_kwargs`
+  has no effect.
+- The complete prompt must fit the engine's resolved `max_model_len`, including
+  expanded media, state, questions, options and fixed prompt tokens. There is no
+  additional 16,384-token cap or silent state truncation. Oversized requests
+  return 400 before pooling; shorten/split the input or configure a supported
+  larger context. Exactly-at-limit requests reserve no generation tokens.
+- `images` and `videos` are placed before the state. Videos are sampled at
+  2 fps and processed by the Qwen3.5 vision processor. Audio inputs return
+  400, and video soundtracks are ignored.
+- Each request performs one pooling read. `usage.input_tokens` counts the
+  prompt once, `output_tokens` is 0, and `label_mass` is 1.
+
 ## Clef-Omni
 
 [Clef-Omni](https://huggingface.co/Cloudflare/clef-omni) is a decision model:
@@ -188,7 +215,7 @@ vllm serve LiquidAI/d1-3B
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Omni](#clef-omni), [Liquid d1](#liquid-d1), images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Liquid d1](#liquid-d1), images only) |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
