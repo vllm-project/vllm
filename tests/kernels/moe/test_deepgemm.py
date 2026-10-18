@@ -610,7 +610,13 @@ def make_mxfp4_weights(
       w1_bf16: (E, 2N, K)   — original BF16 for reference
       w2_bf16: (E, K, N)    — original BF16 for reference
     """
-    from deep_gemm.utils.math import per_token_cast_to_fp4
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    module = _import_deep_gemm()
+    assert module is not None, "DeepGEMM is required for FP4 test operands"
+    per_token_cast_to_fp4 = importlib.import_module(
+        f"{module.__name__}.utils.math"
+    ).per_token_cast_to_fp4
 
     dtype = torch.bfloat16
     gran_k = 32  # MXFP4 block size
@@ -636,6 +642,301 @@ def make_mxfp4_weights(
         )
 
     return w1, w2, w1_s, w2_s, w1_bf16, w2_bf16
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, True),
+        (dict(dp_size=4, ep_size=4, use_ep=True), True),
+        (dict(dp_size=2, ep_size=4, use_ep=True), False),
+        (
+            dict(
+                dp_size=4, ep_size=4, use_ep=True, all2all_backend="deepep_low_latency"
+            ),
+            False,
+        ),
+        (dict(sp_size=2), False),
+        (dict(enable_eplb=True), False),
+    ],
+)
+def test_mxfp4_bi_backend_selection_limits(monkeypatch, overrides, expected):
+    """Production selection rejects communication paths without BI evidence."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from vllm import envs
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import deep_gemm_moe
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kMxfp4Static,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(
+        deep_gemm_moe,
+        "current_platform",
+        SimpleNamespace(is_device_capability_family=lambda family: family == 100),
+    )
+    cls = deep_gemm_moe.DeepGemmFP4Experts
+    monkeypatch.setattr(cls, "_supports_current_device", staticmethod(lambda: True))
+    parallel = replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        all2all_backend="allgather_reducescatter",
+    )
+    parallel = replace(parallel, **overrides)
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=6,
+        hidden_dim=5120,
+        intermediate_size=2304,
+        num_local_experts=8 // parallel.ep_size,
+        num_logical_experts=8,
+        moe_parallel_config=parallel,
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
+    )
+    assert envs.VLLM_BATCH_INVARIANT
+    supported, reason = mk.FusedMoEExperts.is_supported_config(
+        cls,
+        config,
+        kMxfp4Static,
+        kFp8Dynamic128Sym,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported == expected, reason
+    if not expected:
+        assert "parallel config" in reason
+
+
+@torch.inference_mode()
+def _mxfp4_bi_ep_worker(group, vllm_config, cpu_group, clamp):
+    from dataclasses import replace
+
+    from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.model_executor.determinism.batch_invariant import (
+        enable_batch_invariant_mode,
+    )
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        _pack_deepgemm_mxfp4_scales,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(group.device)
+    enable_batch_invariant_mode()
+    torch.manual_seed(1907)
+    experts, intermediate, hidden, topk = 8, 2304, 5120, 6
+    w1, w2, s1, s2, _, _ = make_mxfp4_weights(experts, intermediate, hidden)
+    scales = _pack_deepgemm_mxfp4_scales(w1, w2, s1, s2)
+    per_rank = experts // group.world_size
+    first = group.rank * per_rank
+    owned = slice(first, first + per_rank)
+    expert_map = torch.full((experts,), -1, device=group.device, dtype=torch.int32)
+    expert_map[owned] = torch.arange(per_rank, device=group.device, dtype=torch.int32)
+    base = make_dummy_moe_config(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+    )
+    parallel = FusedMoEParallelConfig.make(
+        1, 1, group.world_size, 1, vllm_config.parallel_config
+    )
+    sharded = replace(base, num_local_experts=per_rank, moe_parallel_config=parallel)
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kMxfp4Static,
+    )
+
+    supported, reason = mk.FusedMoEExperts.is_supported_config(
+        DeepGemmFP4Experts,
+        sharded,
+        kMxfp4Static,
+        kFp8Dynamic128Sym,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported, reason
+
+    def kernel(config, sf1, sf2):
+        activation = FusedMoEQuantDesc(torch.float8_e4m3fn, GroupShape(128, 128))
+        quant = FusedMoEQuantConfig(
+            _a1=activation,
+            _a2=activation,
+            _w1=FusedMoEQuantDesc("mxfp4", scale=sf1),
+            _w2=FusedMoEQuantDesc("mxfp4", scale=sf2),
+            gemm1_clamp_limit=clamp,
+        )
+        return mk.FusedMoEKernel(
+            prepare_finalize=maybe_make_prepare_finalize(
+                config, quant, allow_new_interface=True
+            ),
+            fused_experts=DeepGemmFP4Experts(config, quant),
+        )
+
+    local = kernel(base, *scales)
+    distributed = kernel(sharded, *(s[owned] for s in scales))
+    # Empty input ranks and an entirely idle expert rank exercise collective
+    # participation independently of expert ownership and token counts.
+    for sizes, active in (([17, 5, 0, 3], experts), ([1, 0, 9, 4], 6)):
+        total = sum(sizes)
+        values = torch.randn(total, hidden, device=group.device, dtype=torch.bfloat16)
+        values[::3] *= 32
+        ids = torch.stack(
+            [torch.randperm(active, device=group.device)[:topk] for _ in range(total)]
+        ).int()
+        scores = torch.rand(total, topk, device=group.device)
+        begin = sum(sizes[: group.rank])
+        rows = slice(begin, begin + sizes[group.rank])
+        kwargs = dict(
+            activation=MoEActivation.SILU,
+            global_num_experts=experts,
+            apply_router_weight_on_input=False,
+        )
+        expected = local.apply(
+            hidden_states=values,
+            w1=w1,
+            w2=w2,
+            topk_weights=scores,
+            topk_ids=ids,
+            expert_map=None,
+            **kwargs,
+        )[rows].clone()
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=sizes[group.rank],
+            num_tokens_across_dp=torch.tensor(sizes, device="cpu", dtype=torch.int32),
+        ):
+            metadata = get_forward_context().dp_metadata
+            assert metadata is not None
+            with metadata.sp_local_sizes(sequence_parallel_size=1):
+                actual = distributed.apply(
+                    hidden_states=values[rows].contiguous(),
+                    w1=w1[owned].contiguous(),
+                    w2=w2[owned].contiguous(),
+                    topk_weights=scores[rows].contiguous(),
+                    topk_ids=ids[rows].contiguous(),
+                    expert_map=expert_map,
+                    **kwargs,
+                )
+        assert actual.shape == expected.shape
+        assert torch.equal(actual, expected), (group.rank, sizes, clamp)
+
+
+@torch.inference_mode()
+def test_mxfp4_bi_rows_independent_of_batch_and_alignment(monkeypatch, workspace_init):
+    """BI pads experts to DeepGEMM's per-call BLOCK_M, which varies with M; a
+    row's MoE output must not change with M, the alignment, or its batch-mates."""
+    from vllm.model_executor.layers.fused_moe import deep_gemm_utils
+    from vllm.model_executor.layers.fused_moe.experts import deep_gemm_moe
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        _pack_deepgemm_mxfp4_scales,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(2311)
+    experts, intermediate, hidden, topk, total = 16, 2304, 5120, 6, 2048
+    w1, w2, s1, s2, _, _ = make_mxfp4_weights(experts, intermediate, hidden)
+    sf1, sf2 = _pack_deepgemm_mxfp4_scales(w1, w2, s1, s2)
+    activation = FusedMoEQuantDesc(torch.float8_e4m3fn, GroupShape(128, 128))
+    quant = FusedMoEQuantConfig(
+        _a1=activation,
+        _a2=activation,
+        _w1=FusedMoEQuantDesc("mxfp4", scale=sf1),
+        _w2=FusedMoEQuantDesc("mxfp4", scale=sf2),
+    )
+    config = make_dummy_moe_config(
+        num_experts=experts,
+        experts_per_token=topk,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        max_num_tokens=total,
+    )
+    kernel = mk.FusedMoEKernel(
+        prepare_finalize=maybe_make_prepare_finalize(
+            config, quant, allow_new_interface=True
+        ),
+        fused_experts=DeepGemmFP4Experts(config, quant),
+    )
+    values = torch.randn(total, hidden, device="cuda", dtype=torch.bfloat16)
+    values[::3] *= 32
+    ids = torch.stack(
+        [torch.randperm(experts, device="cuda")[:topk] for _ in range(total)]
+    ).int()
+    ids[1:64] = ids[0]
+    scores = torch.rand(total, topk, device="cuda")
+    default = get_mk_alignment_for_contiguous_layout()
+    block_m = {"value": None}
+
+    def capped():
+        return [block_m["value"] or default[0], default[1]]
+
+    monkeypatch.setattr(deep_gemm_moe, "get_mk_alignment_for_contiguous_layout", capped)
+    monkeypatch.setattr(
+        deep_gemm_utils, "get_mk_alignment_for_contiguous_layout", capped
+    )
+
+    def run(rows):
+        return kernel.apply(
+            hidden_states=values[rows].contiguous(),
+            w1=w1,
+            w2=w2,
+            topk_weights=scores[rows].contiguous(),
+            topk_ids=ids[rows].contiguous(),
+            global_num_experts=experts,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+        ).view(torch.int16)
+
+    alone = torch.cat([run(slice(i, i + 1)) for i in range(4)])
+    for value in (None, 16, 64, 128):
+        block_m["value"] = value
+        for m in (1, 4, 6, 37, 384, total):
+            rows = torch.cat(
+                [torch.arange(4), torch.randperm(total - 4)[: max(m - 4, 0)] + 4]
+            )[:m].cuda()
+            assert torch.equal(run(rows)[: min(m, 4)], alone[: min(m, 4)]), (value, m)
+
+
+@pytest.mark.parametrize("clamp", [None, 10.0])
+def test_mxfp4_bi_ep_ag_rs_matches_unsharded(clamp):
+    """Real EP4 dispatch/expert/combine preserves the single-rank BF16 result."""
+    from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+        parallel_launch_with_config,
+    )
+    from vllm.config import ParallelConfig, VllmConfig
+
+    assert torch.accelerator.device_count() >= 4, "EP evidence requires four GPUs"
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=4,
+            data_parallel_size_local=4,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+        )
+    )
+    parallel_launch_with_config(
+        4, _mxfp4_bi_ep_worker, config, {"VLLM_BATCH_INVARIANT": "1"}, clamp
+    )
 
 
 def _bf16_moe_reference(x, w1, w2, topk_weights, topk_ids):

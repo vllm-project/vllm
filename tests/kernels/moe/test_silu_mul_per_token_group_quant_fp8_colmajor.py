@@ -19,6 +19,17 @@ FLOAT8_DTYPE = torch.float8_e4m3fn
 GROUP_SIZE = 128
 
 
+def test_bi_packed_quant_rejects_unsupported_padding_before_launch(monkeypatch):
+    """A dense native launch must never silently overwrite expert padding."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with pytest.raises(NotImplementedError, match="expert padding metadata"):
+        silu_mul_quant_fp8_packed_triton(
+            torch.empty(8, 256, dtype=torch.bfloat16),
+            expert_ends=torch.tensor([1, 5], dtype=torch.int32),
+            expert_alignment=4,
+        )
+
+
 def reference_quant(x: torch.Tensor, use_ue8m0: bool):
     """Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
@@ -228,3 +239,32 @@ def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
 
     torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32))
     torch.testing.assert_close(output_scales, ref_output_scales)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA native quantization")
+@pytest.mark.parametrize("rows", [465920, 466048, 626688])
+@pytest.mark.parametrize("packed", [False, True])
+def test_bi_quant_large_numel_matches_row_chunks(rows, packed, monkeypatch):
+    """Rows below and above INT32 numel preserve chunkwise quantization."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        fused_silu_mul_per_token_group_quant_fp8,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    x = torch.full((rows, 4608), 0.125, dtype=torch.bfloat16, device="cuda")
+    x[:, 0] = (torch.arange(rows, device="cuda") % 17).to(torch.bfloat16)
+    output, scales = fused_silu_mul_per_token_group_quant_fp8(
+        x, use_ue8m0=packed, clamp_limit=10.0, masked_m=None
+    )
+    torch.accelerator.synchronize()
+    for start in range(0, rows, 4096):
+        expected, expected_scales = fused_silu_mul_per_token_group_quant_fp8(
+            x[start : start + 4096],
+            use_ue8m0=packed,
+            clamp_limit=10.0,
+            masked_m=None,
+        )
+        assert torch.equal(
+            output[start : start + 4096].view(torch.uint8), expected.view(torch.uint8)
+        )
+        assert torch.equal(scales[start : start + 4096], expected_scales)

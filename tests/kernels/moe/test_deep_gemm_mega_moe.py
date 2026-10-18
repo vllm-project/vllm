@@ -1308,3 +1308,90 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
     assert output.dtype == torch.bfloat16
     assert _calc_diff(output, expected) < 1e-3
     assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
+    ),
+    reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
+)
+@pytest.mark.parametrize("hidden,inter,num_experts,top_k", [(1024, 512, 16, 6)])
+def test_deep_gemm_mega_moe_rows_ignore_batch(
+    dist_init, hidden, inter, num_experts, top_k
+):
+    """Batch-invariant serving needs each token's MegaMoE output bits to
+    depend only on that token: not on the batch size or its row position."""
+    fmt, act, max_tokens = MEGA_MOE_MXFP4, MegaMoEActivation(), 8192
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+
+    def randn(*shape, fan_in):
+        return (torch.randn(*shape, device=device) / fan_in**0.5).bfloat16()
+
+    shared_ckpt = [
+        _quantize(randn(*shape, fan_in=k), fmt.shared[0])
+        for shape, k in (((inter, hidden), hidden),) * 2 + (((hidden, inter), inter),)
+    ]
+    shared_mlp = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(
+            weight=torch.cat([shared_ckpt[0][0], shared_ckpt[1][0]]),
+            weight_scale_inv=torch.cat([shared_ckpt[0][1], shared_ckpt[1][1]]),
+        ),
+        down_proj=SimpleNamespace(
+            weight=shared_ckpt[2][0], weight_scale_inv=shared_ckpt[2][1]
+        ),
+    )
+    with torch.device(device):
+        experts = DeepGemmMegaMoEExperts(
+            vllm_config,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            experts_start_idx=0,
+            top_k=top_k,
+            hidden_size=hidden,
+            intermediate_size=inter,
+            activation=act,
+            weight_format=fmt,
+            shared_experts=shared_mlp,
+            prefix="model.layers.0.bi",
+        )
+    assert experts.has_fused_shared_experts
+    for e in range(num_experts):
+        w13 = _quantize(randn(2 * inter, hidden, fan_in=hidden), fmt.routed)
+        w2 = _quantize(randn(hidden, inter, fan_in=inter), fmt.routed)
+        for shard_id, param, rows, (weight, scale, _, _) in (
+            ("w1", "w13", slice(0, inter), w13),
+            ("w3", "w13", slice(inter, None), w13),
+            ("w2", "w2", slice(None), w2),
+        ):
+            for suffix, tensor in (("weight", weight), ("weight_scale", scale)):
+                name = f"{param}_{suffix}"
+                assert experts.weight_loader(
+                    getattr(experts, name),
+                    tensor[rows],
+                    f"experts.{name}",
+                    shard_id=shard_id,
+                    expert_id=e,
+                    return_success=True,
+                )
+    for (weight, scale, _, _), shard in zip(shared_ckpt, ("w1", "w3", "w2")):
+        experts.load_shared_expert_weight(f"shared_experts.{shard}.weight", weight)
+        experts.load_shared_expert_weight(f"shared_experts.{shard}.weight_scale", scale)
+
+    x = torch.randn(max_tokens, hidden, device=device).bfloat16()
+    scores = torch.randn(max_tokens, num_experts, device=device)
+    weights, ids = torch.topk(scores.softmax(-1), top_k, dim=-1)
+    full = experts(x, weights, ids, None)
+    for m in (1, 7, 64, 129, 1000, 4096):
+        torch.testing.assert_close(
+            experts(x[-m:], weights[-m:], ids[-m:], None), full[-m:], rtol=0, atol=0
+        )
+    rev = torch.arange(max_tokens - 1, -1, -1, device=device)
+    torch.testing.assert_close(
+        experts(x[rev], weights[rev], ids[rev], None), full[rev], rtol=0, atol=0
+    )

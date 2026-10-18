@@ -1516,6 +1516,20 @@ def init_world_group(
     )
 
 
+def _moe_exchange_nccl_env() -> contextlib.AbstractContextManager:
+    """Create DP/EP/Engram communicators without the batch-invariant NCCL pins.
+
+    Under batch invariance these groups only gather rows or reduce tensors
+    whose every element has a single nonzero owner (MoE AG/RS dispatch and
+    combine), which is exact for any NCCL algorithm, protocol or channel count.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        from vllm.utils.nccl import unpinned_nccl_env
+
+        return unpinned_nccl_env()
+    return contextlib.nullcontext()
+
+
 def init_model_parallel_group(
     group_ranks: list[list[int]],
     local_rank: int,
@@ -2206,12 +2220,14 @@ def initialize_model_parallel(
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
         )
-        _ENGRAM_DP = init_model_parallel_group(
-            [x.tolist() for x in group_ranks],
-            get_world_group().local_rank,
-            backend,
-            group_name="edp",
-        )
+        # Engram only all-gathers hash ids and table rows over this group.
+        with _moe_exchange_nccl_env():
+            _ENGRAM_DP = init_model_parallel_group(
+                [x.tolist() for x in group_ranks],
+                get_world_group().local_rank,
+                backend,
+                group_name="edp",
+            )
         logger.info_once(
             "Engram node-local DP group size: %d (TP=%d)",
             engram_dp_size,
@@ -2287,9 +2303,10 @@ def initialize_model_parallel(
                 coord_store=coord_store,
             )
     else:
-        _DP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dp"
-        )
+        with _moe_exchange_nccl_env():
+            _DP = init_model_parallel_group(
+                group_ranks, get_world_group().local_rank, backend, group_name="dp"
+            )
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
@@ -2318,13 +2335,14 @@ def initialize_model_parallel(
                     use_all2all=use_all2all,
                 )
         else:
-            _EP = init_model_parallel_group(
-                group_ranks,
-                get_world_group().local_rank,
-                backend,
-                group_name="ep",
-                use_all2all=use_all2all,
-            )
+            with _moe_exchange_nccl_env():
+                _EP = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="ep",
+                    use_all2all=use_all2all,
+                )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
         # This is a separate process group to isolate EPLB communications

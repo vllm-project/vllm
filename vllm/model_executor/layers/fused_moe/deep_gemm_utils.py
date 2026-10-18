@@ -9,6 +9,7 @@ import math
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
@@ -43,8 +44,13 @@ def compute_aligned_M_and_alignment(
     GEMM call site needs to wrap itself in ``mk_alignment_scope`` or
     otherwise reason about the actual per-expert padding.
     """
-    if (expert_tokens_meta is not None) and (
-        expert_tokens_meta.expert_num_tokens_cpu is not None
+    expected_m = M * num_topk
+    # BI skips the routing-dependent CPU counts; a row's DeepGEMM result does
+    # not depend on BLOCK_M, so the per-call alignment below is still exact.
+    if (
+        (not envs.VLLM_BATCH_INVARIANT)
+        and (expert_tokens_meta is not None)
+        and (expert_tokens_meta.expert_num_tokens_cpu is not None)
     ):
         return (
             expert_num_tokens_round_up_and_sum(
@@ -58,7 +64,6 @@ def compute_aligned_M_and_alignment(
     # active, so the worst-case `local_num_experts*(align-1)` is too loose.
     # Also shrink `alignment` to DeepGEMM's per-call theoretical BLOCK_M on
     # SM100/SM120 when smaller.
-    expected_m = M * num_topk
     try:
         from vllm.utils.deep_gemm import (
             get_theoretical_mk_alignment_for_contiguous_layout,
@@ -494,6 +499,23 @@ def deepgemm_moe_permute(
         expert_tokens_meta=expert_tokens_meta,
     )
 
+    if envs.VLLM_BATCH_INVARIANT:
+        if use_psum_layout or aq_scale.dtype != torch.float32:
+            raise ValueError("CUDA BI permutation requires FP8/FP32 scales")
+        from vllm.model_executor.kernels.batch_invariant import stable_expert_permute
+
+        permuted, scales, grouped_layout, inverse = stable_expert_permute(
+            aq,
+            aq_scale,
+            topk_ids,
+            local_num_experts,
+            M_sum,
+            align_used,
+            expert_map=expert_map,
+            output=aq_out,
+        )
+        return permuted, scales, grouped_layout, inverse, align_used
+
     expert_start_loc = torch.empty(
         (local_num_experts), device=device, dtype=torch.int32
     )
@@ -574,4 +596,50 @@ def deepgemm_unpermute_and_reduce(
         input_index=inv_perm,
         expert_map=expert_map,
         output_tensor=output,
+    )
+
+
+@torch.no_grad()
+def deepgemm_ep_ordered_unpermute_and_reduce(
+    a: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    inv_perm: torch.Tensor,
+    expert_map: torch.Tensor,
+    output: torch.Tensor,
+):
+    """Return single-owner rows to each token's rank, then FP32 top-k FMA there.
+
+    Every slot is a BF16 expert row on exactly one EP rank and +0 elsewhere, so
+    the BF16 reduce-scatter adds only zeros and is exact for any algorithm or
+    order. Each rank combines its own tokens; other rows stay zero, so the AG/RS
+    combine that follows is exact too.
+    """
+    from vllm.distributed import get_ep_group
+    from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+    from vllm.model_executor.kernels.batch_invariant import (
+        gather_expert_slots,
+        ordered_topk_combine,
+    )
+
+    if output.shape[0] == 0:
+        return
+    communicator = get_ep_group().device_communicator
+    assert communicator is not None
+    manager = communicator.all2all_manager
+    assert isinstance(manager, AgRsAll2AllManager)
+    group = manager._get_comm_group(False)
+    sizes = manager._get_sizes(output.shape[0] // group.world_size, group)
+    slots = gather_expert_slots(a, topk_ids, inv_perm, expert_map, torch.bfloat16)
+    local = group.reduce_scatterv(slots, dim=0, sizes=sizes)
+    start = sum(sizes[: group.rank_in_group])
+    end = start + sizes[group.rank_in_group]
+    output.zero_()
+    ordered_topk_combine(
+        local.float(),
+        topk_weights[start:end],
+        output.dtype,
+        routes=topk_ids[start:end],
+        global_num_experts=expert_map.numel(),
+        output=output[start:end],
     )

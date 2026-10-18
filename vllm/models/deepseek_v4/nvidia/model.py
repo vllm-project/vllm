@@ -464,8 +464,9 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
+        # Batch invariance needs one router path for every batch size.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
+        if envs.VLLM_BATCH_INVARIANT or hidden_states.shape[0] <= gate_threshold:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,

@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -385,6 +386,17 @@ def test_dsv4_fast_topk(
         atol=2e-5,
         rtol=2e-5,
     )
+
+    if envs.VLLM_BATCH_INVARIANT and num_tokens:
+        single_weights, single_ids = dsv4_topk(
+            gating_output[:1],
+            correction_bias,
+            indices_type,
+            1.5,
+            is_padding=is_padding[:1] if use_padding else None,
+        )
+        assert torch.equal(topk_ids[:1], single_ids)
+        assert torch.equal(topk_weights[:1], single_weights)
 
     if use_padding and num_tokens:
         graph = torch.cuda.CUDAGraph()
