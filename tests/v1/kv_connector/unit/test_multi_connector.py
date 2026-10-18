@@ -4,12 +4,15 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from tests.v1.core.utils import create_scheduler
+from tests.v1.kv_connector.unit.test_connector_init_status import _make_connector
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
@@ -17,6 +20,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRankInitStatus,
     SupportsHMA,
     supports_hma,
 )
@@ -26,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorInitStatus,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
@@ -33,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
@@ -259,6 +266,67 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+def test_multi_connector_preserves_child_eligibility_through_completion(mc):
+    fast, slow = mc._connectors
+    for connector in (fast, slow):
+        connector.build_connector_meta.side_effect = lambda _: KVConnectorMetadata()
+        connector.get_num_new_matched_tokens.return_value = (0, False)
+        connector.request_finished.return_value = (False, None)
+        connector.get_finished.return_value = (None, None)
+    fast.is_connector_ready.return_value = True
+    slow.is_connector_ready.return_value = False
+    early = SimpleNamespace(request_id="early")
+    late = SimpleNamespace(request_id="late")
+    mc.on_new_request(early)
+    mc.build_connector_meta(SchedulerOutput.make_empty())
+    slow.on_new_request.assert_not_called()
+    slow.build_connector_meta.assert_not_called()
+
+    slow.is_connector_ready.return_value = True
+    mc.get_num_new_matched_tokens(early, 0)
+    slow.get_num_new_matched_tokens.assert_not_called()
+    mc.on_new_request(late)
+    mc.request_finished(early, [])
+    slow.request_finished.assert_not_called()
+
+    output = SchedulerOutput.make_empty()
+    output.finished_req_ids = {"early", "late"}
+    metadata = mc.build_connector_meta(output)
+    assert fast.build_connector_meta.call_args.args[0].finished_req_ids == {
+        "early",
+        "late",
+    }
+    assert slow.build_connector_meta.call_args.args[0].finished_req_ids == {"late"}
+    mc.bind_connector_metadata(metadata)
+    mc.get_finished(output.finished_req_ids)
+    fast.get_finished.assert_called_once_with({"early", "late"})
+    slow.get_finished.assert_called_once_with({"late"})
+
+    mc.on_new_request(early)
+    mc.get_num_new_matched_tokens(early, 0)
+    slow.get_num_new_matched_tokens.assert_called_once_with(early, 0)
+
+
+def test_ready_child_does_not_stop_idle_polling_for_initializing_child(mc):
+    scheduler = create_scheduler(use_kv_connector=True)
+    fast = _make_connector(KVConnectorRole.SCHEDULER)
+    slow = _make_connector(KVConnectorRole.SCHEDULER)
+    slow.enable_async_init()
+    mc._connectors = [fast, slow]
+    scheduler.connector = mc
+    for rank in (0, 1):
+        assert mc.is_connector_ready()
+        assert scheduler.has_requests()
+        output = scheduler.schedule()
+        assert output.total_num_scheduled_tokens == 0
+        mc.update_connector_init_status(
+            MultiKVConnectorInitStatus(
+                statuses=(None, KVConnectorRankInitStatus({rank}))
+            )
+        )
+    assert not scheduler.has_requests()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
@@ -480,7 +548,12 @@ def test_multi_example_connector_consistency():
 def _ignore_event_collection(events: list[str]) -> list[str]:
     # Filter out per-step polling hooks that the scheduler calls repeatedly
     # and which are not meaningful state transitions for these assertions.
-    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    ignored = {
+        "get_kv_connector_stats",
+        "has_pending_push_work",
+        "is_connector_ready",
+        "take_events",
+    }
     return [event for event in events if event not in ignored]
 
 
@@ -1016,6 +1089,9 @@ def test_multi_connector_overrides_all_base_methods():
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
     INHERITED_OK = {
+        "enable_async_init",
+        "get_connector_init_state",
+        "request_handler",
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",

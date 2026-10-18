@@ -44,6 +44,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -160,6 +161,74 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     pass
 
 
+class NoOpKVConnectorMetadata(KVConnectorMetadata):
+    """Mark a step that must skip connector transfer hooks."""
+
+
+class KVConnectorRequestHandler:
+    """Own lifetime exclusions for scheduler-side request hooks.
+
+    Requests admitted before readiness stay excluded through completion.
+    Callers must check is_eligible() before invoking per-request hooks.
+    """
+
+    def __init__(self, connector: "KVConnectorBase_V1") -> None:
+        self._connector = connector
+        self._excluded_request_ids: set[str] = set()
+
+    def is_eligible(self, request_id: str) -> bool:
+        return request_id not in self._excluded_request_ids
+
+    def has_excluded_requests(self) -> bool:
+        return bool(self._excluded_request_ids)
+
+    def on_new_request(self, request: "Request") -> None:
+        if self._connector.is_connector_ready():
+            self._connector.on_new_request(request)
+        else:
+            self._excluded_request_ids.add(request.request_id)
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        if self._connector.is_connector_ready():
+            metadata = self._connector.build_connector_meta(
+                scheduler_output.without_requests(self._excluded_request_ids)
+            )
+        else:
+            metadata = NoOpKVConnectorMetadata()
+        self._excluded_request_ids.difference_update(scheduler_output.finished_req_ids)
+        return metadata
+
+
+class ConnectorInitState(enum.Enum):
+    """Worker initialization state."""
+
+    INITIALIZING = enum.auto()
+    READY = enum.auto()
+
+
+class KVConnectorInitStatus(ABC):
+    """Worker-to-scheduler status for asynchronous connector initialization."""
+
+    @abstractmethod
+    def aggregate(self, other: "KVConnectorInitStatus") -> "KVConnectorInitStatus":
+        """Combine statuses reported by different workers."""
+
+
+@dataclass
+class KVConnectorRankInitStatus(KVConnectorInitStatus):
+    """Initialization status reported by one or more connector ranks."""
+
+    ready_ranks: set[int] = field(default_factory=set)
+
+    def aggregate(self, other: KVConnectorInitStatus) -> KVConnectorInitStatus:
+        assert isinstance(other, KVConnectorRankInitStatus)
+        return KVConnectorRankInitStatus(
+            ready_ranks=self.ready_ranks | other.ready_ranks,
+        )
+
+
 class KVConnectorWorkerMetadata(ABC):
     """Abstract Metadata used to communicate back
     Worker KVConnector -> Scheduler KVConnector.
@@ -184,6 +253,11 @@ class KVConnectorBase_V1(ABC):
     # Source label for this connector's external hits. Subclasses must set
     # HOST/DISK/P2P or override get_external_cache_hit_sources().
     _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    # Synchronous by default; enable_async_init() opts in. Class-level so
+    # connectors need no extra constructor state for the default path.
+    _async_init_enabled = False
+    _connector_ready = True
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -230,6 +304,63 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
+
+    @cached_property
+    def request_handler(self) -> KVConnectorRequestHandler:
+        """Scheduler-side request exclusions for asynchronous initialization."""
+        return KVConnectorRequestHandler(self)
+
+    def enable_async_init(self) -> None:
+        """Opt into async initialization with Model Runner V2.
+
+        When enabled, serving must work without this connector so vllm can hide
+        connector startup latency while serving requests.
+        Readiness is monotonic; activation waits for all workers' reports during
+        ordinary engine steps. Idle engines do not poll. Metadata reporting,
+        output updates, stats, reset and shutdown must remain safe while
+        initializing. Raise failures from get_connector_init_state().
+        Requests admitted before readiness are never shown to this connector,
+        except as finished request IDs on the worker, which must be ignored.
+        """
+        if self._async_init_enabled:
+            raise RuntimeError("Asynchronous connector initialization is one-shot")
+        if not self._vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "Asynchronous connector initialization requires Model Runner V2"
+            )
+        parallel_config = self._vllm_config.parallel_config
+        backend = parallel_config.distributed_executor_backend
+        if (backend == "external_launcher" and parallel_config.world_size > 1) or (
+            backend == "ray" and parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError(
+                "Asynchronous connector initialization requires readiness reports "
+                "from every worker; external_launcher with multiple ranks and "
+                "Ray pipeline parallelism are not supported"
+            )
+        self._async_init_enabled = True
+        self._connector_ready = False
+        self._ready_connector_ranks: set[int] = set()
+
+    def get_connector_init_state(self) -> ConnectorInitState | None:
+        """Return this worker's initialization state, or None when synchronous."""
+        return None
+
+    def is_connector_ready(self) -> bool:
+        """Whether this connector can accept new requests."""
+        if not self._async_init_enabled:
+            return True
+        if self._role == KVConnectorRole.WORKER and not self._connector_ready:
+            self._connector_ready = (
+                self.get_connector_init_state() == ConnectorInitState.READY
+            )
+        return self._connector_ready
+
+    def requires_allocation_tracking(self) -> bool:
+        """Whether initialization or excluded requests can hide block reuse."""
+        return (
+            self._async_init_enabled and not self.is_connector_ready()
+        ) or self.request_handler.has_excluded_requests()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -482,6 +613,40 @@ class KVConnectorBase_V1(ABC):
 
         """
         return None
+
+    def build_connector_init_status(self) -> KVConnectorInitStatus | None:
+        """Report initialization until this step has real connector metadata."""
+        if (
+            not self._async_init_enabled
+            or self._role != KVConnectorRole.WORKER
+            or self.has_connector_metadata()
+        ):
+            return None
+        rank = self._vllm_config.parallel_config.rank
+        return KVConnectorRankInitStatus(
+            ready_ranks={rank} if self.is_connector_ready() else set(),
+        )
+
+    def update_connector_init_status(
+        self, status: KVConnectorInitStatus | None
+    ) -> None:
+        """Apply aggregated worker initialization status on the scheduler."""
+        if not self._async_init_enabled or self._role != KVConnectorRole.SCHEDULER:
+            return
+        if status is None:
+            return
+        assert isinstance(status, KVConnectorRankInitStatus)
+        if self._connector_ready:
+            return
+        self._ready_connector_ranks |= status.ready_ranks
+        if (
+            len(self._ready_connector_ranks)
+            == self._vllm_config.parallel_config.world_size
+        ):
+            logger.info(
+                "Asynchronous connector initialization completed on all workers"
+            )
+            self._connector_ready = True
 
     # ==============================
     # Scheduler-side methods

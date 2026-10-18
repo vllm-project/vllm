@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import NoOpKVConnectorMetadata
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -83,6 +84,8 @@ class ActiveKVConnector(KVConnector):
 
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
+        if isinstance(kv_connector_metadata, NoOpKVConnectorMetadata):
+            return
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         self._pending_load_kwargs = self._build_load_kwargs(
@@ -127,7 +130,7 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
 
     def finish_forward(self) -> None:
-        if not self._disabled:
+        if not self._disabled and self.kv_connector.has_connector_metadata():
             self.kv_connector.finish_forward()
 
     def reset_capture_state(self) -> None:
@@ -143,6 +146,14 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
+        output.kv_connector_init_status = (
+            self.kv_connector.build_connector_init_status()
+        )
+        if not self.kv_connector.has_connector_metadata():
+            output.kv_connector_worker_meta = (
+                self.kv_connector.build_connector_worker_meta()
+            )
+            return output
         if not defer_finalize:
             self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
@@ -160,7 +171,7 @@ class ActiveKVConnector(KVConnector):
         return output
 
     def finalize_step(self) -> None:
-        if self._disabled:
+        if self._disabled or not self.kv_connector.has_connector_metadata():
             return
         self.kv_connector.wait_for_save()
         self.kv_connector.clear_connector_metadata()

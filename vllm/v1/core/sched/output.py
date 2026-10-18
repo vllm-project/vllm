@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -190,6 +190,26 @@ class CachedRequestData:
         num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
         return num_output_tokens is not None and num_output_tokens == 0
 
+    def without_requests(self, excluded: set[str]) -> "CachedRequestData":
+        """Filter request data while keeping its per-request lists aligned."""
+        if excluded.isdisjoint(self.req_ids):
+            return self
+        keep = [i for i, req_id in enumerate(self.req_ids) if req_id not in excluded]
+        return replace(
+            self,
+            req_ids=[self.req_ids[i] for i in keep],
+            resumed_req_ids=self.resumed_req_ids - excluded,
+            new_token_ids=(
+                [self.new_token_ids[i] for i in keep] if self.new_token_ids else []
+            ),
+            all_token_ids={
+                r: t for r, t in self.all_token_ids.items() if r not in excluded
+            },
+            new_block_ids=[self.new_block_ids[i] for i in keep],
+            num_computed_tokens=[self.num_computed_tokens[i] for i in keep],
+            num_output_tokens=[self.num_output_tokens[i] for i in keep],
+        )
+
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
@@ -221,6 +241,9 @@ class KVConnectorBlockState:
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
     # Exact Mamba "align" boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+    # Global allocations, including requests excluded from connector work.
+    # Connectors must fence pending transfers before these blocks are reused.
+    allocated_block_ids: set[int] = field(default_factory=set)
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
         if req_id not in self.req_ids:
@@ -230,6 +253,7 @@ class KVConnectorBlockState:
 
 @dataclass
 class SchedulerOutput:
+    # NOTE: request-keyed fields must also be filtered in without_requests().
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
@@ -311,6 +335,64 @@ class SchedulerOutput:
     # Deprecated: cascade attention has been removed, so this is always empty.
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)
+
+    def without_requests(self, excluded: set[str]) -> "SchedulerOutput":
+        """Filter request work while preserving global block-reuse information."""
+        if not excluded:
+            return self
+
+        num_scheduled_tokens = {
+            r: n for r, n in self.num_scheduled_tokens.items() if r not in excluded
+        }
+        return replace(
+            self,
+            scheduled_new_reqs=[
+                r for r in self.scheduled_new_reqs if r.req_id not in excluded
+            ],
+            scheduled_cached_reqs=self.scheduled_cached_reqs.without_requests(excluded),
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
+            scheduled_spec_decode_tokens={
+                r: t
+                for r, t in self.scheduled_spec_decode_tokens.items()
+                if r not in excluded
+            },
+            scheduled_encoder_inputs={
+                r: inputs
+                for r, inputs in self.scheduled_encoder_inputs.items()
+                if r not in excluded
+            },
+            num_invalid_spec_tokens=(
+                None
+                if self.num_invalid_spec_tokens is None
+                else {
+                    r: n
+                    for r, n in self.num_invalid_spec_tokens.items()
+                    if r not in excluded
+                }
+            ),
+            finished_req_ids=self.finished_req_ids - excluded,
+            preempted_req_ids=(
+                None
+                if self.preempted_req_ids is None
+                else self.preempted_req_ids - excluded
+            ),
+            kv_connector_block_state=(
+                None
+                if self.kv_connector_block_state is None
+                else replace(
+                    self.kv_connector_block_state,
+                    req_ids=self.kv_connector_block_state.req_ids - excluded,
+                    boundary_state_offloads={
+                        r: entries
+                        for r, entries in (
+                            self.kv_connector_block_state.boundary_state_offloads.items()
+                        )
+                        if r not in excluded
+                    },
+                )
+            ),
+        )
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
