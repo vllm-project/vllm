@@ -8,7 +8,6 @@ mod convert;
 mod health;
 mod inference;
 mod media;
-mod xgrammar;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
 pub use vllm_proto as pb;

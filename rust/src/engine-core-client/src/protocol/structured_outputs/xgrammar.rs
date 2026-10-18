@@ -3,8 +3,6 @@
 
 //! Request-side xgrammar handling mirrored from Python's xgrammar backend.
 
-use std::fmt::Write as _;
-
 use serde_json::{Map, Value};
 
 const STRING_SUPPORTED_FORMATS: &[&str] = &[
@@ -23,32 +21,6 @@ const STRING_SUPPORTED_FORMATS: &[&str] = &[
     "json-pointer",
     "relative-json-pointer",
 ];
-
-/// Port of Python's `vllm.v1.structured_output.utils.choice_as_grammar`.
-pub(super) fn choice_as_grammar(choices: &[String]) -> String {
-    let mut grammar = String::from("root ::= ");
-    for (i, choice) in choices.iter().enumerate() {
-        if i > 0 {
-            grammar.push_str(" | ");
-        }
-        grammar.push('"');
-        for ch in choice.chars() {
-            match ch {
-                '\\' => grammar.push_str(r"\\"),
-                '"' => grammar.push_str(r#"\""#),
-                '\n' => grammar.push_str(r"\n"),
-                '\r' => grammar.push_str(r"\r"),
-                '\t' => grammar.push_str(r"\t"),
-                '\0'..='\x1f' | '\x7f' => {
-                    write!(grammar, "\\u{:04x}", u32::from(ch)).expect("writing to a String")
-                }
-                ch => grammar.push(ch),
-            }
-        }
-        grammar.push('"');
-    }
-    grammar
-}
 
 /// Port of Python's `has_xgrammar_unsupported_json_features`. xgrammar
 /// ignores these constraints rather than rejecting the schema.
@@ -128,19 +100,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    #[test]
-    fn choice_grammar_matches_python() {
-        let choices = [
-            "yes".to_string(),
-            "no \"x\" \\ y".to_string(),
-            "a\nb\u{1}\u{7f}\té".to_string(),
-        ];
-        assert_eq!(
-            choice_as_grammar(&choices),
-            r#"root ::= "yes" | "no \"x\" \\ y" | "a\nb\u0001\u007f\té""#
-        );
-    }
 
     #[test]
     fn unsupported_json_features_match_python() {

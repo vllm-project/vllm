@@ -11,14 +11,14 @@ use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope}
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputConstraint, StructuredOutputsParams,
+    StructuredOutputBackend, StructuredOutputsParams,
 };
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
-use super::{pb, xgrammar};
+use super::pb;
 
 fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
     KvHintsEnvelope {
@@ -287,15 +287,10 @@ fn convert_structured_output(
         Some(so) => so,
     };
     use pb::decoding_parameters::StructuredOutput;
-    let params = match so {
+    let mut params = match so {
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            if xgrammar::has_unsupported_json_features(&json) {
-                return Err(Status::invalid_argument(
-                    "The provided JSON schema contains features not supported by xgrammar.",
-                ));
-            }
             StructuredOutputsParams::json(json)
         }
         StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
@@ -309,21 +304,11 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params.backend = StructuredOutputBackend::Xgrammar;
     params
         .validate()
         .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
-    // The xgrammar backend has no `choice` path.
-    let constraint = match params.constraint {
-        StructuredOutputConstraint::Choice(choices) => {
-            StructuredOutputConstraint::Grammar(xgrammar::choice_as_grammar(&choices))
-        }
-        constraint => constraint,
-    };
-    Ok(Some(StructuredOutputsParams {
-        constraint,
-        backend: StructuredOutputBackend::Xgrammar,
-        ..params
-    }))
+    Ok(Some(params))
 }
 
 // ========================================================================================
@@ -815,21 +800,6 @@ mod tests {
             let params = lower_structured_output(so.clone()).expect("convert ok");
             assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
         }
-    }
-
-    #[test]
-    fn grpc_choice_lowers_to_grammar() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        let params = lower_structured_output(StructuredOutput::Choice(
-            super::pb::decoding_parameters::StringChoices {
-                choices: vec!["yes".to_string(), "no".to_string()],
-            },
-        ))
-        .expect("convert ok");
-        assert_eq!(
-            params.constraint.as_grammar().map(String::as_str),
-            Some(r#"root ::= "yes" | "no""#)
-        );
     }
 
     #[test]
