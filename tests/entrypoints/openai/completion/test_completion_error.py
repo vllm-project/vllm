@@ -714,9 +714,11 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
         mock_engine, request_logger=request_logger, enable_log_outputs=True
     )
 
-    def request_output(text: str, token_ids: list[int], finish_reason: str | None):
+    def request_output(
+        request_id: str, text: str, token_ids: list[int], finish_reason: str | None
+    ):
         return RequestOutput(
-            request_id="test-id",
+            request_id=request_id,
             prompt="Test prompt",
             prompt_token_ids=[1, 2, 3],
             prompt_logprobs=None,
@@ -733,12 +735,12 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
             finished=finish_reason is not None,
         )
 
-    async def mock_generate(*args, **kwargs):
+    async def mock_generate(prompt, params, request_id, **kwargs):
         if stream:
-            yield request_output("Hello", [100], None)
-            yield request_output(" world", [101], "stop")
+            yield request_output(request_id, "Hello", [100], None)
+            yield request_output(request_id, " world", [101], "stop")
         else:
-            yield request_output("Hello world", [100, 101], "stop")
+            yield request_output(request_id, "Hello world", [100, 101], "stop")
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
     request = CompletionRequest(
