@@ -31,6 +31,13 @@ void sparse_metadata(const torch::Tensor& mask,
                      const std::optional<torch::Tensor>& main,
                      int64_t main_size, int64_t window, torch::Tensor& output,
                      torch::Tensor& lengths);
+void combine_swa_first_indices(const torch::Tensor& topk,
+                               const torch::Tensor& query_start_loc,
+                               const torch::Tensor& seq_lens,
+                               const torch::Tensor& gather_lens, int64_t window,
+                               int64_t compress_ratio, int64_t top_k, int64_t m,
+                               int64_t n, torch::Tensor& output,
+                               torch::Tensor& lengths);
 
 void cast_indexer_logits(const torch::Tensor& input,
                          const torch::Tensor& row_ends, torch::Tensor& output);
@@ -109,6 +116,10 @@ TORCH_LIBRARY(vllm_batch_invariant, ops) {
       "sparse_metadata(Tensor mask, Tensor? main, int main_size, int window, "
       "Tensor(a!) output, Tensor(b!) lengths) -> ()");
   ops.def(
+      "combine_swa_first_indices(Tensor topk, Tensor query_start_loc, "
+      "Tensor seq_lens, Tensor gather_lens, int window, int compress_ratio, "
+      "int top_k, int m, int n, Tensor(a!) output, Tensor(b!) lengths) -> ()");
+  ops.def(
       "cast_indexer_logits(Tensor input, Tensor row_ends, Tensor(a!) output) "
       "-> ()");
   ops.def(
@@ -161,6 +172,8 @@ TORCH_LIBRARY_IMPL(vllm_batch_invariant, CUDA, ops) {
   ops.impl("silu_mul_bf16", &vllm::batch_invariant::silu_mul_bf16);
   ops.impl("hc_collapse", &vllm::batch_invariant::hc_collapse);
   ops.impl("sparse_metadata", &vllm::batch_invariant::sparse_metadata);
+  ops.impl("combine_swa_first_indices",
+           &vllm::batch_invariant::combine_swa_first_indices);
   ops.impl("cast_indexer_logits", &vllm::batch_invariant::cast_indexer_logits);
   ops.impl("dequant_gather_nvfp4",
            &vllm::batch_invariant::dequant_gather_nvfp4);

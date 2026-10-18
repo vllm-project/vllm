@@ -536,6 +536,148 @@ def test_v41_combine_clears_stale_tail_for_sparse_prefill():
     assert not torch.equal(attend(leaky, lens), expected)
 
 
+def _require_bi_kernels():
+    from vllm.model_executor.kernels.batch_invariant import (
+        batch_invariant_quant_kernel_available,
+    )
+
+    if not torch.cuda.is_available() or not batch_invariant_quant_kernel_available():
+        pytest.skip("needs CUDA and the batch-invariant extension")
+
+
+def _swa_first_chunk(prefix_query_replay, compress_ratio, ragged, base, gen):
+    """One combine chunk: query_start_loc offset by ``base``, per-request
+    gather lengths stopping at the replay start, and top-k rows that are
+    ascending (compact) or random with -1 holes, negatives and ids >= N
+    past and inside each row's length (ragged)."""
+    device = torch.device("cuda")
+    window, width = 128, 512
+    seq_lens = [p + q for p, q, _ in prefix_query_replay]
+    query_lens = [q for _, q, _ in prefix_query_replay]
+    gather_lens = [
+        q + min(max(p - r, 0), window - 1) for p, q, r in prefix_query_replay
+    ]
+    n = max(s // compress_ratio for s in seq_lens) if compress_ratio else 0
+    m = n + max(gather_lens)
+    starts = [base]
+    for q in query_lens:
+        starts.append(starts[-1] + q)
+    positions = torch.cat(
+        [torch.arange(p, p + q) for p, q, _ in prefix_query_replay]
+    ).view(-1, 1)
+    visible = (positions + 1) // max(compress_ratio, 1)
+    tokens = positions.shape[0]
+    if ragged:
+        topk = torch.randint(-1, n + 64, (tokens, width), generator=gen)
+        topk[torch.rand(tokens, width, generator=gen) < 0.05] = -7
+    else:
+        draw = torch.randint(0, 1 << 30, (tokens, width), generator=gen)
+        topk = (draw % visible.clamp(min=1)).sort(-1).values
+        topk[torch.arange(width).view(1, -1) >= visible] = -1
+
+    def int32(values):
+        return torch.tensor(values, dtype=torch.int32, device=device)
+
+    return dict(
+        topk_indices=topk.to(device=device, dtype=torch.int32),
+        query_start_loc=int32(starts),
+        seq_lens=int32(seq_lens),
+        gather_lens=int32(gather_lens),
+        window_size=window,
+        compress_ratio=compress_ratio,
+        topk=width if compress_ratio else 0,
+        M=m,
+        N=n,
+    )
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 1, 2, 4])
+@pytest.mark.parametrize("ragged", [False, True])
+@pytest.mark.parametrize("length", [1, 127, 128, 129, 700, 2600, 16384])
+def test_v41_bi_combine_swa_first_matches_combine(length, ragged, compress_ratio):
+    """The batch-invariant SWA-first op returns combine_topk_swa_indices' ids
+    and lengths in the mega decode kernel's slot space, [SWA padded to the
+    window with -1; top-k], length window + topk_len, for fresh, continued
+    and replay-bounded requests split over two chunks of one workspace."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        combine_swa_first_indices,
+    )
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+
+    _require_bi_kernels()
+    gen = torch.Generator().manual_seed(length * 8 + compress_ratio * 2 + ragged)
+    chunks = [
+        _swa_first_chunk([(0, length, 0)], compress_ratio, ragged, 7, gen),
+        _swa_first_chunk(
+            [(50, length, 0), (5000, length, 4990), (300, length, 0)],
+            compress_ratio,
+            ragged,
+            7 + length,
+            gen,
+        ),
+    ]
+    workspace = torch.full((3 * length, 640), 12345, dtype=torch.int32).cuda()
+    lens_workspace = torch.full((3 * length,), 12345, dtype=torch.int32).cuda()
+    for chunk in chunks:
+        tokens = chunk["topk_indices"].shape[0]
+        indices, lens = combine_swa_first_indices(
+            **chunk, out=(workspace[:tokens], lens_workspace[:tokens])
+        )
+        combined, combined_lens = combine_v41(**chunk)
+        width = combined.shape[1]
+
+        starts = chunk["query_start_loc"]
+        query_lens = (starts[1:] - starts[:-1]).long()
+        prefix = torch.repeat_interleave(chunk["seq_lens"] - query_lens, query_lens)
+        first = torch.repeat_interleave(starts[:-1] - starts[0], query_lens)
+        pos = prefix + torch.arange(tokens, device=prefix.device) - first
+        topk_len = torch.zeros_like(pos)
+        if compress_ratio:
+            topk_len = ((pos + 1) // compress_ratio).clamp(0, chunk["topk"])
+        swa_len = combined_lens - topk_len
+        slot = torch.arange(width, device=pos.device).view(1, -1)
+        in_swa = slot < 128
+        source = torch.where(in_swa, topk_len[:, None] + slot, slot - 128)
+        valid = torch.where(
+            in_swa, slot < swa_len[:, None], slot - 128 < topk_len[:, None]
+        )
+        expected = torch.where(
+            valid, combined.gather(1, source.clamp(0, width - 1)), -1
+        )
+        assert torch.equal(indices[:, :width], expected)
+        assert torch.equal(lens, (128 + topk_len).int())
+
+
+def test_v41_bi_combine_swa_first_replays_in_cuda_graph():
+    """The SWA-first op captures into a CUDA graph and its replay follows
+    new top-k and metadata contents."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        combine_swa_first_indices,
+    )
+
+    _require_bi_kernels()
+    gen = torch.Generator().manual_seed(0)
+    requests = [(40, 300, 0), (900, 64, 850), (0, 5, 0)]
+    static = _swa_first_chunk(requests, 2, True, 3, gen)
+    out = (
+        torch.empty((369, 640), dtype=torch.int32, device="cuda"),
+        torch.empty(369, dtype=torch.int32, device="cuda"),
+    )
+    combine_swa_first_indices(**static, out=out)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        combine_swa_first_indices(**static, out=out)
+    # Same M and N, so the captured scalars still hold.
+    fresh = _swa_first_chunk([(40, 300, 0), (900, 64, 870), (0, 5, 0)], 2, True, 9, gen)
+    for name in ("topk_indices", "query_start_loc", "seq_lens", "gather_lens"):
+        static[name].copy_(fresh[name])
+    graph.replay()
+    expected = combine_swa_first_indices(**fresh)
+    assert torch.equal(out[0], expected[0]) and torch.equal(out[1], expected[1])
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):

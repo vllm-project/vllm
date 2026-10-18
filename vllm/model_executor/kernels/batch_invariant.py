@@ -44,6 +44,7 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
             "silu_mul_bf16",
             "hc_collapse",
             "sparse_metadata",
+            "combine_swa_first_indices",
             "cast_indexer_logits",
             "dequant_gather_nvfp4",
             "sparse_decode_gather",
@@ -250,6 +251,46 @@ def compact_sparse_slots(
         mask, main, main_size, window_size, indices, lengths
     )
     return indices, lengths
+
+
+def combine_swa_first_indices(
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``combine_topk_swa_indices`` laid out in the mega decode kernel's slot
+    space, ``[swa padded to the window; topk]``, with length
+    ``window + topk_len``, so prefill blocks a row's KV as decode does."""
+    require_batch_invariant_kernel()
+    if out is None:
+        num_tokens = topk_indices.shape[0]
+        width = (topk + window_size + 127) // 128 * 128
+        out = (
+            torch.empty(
+                (num_tokens, width), dtype=torch.int32, device=topk_indices.device
+            ),
+            torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device),
+        )
+    torch.ops.vllm_batch_invariant.combine_swa_first_indices(
+        topk_indices,
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        topk,
+        M,
+        N,
+        *out,
+    )
+    return out
 
 
 def silu_mul_bf16(
