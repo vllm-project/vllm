@@ -1113,11 +1113,8 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     assert receiver.get_and_update_item(payload, mm_hash) is item
 
 
-@pytest.mark.asyncio
-async def test_cache_drift_invalidation_waits_for_render_without_delaying_outputs(
-    monkeypatch,
-):
-    """Apply drift invalidation between renders, including already queued work."""
+@pytest.fixture
+def mm_cache_renderer():
     model_config = ModelConfig(
         model="hf-internal-testing/tiny-random-Qwen2VLForConditionalGeneration",
         max_model_len=2048,
@@ -1128,6 +1125,19 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         "prompt": "<|vision_start|><|image_pad|><|vision_end|>Describe.",
         "multi_modal_data": {"image": Image.new("RGB", (56, 56))},
     }
+    try:
+        yield renderer, prompt
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cache_drift_invalidation_waits_for_render_without_delaying_outputs(
+    monkeypatch,
+    mm_cache_renderer,
+):
+    """Apply drift invalidation between renders, including already queued work."""
+    renderer, prompt = mm_cache_renderer
     primed = (await renderer.render_cmpl_async([prompt]))[0]
     mm_hash = primed["mm_hashes"]["image"][0]
     processor = renderer.get_mm_processor()
@@ -1227,7 +1237,70 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         engine.output_handler.cancel()
         with suppress(asyncio.CancelledError):
             await engine.output_handler
-        renderer.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cache_miss_notifications_ignore_absent_and_coalesce_live_hashes(
+    mm_cache_renderer,
+):
+    renderer, prompt = mm_cache_renderer
+    renderer.queue_mm_cache_invalidations([f"absent-{i}" for i in range(1000)])
+    assert not renderer._pending_mm_cache_invalidations
+
+    primed = (await renderer.render_cmpl_async([prompt]))[0]
+    mm_hash = primed["mm_hashes"]["image"][0]
+    for _ in range(100):
+        renderer.queue_mm_cache_invalidations([mm_hash, mm_hash])
+    assert len(renderer._pending_mm_cache_invalidations) == 1
+    resent = (await renderer.render_cmpl_async([prompt]))[0]
+    assert resent["mm_kwargs"]["image"][0] is not None
+    assert not renderer._pending_mm_cache_invalidations
+
+    renderer.queue_mm_cache_invalidations([mm_hash])
+    await renderer.clear_mm_cache_async()
+    resent = (await renderer.render_cmpl_async([prompt]))[0]
+    assert resent["mm_kwargs"]["image"][0] is not None
+    renderer.queue_mm_cache_invalidations([mm_hash])
+    resent = (await renderer.render_cmpl_async([prompt]))[0]
+    assert resent["mm_kwargs"]["image"][0] is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_cache_invalidation_preserves_pending_and_concurrent_misses(
+    monkeypatch,
+    mm_cache_renderer,
+):
+    renderer, _ = mm_cache_renderer
+    cache = renderer.mm_processor_cache
+    hashes = ["first", "second", "concurrent"]
+    for mm_hash in hashes:
+        cache.get_and_update_item((_dummy_item({"x": 8}), []), mm_hash)
+    renderer.queue_mm_cache_invalidations(hashes[:2])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def failing_invalidate(mm_hash):
+        entered.set()
+        assert release.wait(timeout=10)
+        raise RuntimeError("invalidate failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "invalidate", failing_invalidate)
+        drain = renderer._mm_executor.submit(renderer._drain_mm_cache_invalidations)
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            # Enqueue must not wait for cache invalidation to finish.
+            await asyncio.wait_for(
+                asyncio.to_thread(renderer.queue_mm_cache_invalidations, hashes[2:]),
+                timeout=5,
+            )
+        finally:
+            release.set()
+            with pytest.raises(RuntimeError, match="invalidate failed"):
+                await asyncio.wrap_future(drain)
+
+    renderer._drain_mm_cache_invalidations()
+    assert all(not cache.is_cached_item(mm_hash) for mm_hash in hashes)
 
 
 _SLEEP_VISION_PROMPT = (
