@@ -1002,6 +1002,14 @@ class Glm5NextVideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        # vLLM reports an unknown source fps as 0. HF's Glm5Next sampler needs
+        # it to build the frame timestamps, and raises when it is missing, so
+        # name the cause here instead of dividing by zero below.
+        if source.original_fps <= 0:
+            raise ValueError(
+                "GLM-5.3-Flash video sampling needs a known source fps, but "
+                "the container reported 0 (unknown or variable frame rate)."
+            )
         return cls._sample_frame_indices(
             source.total_frames_num,
             source.original_fps,

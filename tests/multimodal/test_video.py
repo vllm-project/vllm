@@ -2195,6 +2195,36 @@ def test_glm5next_backend_metadata_contract():
     )
 
 
+def test_glm5next_backend_rejects_unknown_source_fps():
+    """A container reporting 0 fps (VFR/unknown) must raise a clear
+    ValueError instead of ZeroDivisionError. Both the reported and the
+    derived-duration paths reach the division, so cover both."""
+    target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=300)
+    for duration in (5.0, 0.0):
+        source = VideoSourceMetadata(
+            total_frames_num=150, original_fps=0.0, duration=duration
+        )
+        with pytest.raises(ValueError, match="known source fps"):
+            Glm5NextVideoBackend.compute_frames_index_to_sample(source, target)
+
+
+def test_glm5next_load_bytes_rejects_unknown_source_fps(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """The guard is reachable from load_bytes: a decoder reporting 0 fps
+    surfaces as a ValueError instead of escaping as ZeroDivisionError."""
+    get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
+
+    def unknown_fps(cap) -> VideoSourceMetadata:
+        return get_video_metadata(cap)._replace(original_fps=0.0, duration=0.0)
+
+    monkeypatch.setattr(
+        OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
+    )
+    with pytest.raises(ValueError, match="known source fps"):
+        Glm5NextVideoBackend.load_bytes(dummy_video_path.read_bytes(), fps=2)
+
+
 def _write_gray_video(tmp_path, total_frames, fps, size=(32, 32)):
     """Synthetic clip whose frame i is flat gray level i (near-lossless under
     mp4v), so a decoded frame's level maps back to its source index."""
