@@ -49,6 +49,7 @@ class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
         self.backend: StructuredOutputBackend | None = None
+        self._backends: dict[str, StructuredOutputBackend] = {}
         # We only store the class of the reasoner in the manager.
         # The parser instance is request-scoped because some reasoning parsers
         # depend on per-request chat-template kwargs.
@@ -67,6 +68,8 @@ class StructuredOutputManager:
         )
 
         self._grammar_bitmask: torch.Tensor | None = None
+        self._backend_bitmasks: dict[str, torch.Tensor] = {}
+        self._model_vocab_size = vllm_config.model_config.get_vocab_size()
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
@@ -133,23 +136,19 @@ class StructuredOutputManager:
                 and request.sampling_params.structured_outputs is not None
             )
 
-        # Initialize the backend the first time it is needed.
-        #
-        # NOTE: We only support a single backend. We do NOT support different
-        # backends on a per-request basis in V1 (for now, anyway...).
-        # _backend is set in Processor._validate_structured_output
-        if self.backend is None:
-            assert request.sampling_params is not None
-            backend = request.sampling_params.structured_outputs._backend
+        assert request.sampling_params is not None
+        backend = request.sampling_params.structured_outputs._backend
+        if backend not in self._backends:
             vocab_size = self.vllm_config.model_config.get_vocab_size()
+            selected_backend: StructuredOutputBackend
             if backend == "xgrammar":
-                self.backend = XgrammarBackend(
+                selected_backend = XgrammarBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
             elif backend == "guidance":
-                self.backend = GuidanceBackend(
+                selected_backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
@@ -157,7 +156,7 @@ class StructuredOutputManager:
             elif backend == "outlines":
                 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 
-                self.backend = OutlinesBackend(
+                selected_backend = OutlinesBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
@@ -167,13 +166,18 @@ class StructuredOutputManager:
                     LMFormatEnforcerBackend,
                 )
 
-                self.backend = LMFormatEnforcerBackend(
+                selected_backend = LMFormatEnforcerBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
+
+            self._backends[backend] = selected_backend
+            # Keep the first compiler alias for existing lifecycle callers.
+            if self.backend is None:
+                self.backend = selected_backend
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
@@ -195,13 +199,17 @@ class StructuredOutputManager:
         # scheduler so it can fail only this request.
         try:
             request_type, grammar_spec = struct_request.structured_output_key
-            assert self.backend is not None
+            assert request.sampling_params is not None
+            assert request.sampling_params.structured_outputs is not None
+            backend_name = request.sampling_params.structured_outputs._backend
+            assert backend_name is not None
+            backend = self._backends[backend_name]
             stop_token_ids = (
                 request.sampling_params.all_stop_token_ids
                 if request.sampling_params is not None
                 else None
             )
-            return self.backend.compile_grammar(
+            return backend.compile_grammar(
                 request_type, grammar_spec, stop_token_ids=stop_token_ids
             )
         except Exception:
@@ -211,20 +219,27 @@ class StructuredOutputManager:
             raise
 
     def _fill_bitmasks(
-        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: Iterable[tuple[StructuredOutputGrammar, str, int, bool]]
     ) -> None:
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask in batch:
+        for grammar, backend_name, index, apply_bitmask in batch:
             if apply_bitmask and not grammar.is_terminated():
-                grammar.fill_bitmask(self._grammar_bitmask, index)
+                native_bitmask = self._backend_bitmasks[backend_name]
+                grammar.fill_bitmask(native_bitmask, index)
+                model_row = self._grammar_bitmask[index]
+                if native_bitmask is not self._grammar_bitmask:
+                    # Native work buffers use their tokenizer's exact width.
+                    model_row.zero_()
+                    width = min(model_row.shape[0], native_bitmask.shape[1])
+                    model_row[:width].copy_(native_bitmask[index, :width])
+                remainder = self._model_vocab_size % 32
+                if remainder:
+                    model_row[-1] &= (1 << remainder) - 1
             else:
-                # Note that for thinking support, we will need to
-                # reset the relevant part of the bitmask for consequent
-                # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: list[tuple[StructuredOutputGrammar, str, int, bool]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
 
@@ -341,15 +356,42 @@ class StructuredOutputManager:
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
-            assert self.backend is not None
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
 
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
-            self._grammar_bitmask = self.backend.allocate_token_bitmask(
-                max_batch_size * (1 + max_num_spec_tokens)
+            self._grammar_bitmask = torch.full(
+                (
+                    max_batch_size * (1 + max_num_spec_tokens),
+                    (self._model_vocab_size + 31) // 32,
+                ),
+                -1,
+                dtype=torch.int32,
             )
+
+        # Allocate native work buffers before launching parallel row fills.
+        # Equal-width backends can fill the model buffer directly.
+        backend_names = {}
+        for req_id in structured_output_request_ids:
+            request = requests[req_id]
+            assert request.sampling_params is not None
+            assert request.sampling_params.structured_outputs is not None
+            name = request.sampling_params.structured_outputs._backend
+            assert name is not None
+            backend_names[req_id] = name
+            if name not in self._backend_bitmasks:
+                native_bitmask = self._backends[name].allocate_token_bitmask(
+                    self._grammar_bitmask.shape[0]
+                )
+                assert native_bitmask.dtype == torch.int32 and native_bitmask.is_cpu
+                assert native_bitmask.ndim == 2
+                assert native_bitmask.shape[0] == self._grammar_bitmask.shape[0]
+                self._backend_bitmasks[name] = (
+                    self._grammar_bitmask
+                    if native_bitmask.shape == self._grammar_bitmask.shape
+                    else native_bitmask
+                )
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
@@ -377,7 +419,9 @@ class StructuredOutputManager:
                 apply_bitmask = (
                     self._get_constraint_bounds(request, ()).constraint_start == 0
                 )
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                batch.append(
+                    (grammar, backend_names[req_id], cumulative_index, apply_bitmask)
+                )
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -417,7 +461,16 @@ class StructuredOutputManager:
                         cumulative_index += 1
                         continue
                     apply_bitmask = not seen_padding and i >= constraint_start
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    self._fill_bitmasks(
+                        (
+                            (
+                                grammar,
+                                backend_names[req_id],
+                                cumulative_index,
+                                apply_bitmask,
+                            ),
+                        )
+                    )
                     if token == -1:
                         seen_padding = True
                     elif not seen_padding and i >= grammar_start:
@@ -444,7 +497,16 @@ class StructuredOutputManager:
                         bonus_apply = not seen_padding and constraint_start <= len(
                             req_tokens
                         )
-                        self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
+                        self._fill_bitmasks(
+                            (
+                                (
+                                    grammar,
+                                    backend_names[req_id],
+                                    cumulative_index,
+                                    bonus_apply,
+                                ),
+                            )
+                        )
                     cumulative_index += 1
 
                 if state_advancements > 0:
@@ -490,6 +552,9 @@ class StructuredOutputManager:
             < self.vllm_config.scheduler_config.max_num_seqs
         ):
             self.executor_for_fillmask.shutdown(wait=True, cancel_futures=True)
-        if self.backend is not None:
-            self.backend.destroy()
-            self.backend = None
+        for backend in self._backends.values():
+            backend.destroy()
+        self._backends.clear()
+        self._backend_bitmasks.clear()
+        self._grammar_bitmask = None
+        self.backend = None
