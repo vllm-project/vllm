@@ -122,22 +122,8 @@ async def _align_prompts_to_server_tokenizer(
 
         try:
             first_tokens = await _tokenize(input_requests[0].prompt)
-        except aiohttp.ClientConnectionError as e:
-            print(f"WARNING: {base_url} unreachable ({e!r}), skipping alignment.")
-            return input_requests
-        except aiohttp.ClientResponseError as e:
-            if e.status == 404:
-                hint = (
-                    "404 Not Found: either this server has no /tokenize route,"
-                    f" or it does not serve a model named `{model_id}`"
-                    " (its served names are listed by GET /v1/models)"
-                )
-            else:
-                hint = f"HTTP {e.status}"
-            print(f"WARNING: /tokenize unavailable ({hint}), skipping alignment.")
-            return input_requests
-        except Exception as e:
-            print(f"WARNING: /tokenize probe failed ({e!r}), skipping alignment.")
+        except Exception:
+            print("WARNING: /tokenize unavailable, skipping alignment.")
             return input_requests
 
         expected = input_requests[0].prompt_len
@@ -838,24 +824,21 @@ async def benchmark(
     # Use ssl_context if provided, otherwise default to True for https URLs
     ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
 
-    def make_session(limit: int) -> aiohttp.ClientSession:
-        connector = aiohttp.TCPConnector(
-            limit=limit,
-            limit_per_host=limit,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-            keepalive_timeout=60,
-            enable_cleanup_closed=True,
-            force_close=False,
-            ssl=ssl_setting,
-        )
-        return aiohttp.ClientSession(
-            connector=connector,
-            trust_env=True,
-            timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
-        )
-
-    session = make_session(max_concurrency or 0)
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrency or 0,
+        limit_per_host=max_concurrency or 0,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        keepalive_timeout=60,
+        enable_cleanup_closed=True,
+        force_close=False,
+        ssl=ssl_setting,
+    )
+    session = aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,
+        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+    )
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
@@ -1014,16 +997,11 @@ async def benchmark(
             chat_messages=None,
         )
         interval = 1 / probe_request_rate
-        # The main session's pool is capped at max_concurrency, so probes use
-        # their own connection.
-        async with make_session(1) as probe_session:
-            while not probe_stop.is_set():
-                probe_outputs.append(
-                    await request_func(
-                        request_func_input=probe_input, session=probe_session
-                    )
-                )
-                await asyncio.sleep(interval)
+        while not probe_stop.is_set():
+            probe_outputs.append(
+                await request_func(request_func_input=probe_input, session=session)
+            )
+            await asyncio.sleep(interval)
 
     probe_task: asyncio.Task | None = None
     if probe_request_rate > 0:
@@ -1102,16 +1080,14 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
+
     if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
-
-    # Stop probes after measuring the duration, so the final probe interval
-    # is not counted toward the main workload's throughput.
-    if probe_task is not None:
-        probe_stop.set()
-        await probe_task
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
