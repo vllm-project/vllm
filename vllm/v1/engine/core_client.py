@@ -1839,6 +1839,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 f"minimum is "
                 f"{-(-num_experts * cur_data_parallel_size // num_physical_experts)}"
             )
+        if parallel_config.all2all_backend == "nixl_ep_v2":
+            # Refuse here, before any engine is touched: the engines' own
+            # check fails under the pause and kills them.
+            from vllm.distributed.elastic_ep.elastic_execute import (
+                nixl_ep_v2_domain_size,
+            )
+
+            n = parallel_config.world_size
+            p = nixl_ep_v2_domain_size(parallel_config)
+            lo = -(-num_experts * cur_data_parallel_size // num_physical_experts)
+            # EP size 1 has no device communicator.
+            valid = [
+                d
+                for d in range(lo, parallel_config.elastic_ep_max_dp_size + 1)
+                if d * n > 1 and (d * n <= p or d * n % p == 0)
+            ]
+            if new_data_parallel_size not in valid:
+                raise ValueError(
+                    f"nixl_ep_v2 resizes by whole NVLink domains of {p} GPUs "
+                    "or inside the first one; valid data_parallel_size "
+                    f"values: {valid}"
+                )
         if new_data_parallel_size < cur_data_parallel_size:
             await self._prepare_scale_down_elastic_ep(new_data_parallel_size)
         else:

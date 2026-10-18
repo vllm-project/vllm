@@ -18,7 +18,11 @@ from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 @pytest.fixture(autouse=True)
 def cleanup_ray_between_tests():
-    """Force-stop any lingering Ray processes between tests."""
+    """Force-stop any lingering Ray processes between tests, unless the test
+    joins a Ray cluster started before pytest (LEADER_ADDRESS)."""
+    if os.environ.get("LEADER_ADDRESS"):
+        yield
+        return
     subprocess.run(["ray", "stop", "--force"], timeout=30, capture_output=True)
     time.sleep(5)
     yield
@@ -140,7 +144,8 @@ def _scale_with_traffic(
         f"[Elastic EP timing][{source_dp_size}->{new_dp_size}]"
         f"[traffic={traffic_mode}] "
         f"scale_seconds={scale_seconds:.3f} "
-        f"downtime_seconds={_downtime(probe_result):.3f}"
+        f"downtime_seconds={_downtime(probe_result):.3f} "
+        f"num_503={sum(s == 503 for r in results for _, _, s in r)}"
     )
 
 
@@ -205,6 +210,9 @@ def _base_serve_args(
     leader_address = os.environ.get("LEADER_ADDRESS")
     if leader_address:
         args.extend(["--data-parallel-address", leader_address])
+    # With Ray it defaults to the DP size, more engines than one node holds.
+    if dp_local := os.environ.get("VLLM_TEST_ELASTIC_EP_DP_LOCAL"):
+        args.extend(["--data-parallel-size-local", dp_local])
     if enforce_eager:
         args.append("--enforce-eager")
 
@@ -224,6 +232,7 @@ def _base_serve_args(
             id="cuda_graphs_heavy",
         ),
         pytest.param(False, "heavy", "nixl_ep", id="cuda_graphs_heavy_nixl_ep"),
+        pytest.param(False, "heavy", "nixl_ep_v2", id="cuda_graphs_heavy_nixl_ep_v2"),
     ],
 )
 @multi_gpu_test(num_gpus=4)
@@ -231,7 +240,7 @@ def test_elastic_ep_scaling(
     enforce_eager: bool, traffic_mode: str, all2all_backend: str
 ):
     from vllm.distributed.eplb.eplb_communicator import has_nixl
-    from vllm.utils.import_utils import has_nixl_ep
+    from vllm.utils.import_utils import has_nixl_ep, has_nixl_ep_v2
 
     if not has_nixl():
         pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
@@ -239,6 +248,8 @@ def test_elastic_ep_scaling(
         pytest.skip("Elastic EP with NIXL is not supported on XPU")
     if all2all_backend == "nixl_ep" and not has_nixl_ep():
         pytest.skip("NIXL EP is not installed")
+    if all2all_backend == "nixl_ep_v2" and not has_nixl_ep_v2():
+        pytest.skip("nixl.runtime.ep is not installed")
 
     initial_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INITIAL_DP", "2"))
     target_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_TARGET_DP", "4"))
@@ -268,6 +279,15 @@ def test_elastic_ep_scaling(
             f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
         )
 
+        if all2all_backend == "nixl_ep_v2":
+            # New processes take over the EP ranks the leavers had.
+            _scale_with_traffic(server, initial_dp_size, target_dp_size, traffic_mode)
+            rescale_accuracy = _run_gsm8k_eval(server, "After second scale up")
+            assert rescale_accuracy >= initial_accuracy - ACCURACY_TOL, (
+                f"Second scale up accuracy {rescale_accuracy:.3f} dropped more "
+                f"than {ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
+            )
+
         print("\nAccuracy Summary:")
         print(f"  Initial:    {initial_accuracy:.3f}")
         print(
@@ -279,3 +299,39 @@ def test_elastic_ep_scaling(
             f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
         )
         print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
+
+
+@multi_gpu_test(num_gpus=2)
+def test_elastic_ep_rejects_invalid_size():
+    """nixl_ep_v2 refuses a size that is not whole NVLink domains or inside
+    the first one, before any engine is touched: HTTP 400, serving goes on."""
+    from vllm.distributed.eplb.eplb_communicator import has_nixl
+    from vllm.utils.import_utils import has_nixl_ep_v2
+
+    if not has_nixl():
+        pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
+    if not has_nixl_ep_v2():
+        pytest.skip("nixl.runtime.ep is not installed")
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        _base_serve_args(2, 8, all2all_backend="nixl_ep_v2"),
+        env_dict={"VLLM_NIXL_EP_V2_DOMAIN_SIZE": "4"},
+        max_wait_seconds=1200,
+    ) as server:
+        response = requests.post(
+            server.url_for("scale_elastic_ep"),
+            json={"new_data_parallel_size": 5},
+            timeout=300,
+        )
+        assert response.status_code == 400, response.text
+        # DP 1 fails the expert-fit check.
+        assert "[2, 3, 4, 8]" in response.text, response.text
+        probe = requests.post(server.url_for("is_scaling_elastic_ep"), timeout=30)
+        assert probe.status_code == 200, probe.status_code
+        completion = requests.post(
+            server.url_for("v1/completions"),
+            json={"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 4},
+            timeout=120,
+        )
+        assert completion.status_code == 200, completion.text
