@@ -186,6 +186,11 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         comm = dist_group.device_communicator.pynccl_comm
         rank, world = dist_group.rank_in_group, dist_group.world_size
+        if world > 1 and (comm is None or comm.disabled):
+            raise RuntimeError(
+                "The batch-invariant MoE combine sends over PyNccl; unset "
+                "VLLM_DISABLE_PYNCCL"
+            )
         hidden_states = hidden_states.contiguous()
         starts = [sum(sizes[:r]) for r in range(world)]
         mine = sizes[rank]

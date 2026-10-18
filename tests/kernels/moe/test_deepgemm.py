@@ -917,6 +917,21 @@ def test_mxfp4_bi_rows_independent_of_batch_and_alignment(monkeypatch, workspace
             assert torch.equal(run(rows)[: min(m, 4)], alone[: min(m, 4)]), (value, m)
 
 
+def test_bi_ordered_combine_requires_pynccl():
+    """Without PyNccl the rank-order combine would sum rows it never received."""
+    from types import SimpleNamespace
+
+    from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+
+    group = SimpleNamespace(
+        rank_in_group=0,
+        world_size=2,
+        device_communicator=SimpleNamespace(pynccl_comm=SimpleNamespace(disabled=True)),
+    )
+    with pytest.raises(RuntimeError, match="PyNccl"):
+        AgRsAll2AllManager._ordered_combine(torch.zeros(2, 4), group, [1, 1])
+
+
 @pytest.mark.parametrize("clamp", [None, 10.0])
 def test_mxfp4_bi_ep_ag_rs_matches_unsharded(clamp):
     """Real EP4 dispatch/expert/combine preserves the single-rank BF16 result."""
