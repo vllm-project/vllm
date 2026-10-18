@@ -91,8 +91,12 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        ctx = get_forward_context()
+        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        offset = ctx.additional_kwargs.get("routed_experts_token_offset", 0)
+        self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
+            local_topk_ids
+        )
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -153,9 +157,18 @@ class RoutedExpertsCapturer:
             f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 
-    def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
+    def snapshot_routing_data(
+        self,
+        num_tokens: int,
+        token_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Return a stable snapshot of the current routing data."""
-        return self.device_buffer[:num_tokens].to(self.output_dtype)
+        routing_data = (
+            self.device_buffer[:num_tokens]
+            if token_indices is None
+            else self.device_buffer[token_indices]
+        )
+        return routing_data.to(self.output_dtype)
 
 
 class RoutedExpertsSink:

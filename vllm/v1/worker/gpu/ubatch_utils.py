@@ -419,10 +419,6 @@ class UBatchRunner:
             ("speculative_config", config.speculative_config is not None),
             ("enable_eplb", parallel.enable_eplb),
             ("kv_transfer_config", config.kv_transfer_config is not None),
-            (
-                "enable_return_routed_experts",
-                config.model_config.enable_return_routed_experts,
-            ),
         ):
             if enabled:
                 return (
@@ -612,6 +608,9 @@ class UBatchRunner:
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     slot_mapping=slot_mappings_by_layer[i],
                     is_padding=is_padding[i],
+                    additional_kwargs={
+                        "routed_experts_token_offset": ubatch_slice.token_slice.start
+                    },
                 )
             )
         return forward_contexts

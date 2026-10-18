@@ -491,6 +491,46 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype):
     assert output.data_ptr() != capturer.device_buffer.data_ptr()
 
 
+@pytest.mark.parametrize("padded,k", [(127, 2), (128, 3), (129, 4), (127, 8)])
+def test_microbatch_routing_snapshot_restores_logical_rows(padded, k):
+    """Offset writes and staged snapshots preserve order and own their storage."""
+    from vllm.v1.worker.gpu.ubatch_utils import stage_decode_tokens
+    from vllm.v1.worker.ubatch_utils import UBatchSlice
+
+    n = 63
+    batch = SimpleNamespace(
+        num_tokens=n,
+        num_tokens_after_padding=padded,
+        input_ids=torch.arange(padded, dtype=torch.int32),
+        positions=torch.arange(padded, dtype=torch.int64) + 100,
+        is_padding=torch.zeros(padded, dtype=torch.bool),
+    )
+    expected = torch.stack(
+        (batch.input_ids[:n] % 17, batch.positions[:n].int() % 19), dim=1
+    )
+    boundaries = [i * (padded // k) for i in range(k)] + [padded]
+    slices = [
+        UBatchSlice(slice(start, stop), slice(start, stop))
+        for start, stop in zip(boundaries, boundaries[1:])
+    ]
+    rows = stage_decode_tokens(batch, (), torch.zeros(1, padded), slices)
+    capturer = _capturer_with_buffer(max_tokens=padded, num_layers=1)
+    for microbatch in slices:
+        region = microbatch.token_slice
+        topk = torch.stack(
+            (batch.input_ids[region] % 17, batch.positions[region].int() % 19), dim=1
+        )
+        ctx = _forward_context(
+            additional_kwargs={"routed_experts_token_offset": region.start}
+        )
+        with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+            capturer.capture(layer_id=0, topk_ids=topk)
+
+    snapshot = capturer.snapshot_routing_data(n, rows)
+    capturer.device_buffer.fill_(-1)
+    torch.testing.assert_close(snapshot[:, 0], expected.to(capturer.output_dtype))
+
+
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
     """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)

@@ -1631,7 +1631,7 @@ def staging_model_config(tmp_path):
 )
 def test_staging_capability_checks_data_contract(excluded, staging_model_config):
     runner = _make_staging_capability_runner(staging_model_config, excluded)
-    assert runner.stage_real_tokens == (excluded in (None, "k3", "k4"))
+    assert runner.stage_real_tokens == (excluded in (None, "routing", "k3", "k4"))
 
 
 @pytest.mark.parametrize("excluded", [None, "backend", "routing", "k3", "k4"])
@@ -1654,9 +1654,7 @@ def test_dp_gate_uses_real_staging_capability(staging_model_config, excluded):
         num_reqs_per_rank=[63, 97],
         num_ubatches=k,
     )
-    expected = (
-        CUDAGraphMode.FULL if excluded in (None, "k3", "k4") else CUDAGraphMode.NONE
-    )
+    expected = CUDAGraphMode.FULL if excluded != "backend" else CUDAGraphMode.NONE
     assert desc.cg_mode == expected
 
 
@@ -1664,7 +1662,6 @@ def test_dp_gate_uses_real_staging_capability(staging_model_config, excluded):
     "excluded, expected",
     [
         ("backend", "TRITON_ATTN"),
-        ("routing", "enable_return_routed_experts"),
         ("communication", "deepep_low_latency"),
     ],
 )
