@@ -56,9 +56,9 @@ lists of Python ints are much slower to copy and serialize. With a logits
 - No `--kv-sharing-fast-prefill`.
 
 Scoring skips prefix-cache reads by default. With `skip_reading_prefix_cache=False`,
-local reuse ends before `prompt_logprob_start` (default: 0), rounded down to a
-cache block boundary. Ordinary `prompt_logprobs` or a KV connector require full
-prompt recomputation.
+local reuse ends before `prompt_logprob_start` (default: 0), following the existing
+cache lookup alignment. Ordinary `prompt_logprobs` or a KV connector disable
+cache reads; connector admission must also honor the skip flag.
 
 ## Limitations
 
