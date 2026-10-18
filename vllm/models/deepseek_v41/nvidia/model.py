@@ -878,7 +878,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         cut = max(config.kv_source_layer_ids, default=None)
         if (
             cut is not None
-            and cut < self.end_layer - 1
+            # Layers before the cut write the KV it replays from, so they and
+            # the cut itself must run on this rank.
+            and self.start_layer < cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):

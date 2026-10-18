@@ -10,7 +10,14 @@ import torch
 
 @pytest.mark.parametrize(
     ("sources", "compress_ratio", "replay"),
-    [([], 0, False), ([0], 0, True), ([0], 1, True), ([0], 2, False)],
+    [
+        ([], 0, False),
+        ([1], 0, True),
+        ([1], 1, True),
+        ([1], 2, False),
+        # Nothing before the cut would run on this rank.
+        ([0], 0, False),
+    ],
 )
 def test_prefix_replay_requires_an_uncompressed_kv_source(
     monkeypatch, sources, compress_ratio, replay
@@ -28,7 +35,7 @@ def test_prefix_replay_requires_an_uncompressed_kv_source(
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
     )
-    layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+    layers = torch.nn.ModuleList([torch.nn.Module() for _ in range(3)])
     for i, layer in enumerate(layers):
         layer.attn = SimpleNamespace(
             swa_cache_layer=SimpleNamespace(bounded_replay=True, prefix=f"swa.{i}"),
@@ -47,7 +54,7 @@ def test_prefix_replay_requires_an_uncompressed_kv_source(
         hc_eps=1e-6,
         rms_norm_eps=1e-6,
         index_topk=512,
-        num_hidden_layers=2,
+        num_hidden_layers=3,
         kv_source_layer_ids=sources,
         sliding_window=128,
     )
@@ -64,4 +71,4 @@ def test_prefix_replay_requires_an_uncompressed_kv_source(
     )
     model = model_module.DeepseekV4Model(vllm_config=vllm_config)
     assert (model.decoder_replay_layers is not None) == replay
-    assert model.decoder_replay_start == (0 if replay else 2)
+    assert model.decoder_replay_start == (1 if replay else 3)
