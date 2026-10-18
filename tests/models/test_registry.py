@@ -127,9 +127,9 @@ def test_registry_is_pp(model_arch, is_pp):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        ("Qwen4ExpForCausalLM", not current_platform.is_rocm()),
-        ("Qwen4ExpForConditionalGeneration", not current_platform.is_rocm()),
-        ("Qwen4ExpMTP", not current_platform.is_rocm()),
+        ("Qwen4ExpForCausalLM", True),
+        ("Qwen4ExpForConditionalGeneration", True),
+        ("Qwen4ExpMTP", True),
         ("LlamaForCausalLM", False),
     ],
 )
