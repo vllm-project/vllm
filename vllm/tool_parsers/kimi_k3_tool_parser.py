@@ -380,9 +380,6 @@ class KimiK3ToolParser(ToolParser):
             m_close = self._call_close_re.search(
                 current_text, self._stream_call_close_idx, partial=True
             )
-            if m_close is None:
-                self._stream_call_close_idx = len(current_text)
-                break
             if m_close.partial:
                 self._stream_call_close_idx = m_close.start()
                 break
