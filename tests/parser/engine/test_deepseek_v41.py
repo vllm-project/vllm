@@ -154,20 +154,34 @@ def test_python_argument_conversion_and_partial_values():
     }
 
 
+@pytest.mark.parametrize("partial", [True, False])
+@pytest.mark.parametrize(
+    "cut", ["<", "</", "</｜", "</｜DSML｜", "</｜DSML｜ parameter"]
+)
+def test_python_argument_conversion_drops_partial_close_marker(cut, partial):
+    converter = deepseek_v41_config().arg_converter
+    raw = '<｜DSML｜ parameter name="city" string="true">Paris' + cut
+    assert json.loads(converter(raw, partial)) == {"city": "Paris"}
+
+
 @pytest.mark.parametrize("chunk_size", [1, 7, 10000])
 @pytest.mark.parametrize(
     ("text", "expected_name", "expected_args"),
     [
         (
-            '<｜DSML｜ calls>\n<｜DSML｜ invoke name="WebFetch">\n'
-            '<｜DSML｜ parameter name="url" string="true">https://example.com',
+            (
+                '<｜DSML｜ calls>\n<｜DSML｜ invoke name="WebFetch">\n'
+                '<｜DSML｜ parameter name="url" string="true">https://example.com'
+            ),
             "WebFetch",
             {"url": "https://example.com"},
         ),
         (
-            '<｜DSML｜ calls>\n<｜DSML｜ invoke name="Read">\n'
-            '<｜DSML｜ parameter name="file_path" string="true">/tmp/a'
-            "</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+            (
+                '<｜DSML｜ calls>\n<｜DSML｜ invoke name="Read">\n'
+                '<｜DSML｜ parameter name="file_path" string="true">/tmp/a'
+                "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+            ),
             "Read",
             {"file_path": "/tmp/a"},
         ),
@@ -184,6 +198,7 @@ def test_truncated_and_unclosed_parameter_streaming_and_non_streaming(
             tokens,
             chunk_size=chunk_size,
             finished_on_last=True,
+            tools=DUMMY_TOOLS,
         )
     )
     assert len(output.tool_calls) == 1
@@ -193,7 +208,7 @@ def test_truncated_and_unclosed_parameter_streaming_and_non_streaming(
     parser_non_stream = parser_for(tokenizer, {"thinking": False})
     _, content, calls = parser_non_stream.parse(
         text,
-        _test_request(),
+        _test_request(tools=DUMMY_TOOLS),
         enable_auto_tools=True,
         model_output_token_ids=[tid for tid, _ in tokens],
     )
@@ -201,4 +216,3 @@ def test_truncated_and_unclosed_parameter_streaming_and_non_streaming(
     assert calls is not None and len(calls) == 1
     assert calls[0].name == expected_name
     assert json.loads(calls[0].arguments) == expected_args
-

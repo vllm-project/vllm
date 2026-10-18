@@ -118,10 +118,12 @@ def _dsml_parse_args(
     pm = partial_param_re.search(raw_args, last_end)
     if pm:
         name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
-        if partial:
-            window = _value_end_window(value, value_end_re)
-            if window:
-                value = value[: -len(window)]
+        # The trailing parameter is unclosed, so a suffix that can only be the
+        # start of its close marker (or of the next parameter) is not part of
+        # the value, including at the end of a truncated output.
+        window = _value_end_window(value, value_end_re)
+        if window:
+            value = value[: -len(window)]
         if is_str == "true":
             params[name] = value
             open_match = pm
