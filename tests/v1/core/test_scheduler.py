@@ -6959,6 +6959,37 @@ def test_drafter_lookahead_encoder_cache_cap_makes_progress(prefill_lookahead):
     assert scheduled_inputs == [0, 1]
 
 
+@pytest.mark.parametrize("prefill_lookahead", [1, 3])
+@pytest.mark.parametrize("past_chunk_end", [0, 1, 2])
+def test_drafter_lookahead_encoder_cache_cap_respects_token_budget(
+    prefill_lookahead, past_chunk_end
+):
+    """An unallocatable input reached only by look-ahead must not grow the chunk."""
+    budget = 100
+    scheduler = create_scheduler(max_num_batched_tokens=budget, max_model_len=2048)
+    scheduler.num_prefill_lookahead = prefill_lookahead
+    scheduler.max_num_encoder_input_tokens = 1000
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=300)
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=budget + past_chunk_end + 320,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=80),
+                PlaceholderRange(offset=budget + past_chunk_end, length=300),
+            ]
+        ],
+        max_tokens=1,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["req"] == budget
+    assert output.scheduled_encoder_inputs["req"] == [0]
+
+
 def test_free_encoder_inputs_unchanged_without_spec_decode():
     """Without speculative decoding, encoder inputs are freed as soon as
     num_computed_tokens passes the placeholder range, as before."""

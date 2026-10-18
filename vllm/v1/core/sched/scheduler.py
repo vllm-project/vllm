@@ -2011,7 +2011,9 @@ class Scheduler(SchedulerInterface):
                     # We only schedule the decoder tokens just before the
                     # encoder input. No drafter shift here: its read-ahead into
                     # this unencoded input falls back to token embeddings.
-                    num_new_tokens = start_pos - num_computed_tokens
+                    num_new_tokens = min(
+                        num_new_tokens, start_pos - num_computed_tokens
+                    )
                 else:
                     # Because of prefix caching, num_computed_tokens is greater
                     # than start_pos even though its encoder input is not
