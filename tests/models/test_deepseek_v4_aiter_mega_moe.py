@@ -200,7 +200,9 @@ def test_mega_moe_routing_matches_reference(
     moe.experts = experts
     moe.shared_experts = lambda x: 3 * x
     moe.shared_experts_stream = aux_stream() if shared_stream else None
-    moe.shared_experts_events = (torch.cuda.Event(), torch.cuda.Event())
+    moe.shared_experts_events = (
+        (torch.cuda.Event(), torch.cuda.Event()) if shared_stream else None
+    )
     moe.scoring_func = "sqrtsoftplus"
     moe.n_activated_experts = top_k
     moe.renormalize = True
