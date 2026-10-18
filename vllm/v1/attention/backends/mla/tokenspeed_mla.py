@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TokenSpeed CuTe DSL MLA decode backend (Blackwell, FP8 KV cache only)."""
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -38,6 +39,72 @@ logger = init_logger(__name__)
 # EAGLE3 / MTP-2 spec decoding query lengths; larger q_len fails the kernel's
 # own buffer check.
 _TOKENSPEED_MAX_Q_LEN = 8
+
+
+@triton.jit(do_not_specialize=["num_reqs", "budget", "max_splits"])
+def _plan_proportional_split_counts(
+    seq_lens_ptr,
+    counts_ptr,
+    num_reqs,
+    budget,
+    max_splits,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK_SIZE)
+    lengths = tl.load(seq_lens_ptr + offsets, offsets < num_reqs, other=0).to(tl.int64)
+    total = tl.maximum(tl.sum(lengths, 0), 1)
+    counts = tl.cdiv(lengths * budget, total)
+    counts = tl.minimum(tl.maximum(counts, 1), max_splits)
+    tl.store(counts_ptr + offsets, counts.to(tl.int32), offsets < num_reqs)
+
+
+def _prepare_proportional_splits(
+    query: torch.Tensor,
+    seq_lens: torch.Tensor,
+    workspace: torch.Tensor,
+    kv_lora_rank: int,
+    min_split_kv: int,
+) -> tuple[torch.Tensor, torch.Tensor | None, int | None]:
+    """Plan counts in the existing workspace, with no host synchronization."""
+    from tokenspeed_mla import get_num_sm, select_mla_decode_tilers
+
+    batch, query_len, heads = query.shape[:3]
+    if batch <= 1 or query_len == 0 or batch != seq_lens.numel():
+        return workspace, None, None
+    (tile_rows, _), _ = select_mla_decode_tilers(
+        heads,
+        query_len,
+        is_fp8=query.dtype == torch.float8_e4m3fn,
+        compute_capability=torch.cuda.get_device_capability(query.device),
+    )
+    query_tiles = (query_len * heads + tile_rows - 1) // tile_rows
+    ctas_per_tile = 1 if tile_rows == 64 else 2
+    splits_per_request = max(
+        min_split_kv,
+        min(
+            32,
+            max(1, get_num_sm(query.device) // batch // (ctas_per_tile * query_tiles)),
+        ),
+    )
+    # Keep the count tensor aligned for CuTe and separate from reduction scratch.
+    count_bytes = (batch + 3) // 4 * 16
+    scratch = workspace[:-count_bytes]
+    # Whole query tiles bound both folded and packed layouts.
+    bytes_per_split = batch * query_tiles * tile_rows * (kv_lora_rank + 1) * 4
+    # TokenSpeed rejects reduction workspaces whose byte offsets exceed int32.
+    max_splits = min(32, min(scratch.numel(), (1 << 31) - 1) // bytes_per_split)
+    if max_splits <= splits_per_request:
+        return workspace, None, None
+    counts = workspace[-count_bytes:].view(torch.int32)[:batch]
+    _plan_proportional_split_counts[(1,)](
+        seq_lens,
+        counts,
+        batch,
+        batch * splits_per_request,
+        max_splits,
+        BLOCK_SIZE=triton.next_power_of_2(max(128, batch)),
+    )
+    return scratch, counts, max_splits
 
 
 def _get_workspace(
@@ -232,6 +299,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         config = get_current_vllm_config()
         self._min_split_kv = config.attention_config.tokenspeed_mla_min_split_kv
+        self._split_kv_policy = config.attention_config.tokenspeed_mla_split_kv_policy
         self._max_decode_tokens = 0
         if self._min_split_kv > 1:
             spec = config.speculative_config
@@ -325,6 +393,16 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self._min_split_kv,
             self._max_decode_tokens,
         )
+        split_options: dict[str, Any] = {}
+        if self._split_kv_policy == "proportional":
+            workspace, split_counts, split_capacity = _prepare_proportional_splits(
+                q, seq_lens, workspace, self.kv_lora_rank, self._min_split_kv
+            )
+            if split_counts is not None:
+                split_options = {
+                    "split_kv_counts": split_counts,
+                    "max_split_kv": split_capacity,
+                }
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
         # tokenspeed_mla_decode wants 3D — pass as-is (no unsqueeze, unlike trtllm).
@@ -347,7 +425,8 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             cp_world=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_interleave_size=self._parallel_config.cp_kv_cache_interleave_size,
-            min_split_kv=self._min_split_kv,
+            min_split_kv=1 if split_options else self._min_split_kv,
+            **split_options,
         )
         if return_lse:
             o, lse = kernel_out

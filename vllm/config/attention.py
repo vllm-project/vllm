@@ -66,6 +66,13 @@ class AttentionConfig:
     automatic scheduling. Larger values request a split floor and may increase
     workspace memory. Only applies to the TokenSpeed MLA backend."""
 
+    tokenspeed_mla_split_kv_policy: Literal["uniform", "proportional"] = "uniform"
+    """TokenSpeed MLA split scheduling. Proportional scheduling distributes
+    splits by request KV length, with at most 32 splits per request and no
+    increase to the existing workspace reservation. In proportional mode,
+    tokenspeed_mla_min_split_kv sizes the total split budget; short requests
+    may receive fewer splits than this value."""
+
     tq_max_kv_splits_for_cuda_graph: int = 32
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
     Fixes the split count so grid dimensions are constant across captures,
