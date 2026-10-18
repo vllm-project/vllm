@@ -2391,20 +2391,24 @@ def sort_batch_req_ids(
     req_id_to_index: dict[str, int] | None = None,
 ) -> list[str]:
     # Order verification/decode -> short_extend -> extend -> prefill.
-    # split_decodes_prefills_and_extends takes the first context-less request as
-    # the start of the prefills and does not re-check the rest, and the prefill
-    # path never reads the KV cache, so a context-less request sorted ahead of one
-    # with context silently drops that request's history. The context term
-    # precedes the decode-length term because split_dcp_context_queries splits at
+    # Keeping requests that have context ahead of context-less ones lets
+    # split_decodes_prefills_and_extends end the extend region as early as
+    # possible; the splitter clamps the boundary itself, so this is a tightening
+    # rather than a correctness requirement. The context term precedes the
+    # decode-length term because split_dcp_context_queries splits at
     # decode_threshold=1, where a context-less decode_query_len chunk is a prefill.
     def key(r: str) -> tuple[bool, bool, bool, int]:
         num = num_tokens_per_req[r]
+        drafts = draft_tokens.get(r)
         return (
-            not draft_tokens.get(r),
-            # Single-token requests stay with the decodes, so skip the lookup for
-            # them. `not` keeps the numpy scalar out of the tuple: sorting compares
-            # tuples O(n log n) times, and numpy scalars compare far slower.
+            not drafts,
+            # Single-token requests stay with the decodes and drafted requests are
+            # pinned ahead of everything by the term above, so neither needs the
+            # lookup. `not` keeps the numpy scalar out of the tuple: sorting
+            # compares tuples O(n log n) times, and numpy scalars compare far
+            # slower.
             num > 1
+            and not drafts
             and num_computed_tokens is not None
             and req_id_to_index is not None
             and not num_computed_tokens[req_id_to_index[r]],
