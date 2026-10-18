@@ -83,7 +83,7 @@ class SpecializedDecode(Generic[KernelT]):
         if not agreed:
             raise DecodeUnsupported(f"{refused}: another TP rank refused")
         self.vllm_config = vllm_config
-        self.widths = spec.widths(vllm_config)
+        self.widths = tuple(sorted(spec.widths(vllm_config)))
         self._bound = False
         self.kernel: KernelT = spec.build(vllm_config, model, self.widths)
         kernel = self.kernel
@@ -106,6 +106,13 @@ class SpecializedDecode(Generic[KernelT]):
         self.kernel.bind_caches(caches)
         self._bound = True
 
+    def _kernel_width(self, width: int) -> int | None:
+        """The width the kernel launches at for a step of ``width`` rows, or
+        None when the spec serves no width for it."""
+        if self.spec.pad_steps:
+            return next((w for w in self.widths if w >= width), None)
+        return width if width in self.widths else None
+
     def plan(self, positions: torch.Tensor, intermediate_tensors=None) -> Step | None:
         """This step's plan, or None to run the model's own forward instead.
 
@@ -113,10 +120,11 @@ class SpecializedDecode(Generic[KernelT]):
         serve it, as described by the spec.
         """
         width = positions.size(-1)
+        kernel_width = self._kernel_width(width)
         why: str | None
         if intermediate_tensors is not None:
             why = "pipeline stage input"
-        elif width not in self.widths:
+        elif kernel_width is None:
             why = "width"
         elif not is_forward_context_available():
             why = "no forward context"
@@ -125,13 +133,14 @@ class SpecializedDecode(Generic[KernelT]):
         elif not self._bound:
             why = "caches not bound"
         else:
-            why = self.spec.skip_step(self.vllm_config, self.kernel, width)
+            why = self.spec.skip_step(self.vllm_config, self.kernel, kernel_width)
         if why is not None:
             logger.info_once(
                 "Specialized decode %s: step on vLLM's path (%s)", self.spec.name, why
             )
             return None
-        return Step(width=width, positions=positions)
+        assert kernel_width is not None
+        return Step(width=width, kernel_width=kernel_width, positions=positions)
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
         """Run the specialized kernel, returning what the model's own forward would

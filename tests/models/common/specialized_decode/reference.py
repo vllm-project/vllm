@@ -75,7 +75,7 @@ class ReferenceKernel:
         self.compiled: set[Any] = set()
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs):
-        self.launched.append(step.width)
+        self.launched.append(step.kernel_width)
         hidden = inputs_embeds
         for layer in self.model.layers:
             weight = self.weights.get(layer.index)

@@ -223,7 +223,7 @@ class KimiK3Kernel:
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs):
         """Normalized hidden states (and the aux streams) of a planned step."""
-        plan = self.step_plan(step.width)
+        plan = self.step_plan(step.kernel_width)
         assert plan is not None
         x = inputs_embeds
         if x is None:

@@ -181,6 +181,17 @@ def test_capture_sizes_become_the_widths(config):
     assert config.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 16, 32]
 
 
+def test_a_spec_can_keep_the_engines_capture_sizes(config):
+    """A spec that pads serves whatever sizes the deployment captures, so it
+    opts out of having them rewritten."""
+    spec = replace(reference.REFERENCE, set_capture_sizes=False)
+    config.compilation_config.cudagraph_capture_sizes = [1, 3, 4, 16, 32]
+
+    assert select_decode_spec(config, spec) is spec
+
+    assert config.compilation_config.cudagraph_capture_sizes == [1, 3, 4, 16, 32]
+
+
 # Build
 
 
@@ -253,8 +264,31 @@ def test_a_served_decode_step_takes_the_kernel(config, decode):
     with forward(config, CUDAGraphMode.FULL, {"prefill": False}):
         step = decode.plan(rows)
     assert isinstance(step, Step)
-    assert step.width == min(decode.widths)
+    assert step.width == step.kernel_width == min(decode.widths)
     assert step.positions is rows
+
+
+def test_a_spec_that_pads_runs_a_short_step_at_the_next_width(config, model):
+    """``pad_steps`` serves a width the spec was not built for by launching at
+    the next one up, which is the width the kernel is handed."""
+    spec = replace(reference.REFERENCE, pad_steps=True)
+    decode = SpecializedDecode(model, config, spec)
+    decode.bind_caches()
+    assert decode.widths == (1, 2, 4, 8)
+
+    with forward(config, CUDAGraphMode.FULL, {"prefill": False}):
+        step = decode.plan(positions(3))
+        over = decode.plan(positions(9))
+
+    assert step is not None and step.width == 3 and step.kernel_width == 4
+    assert over is None
+
+
+def test_without_padding_an_unserved_width_takes_vllms_path(config, decode):
+    """The default is exact: a width the spec was not built for falls back,
+    rather than silently running on a wider launch."""
+    with forward(config, CUDAGraphMode.FULL, {"prefill": False}):
+        assert decode.plan(positions(3)) is None
 
 
 @pytest.mark.parametrize(

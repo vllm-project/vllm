@@ -553,7 +553,7 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
 
     decode.kernel.launch_whole = launch_whole
 
-    step = Step(width=1, positions=torch.zeros(1, dtype=torch.long))
+    step = Step(width=1, kernel_width=1, positions=torch.zeros(1, dtype=torch.long))
     out = decode.kernel.run(step, None, torch.zeros(1, HIDDEN))
 
     assert out.shape == (1, HIDDEN)

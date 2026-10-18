@@ -129,7 +129,8 @@ def _select_spec(
 
 
 def _set_capture_sizes(spec: DecodeSpec[Any], vllm_config: "VllmConfig") -> None:
-    """Amend the capture sizes with the supported widths to avoid padding."""
+    """Amend the capture sizes with the supported widths, so that no step is
+    refused for its width alone."""
     cc = vllm_config.compilation_config
     widths = spec.widths(vllm_config)
     sizes = cc.cudagraph_capture_sizes or []
@@ -145,7 +146,8 @@ def select_decode_spec(
     vllm_config: "VllmConfig",
     specs: DecodeSpec[KernelT] | Sequence[DecodeSpec[KernelT]],
 ) -> DecodeSpec[KernelT] | None:
-    """Select the first compatible spec and set the capture sizes, if enabled.
+    """Select the first compatible spec and, unless it declines them, set the
+    capture sizes to its widths.
 
     Args:
         vllm_config: The engine's config, before the weights are loaded.
@@ -161,7 +163,8 @@ def select_decode_spec(
             "Specialized decode refused: "
             + "; ".join(f"{n}: {', '.join(rs)}" for n, rs in refusals.items())
         )
-    _set_capture_sizes(spec, vllm_config)
+    if spec.set_capture_sizes:
+        _set_capture_sizes(spec, vllm_config)
     if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         logger.warning(
             "Specialized decode %s under eager mode: for debugging only, serve "

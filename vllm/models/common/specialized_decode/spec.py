@@ -48,7 +48,15 @@ class Step:
     """One decode step the kernel takes, as ``SpecializedDecode.plan`` decided it."""
 
     width: int
-    """The step's rows, one of the widths the spec serves."""
+    """The step's rows, as the model's forward was handed them."""
+
+    kernel_width: int
+    """The width the kernel launches at, one of the widths the spec serves.
+
+    Equal to ``width``, unless the spec pads a short step up to the next width
+    it was built for, in which case it is the larger of the two and the kernel
+    owns the padding.
+    """
 
     positions: "torch.Tensor"
     """The step's positions, as the model's forward was handed them."""
@@ -104,8 +112,7 @@ class DecodeSpec(Generic[KernelT]):
         name: Log and metric name.
         supports: Features this spec serves. Default deny: a feature in use
             that is absent from it refuses the deployment.
-        widths: The rows a launch serves, from the engine's config. These
-            become the CUDA graph capture sizes.
+        widths: The rows a launch serves, from the engine's config.
         refuse_config: Conditions under which the specialized decode kernel cannot run,
             based on the config.
         refuse_model: Conditions under which the specialized decode kernel cannot run,
@@ -113,8 +120,16 @@ class DecodeSpec(Generic[KernelT]):
         refuse_caches: Conditions under which the specialized decode kernel cannot run,
             based on the cache.
         skip_step: Whether to run the specialized decode kernel for this forward call,
-            or to fall back to the model's own forward.
+            or to fall back to the model's own forward. Takes the step's
+            ``kernel_width``.
         build: This rank's kernel.
+        pad_steps: Whether a step of fewer rows than a served width runs on the
+            next width up, the kernel padding it. Default deny: a step whose
+            rows are not themselves a served width falls back.
+        set_capture_sizes: Whether to make the served widths the CUDA graph
+            capture sizes, so that no step is refused for its width alone. Turn
+            it off for a spec that pads, which serves the engine's own capture
+            sizes as they are.
 
     """
 
@@ -126,3 +141,5 @@ class DecodeSpec(Generic[KernelT]):
     refuse_caches: Callable[["VllmConfig", KernelT, Mapping[str, Any]], list[str]]
     skip_step: Callable[["VllmConfig", KernelT, int], str | None]
     build: Callable[["VllmConfig", Any, tuple[int, ...]], KernelT]
+    pad_steps: bool = False
+    set_capture_sizes: bool = True
