@@ -181,6 +181,7 @@ def test_exact_replay_keeps_more_rows_than_the_window(state):
     last-window outputs; their KV window starts at the first kept row."""
     kept_rows = 200
     state.decoder_replay_layers.kept_rows = kept_rows
+    state.decoder_replay_layers.stage_rows = [kept_rows]
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
     replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
     assert replay is not None
@@ -433,7 +434,11 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = SimpleNamespace(
-        window=WINDOW, kept_rows=WINDOW, replay_batch=None, metadata_prefixes=set()
+        window=WINDOW,
+        kept_rows=WINDOW,
+        stage_rows=[WINDOW],
+        replay_batch=None,
+        metadata_prefixes=set(),
     )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(

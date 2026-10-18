@@ -103,7 +103,8 @@ def _pad_replayed_slots_kernel(
             )
 
 
-@triton.jit
+# Stages keep different row counts; one compile serves all of them.
+@triton.jit(do_not_specialize=["kept_rows"])
 def _gather_replay_batch_kernel(
     query_start_loc_ptr,  # [num_reqs + 1]
     dropped_before_ptr,  # [num_reqs + 1] rows trimmed before each boundary
@@ -281,7 +282,7 @@ class DeepseekV41ModelState(DefaultModelState):
             # Exact replay in stages: the later stages' buffers.
             self._replay_stages = [
                 _ReplayStageBuffers(self.max_num_reqs, self.max_num_tokens, device)
-                for _ in self._stage_rows()[1:]
+                for _ in self.decoder_replay_layers.stage_rows[1:]
             ]
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
@@ -311,13 +312,6 @@ class DeepseekV41ModelState(DefaultModelState):
                 vllm_config, device, layers
             )
             layers.trim_threshold = threshold
-
-    def _stage_rows(self) -> list[int]:
-        """Rows each replay stage keeps per request; the first stage's are the
-        layers' ``kept_rows``."""
-        layers = self.decoder_replay_layers
-        assert layers is not None
-        return [layers.kept_rows, *getattr(layers, "stage_rows", [])[1:]]
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -547,7 +541,7 @@ class DeepseekV41ModelState(DefaultModelState):
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
         keeps_rows = self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]]
-        stage_rows = self._stage_rows()
+        stage_rows = layers.stage_rows
         if capture_desc is not None:
             # A capture keeps the dummy batch's rows at every stage: its graphs
             # are keyed by the one size.
@@ -761,6 +755,8 @@ class DeepseekV41ModelState(DefaultModelState):
         assert all_slot_mappings is not None
         kept_slot_mappings = all_slot_mappings[:, :num_padded]
         kept_slot_mappings[:, num_tokens:].fill_(PAD_SLOT_ID)
+        layers = self.decoder_replay_layers
+        assert layers is not None
         _gather_replay_batch_kernel[(num_reqs,)](
             input_batch.query_start_loc,
             dropped_before,
@@ -775,7 +771,7 @@ class DeepseekV41ModelState(DefaultModelState):
             kept_slot_mappings,
             kept_slot_mappings.stride(0),
             kv_start,
-            self._stage_rows()[stage],
+            layers.stage_rows[stage],
             dropped_before if prev_dropped is None else prev_dropped,
             select,
             NUM_GROUPS=slot_mappings.shape[0],
