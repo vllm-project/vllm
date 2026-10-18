@@ -479,7 +479,8 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
 
 
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):
-    """Every rank pads its replay batch to the graph fitting the largest rank's."""
+    """Every rank pads its replay batch to the graph fitting the largest rank's,
+    and marks the padding rows so MoE does not dispatch them."""
     dp_state.replay_cudagraphs = MagicMock()
     dp_state.replay_cudagraphs.dispatch.return_value = BatchExecutionDescriptor(
         CUDAGraphMode.PIECEWISE, 512, None
@@ -491,3 +492,7 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert replay.forward_context.batch_descriptor.num_tokens == 512
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+    num_rows = len(REPLAY_ROWS)
+    assert replay.forward_context.is_padding.tolist() == [False] * num_rows + [True] * (
+        512 - num_rows
+    )

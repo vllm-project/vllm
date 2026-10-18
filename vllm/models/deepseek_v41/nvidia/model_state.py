@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
@@ -284,6 +285,16 @@ class DeepseekV41ModelState(DefaultModelState):
                 _ReplayStageBuffers(self.max_num_reqs, self.max_num_tokens, device)
                 for _ in self.decoder_replay_layers.stage_rows[1:]
             ]
+            # Per stage, the rows padding its graph past its tokens: MoE must
+            # not dispatch them (their routes are garbage and can overflow an
+            # expert's receive slots on the other ranks). Persistent so the
+            # graphs read each step's mask.
+            self._replay_is_padding = torch.ones(
+                len(self._replay_stages) + 1,
+                self.max_num_tokens,
+                dtype=torch.bool,
+                device=device,
+            )
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -652,6 +663,11 @@ class DeepseekV41ModelState(DefaultModelState):
                     kv_cache_config,
                     model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
                 )[first_swa]
+            is_padding = None
+            if run_graph is not None and envs.VLLM_MOE_SKIP_PADDING:
+                is_padding = self._replay_is_padding[i, :num_padded]
+                is_padding[:num_tokens].fill_(False)
+                is_padding[num_tokens:].fill_(True)
             forward_context = create_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -661,6 +677,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
+                is_padding=is_padding,
             )
             if i == 0:
                 replay_batch = ReplayBatch(
