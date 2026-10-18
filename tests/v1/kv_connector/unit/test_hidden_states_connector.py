@@ -215,6 +215,20 @@ def test_finished_sending_waits_for_copy_event_before_releasing_blocks(
 
 
 @pytest.mark.cpu_test
+def test_finished_sending_ignores_requests_without_pending_export(
+    window_connector,
+):
+    connector = window_connector
+    connector.has_connector_metadata = lambda: False
+    connector._accumulated_finished_req_ids = set()
+    connector._req_copy_events = {}
+    connector._lock_fds = {}
+
+    assert connector.get_finished({"immediate"}) == (None, None)
+    assert not connector._accumulated_finished_req_ids
+
+
+@pytest.mark.cpu_test
 def test_window_file_publication_waits_for_d2h_and_is_atomic(tmp_path):
     from unittest.mock import Mock
 

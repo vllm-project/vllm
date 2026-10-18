@@ -897,10 +897,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         still be in flight; clients block on the per-file flock to wait for it.
         """
         # Extract and submit async writes for newly finished requests
+        new_pending_req_ids: set[str] = set()
         if self.has_connector_metadata():
             connector_metadata = self._get_connector_metadata()
             if isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata):
                 for pending in connector_metadata.pending_saves:
+                    new_pending_req_ids.add(pending.req_id)
                     try:
                         self._submit_async_write(pending)
                     except Exception:
@@ -918,8 +920,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                             "Hidden-state export failed for %s", pending.req_id
                         )
 
+        # Only track requests whose block release was delayed for an export.
+        # finished_req_ids also contains requests that request_finished() chose
+        # not to delay, such as windows with too few accepted rows.
+        eligible_req_ids = new_pending_req_ids | self._req_copy_events.keys()
+        self._accumulated_finished_req_ids.update(
+            finished_req_ids & eligible_req_ids
+        )
+
         # Poll for completed DtoH copies
-        self._accumulated_finished_req_ids.update(finished_req_ids)
 
         done_sending: set[str] = set()
         for req_id in list(self._accumulated_finished_req_ids):
