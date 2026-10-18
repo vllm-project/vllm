@@ -13,20 +13,22 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.async_init import (
+    KVConnectorRequestHandler,
+    SupportsAsyncInit,
+    get_request_handler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorInitStatus,
     KVConnectorMetadata,
-    KVConnectorRequestHandler,
     KVConnectorRole,
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     NoOpKVConnectorMetadata,
-    SupportsAsyncInit,
     SupportsHMA,
-    get_request_handler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,

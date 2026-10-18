@@ -11,10 +11,10 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    NoOpKVConnectorMetadata,
+from vllm.distributed.kv_transfer.kv_connector.v1.async_init import (
     get_request_handler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import NoOpKVConnectorMetadata
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,

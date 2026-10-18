@@ -142,7 +142,8 @@ steps; initialization alone does not keep an idle engine stepping. After an idle
 period, requests admitted before the scheduler observes readiness are served
 without that connector for their whole lifetime, even if workers have already
 finished initializing. Initialization errors are also observed when stepping
-resumes.
+resumes. Workers raise if setup is not done within
+`VLLM_KV_CONNECTOR_INIT_TIMEOUT` seconds (default 1800), checked on engine steps.
 
 Requests admitted before readiness remain excluded for their whole lifetime,
 including chunked prefill, preemption and completion notifications. With
