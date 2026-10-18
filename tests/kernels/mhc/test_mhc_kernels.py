@@ -149,7 +149,11 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     assert mhc.supports_mhc_all_reduce(config) is expected
+    # The fused all-reduce sums ranks in its own order.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert mhc.supports_mhc_all_reduce(config) is False
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -219,6 +223,7 @@ def test_bi_hc_collapse_executes_native_cuda_with_exact_cpu_reference(monkeypatc
     )
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     require_batch_invariant_kernel()
     assert torch._C._dispatch_has_kernel_for_dispatch_key(
         "vllm_batch_invariant::hc_collapse", "CUDA"
