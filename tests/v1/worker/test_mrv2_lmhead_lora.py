@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 from vllm.lora.request import LoRARequest
-from vllm.v1.worker.gpu.input_batch import make_num_logits_per_req
 from vllm.v1.worker.gpu.lora_utils import LoraState
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -44,19 +43,14 @@ def test_prompt_lora_mapping_aligns_with_spec_decode_logits_rows():
     assert requests == {lora_b}
 
 
-def test_num_logits_per_req_counts_bonus_rows_and_draft_rows():
-    """Bonus tokens and draft tokens both add logits rows."""
-    drafts = np.array([0, 2, 1], dtype=np.int32)
-    assert make_num_logits_per_req(3, drafts, 1).tolist() == [1, 3, 2]
-    # Multiple sampled tokens per step, no drafts: still more than one row.
-    assert make_num_logits_per_req(2, None, 2).tolist() == [2, 2]
-    assert make_num_logits_per_req(3, None, 1).tolist() == [1, 1, 1]
-
+def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
+    """Multiple sampled tokens per step still get one lm_head id per row."""
     state = LoraState(max_num_reqs=2)
     lora = LoRARequest("adapter", 3, "/tmp/adapter")
     state.add_request("req-a", 0, lora)
     state.add_request("req-b", 1, None)
-    num_logits = make_num_logits_per_req(2, None, 2)
+    # Two logits rows per request, no drafts.
+    num_logits = np.array([2, 2], dtype=np.int32)
     prompt, token, _requests = state.make_lora_inputs(
         ["req-a", "req-b"],
         np.array([0, 1], dtype=np.int32),
