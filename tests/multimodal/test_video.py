@@ -49,7 +49,9 @@ from vllm.transformers_utils.processor import get_video_processor_cls_name_from_
 
 from .utils import (
     create_edit_list_trimmed_video,
+    create_live_webm_video,
     create_long_gop_video,
+    create_raw_h264_video,
     create_video_from_image,
 )
 
@@ -1261,8 +1263,8 @@ def test_qwen3_vl_unknown_source_fps_matches_hf(
     the metadata carries the fps HF assumes, which the frame timestamps use."""
     get_video_metadata = OpenCVVideoBackendMixin.get_video_metadata
 
-    def unknown_fps(cap) -> VideoSourceMetadata:
-        return get_video_metadata(cap)._replace(original_fps=0.0, duration=0.0)
+    def unknown_fps(data) -> VideoSourceMetadata:
+        return get_video_metadata(data)._replace(original_fps=0.0, duration=0.0)
 
     monkeypatch.setattr(
         OpenCVVideoBackendMixin, "get_video_metadata", staticmethod(unknown_fps)
@@ -1473,6 +1475,36 @@ def test_video_backend_handles_edit_list_trimmed_video(
         # The Qwen samplers used to degenerate to a single frame here.
         qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(video_data)
         assert qwen_metadata["total_num_frames"] == num_visible
+        assert qwen_frames.shape[0] >= 4
+
+
+def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Streamed WebM and raw H.264 carry no frame count/duration in their
+    headers, so OpenCV reports a bogus negative ``CAP_PROP_FRAME_COUNT``.
+    The loader must count the frames via a demux-only pass, without
+    decoding.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+        webm_data = create_live_webm_video(num_frames=20, fps=10)
+        frames, metadata = loader.load_bytes(webm_data, backend="opencv")
+        assert frames.shape[0] == 20
+        assert metadata["total_num_frames"] == 20
+        assert metadata["duration"] == pytest.approx(2.0)
+
+        h264_data = create_raw_h264_video(num_frames=20, fps=25)
+        frames, metadata = loader.load_bytes(h264_data, backend="opencv")
+        assert frames.shape[0] == 20
+        assert metadata["total_num_frames"] == 20
+        assert metadata["duration"] == pytest.approx(0.8)
+
+        # The Qwen samplers used to raise on the bogus negative frame count.
+        qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(webm_data)
+        assert qwen_metadata["total_num_frames"] == 20
         assert qwen_frames.shape[0] >= 4
 
 
