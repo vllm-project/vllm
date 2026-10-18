@@ -224,6 +224,7 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_discarded_weights = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -301,6 +302,7 @@ class Worker(WorkerBase):
 
         # Save the buffers before level 2 sleep
         if level == 2:
+            self._sleep_discarded_weights = True
             model = self.model_runner.model
             self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
@@ -360,6 +362,10 @@ class Worker(WorkerBase):
                     if name in self._sleep_saved_draft_buffers:
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
+
+        if wake_weights and self._sleep_discarded_weights:
+            self._sleep_discarded_weights = False
+            self.model_runner.restore_lora_state()
 
         self.synchronize_device()
 

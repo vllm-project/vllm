@@ -38,6 +38,11 @@ class LoRAModelRunnerMixin:
             if isinstance(module, LogitsProcessorWithLoRA):
                 module.reset_sharded_to_full_mapping()
 
+    def restore_lora_state(self) -> None:
+        """Rewrite LoRA adapter slots after level-2 sleep discarded them."""
+        if self.lora_config:
+            self.lora_manager.restore_adapter_slots()
+
     def load_lora_model(
         self,
         model: nn.Module,
