@@ -24,19 +24,24 @@ def main():
     parser.add_argument(
         "--vocab-sizes", type=int, nargs="+", default=[32000, 128256, 151936]
     )
+    parser.add_argument(
+        "--dtype", choices=["float32", "float16", "bfloat16"], default="float32"
+    )
     args = parser.parse_args()
     torch.manual_seed(0)
-    print("batch,vocab,latency_us")
+    print("batch,vocab,dtype,latency_us")
     for batch in args.batch_sizes:
         for vocab in args.vocab_sizes:
-            logits = torch.randn(batch, vocab, device="cuda", dtype=torch.float32)
+            logits = torch.randn(
+                batch, vocab, device="cuda", dtype=getattr(torch, args.dtype)
+            )
             mapping = torch.arange(batch, device="cuda", dtype=torch.int32)
             min_p = torch.full((batch,), 0.1, device="cuda")
             # Reapplying the filter is idempotent and preserves the row maximum.
             latency = triton.testing.do_bench_cudagraph(
                 partial(apply_min_p, logits, mapping, min_p)
             )
-            print(f"{batch},{vocab},{latency * 1000:.3f}")
+            print(f"{batch},{vocab},{args.dtype},{latency * 1000:.3f}")
 
 
 if __name__ == "__main__":

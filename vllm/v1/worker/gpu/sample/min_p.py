@@ -51,7 +51,7 @@ def apply_min_p(
     num_tokens, vocab_size = logits.shape
     # Wider loads amortize the serial scan for small batches. Keep the smaller
     # tile for larger batches to avoid increasing register pressure.
-    BLOCK_SIZE = 8192 if vocab_size > 16384 and num_tokens <= 8 else 1024
+    BLOCK_SIZE = 8192 if vocab_size > 16384 and num_tokens <= 32 else 1024
     _min_p_kernel[(num_tokens,)](
         logits,
         logits.stride(0),
@@ -59,4 +59,5 @@ def apply_min_p(
         min_p,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=16 if BLOCK_SIZE == 8192 else 4,
     )

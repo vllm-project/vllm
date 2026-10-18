@@ -59,7 +59,7 @@ def test_min_p_graph_replay():
         torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("batch_size", [8, 9])
+@pytest.mark.parametrize("batch_size", [8, 9, 32, 33])
 def test_min_p_batch_boundary(batch_size):
     torch.manual_seed(0)
     logits = torch.randn(batch_size, 32000, device="cuda")
