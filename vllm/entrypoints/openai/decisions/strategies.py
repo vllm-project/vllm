@@ -18,6 +18,7 @@ from functools import cached_property
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -25,9 +26,15 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
+from vllm.inputs import (
+    EngineInput,
+    MultiModalInput,
+    TokensPrompt,
+    tokens_input,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.media import (
     MEDIA_CONNECTOR_REGISTRY,
     ImageMediaIO,
@@ -49,8 +56,10 @@ from .question_types import (
     QUESTION_TYPES,
     Question,
     StructuredDecisionError,
+    UnsupportedQuestion,
     label_softmax,
 )
+from .spatial import spatial_answer
 
 _M = TypeVar("_M")
 
@@ -73,6 +82,14 @@ class DecisionLimits:
     #: Whether a read scores each option by its label's token, so a question
     #: has at most as many options as its type has labels.
     labeled: bool = True
+    #: The question types the model answers. None means every type that its
+    #: read strategy can build a prompt for.
+    primitives: frozenset[str] | None = None
+
+
+#: The option-scoring types a label read answers, and the only types a label
+#: model can. A spatial question against one is a refusal, not a misread.
+LABEL_PRIMITIVES = frozenset({"choice", "noul", "score"})
 
 
 @dataclass
@@ -84,6 +101,9 @@ class QuestionRead:
     output_tokens: int
     cached_tokens: int = 0
     cache_write_tokens: int = 0
+    #: The decoded answer of a question whose type does not use options, such
+    #: as a box or a ground point, in place of ``probs``.
+    spatial: dict[str, Any] | None = None
 
 
 class ReadPromptRequest(OpenAIBaseModel):
@@ -208,6 +228,39 @@ def type_label_ids(
     return label_ids
 
 
+def check_question_type(type_name: str, limits: DecisionLimits) -> None:
+    """Raise if the model does not answer a question's type.
+
+    Runs on the requested type name before the question is built: a refused
+    type is a 501, and it must not be pre-empted by the 400 a wrong option
+    count would otherwise give against this model's limits. An unknown type
+    name is left to ``build_question``, which reports it as the 400 it is on
+    every model.
+    """
+    if (
+        limits.primitives is not None
+        and type_name in QUESTION_TYPES
+        and type_name not in limits.primitives
+    ):
+        raise UnsupportedQuestion(
+            f"this model answers {', '.join(sorted(limits.primitives))} "
+            f"questions, not {type_name!r}"
+        )
+
+
+def check_question_media(
+    questions: Sequence[Question], media: Mapping[str, Sequence[str]]
+) -> None:
+    """Raise if a question needs a modality the request did not attach."""
+    offered = {modality for modality, items in media.items() if items}
+    for question in questions:
+        if missing := question.type.needs_media - offered:
+            raise StructuredDecisionError(
+                f"question {question.id!r}: a {question.type.name} question "
+                f"needs {' and '.join(sorted(missing))} input"
+            )
+
+
 def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
     """Shrink ``image`` to at most ``max_pixels`` pixels (bicubic)."""
     w, h = image.size
@@ -291,7 +344,9 @@ class NextTokenStrategy(ReadStrategy):
         return [{"type": "image_pil", "image_pil": image} for image in images]
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        return DecisionLimits(
+            max_questions=64, max_options=len(LABELS), primitives=LABEL_PRIMITIVES
+        )
 
     def _read_request(
         self, chat_template_kwargs: dict[str, Any] | None, cache_salt: str | None = None
@@ -601,7 +656,9 @@ class JointSchemaStrategy(ReadStrategy):
         )
 
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=len(LABELS))
+        return DecisionLimits(
+            max_questions=64, max_options=len(LABELS), primitives=LABEL_PRIMITIVES
+        )
 
     def render_state(self, state: Any) -> str:
         return self._render(state)
@@ -942,7 +999,10 @@ class D3Strategy(ReadStrategy):
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(
-            max_questions=64, max_options=len(self.codes), labeled=False
+            max_questions=64,
+            max_options=len(self.codes),
+            labeled=False,
+            primitives=LABEL_PRIMITIVES,
         )
 
     def render_state(self, state: Any) -> str:
@@ -1157,10 +1217,271 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class GuiActorStrategy(ReadStrategy):
+    """GUI-Actor pointer-head models. Each question is one classify read of the
+    checkpoint's click-action prompt: a system turn (the state), a user turn
+    (the image and the instruction), then an assistant head whose coordinate
+    list holds the pointer placeholder triple. The answer is the pointer head's
+    attention over the image's patches, decoded into a box or a point.
+
+    The model answers no label question, so a choice, noul or score question is
+    refused rather than misread."""
+
+    task = "classify"
+    modalities = frozenset({"image"})
+
+    #: The grounding system prompt the checkpoints were trained against, used
+    #: only when a request's state renders to nothing -- otherwise the state IS
+    #: the system prompt.
+    GROUNDING_SYSTEM_MESSAGE = (
+        "You are a GUI agent. Given a screenshot of the current GUI and a human "
+        "instruction, your task is to locate the screen element that corresponds "
+        "to the instruction. You should output a click action on the correct "
+        "position. To indicate the click location, we will use some special "
+        "tokens, which is used to refer to a visual patch later. "
+        "For each function call, return its arguments as a json object:\n"
+        '{"action": "click", "coordinate": [<your_special_token_here>]}'
+    )
+    POINTER_START = "<|pointer_start|>"
+    POINTER_END = "<|pointer_end|>"
+    POINTER_PAD = "<|pointer_pad|>"
+    VISION_START = "<|vision_start|>"
+    VISION_END = "<|vision_end|>"
+    #: The assistant reply *is* the action, so it is just the arguments JSON:
+    #: no tool-name envelope and no <tool_call> wrapper.
+    CLICK_ACTION_JSON = '{"action": "click", "coordinate": [%s]}'
+    ASSISTANT_HEAD = "<|im_start|>assistant<|recipient|>os\n"
+    #: Every special token the prompt writes. Spelled out here rather than
+    #: imported from the model module, which the entrypoints layer does not
+    #: depend on; the model checks the same five at load.
+    PROMPT_TOKENS = (
+        "<|recipient|>",
+        "<|diff_marker|>",
+        POINTER_START,
+        POINTER_END,
+        POINTER_PAD,
+    )
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        model_config = context.engine_client.model_config
+        # `GuiActorForConditionalGenerationConfig` has already validated and
+        # normalized this on the model side; reading it here must not second-
+        # guess that, or the API process and the engine could disagree.
+        self.temperature = float(
+            getattr(model_config.hf_config, "pointer_temperature", 1.0)
+        )
+        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+        self.max_model_len = model_config.max_model_len
+        vocab = self.tokenizer.get_vocab()
+        # Every special token the prompt writes, not just the ones the pooler
+        # locates: a checkpoint missing one of these would otherwise be served a
+        # prompt it was never trained on.
+        missing = [token for token in self.PROMPT_TOKENS if token not in vocab]
+        if missing:
+            raise ValueError(
+                f"a GUI-Actor checkpoint needs its special tokens, but {missing} "
+                "are missing from the tokenizer"
+            )
+        # The pooler locates the image and the pointer in the prompt by these
+        # ids, so it does not depend on the prompt's layout.
+        self.pointer_ids = {
+            name: vocab[token]
+            for name, token in (
+                ("pointer_token_id", self.POINTER_PAD),
+                ("vision_start_token_id", self.VISION_START),
+                ("vision_end_token_id", self.VISION_END),
+            )
+        }
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=64,
+            max_options=0,
+            labeled=False,
+            primitives=frozenset({"box", "ground"}),
+        )
+
+    def render_state(self, state: Any) -> str:
+        return state_text(state) if state else self.GROUNDING_SYSTEM_MESSAGE
+
+    async def _render(
+        self, state: str, instruction: str, image: Image.Image
+    ) -> MultiModalInput:
+        """The click-action prompt as the engine input, with the image expanded
+        into visual tokens."""
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": state}]},
+            {
+                "role": "user",
+                "content": [
+                    # The template renders an image placeholder only for
+                    # ``"image"`` (or ``"image_url"``); an ``"image_pil"`` part
+                    # is passed over silently and the prompt then carries no
+                    # ``<|image_pad|>`` for the processor to replace.
+                    {"type": "image"},
+                    {"type": "text", "text": instruction},
+                ],
+            },
+        ]
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert isinstance(text, str)
+        # The processor expands the image by decoding the prompt back to text
+        # and matching the placeholder that text carries, so the checkpoint's
+        # own template must write it: a hand-written template renders a
+        # placeholder the processor does not recognise, and it raises "Failed
+        # to apply prompt replacement". The click action goes after the
+        # template, as the reference layer writes it.
+        placeholder = f"{self.POINTER_START}{self.POINTER_PAD}{self.POINTER_END}"
+        prompt = TokensPrompt(
+            prompt_token_ids=self.tokenizer.encode(
+                text + self.ASSISTANT_HEAD + self.CLICK_ACTION_JSON % placeholder,
+                add_special_tokens=False,
+            ),
+            multi_modal_data={"image": image},
+        )
+        renderer = self.context.online_renderer.renderer
+        try:
+            engine_input = await renderer.process_for_engine_async(prompt, time.time())
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        assert engine_input["type"] == "multimodal"
+        return engine_input
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if instructions:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions"
+            )
+        for question in questions:
+            if question.type.name not in self.limits().primitives:
+                raise UnsupportedQuestion(
+                    f"question {question.id!r}: this model does not answer "
+                    f"{question.type.name!r} questions"
+                )
+        urls = list((media or {}).get("image", ()))
+        if len(urls) != 1:
+            raise StructuredDecisionError(
+                f"this model needs exactly one image, got {len(urls)}"
+            )
+        try:
+            # The connector wraps the decoded image with its original bytes;
+            # the processor takes the Pillow image itself.
+            image = (await self._connector.fetch_image_async(urls[0])).media
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+
+        async def read_one(n: int, question: Question) -> QuestionRead:
+            engine_input = await self._render(state, question.instructions, image)
+            prompt_ids = engine_input["prompt_token_ids"]
+            if len(prompt_ids) > self.max_model_len:
+                raise StructuredDecisionError(
+                    f"question {question.id!r}: the prompt has {len(prompt_ids)} "
+                    f"tokens, more than max_model_len={self.max_model_len}"
+                )
+            n_height, n_width = self._merged_grid(engine_input, image)
+            params = PoolingParams(
+                task="classify",
+                use_activation=False,
+                extra_kwargs={"pointer": self.pointer_ids},
+            )
+            if cache_salt is not None:
+                engine_input["cache_salt"] = cache_salt
+            result = None
+            async for result in self.context.engine_client.encode(
+                engine_input,
+                params,
+                f"{request_id}-{n}",
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            ):
+                pass
+            if result is None or result.error is not None:
+                message = "no result" if result is None else result.error.message
+                raise ValueError(f"Failed to ground the question: {message}")
+            patch_logits = result.outputs.data.float()
+            # The head scores one value per merged visual token, so the count
+            # is the grid the answer decode will reshape to. A mismatch means
+            # the two disagree, and reshaping anyway would silently map the
+            # geometry onto the wrong grid.
+            if patch_logits.numel() != n_height * n_width:
+                raise StructuredDecisionError(
+                    f"question {question.id!r}: the image scored "
+                    f"{patch_logits.numel()} patches, not the "
+                    f"{n_height}x{n_width} grid its prompt carried"
+                )
+            answer = spatial_answer(
+                question.type.name,
+                torch.softmax(patch_logits, dim=-1).reshape(1, -1),
+                patch_logits,
+                n_width,
+                n_height,
+                temperature=self.temperature,
+            )
+            return QuestionRead(
+                probs=[],
+                label_mass=1.0,
+                argmax_is_label=True,
+                input_tokens=len(prompt_ids),
+                output_tokens=0,
+                spatial=answer,
+            )
+
+        return list(
+            await asyncio.gather(*(read_one(n, q) for n, q in enumerate(questions)))
+        )
+
+    def _merged_grid(
+        self, engine_input: MultiModalInput, image: Image.Image
+    ) -> tuple[int, int]:
+        """``(n_height, n_width)`` of the image's merged visual token grid.
+
+        The engine input cannot supply it: Qwen2.5-VL registers the grid with
+        ``keep_on_cpu=True``, which leaves ``mm_kwargs['image'][0]`` empty, the
+        data having stayed in the engine core. So the grid is recomputed from
+        the image, and the caller checks it against the number of patches the
+        head actually scored -- a disagreement is a 400 rather than a silently
+        wrong answer.
+        """
+        item = engine_input["mm_kwargs"]["image"][0]
+        if item is not None and item.get("image_grid_thw") is not None:
+            grid = item["image_grid_thw"].data.reshape(-1).tolist()
+        else:
+            info = MULTIMODAL_REGISTRY.get_processing_info(
+                self.context.engine_client.model_config
+            )
+            hf_inputs = info.get_hf_processor()(images=[image], return_tensors="pt")
+            grid = hf_inputs["image_grid_thw"].reshape(-1).tolist()
+        if len(grid) != 3:
+            raise StructuredDecisionError("the image produced no patch grid")
+        hf_config = self.context.engine_client.model_config.hf_config
+        merge = int(hf_config.vision_config.spatial_merge_size)
+        return grid[1] // merge, grid[2] // merge
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "D3ForSequenceClassification": D3Strategy,
+    "GuiActorForConditionalGeneration": GuiActorStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,

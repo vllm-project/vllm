@@ -22,6 +22,7 @@ used for classification and routing.
 |--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
 | `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
 | `D3ForSequenceClassification`        | T + I + V                           | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
+| `GuiActorForConditionalGeneration`   | T + I                               | `GuiActorStrategy`             | `classify`       | `PointerHead`     | `microsoft/GUI-Actor-7B-Qwen2.5-VL`, etc. |
 | `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
 | `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
 | `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
@@ -67,9 +68,19 @@ question prefills only its own text, then reads one token.
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
 | `noul` | `null`, or an object with optional `true` and `false` descriptions | `noul` (probability of yes), `probabilities`, `confidence` |
 | `score` | ordered list of level names | `score` (expected 0-indexed level), `legend`, `probabilities` by level index, `confidence` |
+| `box` | `null`; the question needs an image | `box` (`left`, `right`, `top`, `bottom`), `confidence` |
+| `ground` | `null`; the question needs an image | `point` (`[x, y]`), `confidence`, `topk_points` |
 
 A choice has at least one option, a score at least two levels. A question id
 is a non-empty string.
+
+A `box` or `ground` question names its target in `instructions` (a blank one is
+rejected) and is answered only by a model with a registered pointer head, such
+as [GUI-Actor](#gui-actor-box-and-ground); other models return 501. Their answer
+carries no `probabilities`: a box's edges are fractions of the image's width
+and height from the top-left corner (`left < right`, `top < bottom`), a ground
+point is `[x, y]` in 0-999 integers, and `confidence` is the probability mass
+the predicted region holds.
 
 #### Example
 
@@ -160,6 +171,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | questions per request | 64 |
 | options per `choice` | 26 |
 | levels per `score` | 10 |
+| images per `box` or `ground` question | exactly 1 |
 
 #### Request fields
 
@@ -170,7 +182,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [Liquid d1](#liquid-d1), images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [GUI-Actor](#gui-actor-box-and-ground), one image; [Liquid d1](#liquid-d1), images only) |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.
@@ -337,6 +349,48 @@ vllm serve vllm-sr/d3
   once and shared by every question of the request.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
   first codes, one per option, belong to a question.
+
+### GUI-Actor (Box and Ground)
+
+[`microsoft/GUI-Actor-7B-Qwen2.5-VL`](https://huggingface.co/microsoft/GUI-Actor-7B-Qwen2.5-VL)
+and its 3B variant answer `box` and `ground` questions with a pointer head over
+the image's visual patches: neither regresses coordinates nor generates text.
+The prompt carries a click action whose coordinate list holds the
+`<|pointer_start|><|pointer_pad|><|pointer_end|>` placeholder triple, and the
+answer is that token's attention over the patches -- a region of the image,
+read off one prefill. vLLM detects the head by its tensors and serves the
+checkpoint as a classification model.
+
+!!! note
+    Only the Qwen2.5-VL checkpoints are supported in this release. The head is
+    square -- it projects into the hidden size and back -- which needs the
+    vision tower's output width to equal the language model's. A GUI-Actor
+    checkpoint over another backbone reports a load error rather than
+    mis-serving it.
+
+```bash
+vllm serve microsoft/GUI-Actor-7B-Qwen2.5-VL
+```
+
+- The pointer head answers neither label question, so a `choice`, `noul` or
+  `score` question returns 501. `instructions` returns 400, since the prompt is
+  fixed, and `chat_template_kwargs` has no effect.
+- Every question needs exactly one image, shared by all the request's questions.
+  The state is the system prompt, or the checkpoint's own grounding prompt when
+  the state is empty.
+- Chunked prefill and prefix caching are turned off at load, since the answer is
+  read from the whole prompt's prefill.
+- A `box` answer's four edges are fractions of the image's width and height from
+  the top-left corner, with `left < right` and `top < bottom`. A `ground`
+  answer's point is `[x, y]` in 0-999 integers, x across the width and y down
+  the height; `topk_points` carries the other regions' centres. The caller turns
+  either into pixels against the image it sent.
+- The geometry comes from the patch distribution's moments, and the temperature
+  the checkpoint fitted scales the `confidence` only -- a box's edges and a
+  ground point never move when the calibration is retuned.
+- `/classify` and `/pooling` return the raw scores of the image's visual tokens,
+  one value per patch. The served `box` and `ground` answers are the reference
+  decode of those scores.
 
 ### Liquid d1
 

@@ -332,6 +332,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     ),
     # [Multimodal]
     "D3ForSequenceClassification": ("d3", "D3ForSequenceClassification"),
+    "GuiActorForConditionalGeneration": (
+        "gui_actor",
+        "GuiActorForConditionalGeneration",
+    ),
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "LlamaNemotronVLForSequenceClassification": (
         "nemotron_vl",
