@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
+from types import MethodType
 from typing import Any
 
 import torch
@@ -31,7 +32,7 @@ class LinearCommKernel(ABC):
 
     @staticmethod
     @contextmanager
-    def _replace(source: Callable, target: Callable):
+    def _replace(source: MethodType, target: Callable):
         """Swap the bound method ``source`` for ``target`` for one call."""
         owner, name = source.__self__, source.__name__
         setattr(owner, name, target)
@@ -77,7 +78,7 @@ class FusedCommGemmKernel(LinearCommKernel):
     """
 
     @abstractmethod
-    def source_gemm_method(self) -> Callable:
+    def source_gemm_method(self) -> MethodType:
         """The quant method's GEMM method this kernel fuses a collective
         into, e.g. ``self._fp8_kernel.apply_scaled_mm``."""
         raise NotImplementedError
