@@ -13,6 +13,7 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ConnectorInitState,
     CopyBlocksOp,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
@@ -22,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     NoOpKVConnectorMetadata,
+    SupportsAsyncInit,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -153,7 +155,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
                 prom_metrics.observe(stats_data, engine_idx)
 
 
-class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+class MultiConnector(SupportsAsyncInit, SupportsHMA):
     """A wrapper for using multiple KVConnectors at the same time.
 
     The current logic is:
@@ -228,6 +230,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # a single connector to load.
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
+
+    def enable_async_init(self) -> None:
+        raise RuntimeError("Enable asynchronous initialization on child connectors")
+
+    def get_connector_init_state(self) -> ConnectorInitState:
+        # Readiness is derived from children; see is_connector_ready().
+        raise NotImplementedError
 
     def is_connector_ready(self) -> bool:
         return any(c.is_connector_ready() for c in self._connectors)
@@ -478,7 +487,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
     def build_connector_init_status(self) -> KVConnectorInitStatus | None:
-        statuses = tuple(c.build_connector_init_status() for c in self._connectors)
+        statuses = tuple(
+            c.build_connector_init_status()
+            if isinstance(c, SupportsAsyncInit)
+            else None
+            for c in self._connectors
+        )
         if not any(status is not None for status in statuses):
             return None
         return MultiKVConnectorInitStatus(statuses=statuses)
@@ -591,7 +605,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert isinstance(status, MultiKVConnectorInitStatus)
         for connector, child_status in zip(self._connectors, status.statuses):
-            connector.update_connector_init_status(child_status)
+            if isinstance(connector, SupportsAsyncInit):
+                connector.update_connector_init_status(child_status)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata from sub-connectors.

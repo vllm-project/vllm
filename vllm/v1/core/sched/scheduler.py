@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    SupportsAsyncInit,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -3329,9 +3330,10 @@ class Scheduler(SchedulerInterface):
             schedule the request during the next step.
         """
         if self.connector is not None:
-            self.connector.update_connector_init_status(
-                kv_connector_output.kv_connector_init_status
-            )
+            if isinstance(self.connector, SupportsAsyncInit):
+                self.connector.update_connector_init_status(
+                    kv_connector_output.kv_connector_init_status
+                )
             self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.
