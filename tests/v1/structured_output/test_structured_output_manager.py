@@ -220,8 +220,9 @@ def _run_real_flow(
         scheduled_spec_decode_tokens={request.request_id: padded},
     )
     assert bitmask is not None
-    assert bitmask.shape[0] == len(raw_drafts) + 1
-    assert _row_pattern(bitmask, masked_ids or ()) == expected_row_pattern
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
+    row_pattern = _row_pattern(bitmask[: len(raw_drafts) + 1], masked_ids or ())
+    assert row_pattern == expected_row_pattern
 
     # grammar_bitmask() must rollback any speculative state it advanced.
     assert manager.validate_tokens(request, list(raw_drafts)) == expected_validated
@@ -248,7 +249,7 @@ def _run_real_flow(
         scheduled_spec_decode_tokens={},
     )
     assert post_accept_bitmask is not None
-    assert post_accept_bitmask.shape[0] == 1
+    assert post_accept_bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert (post_accept_bitmask[0] == expected_post_accept_row).all()
     assert structured_req.reasoning_ended == expected_reasoning
     assert grammar.is_terminated() is expect_terminated
@@ -497,7 +498,7 @@ def test_reasoning_rows_mask_grammar_invalid_implicit_end(
         scheduled_spec_decode_tokens={request.request_id: drafts},
     )
     assert bitmask is not None
-    assert _row_pattern(bitmask, [marker]) == expected_row_pattern
+    assert _row_pattern(bitmask[: len(drafts) + 1], [marker]) == expected_row_pattern
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -643,7 +644,7 @@ def test_rejected_draft_keeps_later_rows_constrained(
         scheduled_spec_decode_tokens={request.request_id: drafts},
     )
     assert bitmask is not None
-    assert _row_pattern(bitmask) == "CCCC"
+    assert _row_pattern(bitmask[: len(drafts) + 1]) == "CCCC"
     assert (bitmask[2] == bitmask[1]).all()
     assert (bitmask[3] == bitmask[1]).all()
 
