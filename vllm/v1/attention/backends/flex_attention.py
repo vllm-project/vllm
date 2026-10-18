@@ -28,6 +28,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
@@ -483,10 +484,8 @@ class FlexAttentionMetadata:
         KV cache, this function creates a mask based on the
         packed query sequences.
         """
-        # Create a lookup mapping from query indices -> request number
-        request_lookup = _offsets_to_doc_ids_tensor(
-            self.query_start_loc_cpu, self.query_start_loc.device
-        )
+        assert self.doc_ids is not None
+        request_lookup = self.doc_ids
 
         def final_mask_mod(
             b: torch.Tensor,
@@ -807,6 +806,35 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
+        if (
+            HAS_TRITON
+            and current_platform.is_cuda_alike()
+            and is_torch_equal_or_newer("2.9.0.dev0")
+            and not self.uses_paged_kv
+            and not self.causal
+            and self.num_actual_tokens > 0
+            and not self.mm_prefix_range
+            and self.block_sparsity_hint is None
+            and self.rswa_window is None
+            and self.rswa_prefix_lens is None
+            and self.logical_mask_mod is causal_mask_mod
+            and self.doc_ids is not None
+            and self.sliding_window is None
+        ):
+            from vllm.v1.attention.backends.flex_attention_encoder import (
+                build_encoder_span_block_mask,
+            )
+
+            return build_encoder_span_block_mask(
+                query_start_loc=self.query_start_loc,
+                doc_ids=self.doc_ids,
+                num_tokens=self.num_actual_tokens,
+                max_model_len=self.max_possible_sequence_length,
+                q_block_size=self.q_block_size,
+                kv_block_size=self.kv_block_size,
+                mask_mod=mask_mod,
+            )
+
         kv_len = (
             self.total_cache_tokens if self.uses_paged_kv else self.num_actual_tokens
         )
@@ -856,6 +884,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
+        supports_small_encoder_blocks = (
+            supports_small_blocks and HAS_TRITON and current_platform.is_cuda_alike()
+        )
         uses_paged_kv = not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec)
         self.direct_build: bool = supports_small_blocks
 
@@ -864,6 +895,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             supports_small_blocks,
             self.block_size,
             uses_paged_kv,
+            supports_small_encoder_blocks=supports_small_encoder_blocks,
         )
 
         if self.direct_build and self.kv_block_size != self.block_size:
@@ -933,16 +965,22 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         supports_small_blocks: bool,
         cache_block_size: int,
         uses_paged_kv: bool,
+        supports_small_encoder_blocks: bool = False,
     ) -> tuple[int, int]:
-        # Small blocks are efficient with the direct mask builder, which maps
-        # logical blocks to paged KV cache blocks without materializing and
-        # sorting a generic block mask. Encoder-only attention has no paged KV
-        # cache and therefore cannot use that path. Keeping its generic path at
-        # 16-token blocks creates very large mask-conversion graphs and makes
-        # Inductor compilation dominate the first request.
+        # Smaller blocks work well for the direct paged mask builder. Encoders
+        # use their GPU span builder when Triton and the compatible PyTorch
+        # BlockMask API are available; otherwise keep the generic mask at 128.
         use_small_blocks = supports_small_blocks and uses_paged_kv
-        q_block_size = 16 if use_small_blocks else 128
-        kv_block_size = cache_block_size if use_small_blocks else 128
+        use_small_encoder_blocks = supports_small_encoder_blocks and not uses_paged_kv
+        if use_small_blocks:
+            q_block_size = 16
+            kv_block_size = cache_block_size
+        elif use_small_encoder_blocks:
+            q_block_size = 64
+            kv_block_size = 64
+        else:
+            q_block_size = 128
+            kv_block_size = 128
 
         q_block_size = attn_cfg.flex_attn_q_block_size or q_block_size
         if (q_block_size & (q_block_size - 1)) != 0 or (
