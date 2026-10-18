@@ -100,8 +100,8 @@ else:
     )
 
     class _ObservabilityMixinWithOpenTelemetry(_ObservabilityMixin):
-        def __init__(self):
-            super().__init__()
+        def _init_observability(self):
+            super()._init_observability()
 
             if not self.is_tracing_request:
                 return
