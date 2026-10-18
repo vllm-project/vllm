@@ -45,7 +45,7 @@ def _has_sys_ptrace() -> bool:
     return False
 
 
-def _spawn_workers(worker_fn, world_size, *, dp_size=None, cleanup_one_sided=False):
+def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     """Spawn one process per GPU, run worker_fn, assert all succeed.
 
     Uses an mp.Queue to propagate worker tracebacks back to the parent
@@ -63,16 +63,7 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None, cleanup_one_sided=Fal
     for rank in range(world_size):
         p = mp.Process(
             target=_run_worker,
-            args=(
-                rank,
-                world_size,
-                port,
-                worker_fn,
-                dp_size,
-                dp_port,
-                err_queue,
-                cleanup_one_sided,
-            ),
+            args=(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue),
         )
         p.start()
         procs.append(p)
@@ -95,9 +86,7 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None, cleanup_one_sided=Fal
     )
 
 
-def _run_worker(
-    rank, world_size, port, worker_fn, dp_size, dp_port, err_queue, cleanup_one_sided
-):
+def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
     """Per-process setup: device, distributed env, then call worker_fn.
 
     Args:
@@ -105,7 +94,6 @@ def _run_worker(
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
-        cleanup_one_sided: Release FlashInfer one-sided cached workspaces on exit.
 
     """
     try:
@@ -117,7 +105,7 @@ def _run_worker(
             init_test_distributed_environment(world_size, 1, rank, port)
         worker_fn(rank, world_size)
         torch.distributed.barrier()
-        if cleanup_one_sided:
+        if has_flashinfer_nvlink_one_sided():
             from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
 
             # Release cached tensor deleters while their JIT library is loaded,
@@ -376,7 +364,6 @@ def test_one_sided_manager_lifecycle(world_size):
         _one_sided_lifecycle_worker,
         world_size,
         dp_size=world_size,
-        cleanup_one_sided=True,
     )
 
 
@@ -507,7 +494,6 @@ def test_one_sided_manager_workspace_grow(world_size):
         _one_sided_workspace_grow_worker,
         world_size,
         dp_size=world_size,
-        cleanup_one_sided=True,
     )
 
 
@@ -1135,7 +1121,6 @@ def test_one_sided_dispatch_combine(world_size, padded_mxfp8):
         partial(_one_sided_data_worker, padded_mxfp8=padded_mxfp8),
         world_size,
         dp_size=world_size,
-        cleanup_one_sided=True,
     )
 
 
@@ -1255,7 +1240,6 @@ def test_one_sided_prepare_finalize(empty_rank, cuda_graph):
         ),
         2,
         dp_size=2,
-        cleanup_one_sided=True,
     )
 
 
@@ -1344,12 +1328,7 @@ def test_one_sided_combine_low_precision(world_size, monkeypatch):
     than raising, so this asserts the combined values are exactly right.
     """
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "1")
-    _spawn_workers(
-        _one_sided_low_precision_worker,
-        world_size,
-        dp_size=world_size,
-        cleanup_one_sided=True,
-    )
+    _spawn_workers(_one_sided_low_precision_worker, world_size, dp_size=world_size)
 
 
 # ---------------------------------------------------------------------------
