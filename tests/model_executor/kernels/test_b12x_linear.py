@@ -1084,3 +1084,109 @@ def test_b12x_q8_embedding_graph(default_vllm_config, id_dtype, profile_first):
     assert torch.accelerator.memory_allocated() == allocated
     torch.testing.assert_close(output, decoded[ids.long()], rtol=0, atol=0)
     graph.reset()
+
+
+@pytest.fixture
+def ds41_mxfp8_cpu_config():
+    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    with set_current_vllm_config(config):
+        yield config
+
+
+@pytest.mark.parametrize(
+    "model_type,major,bi,native",
+    [
+        ("deepseek_v41", 10, True, True),
+        ("deepseek_v4", 10, True, False),
+        ("qwen3", 10, True, False),
+        ("deepseek_v41", 9, True, False),
+        ("deepseek_v41", 12, True, False),
+        ("deepseek_v41", 10, False, False),
+    ],
+)
+def test_ds41_mxfp8_bi_selector_scope(
+    monkeypatch, ds41_mxfp8_cpu_config, model_type, major, bi, native
+):
+    """BI must preserve the ordinary selector outside the proven DS41/SM100 scope."""
+    from types import SimpleNamespace
+
+    import vllm.model_executor.kernels.linear as linear
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(bi)))
+    monkeypatch.setattr(linear.current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        type(linear.current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(major, 0)),
+    )
+    monkeypatch.setattr(
+        ds41_mxfp8_cpu_config,
+        "model_config",
+        SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+    )
+    monkeypatch.setitem(
+        linear._POSSIBLE_MXFP8_KERNELS,
+        PlatformEnum.CUDA,
+        [linear.EmulationMxfp8LinearKernel],
+    )
+    result = linear.init_mxfp8_linear_kernel(weight_shape=(64, 128))
+    expected = (
+        linear.BatchInvariantMxfp8LinearKernel
+        if native
+        else linear.EmulationMxfp8LinearKernel
+    )
+    assert type(result) is expected
+    assert linear.BatchInvariantMxfp8LinearKernel.is_supported()[0] == (
+        model_type == "deepseek_v41" and major == 10
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,native", [("deepseek_v41", True), ("qwen3", False)]
+)
+def test_ds41_grouped_mxfp8_bi_scope_survives_forward_without_config(
+    monkeypatch, ds41_mxfp8_cpu_config, model_type, native
+):
+    """Grouped selection retains its construction-time model scope at forward."""
+    from types import SimpleNamespace
+
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.kernels.linear.mxfp8 import deep_gemm
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(deep_gemm.current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        type(deep_gemm.current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(10, 0)),
+    )
+    monkeypatch.setattr(
+        ds41_mxfp8_cpu_config,
+        "model_config",
+        SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
+    )
+    monkeypatch.setattr(
+        deep_gemm.DeepGemmMxfp8BmmLinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+    kernel = deep_gemm.DeepGemmMxfp8BmmLinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=(32, 32), bmm_batch_size=2)
+    )
+    native_output, original_output = torch.ones(1, 2, 32), torch.zeros(1, 2, 32)
+    monkeypatch.setattr(deep_gemm, "block32_scaled_mm", lambda *a, **kw: native_output)
+    monkeypatch.setattr(
+        torch.ops.vllm, "deepgemm_mxfp8_bmm", lambda *a: original_output
+    )
+    layer = SimpleNamespace(
+        weight=torch.empty(2, 32, 32), weight_scale=torch.empty(2, 32, 1)
+    )
+    with set_current_vllm_config(None):
+        result = kernel.apply_weights(
+            layer, (torch.empty(1, 2, 32), torch.empty(1, 2, 1))
+        )
+    assert result is (native_output if native else original_output)

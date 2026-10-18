@@ -181,7 +181,18 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 ) = None
 
 
-@functools.cache
+def _configure_deep_gemm(module):
+    if envs.VLLM_BATCH_INVARIANT:
+        configure = getattr(module, "use_deterministic_algorithms", None)
+        if configure is None:
+            raise RuntimeError(
+                "Batch-invariant execution requires the pinned DeepGEMM "
+                "use_deterministic_algorithms API"
+            )
+        configure(True)
+    return module
+
+
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
@@ -194,25 +205,27 @@ def _import_deep_gemm():
     # 1. Try the external (pip-installed) package first.
     try:
         module = importlib.import_module("deep_gemm")
-        logger.debug_once("Imported deep_gemm module from site-packages")
-        return module
     except ImportError:
         logger.info_once(
             "deep_gemm not found in site-packages, "
             "trying vendored vllm.third_party.deep_gemm"
         )
+    else:
+        logger.debug_once("Imported deep_gemm module from site-packages")
+        return _configure_deep_gemm(module)
 
     # 2. Fall back to the vendored copy bundled in the vLLM wheel.
     try:
         module = importlib.import_module("vllm.third_party.deep_gemm")
-        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
-        return module
     except ImportError:
         logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
         logger.warning_once("Failed to import vendored deep_gemm: %s", e)
+    else:
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
+        return _configure_deep_gemm(module)
 
     return None
 

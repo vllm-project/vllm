@@ -8,6 +8,7 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
@@ -167,7 +168,15 @@ class LogitsProcessor(PluggableLayer):
             # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
             # path); other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and current_platform.is_device_capability_family(100)
+            ):
+                from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant
+
+                logits = batch_invariant.bf16_fixed_mm(flat, lm_head.weight)
+            else:
+                logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:
                 logits = logits + embedding_bias.to(self.head_dtype)
             return logits.reshape(*hidden_states.shape[:-1], -1)

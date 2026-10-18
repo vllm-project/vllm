@@ -3,6 +3,8 @@
 
 import torch
 
+from vllm import envs
+from vllm.model_executor.kernels.batch_invariant import block32_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
     per_token_group_quant_fp8_packed_for_deepgemm,
@@ -15,6 +17,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from .batch_invariant import supports_ds41_mxfp8_bi
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
@@ -24,6 +27,7 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
     def __init__(self, config: Mxfp8LinearLayerConfig):
         super().__init__(config)
         self.recipe = (1, 1, 32)
+        self._ds41_bi_math = supports_ds41_mxfp8_bi()
 
     @classmethod
     def is_supported(
@@ -79,9 +83,23 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
             )
             q_input = q_input.view(tokens, groups, k)
             input_scale = input_scale.view(tokens, groups, k // 128)
-        output = torch.ops.vllm.deepgemm_mxfp8_bmm(
-            q_input, input_scale, layer.weight, layer.weight_scale, list(self.recipe)
-        )
+        if envs.VLLM_BATCH_INVARIANT and self._ds41_bi_math:
+            output = block32_scaled_mm(
+                q_input,
+                input_scale,
+                layer.weight,
+                layer.weight_scale,
+                torch.bfloat16,
+                grouped=True,
+            )
+        else:
+            output = torch.ops.vllm.deepgemm_mxfp8_bmm(
+                q_input,
+                input_scale,
+                layer.weight,
+                layer.weight_scale,
+                list(self.recipe),
+            )
         if bias is not None:
             output = output + bias.view(output.shape[1:])
         return output
