@@ -238,7 +238,8 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
-        if rejection_sampler is not None:
+        # All PP ranks must run the same forwards to match sends and receives.
+        if model_runner.speculative_config is not None:
             # Greedy batches skip logits processing, so rejection kernels
             # also see model-dtype logits instead of FP32.
             _warmup_kernels(
