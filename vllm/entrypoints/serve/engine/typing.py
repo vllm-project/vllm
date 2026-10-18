@@ -14,6 +14,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.pooling.pooling.protocol import (
+    PoolingRequest,
+    PostProcessPoolingRequest,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderChatRequest,
     DerenderChatStreamRequest,
@@ -75,6 +79,8 @@ AnyRequest: TypeAlias = (
     | SpeechToTextRequest
     | ResponsesRequest
     | GenerateRequest
+    | PoolingRequest
+    | PostProcessPoolingRequest
 )
 
 AnyResponse: TypeAlias = (
