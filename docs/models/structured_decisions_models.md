@@ -8,11 +8,11 @@ used for classification and routing.
 
 ### Text-only Models
 
-| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models             |
-|---------------------------|---------------------|------------------|-------------------|-------------------------------|
-| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash`       |
-| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc. |
-| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc.       |
+| Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
+|---------------------------|---------------------|------------------|-------------------|-------------------------|
+| `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
+| `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 
 ### Multimodal Models
 
@@ -239,10 +239,10 @@ authenticate callers.
 
 This MVP uses the same label-reading backend as
 [structured decisions](structured_decisions_models.md). It supports generation
-architectures with a registered read strategy, including Qwen, Gemma 4,
-DiffusionGemma, and Liquid d1; unsupported models return 501. Each question
-reads a model's label tokens. Usage reports the actual prompt and output tokens
-across these reads, including prefix-cache counters.
+architectures with a registered read strategy, including Qwen, DiffusionGemma,
+and Liquid d1; unsupported models return 501. Each question reads a model's
+label tokens. Usage reports the actual prompt and output tokens across these
+reads, including prefix-cache counters.
 
 Probabilities are normalized over the supplied options. `confidence` is the
 winning label's probability over the full vocabulary; it is not calibrated

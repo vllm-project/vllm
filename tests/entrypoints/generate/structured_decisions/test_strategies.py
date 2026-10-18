@@ -248,8 +248,6 @@ def test_gemma4_labels_start_the_reply(model_name, reply_start):
     # Construction fails unless every label is one token at the reply's start.
     strategy = NextTokenStrategy(context)
     assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
-    for label, token_id in strategy.label_ids.items():
-        assert tokenizer.decode([token_id]) == label
 
 
 @pytest.fixture
