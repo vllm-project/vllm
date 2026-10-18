@@ -530,7 +530,7 @@ class JointSchemaStrategy(ReadStrategy):
         "answer must be exactly one of that field's allowed options."
     )
     #: The reference's default bound on a prompt, in tokens.
-    MAX_LENGTH = 64000
+    MAX_LENGTH: ClassVar[int | None] = 64000
     TYPE_IDS = {"noul": 0, "choice": 1, "score": 2}
     NOUL_CRITERIA = {
         "true": "The proposition is true or the answer is yes.",
@@ -549,9 +549,9 @@ class JointSchemaStrategy(ReadStrategy):
     def __init__(self, context: ReadContext):
         super().__init__(context)
         self.tokenizer = context.online_renderer.renderer.get_tokenizer()
-        self.max_length = min(
-            self.MAX_LENGTH, context.engine_client.model_config.max_model_len
-        )
+        self.max_length = context.engine_client.model_config.max_model_len
+        if self.MAX_LENGTH is not None:
+            self.max_length = min(self.MAX_LENGTH, self.max_length)
         self.prefix = self._tokens(
             f"<|im_start|>system\n{self.SYSTEM_PROMPT}<|im_end|>\n"
             "<|im_start|>user\nSTATE:\n"
@@ -693,6 +693,14 @@ class JointSchemaStrategy(ReadStrategy):
             f"question {q.id!r}: this model does not answer {q.type.name!r} questions"
         )
 
+    def _state_tokens(self, state: str, fixed: int) -> list[int]:
+        if fixed > self.max_length:
+            raise StructuredDecisionError(
+                f"the questions take {fixed} tokens, more than the "
+                f"{self.max_length} this model reads"
+            )
+        return self._tokens(state)[: self.max_length - fixed]
+
     def encode(
         self, questions: list[Question], state: str, prefix: list[int] | None = None
     ) -> tuple[list[int], dict[str, list[Any]], list[list[int]]]:
@@ -724,12 +732,7 @@ class JointSchemaStrategy(ReadStrategy):
             orders.append([i for i, _, _ in options])
 
         fixed = len(prefix) + len(schema_ids) + len(self.suffix)
-        if fixed > self.max_length:
-            raise StructuredDecisionError(
-                f"the questions take {fixed} tokens, more than the "
-                f"{self.max_length} this model reads"
-            )
-        state_ids = self._tokens(state)[: self.max_length - fixed]
+        state_ids = self._state_tokens(state, fixed)
         prompt = prefix + state_ids + schema_ids + self.suffix
         # The schema ends len(self.suffix) tokens before the prompt does.
         end = len(schema_ids) + len(self.suffix)
@@ -809,7 +812,73 @@ class JointSchemaStrategy(ReadStrategy):
         return reads
 
 
+class ClefFlashStrategy(JointSchemaStrategy):
+    """Clef-Flash's joint schema prompt with Qwen3.5 image/video processing."""
+
+    modalities = frozenset({"image", "video"})
+    MAX_LENGTH = None
+    PLACEHOLDERS = {
+        "image": "<|vision_start|><|image_pad|><|vision_end|>",
+        "video": "<|vision_start|><|video_pad|><|vision_end|>",
+    }
+
+    def _state_tokens(self, state: str, fixed: int) -> list[int]:
+        state_ids = self._tokens(state)
+        total = fixed + len(state_ids)
+        if total > self.max_length:
+            raise StructuredDecisionError(
+                f"the complete prompt takes {total} tokens, more than "
+                f"max_model_len={self.max_length}"
+            )
+        return state_ids
+
+    async def _render_media(
+        self, media: Mapping[str, Sequence[str]], cache_salt: str | None
+    ) -> MultiModalInput:
+        connector = self._connector
+        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
+        try:
+            images, videos = await asyncio.gather(
+                asyncio.gather(
+                    *map(connector.fetch_image_async, media.get("image", ()))
+                ),
+                self._fetch(
+                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
+                ),
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        text = (
+            self.PLACEHOLDERS["image"] * len(images)
+            + self.PLACEHOLDERS["video"] * len(videos)
+            + "\n"
+        )
+        mm_data: dict[str, Any] = {}
+        if images:
+            mm_data["image"] = images
+        if videos:
+            mm_data["video"] = videos
+        prompt = TokensPrompt(
+            prompt_token_ids=self.prefix + self._tokens(text),
+            multi_modal_data=mm_data,
+            mm_processor_kwargs={"videos_kwargs": {"do_sample_frames": False}},
+        )
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        try:
+            engine_input = (
+                await self.context.online_renderer.renderer.process_for_engine_async(
+                    prompt, time.time(), skip_mm_cache=True
+                )
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"media: {e}") from e
+        assert engine_input["type"] == "multimodal"
+        return engine_input
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
+    "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
