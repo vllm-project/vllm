@@ -376,6 +376,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             not delta_text
                             and not delta_token_ids
                             and not previous_num_tokens[i]
+                            and finish_reason is None
                         ):
                             # Chunked prefill case, don't return empty chunks
                             continue
@@ -419,6 +420,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 token_ids=(
                                     as_list(output.token_ids)
                                     if request.return_token_ids
+                                    else None
+                                ),
+                                weight_versions=(
+                                    output.weight_versions
+                                    if request.return_weight_versions
                                     else None
                                 ),
                             )
@@ -594,6 +600,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    weight_versions=(
+                        output.weight_versions
+                        if request.return_weight_versions
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
