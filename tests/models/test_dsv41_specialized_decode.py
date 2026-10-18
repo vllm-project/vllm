@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.common.specialized_decode.dispatch import SpecializedDecode
 from vllm.models.common.specialized_decode.guards import select_decode_spec
 from vllm.models.common.specialized_decode.spec import DecodeUnsupported, Step
-from vllm.models.deepseek_v41.amd import specialized_decode as sd
+from vllm.models.deepseek_v41.amd.specialized_decode import spec as sd
 
 SPECS = (sd.DECODE_SPEC,)
 LAYERS = 6
@@ -267,7 +267,7 @@ def _metadata(model, **overrides) -> dict:
 
 class TestDsv41Spec(DecodeConformance):
     specs = SPECS
-    specs_module = "vllm.models.deepseek_v41.amd.specialized_decode"
+    specs_module = "vllm.models.deepseek_v41.amd.specialized_decode.spec"
 
     @pytest.fixture(autouse=True)
     def _stubs(self, monkeypatch):

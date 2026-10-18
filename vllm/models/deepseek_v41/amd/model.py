@@ -60,7 +60,7 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
-from vllm.models.deepseek_v41.amd.specialized_decode import DECODE_SPEC, DSV41Kernel
+from vllm.models.deepseek_v41.amd.specialized_decode.spec import DECODE_SPEC
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
@@ -72,6 +72,9 @@ from ..common.engram import Engram, EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
+    from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
+        DSV41Kernel,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 logger = init_logger(__name__)
