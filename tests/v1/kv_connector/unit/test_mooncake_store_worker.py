@@ -10,6 +10,7 @@ import queue
 import sys
 import threading
 import types
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2935,6 +2936,19 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch, tp_size=2)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        for pp_rank in range(len(output)):
+            output[pp_rank] = tuple(
+                tuple(
+                    prefix.replace("@pp_rank:0", f"@pp_rank:{pp_rank}")
+                    for prefix in group
+                )
+                for group in local
+            )
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
     monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
     monkeypatch.setenv(
         "MOONCAKE_CONFIG_PATH",
@@ -2963,6 +2977,107 @@ def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
     assert "@store_pp:1" in keys[0]
     assert "@store_pp:2" in keys[1]
     assert keys[0] != keys[1]
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("missing_group", [None, 0, 1])
+def test_hybrid_lookup_uses_each_pp_stage_schema(
+    tmp_path, monkeypatch, tp_size, missing_group
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=tp_size)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 2)
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    stages = []
+    # Build both stage-local schemas before simulating the startup collective.
+    with patch.object(worker.MooncakeStoreWorker, "_init_lookup_key_prefixes"):
+        for pp_rank, layer_counts in enumerate(((2, 1), (1, 2))):
+            kv_config = _make_hybrid_gdn_kv_cache_config(tp_size)
+            kv_config.kv_cache_groups = [
+                replace(
+                    group,
+                    layer_names=[f"pp{pp_rank}_g{g}_l{i}" for i in range(count)],
+                    kv_cache_spec=replace(group.kv_cache_spec, block_size=16),
+                )
+                for g, (group, count) in enumerate(
+                    zip(kv_config.kv_cache_groups, layer_counts, strict=True)
+                )
+            ]
+            stages.append(
+                worker.MooncakeStoreWorker(
+                    _make_vllm_config(
+                        extra_config={"store_tp_size": 4},
+                        rank=pp_rank * tp_size,
+                        pipeline_parallel_size=2,
+                        tensor_parallel_size=tp_size,
+                        prefix_match_unit=16,
+                    ),
+                    kv_config,
+                )
+            )
+
+    stage_prefixes = [
+        tuple(
+            db.store_layout.lookup_key_prefixes([(0, 0, 0, stage.pp_rank)])
+            for db in stage.token_dbs
+        )
+        for stage in stages
+    ]
+    for g in range(2):
+        assert (
+            stages[0].token_dbs[g].metadata.store_namespace
+            != stages[1].token_dbs[g].metadata.store_namespace
+        )
+    hashes = [BlockHash(b"h0"), BlockHash(b"h1")]
+    present = {
+        PoolKey.build_key_string(prefix, block_hash.hex())
+        for groups in stage_prefixes
+        for group in groups
+        for prefix in group
+        for block_hash in hashes
+    }
+    if missing_group is not None:
+        for block_hash in hashes:
+            present.remove(
+                PoolKey.build_key_string(
+                    stage_prefixes[1][missing_group][-1], block_hash.hex()
+                )
+            )
+    store.batch_is_exist.side_effect = lambda keys: [int(k in present) for k in keys]
+    pp_group = SimpleNamespace(cpu_group=object())
+    monkeypatch.setattr(worker, "get_pp_group", lambda: pp_group)
+
+    def gather_prefixes(output, local, *, group):
+        assert group is pp_group.cpu_group
+        output[:] = stage_prefixes
+
+    for stage in stages:
+        gather = MagicMock(side_effect=gather_prefixes)
+        monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
+        stage._init_lookup_key_prefixes()
+        assert stage.lookup(33, hashes).hit_length == (
+            32 if missing_group is None else 0
+        )
+        gather.assert_called_once()
+        assert gather.call_args.args[1] == stage_prefixes[stage.pp_rank]
+        assert stage._lookup_key_prefixes == tuple(
+            tuple(prefix for groups in stage_prefixes for prefix in groups[g])
+            for g in range(2)
+        )
 
 
 def test_save_decode_cache_keeps_transfer_path_enabled(tmp_path, monkeypatch):
@@ -3943,6 +4058,7 @@ def _make_bare_worker(
     worker.requested_store_chunk_size = None
     worker.num_kv_head = 1
     worker.pp_size = 1
+    worker.pp_rank = 0
     # Minimal single-full-attention-group config so the coordinator-based
     # lookup path works (the connector no longer carries a legacy single-group
     # path; everything flows through the coordinator).
@@ -4949,7 +5065,15 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
-def test_register_kv_caches_uses_transfer_group_memory_domain():
+@pytest.mark.parametrize(
+    "extra_config",
+    [
+        {},
+        {"store_tp_size": 2},
+        {"enable_store_tp_lcm": True, "prefill_tp_sizes": [1, 2]},
+    ],
+)
+def test_register_kv_caches_uses_transfer_group_memory_domain(extra_config):
     """Derived GPU caches must not change host-source transfer addresses."""
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
@@ -5001,9 +5125,19 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
     worker = _make_bare_worker(num_gpu_blocks=gpu_num_blocks)
     worker._kv_cache_config = config
     worker._kv_cache_groups = list(config.transfer_groups)
-    worker.token_dbs = [
-        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
-    ]
+    worker.cache_config.prefix_match_unit = None
+    worker.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
+    worker._group_tp_replication_factors = (
+        worker._compute_group_tp_replication_factors()
+    )
+    worker.store_tp_size, namespace, plans = worker._select_store_layout(extra_config)
+    worker.token_dbs = worker._build_token_databases(
+        KeyMetadata("test-model", 0, 0, 0, 0, store_namespace=namespace), plans
+    )
+    assert worker.store_tp_size is None
+    assert isinstance(worker.token_dbs[0].store_layout, RankLocalStoreLayout)
+    if extra_config:
+        assert "@store_format:rank_local_tp1" in namespace
     source = torch.zeros(host_num_blocks, page_size, dtype=torch.uint8)
     indexer = torch.zeros(gpu_num_blocks, page_size, dtype=torch.uint8)
 

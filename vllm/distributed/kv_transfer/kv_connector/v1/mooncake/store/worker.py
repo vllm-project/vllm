@@ -31,6 +31,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -1815,6 +1816,10 @@ class MooncakeStoreWorker:
         fallback_reason: str | None = None
         if requested_store_tp_size is None:
             fallback_reason = "invalid Store TP configuration"
+        elif self._kv_cache_config.hisparse_host_num_blocks is not None:
+            fallback_reason = (
+                "HiSparse host cache registration requires rank-local layout"
+            )
         elif hybrid_store_requested and prefix_match_unit is None:
             fallback_reason = "Hybrid Store TP sharing requires prefix_match_unit"
         elif store_chunk_requested and self.requested_store_chunk_size is None:
@@ -2068,16 +2073,14 @@ class MooncakeStoreWorker:
             if self.dcp_size > 1:
                 # DCP is a TP subdivision: dcp_rank == tp_rank % dcp_size.
                 return tuple(
-                    (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
+                    (tp_rank, pcp_rank, tp_rank % self.dcp_size, self.pp_rank)
                     for pcp_rank in range(self.pcp_size)
                     for tp_rank in range(self.tp_size)
-                    for pp_rank in range(self.pp_size)
                 )
             return tuple(
-                (shard_rank, pcp_rank, 0, pp_rank)
+                (shard_rank, pcp_rank, 0, self.pp_rank)
                 for pcp_rank in range(self.pcp_size)
                 for shard_rank in range(self.tp_size // factor)
-                for pp_rank in range(self.pp_size)
             )
 
         self._lookup_key_prefixes = tuple(
@@ -2086,6 +2089,18 @@ class MooncakeStoreWorker:
             )
             for g_idx, db in enumerate(self.token_dbs)
         )
+        if self.pp_size > 1:
+            # Each stage's schema describes its own layers, not the whole model.
+            stage_prefixes: list[tuple[tuple[str, ...], ...]] = [()] * self.pp_size
+            torch.distributed.all_gather_object(
+                stage_prefixes,
+                self._lookup_key_prefixes,
+                group=get_pp_group().cpu_group,
+            )
+            self._lookup_key_prefixes = tuple(
+                tuple(prefix for stage in stage_prefixes for prefix in stage[g_idx])
+                for g_idx in range(len(self.token_dbs))
+            )
 
     def register_kv_caches(
         self,
