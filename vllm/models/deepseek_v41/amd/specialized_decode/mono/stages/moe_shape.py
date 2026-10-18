@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 
 import flydsl.expr as fx
 
-from vllm.models.common.specialized_decode.amd.mono.plan import BLOCKS, WAVES
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import (
+    BLOCKS,
+    WAVES,
+)
 from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages import (
     moe_plan as mplan,
 )

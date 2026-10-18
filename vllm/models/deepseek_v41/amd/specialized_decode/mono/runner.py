@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from vllm.models.common.specialized_decode.amd.mono.plan import BLOCKS
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import BLOCKS
 
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, Dims
 from .layer import (
@@ -157,9 +157,7 @@ class DSV41MonoLayer:
 
     def __init__(self, tp: int, rank: int, group, device: torch.device | str = "cuda"):
         _ensure_writable_flydsl_cache()
-        from vllm.models.common.specialized_decode.amd.mono.peer_memory import (
-            PeerBuffer,
-        )
+        from .common.peer_memory import PeerBuffer
 
         self.tp, self.rank = tp, rank
         self.d = Dims(tp)

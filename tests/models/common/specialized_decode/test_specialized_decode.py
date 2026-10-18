@@ -286,7 +286,7 @@ def test_run_takes_the_planned_step_to_the_kernel(config, model, decode):
 
 def test_the_contract_imports_without_a_vendor_runtime(monkeypatch):
     """The library loads where neither FlyDSL nor aiter is installed, so a
-    vendor's shared kernel code must stay out of its import graph."""
+    model's kernel code must stay out of its import graph."""
     for name in list(sys.modules):
         if name.split(".")[0] in ("flydsl", "aiter") or "specialized_decode" in name:
             monkeypatch.delitem(sys.modules, name, raising=False)

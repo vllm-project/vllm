@@ -49,7 +49,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
-from vllm.models.common.specialized_decode.amd.mono.mx import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.mx import (
     FP4,
     FP8,
     FP8_MAX,
@@ -61,7 +61,7 @@ from vllm.models.common.specialized_decode.amd.mono.mx import (
     rcp_pow2,
     scale_index,
 )
-from vllm.models.common.specialized_decode.amd.mono.ops import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.ops import (
     CM_DEV,
     CM_NT,
     _hw_f32,
@@ -84,14 +84,18 @@ from vllm.models.common.specialized_decode.amd.mono.ops import (
     sum_partials,
     traced,
 )
-from vllm.models.common.specialized_decode.amd.mono.plan import (
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import (
     BLOCKS,
     THREADS,
     WAVES,
     first_task,
     pair_layout,
 )
-from vllm.models.common.specialized_decode.amd.mono.sync import preg, publish, sreg
+from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.sync import (
+    preg,
+    publish,
+    sreg,
+)
 from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages import (
     moe_plan as mplan,
 )
