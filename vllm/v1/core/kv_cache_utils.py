@@ -176,6 +176,9 @@ class KVCacheBlock:
     # Number of prefix tokens covered by _block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
+    # Changes whenever this physical block starts or stops representing a
+    # cached hash. Waiting-prefix memos use it to detect eviction and ABA.
+    _hash_lifecycle_version: int = field(default=0, compare=False, repr=False)
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -201,11 +204,14 @@ class KVCacheBlock:
         assert self.block_hash is None and self._block_hash_num_tokens is None, (
             "The block already has a hash. This should not happen."
         )
+        self._hash_lifecycle_version += 1
         self._block_hash = block_hash
         self._block_hash_num_tokens = num_tokens
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
+        if self._block_hash is not None or self._block_hash_num_tokens is not None:
+            self._hash_lifecycle_version += 1
         self._block_hash = None
         self._block_hash_num_tokens = None
 

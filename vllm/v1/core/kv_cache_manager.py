@@ -5,21 +5,30 @@ import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
+from weakref import WeakKeyDictionary
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
+    UnitaryKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    make_block_hash_with_group_id,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_kv_cache_spec_kind,
@@ -29,6 +38,10 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
+
+# Memo bookkeeping is only worthwhile when lookup has several full blocks to
+# reuse across admission retries. Keep short-prefix requests on the normal path.
+MIN_PREFIX_HIT_BLOCKS_FOR_MEMO = 4
 
 
 @dataclass
@@ -201,6 +214,19 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
+        self._memoize_prefix_hits = (
+            enable_caching
+            and type(self.coordinator) is UnitaryKVCacheCoordinator
+            and type(self.coordinator.kv_cache_spec) is FullAttentionSpec
+            and not self.coordinator.eagle_group_ids
+            and dcp_world_size == pcp_world_size == 1
+        )
+        # Weak keys avoid retaining abandoned requests; values do not pin KV blocks.
+        self._prefix_hits: WeakKeyDictionary[
+            Request, list[tuple[BlockHash, KVCacheBlock, int]]
+        ] = WeakKeyDictionary()
+
+        self._prefix_hit_map = self.block_pool.cached_block_hash_to_block
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -293,11 +319,25 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens, num_uncached = (
-            self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
+        if self._prefix_hits:
+            self._invalidate_prefix_memos()
+        memo = None
+        if self._memoize_prefix_hits and request.status in (
+            RequestStatus.WAITING,
+            RequestStatus.PREEMPTED,
+        ):
+            memo = self._prefix_hits.get(request)
+        if memo is not None:
+            computed_blocks, num_new_computed_tokens = self._find_memoized_prefix(
+                request, max_cache_hit_length, memo
             )
-        )
+            num_uncached = 0
+        else:
+            computed_blocks, num_new_computed_tokens, num_uncached = (
+                self.coordinator.find_longest_cache_hit(
+                    request.block_hashes, max_cache_hit_length
+                )
+            )
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -319,6 +359,80 @@ class KVCacheManager:
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+    def _invalidate_prefix_memos(self) -> None:
+        mapping = self.block_pool.cached_block_hash_to_block
+        # A new map means a successful prefix-cache reset. Ordinary removals
+        # are handled lazily from each memoized block's lifecycle version.
+        if mapping is not self._prefix_hit_map:
+            self._prefix_hits.clear()
+            self._prefix_hit_map = mapping
+
+    def _remember_failed_prefix(
+        self, request: Request, blocks: tuple[Sequence[KVCacheBlock], ...]
+    ) -> None:
+        if (
+            not self._memoize_prefix_hits
+            or not self.prefix_cache_lookup_enabled(request)
+            or request.status not in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+            or len(blocks[0]) < MIN_PREFIX_HIT_BLOCKS_FOR_MEMO
+        ):
+            return
+        self._invalidate_prefix_memos()
+        if request in self._prefix_hits:
+            return
+        memo = []
+        limit = (request.num_tokens - 1) // self.coordinator.block_size
+        for i, (block_hash, block) in enumerate(zip(request.block_hashes, blocks[0])):
+            if i >= limit:
+                break
+            key = make_block_hash_with_group_id(block_hash, 0)
+            if block.block_hash != key or not self._prefix_hit_map.contain(
+                key, block.block_id
+            ):
+                break
+            memo.append((block_hash, block, block._hash_lifecycle_version))
+        if len(memo) >= MIN_PREFIX_HIT_BLOCKS_FOR_MEMO:
+            self._prefix_hits[request] = memo
+
+    def _find_memoized_prefix(
+        self,
+        request: Request,
+        max_length: int,
+        memo: list[tuple[BlockHash, KVCacheBlock, int]],
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        block_size = self.coordinator.block_size
+        limit = min(max_length // block_size, len(request.block_hashes))
+        blocks: list[KVCacheBlock] = []
+        for i, (block_hash, block, lifecycle_version) in enumerate(memo):
+            if i >= limit or request.block_hashes[i] != block_hash:
+                break
+            # Only primary-hash hits are remembered. Alias hits use the normal
+            # lookup, since an alias need not share the primary hash's lifetime.
+            if (
+                block.block_hash != make_block_hash_with_group_id(block_hash, 0)
+                or block._hash_lifecycle_version != lifecycle_version
+            ):
+                break
+            blocks.append(block)
+        kept = len(blocks)
+        del memo[kept:]
+        for i in range(kept, limit):
+            block_hash = request.block_hashes[i]
+            cached = self.block_pool.get_cached_block(block_hash, [0])
+            if cached is None:
+                break
+            block = cached[0]
+            blocks.append(block)
+            if len(memo) == i and block.block_hash == make_block_hash_with_group_id(
+                block_hash, 0
+            ):
+                memo.append((block_hash, block, block._hash_lifecycle_version))
+        if len(memo) >= MIN_PREFIX_HIT_BLOCKS_FOR_MEMO:
+            self._prefix_hits[request] = memo
+        else:
+            self._prefix_hits.pop(request, None)
+        return (blocks,), len(blocks) * block_size
 
     def get_computed_blocks_for_connector(
         self, request: Request
@@ -536,6 +650,12 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
+                if (
+                    self._memoize_prefix_hits
+                    and len(new_computed_block_list[0])
+                    >= MIN_PREFIX_HIT_BLOCKS_FOR_MEMO
+                ):
+                    self._remember_failed_prefix(request, new_computed_block_list)
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -576,6 +696,11 @@ class KVCacheManager:
         required_blocks = num_blocks_to_allocate + watermark_blocks
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
+            if (
+                self._memoize_prefix_hits
+                and len(new_computed_block_list[0]) >= MIN_PREFIX_HIT_BLOCKS_FOR_MEMO
+            ):
+                self._remember_failed_prefix(request, new_computed_block_list)
             return None
 
         if (
@@ -598,6 +723,8 @@ class KVCacheManager:
             num_tokens_main_model,
             num_encoder_tokens,
         )
+
+        self._prefix_hits.pop(request, None)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -626,6 +753,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self._prefix_hits.pop(request, None)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -683,6 +811,7 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
+        self._prefix_hits.clear()
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
