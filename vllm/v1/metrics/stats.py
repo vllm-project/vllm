@@ -218,6 +218,21 @@ KV_FETCH_STAGES = (
     KV_FETCH_COMPLETED_WAITING,
 )
 
+DEFERRED_BLOCKED = "blocked"
+DEFERRED_STALE_OUTPUT = "stale_output"
+DEFERRED_LORA = "lora"
+DEFERRED_KV_CONNECTOR = "kv_connector"
+DEFERRED_KV_TRANSFER = "kv_transfer"
+DEFERRED_ENCODER_TRANSFER = "encoder_transfer"
+DEFERRED_REASONS = (
+    DEFERRED_BLOCKED,
+    DEFERRED_STALE_OUTPUT,
+    DEFERRED_LORA,
+    DEFERRED_KV_CONNECTOR,
+    DEFERRED_KV_TRANSFER,
+    DEFERRED_ENCODER_TRANSFER,
+)
+
 
 @dataclass
 class SchedulerStats:
@@ -228,6 +243,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+    # the same population as num_skipped_waiting_reqs, split by DEFERRED_REASONS
+    num_deferred_reqs_by_reason: dict[str, int] = field(default_factory=dict)
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
