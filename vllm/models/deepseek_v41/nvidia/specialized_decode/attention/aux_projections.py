@@ -36,21 +36,30 @@ _TUNED: dict[tuple[int, int], dict[int, tuple[str, int | tuple[int, int]]]] = {
 
 
 class AuxProjectionGemm(LLBf16Gemm):
-    def dispatch(self, *, M: int, K: int, N: int) -> LLBf16Gemm.CompileKey:
+    def dispatch(
+        self, *, M: int, K: int, N: int, output_dtype: torch.dtype = torch.float32
+    ) -> LLBf16Gemm.CompileKey:
         tuned = _TUNED.get((K, N), {}).get(M)
         if tuned is not None:
             backend, config = tuned
             if backend == "dotprod":
                 assert isinstance(config, int)
-                return self.CompileKey(backend="dotprod", M=M, K=K, bs=config)
+                return self.CompileKey(
+                    backend="dotprod", M=M, K=K, bs=config, output_dtype=output_dtype
+                )
             assert isinstance(config, tuple)
             split_k, num_stages = config
             return self.CompileKey(
-                backend="splitk", split_k=split_k, num_stages=num_stages
+                backend="splitk",
+                split_k=split_k,
+                num_stages=num_stages,
+                output_dtype=output_dtype,
             )
         if N < _DOTPROD_MAX_N:
-            return self.CompileKey(backend="dotprod", M=M, K=K, bs=_DOTPROD_BS)
-        return super().dispatch(M=M, K=K, N=N)
+            return self.CompileKey(
+                backend="dotprod", M=M, K=K, bs=_DOTPROD_BS, output_dtype=output_dtype
+            )
+        return super().dispatch(M=M, K=K, N=N, output_dtype=output_dtype)
 
 
 aux_projection_gemm = AuxProjectionGemm()

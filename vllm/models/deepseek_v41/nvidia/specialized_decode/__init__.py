@@ -39,8 +39,8 @@ MHC_OVERLAP_MAX_ROWS = 48
 LOW_BATCH_MAX_ROWS = 8
 # The FlashInfer (requirements/cuda.txt) whose internals the publishing wo_b
 # GEMM, the MXFP8 layer input and the pinned MXFP8 tactics were checked
-# against, and the first whose sparse-MLA decode takes caller-owned KV counters.
-FLASHINFER_VERSION = "0.7.1"
+# against. Its sparse-MLA decode takes caller-owned KV counters (since 0.7.1).
+FLASHINFER_VERSION = "0.7.2"
 
 
 @dataclass(frozen=True)

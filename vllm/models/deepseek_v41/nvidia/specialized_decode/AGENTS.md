@@ -36,7 +36,7 @@ collectives and would hang. Which forward steps use the executor depends
 only on the batch, which every TP rank receives identically, so that needs no
 collective.
 
-Four features run only on flashinfer-python 0.7.1 (`FLASHINFER_VERSION`, the
+Four features run only on flashinfer-python 0.7.2 (`FLASHINFER_VERSION`, the
 version `requirements/cuda.txt` pins). Three use FlashInfer internals:
 
 - the publishing `wo_b` GEMM: the CuTe DSL low-latency block-scaled GEMM
