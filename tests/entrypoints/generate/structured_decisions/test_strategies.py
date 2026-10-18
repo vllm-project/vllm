@@ -5,6 +5,7 @@ import json
 import logging
 import math
 from argparse import Namespace
+from copy import deepcopy
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +19,11 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.datastructures import State
+from transformers import Qwen3_5Config
+from transformers.models.qwen2_vl import Qwen2VLImageProcessor
+from transformers.models.qwen3_vl import Qwen3VLProcessor, Qwen3VLVideoProcessor
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
@@ -62,6 +66,12 @@ from vllm.entrypoints.serve.exception_handling.register import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import mm_input, tokens_input
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
+    MultiModalProcessorOnlyCache,
+)
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
     CompletionOutput,
@@ -611,6 +621,129 @@ async def test_media_needs_a_model_that_takes_it(serving_and_engine):
     assert response.error.code == 400
     assert "does not take image inputs" in response.error.message
     engine.generate.assert_not_called()
+
+
+@pytest.mark.parametrize("joint_schema", [ClefFlashStrategy], indirect=True)
+def test_clef_cold_image_cache_survives_first_request_overflow(joint_schema, tmp_path):
+    """A rejected first image must not leave P0 trusting an empty P1 cache."""
+    _, engine, tokenizer = joint_schema
+    tokenizer = deepcopy(tokenizer)
+    hf_processor = Qwen3VLProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(
+            patch_size=16,
+            size={"shortest_edge": 4096, "longest_edge": 4096},
+        ),
+        video_processor=Qwen3VLVideoProcessor(patch_size=16),
+    )
+    # Local configuration and the existing tokenizer need no model weights.
+    hf_processor.save_pretrained(tmp_path)
+    Qwen3_5Config(
+        architectures=["ClefFlashForJointSchema"],
+        image_token_id=tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+        video_token_id=tokenizer.convert_tokens_to_ids("<|video_pad|>"),
+        vision_start_token_id=tokenizer.convert_tokens_to_ids("<|vision_start|>"),
+        vision_end_token_id=tokenizer.convert_tokens_to_ids("<|vision_end|>"),
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=1024,
+            mm_processor_cache_gb=0.01,
+            mm_processor_cache_type="lru",
+            limit_mm_per_prompt={"image": 1, "video": 0},
+        ),
+    )
+    renderer = HfRenderer(config, tokenizer)
+    try:
+        assert isinstance(renderer.mm_processor_cache, LruKeyReplicatedSenderCache)
+        processor_cache = renderer._mm_processor_only_cache
+        assert isinstance(processor_cache, MultiModalProcessorOnlyCache)
+        assert processor_cache.make_stats().total == 0
+        assert renderer.mm_processor_cache.make_stats().total == 0
+        receiver = LruKeyReplicatedReceiverCache(config.model_config)
+        engine.model_config = config.model_config
+        engine.renderer = renderer
+        online = OnlineRenderer(
+            config.model_config,
+            renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        handler = serving(
+            engine, ClefFlashStrategy(ReadContext(engine, online, None, "auto", {}))
+        )
+        encode = engine.encode.side_effect
+        received = []
+
+        async def receive_and_encode(prompt, params, request_id, **kwargs):
+            mm_hash = prompt["mm_hashes"]["image"][0]
+            payload = prompt["mm_kwargs"]["image"][0]
+            features = receiver.get_and_update_features(
+                [
+                    MultiModalFeatureSpec(
+                        data=payload,
+                        modality="image",
+                        identifier=mm_hash,
+                        mm_hash=mm_hash,
+                        mm_position=prompt["mm_placeholders"]["image"][0],
+                    )
+                ]
+            )
+            assert payload is not None
+            item = features[0].data
+            assert item is not None
+            pixels = item["pixel_values"].data
+            assert isinstance(pixels, torch.Tensor)
+            assert pixels.device.type == "cpu"
+            assert torch.unique(pixels).tolist() == [0, 255]
+            assert torch.count_nonzero(pixels) == pixels.numel() // 3
+            received.append((mm_hash, pixels.clone(), list(prompt["prompt_token_ids"])))
+            async for result in encode(prompt, params, request_id, **kwargs):
+                yield result
+
+        engine.encode.side_effect = receive_and_encode
+        app = FastAPI()
+        app.state.args = Namespace(log_error_stack=False)
+        app.state.serving_structured_decisions = handler
+        init_exception_handler(app)
+        register_structured_decisions_api_router(app)
+        buffer = BytesIO()
+        Image.new("RGB", (64, 64), "red").save(buffer, format="PNG")
+        image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+        with TestClient(app) as client:
+            # This unseen image is first processed by the overflowing request.
+            response = client.post(
+                "/v1/systemone",
+                json={
+                    **JOINT_SCHEMA_REQUEST,
+                    "state": "word " * 1024,
+                    "images": [image],
+                },
+            )
+            assert response.status_code == 400
+            assert "complete prompt takes" in response.json()["error"]["message"]
+            engine.encode.assert_not_called()
+            assert received == []
+            for _ in range(2):
+                response = client.post(
+                    "/v1/systemone",
+                    json={**JOINT_SCHEMA_REQUEST, "state": "short", "images": [image]},
+                )
+                assert response.status_code == 200
+                assert response.json()["usage"]["input_tokens"] == len(received[-1][2])
+
+        assert engine.encode.call_count == 2
+        assert received[0][0] == received[1][0]
+        torch.testing.assert_close(received[0][1], received[1][1])
+        assert received[0][2] == received[1][2]
+        assert processor_cache.make_stats().total == 3
+        assert processor_cache.make_stats().hits == 2
+    finally:
+        renderer.shutdown()
 
 
 @pytest.mark.asyncio
