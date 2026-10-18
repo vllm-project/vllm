@@ -368,7 +368,15 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        if pooling_output is None and self.stream_interval > 1:
+        if pooling_output is not None:
+            return self._new_request_output(
+                self.external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
+                error=error,
+            )
+
+        if self.stream_interval > 1:
             assert self.detokenizer is not None
 
             # Send output request only when
@@ -392,14 +400,6 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
-
-        if pooling_output is not None:
-            return self._new_request_output(
-                external_req_id,
-                [self._new_pooling_output(pooling_output)],
-                finished,
-                error=error,
-            )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
