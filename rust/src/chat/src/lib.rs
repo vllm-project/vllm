@@ -60,6 +60,8 @@ mod renderer;
 mod request;
 mod stream;
 
+use std::collections::HashMap;
+
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -82,6 +84,8 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    reasoning_effort_map: HashMap<String, String>,
 }
 
 impl ChatRequestProcessor {
@@ -95,6 +99,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
         }
     }
 
@@ -107,6 +112,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
         }
     }
 
@@ -126,6 +132,24 @@ impl ChatRequestProcessor {
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
         self
+    }
+
+    /// Configure server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.reasoning_effort_map = reasoning_effort_map;
+        self
+    }
+
+    /// Rewrite the typed reasoning effort; `chat_template_kwargs` is left as-is.
+    fn map_reasoning_effort(&self, request: &mut ChatRequest) {
+        if let Some(EffortValue::String(effort)) = &mut request.chat_options.reasoning_effort
+            && let Some(mapped) = self.reasoning_effort_map.get(effort.as_str())
+        {
+            *effort = mapped.clone();
+        }
     }
 
     async fn finalize_rendered_prompt(
@@ -214,8 +238,9 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
-    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+    pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
         self.prepare_text_request(request).await
     }
 
@@ -231,6 +256,7 @@ impl ChatRequestProcessor {
         text_processor: &TextRequestProcessor,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
 
         let mut output_processor = self.backend.new_chat_output_processor(
             &mut request,
@@ -301,6 +327,15 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.processor.reasoning_effort_map = reasoning_effort_map;
         self
     }
 

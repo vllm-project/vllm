@@ -43,7 +43,7 @@ where
 ///
 /// Fixed OpenAI HTTP request grades. Request conversion maps these names to
 /// the model-independent `vllm_chat::EffortValue` before renderer validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
