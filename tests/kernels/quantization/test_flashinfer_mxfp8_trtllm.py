@@ -306,3 +306,132 @@ def test_cuda_k32_tiled_kernels_match_reference(n, k, groups, scale_range):
     for m in (1, 6, 37, 300, 4097):
         rows = torch.randperm(total, generator=generator)[:m].cuda()
         assert torch.equal(run(0, rows), reference[rows]), m
+
+
+@pytest.mark.parametrize(
+    ("n", "k"),
+    [(1792, 5120), (8192, 1280), (5120, 2048), (1152, 5120), (5120, 576), (4096, 1280)],
+)
+@torch.inference_mode()
+def test_bi_pinned_mxfp8_mm_rows_independent_of_batch(n, k):
+    """The tensor-core BI GEMM (VLLM_BI_MXFP8_GEMM=tensor_core) gives every row
+    the same bits at any M, including spec-verify sizes, and any batch-mates."""
+    import vllm.model_executor.kernels.linear.mxfp8.batch_invariant  # noqa: F401
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+        swizzle_mxfp8_scale,
+    )
+
+    torch.manual_seed(n + k)
+    total = max(K32_TILED_MS)
+    x = torch.randn(total, k, device="cuda", dtype=torch.bfloat16)
+    x[::7] *= 64
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * k**-0.5
+    w_codes, w_scale = mxfp8_e4m3_quantize(weight)
+    w_scale = swizzle_mxfp8_scale(w_scale.view(n, k // 32), M=n, K=k)
+
+    def run(rows):
+        codes, scale = mxfp8_e4m3_quantize(x[rows], is_sf_swizzled_layout=True)
+        out = torch.ops.vllm.bi_pinned_mxfp8_mm(
+            codes, w_codes.t(), scale, w_scale, torch.bfloat16
+        )
+        return out.view(torch.int16)
+
+    reference = run(slice(0, total))
+    for m in K32_TILED_MS:
+        assert torch.equal(run(slice(0, m)), reference[:m]), m
+    for m in (1, 6, 37, 300, 4097):
+        rows = torch.randperm(total)[:m].cuda()
+        assert torch.equal(run(rows), reference[rows]), m
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="cute-dsl MXFP8 GEMM requires SM100",
+)
+@pytest.mark.parametrize("m", [1, 6, 96, 384, 8192])
+@pytest.mark.parametrize("n,k", [(1792, 5120), (5120, 2048), (1152, 5120)])
+@torch.inference_mode()
+def test_bi_pinned_mxfp8_mm_tactics_share_bits(m, n, k):
+    """The BI GEMM autotunes over every non-split-K tactic, so each one must
+    give the same bits as the untuned fallback."""
+    from flashinfer.gemm.gemm_base import DEFAULT_WORKSPACE_SIZE, _get_cache_buf
+
+    from vllm.model_executor.kernels.linear.mxfp8.batch_invariant import (
+        _cute_dsl_mxfp8_runner,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+        swizzle_mxfp8_scale,
+    )
+
+    torch.manual_seed(m + n + k)
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * k**-0.5
+    w_codes, w_scale = mxfp8_e4m3_quantize(weight)
+    w_scale = swizzle_mxfp8_scale(w_scale.view(n, k // 32), M=n, K=k)
+    codes, scale = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+    runner = _cute_dsl_mxfp8_runner(torch.bfloat16)
+    workspace = _get_cache_buf("mm_mxfp8_workspace", DEFAULT_WORKSPACE_SIZE, x.device)
+
+    def inputs():
+        out = torch.empty(m, n, device="cuda", dtype=torch.bfloat16)
+        return [codes, w_codes.t(), scale, w_scale, torch.bfloat16, out, workspace]
+
+    def run(tactic):
+        args = inputs()
+        runner.forward(args, tactic=tactic)
+        return args[5].view(torch.int16)
+
+    tactics = runner.get_valid_tactics(inputs(), None)
+    assert tactics and all(t[-1] == 1 for t in tactics)
+    reference = run(-1)
+    for tactic in tactics:
+        assert torch.equal(run(tactic), reference), tactic
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="cute-dsl MXFP8 GEMM requires SM100",
+)
+@torch.inference_mode()
+def test_bi_prequant_qnorm_rows_ignore_batch():
+    """VLLM_BI_MXFP8_PREQUANT feeds the fused Q/KV RMSNorm + MXFP8 quant into
+    the pinned BI GEMM; a row's GEMM output and KV norm must not depend on how
+    many or which rows share the batch."""
+    from vllm.model_executor.kernels.linear.mxfp8.batch_invariant import (
+        _pinned_mxfp8_mm,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+        swizzle_mxfp8_scale,
+    )
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        fused_q_kv_rmsnorm_quant,
+    )
+
+    torch.manual_seed(0)
+    m, q_size, kv_size, n = 1024, 1536, 512, 2048
+    qr = torch.randn(m, q_size, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(m, kv_size, device="cuda", dtype=torch.bfloat16)
+    q_weight = (1 + 0.1 * torch.randn(q_size, device="cuda")).bfloat16()
+    kv_weight = (1 + 0.1 * torch.randn(kv_size, device="cuda")).bfloat16()
+    weight = torch.randn(n, q_size, device="cuda", dtype=torch.bfloat16)
+    w_codes, w_scale = mxfp8_e4m3_quantize(weight)
+    w_scale = swizzle_mxfp8_scale(w_scale.view(n, -1), M=n, K=q_size)
+
+    def run(rows):
+        q, kv_out = fused_q_kv_rmsnorm_quant(
+            qr[rows].contiguous(), kv[rows].contiguous(), q_weight, kv_weight, 1e-6
+        )
+        out = _pinned_mxfp8_mm(
+            q.data.reshape(-1, q_size), w_codes.t(), q.scale, w_scale, torch.bfloat16
+        )
+        return out, kv_out
+
+    full_out, full_kv = run(slice(None))
+    perm = torch.randperm(m, device="cuda")
+    for rows in (slice(0, 1), slice(0, 6), slice(7, 136), slice(-129, None), perm):
+        out, kv_out = run(rows)
+        assert torch.equal(out, full_out[rows])
+        assert torch.equal(kv_out, full_kv[rows])

@@ -818,7 +818,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         other projection backends consume the normalized Q directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda()
+            and not envs.VLLM_BI_MXFP8_PREQUANT
+        ):
             return self.q_norm.forward_cuda(qr), None, self.kv_norm.forward_cuda(kv)
         if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
             from vllm.models.deepseek_v41.common.ops.query_quant import (

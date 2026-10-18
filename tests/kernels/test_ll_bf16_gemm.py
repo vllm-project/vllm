@@ -76,6 +76,43 @@ def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
     assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
 
 
+@pytest.mark.parametrize(
+    "n,k", [(384, 5120), (1024, 5120), (2048, 5120), (129280, 5120)]
+)
+@torch.inference_mode()
+def test_tensor_core_bf16_projection_rows_ignore_batch(monkeypatch, n, k):
+    """VLLM_BI_BF16_GEMM=tensor_core: DeepGEMM without split-K gives every row
+    the same bits at any M, including under CUDA-graph replay."""
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant as bi
+    from vllm.platforms import current_platform
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not (
+        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
+    ):
+        pytest.skip("DeepGEMM BF16 GEMM requires SM100")
+    monkeypatch.setattr(envs, "VLLM_BI_BF16_GEMM", "tensor_core")
+    torch.manual_seed(n)
+    total = 1024 if n > 100000 else 8192
+    a = torch.randn(total, k, device="cuda").bfloat16()
+    weight = (torch.randn(n, k, device="cuda") * k**-0.5).bfloat16()
+    assert bi._uses_tensor_core(weight)
+    reference = bi.bf16_fixed_mm(a, weight)
+    for m in (1, 6, 7, 96, 129, 1000, total // 2):
+        assert torch.equal(bi.bf16_fixed_mm(a[-m:], weight), reference[-m:]), m
+    rows = torch.randperm(total, device="cuda")[:300]
+    assert torch.equal(bi.bf16_fixed_mm(a[rows], weight), reference[rows])
+    static = a[:96].clone()
+    bi.bf16_fixed_mm(static, weight)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed = bi.bf16_fixed_mm(static, weight)
+    static.copy_(a[100:196])
+    graph.replay()
+    assert torch.equal(replayed, reference[100:196])
+
+
 def _ref(a, b):
     return torch.mm(a.float(), b.float().T)
 
