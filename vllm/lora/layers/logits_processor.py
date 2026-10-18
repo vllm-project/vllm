@@ -111,12 +111,15 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
 
+        mapping_gpu = None
         if self.sharded_to_full_mapping is not None:
-            self.sharded_to_full_mapping_gpu = torch.tensor(
+            mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping, device=self.device, dtype=torch.long
             )
-        else:
-            self.sharded_to_full_mapping_gpu = None
+        self.sharded_to_full_mapping_gpu: torch.Tensor | None
+        self.register_buffer(
+            "sharded_to_full_mapping_gpu", mapping_gpu, persistent=False
+        )
 
     def reset_sharded_to_full_mapping(self) -> None:
         """Restore the TP logits mapping after its GPU memory is reused."""
