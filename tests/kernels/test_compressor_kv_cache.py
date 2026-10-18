@@ -1470,6 +1470,221 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
         starts += lengths
 
 
+@pytest.mark.parametrize("major,supported", [(9, False), (10, True), (12, False)])
+def test_v41_compressor_bi_declaration_stays_scoped(monkeypatch, major, supported):
+    from vllm.models.deepseek_v41.compressor import CompressorBackend
+    from vllm.platforms import PlatformEnum
+    from vllm.platforms.interface import DeviceCapability
+
+    monkeypatch.setattr(current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(major, 0)),
+    )
+    assert CompressorBackend.supports_batch_invariance() == supported
+
+    class UnprovenCompressor(CompressorBackend):
+        pass
+
+    assert not UnprovenCompressor.supports_batch_invariance()
+
+
+@pytest.mark.parametrize("speculative_tokens,state_dim", [(1, 1024), (0, 512)])
+def test_v41_bi_compressor_rejects_unproven_ring_geometry(
+    monkeypatch, speculative_tokens, state_dim
+):
+    from vllm.config import set_current_vllm_config
+    from vllm.models.deepseek_v41.compressor import CompressorStateCache
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = SimpleNamespace(
+        num_speculative_tokens=speculative_tokens,
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    with (
+        set_current_vllm_config(config),
+        pytest.raises(NotImplementedError, match="DS41 BI compressor"),
+    ):
+        CompressorStateCache(state_dim, torch.float32, "state")
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="SM100 compressor proof",
+)
+@pytest.mark.parametrize("length", [129, 12290])
+@torch.inference_mode()
+def test_v41_compressor_bi_batch_chunk_pd_graph_cache_bytes(length, monkeypatch):
+    """Actual metadata, ring, latent and NVFP4 publication preserve scheduled bits."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadataBuilder,
+        DeepseekCompressor,
+    )
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(3741)
+    sizes = [length, 65, 127]
+    raw = [torch.randn(n, 1024, device="cuda") for n in sizes]
+    for value in raw:
+        value[:, 512:] *= 40
+    gamma = (1 + torch.randn(512, device="cuda") * 0.03).bfloat16()
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=sum(sizes)),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        speculative_config=None,
+    )
+    spec = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+    )
+    builder = CompressorMetadataBuilder(spec, ["state"], config, torch.device("cuda"))
+    ring = torch.zeros(4, 8, 1024, device="cuda")
+    page_counts = [(n // 2 + 127) // 128 for n in sizes]
+    page_offsets = [0, page_counts[0], page_counts[0] + page_counts[1]]
+    cache = torch.zeros(sum(page_counts), 128, 288, dtype=torch.uint8, device="cuda")
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim, compressor.compress_ratio = (
+        512,
+        64,
+        2,
+    )
+    compressor.rms_norm_eps = 1e-20
+    compressor.norm = SimpleNamespace(weight=gamma)
+    compressor.state_cache = SimpleNamespace(prefix="state", kv_cache=ring)
+    compressor.k_cache_prefix = "main"
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=cache)}
+    angles = (
+        torch.arange(length + 1, device="cuda").float()[:, None]
+        * torch.arange(1, 33, device="cuda").float()[None, :]
+        / 10000
+    )
+    rotary = SimpleNamespace(cos_sin_cache=torch.cat((angles.cos(), angles.sin()), -1))
+
+    def prepare(schedule):
+        counts = [end - start for _, start, end in schedule]
+        starts_cpu = torch.tensor([0, *counts], dtype=torch.int32).cumsum(0).int()
+        positions = torch.cat(
+            [torch.arange(start, end, device="cuda") for _, start, end in schedule]
+        )
+        rows = torch.cat([raw[r][start:end] for r, start, end in schedule])
+        common = CommonAttentionMetadata(
+            query_start_loc=starts_cpu.cuda(),
+            query_start_loc_cpu=starts_cpu,
+            seq_lens=torch.tensor(
+                [end for _, _, end in schedule], device="cuda", dtype=torch.int32
+            ),
+            num_reqs=len(schedule),
+            num_actual_tokens=sum(counts),
+            max_query_len=max(counts),
+            max_seq_len=max(end for _, _, end in schedule),
+            block_table_tensor=torch.tensor(
+                [[r + 1] for r, _, _ in schedule], device="cuda", dtype=torch.int32
+            ),
+            slot_mapping=torch.full(
+                (sum(counts),), -1, device="cuda", dtype=torch.int64
+            ),
+            positions=positions,
+        )
+        state_metadata = builder.build(0, common)
+        expected_slots = torch.cat(
+            [
+                torch.arange(start, end, device="cuda") % 8 + (r + 1) * 8
+                for r, start, end in schedule
+            ]
+        )
+        assert torch.equal(state_metadata.slot_mapping, expected_slots)
+        main_slots = torch.cat(
+            [
+                torch.arange(start, end, device="cuda") // 2 + page_offsets[r] * 128
+                for r, start, end in schedule
+            ]
+        )
+        main_slots = torch.where((positions + 1) % 2 == 0, main_slots, -1)
+        context = ForwardContext(
+            {},
+            {"state": state_metadata, "main": SimpleNamespace(slot_mapping=main_slots)},
+            {},
+        )
+
+        def execute():
+            with override_forward_context(context):
+                latent = compressor(rows, positions)
+                compressor.insert_cache(latent, positions, rotary)
+            return latent
+
+        return execute, positions
+
+    def reset():
+        ring.zero_()
+        cache.zero_()
+
+    reference = []
+    reset()
+    for r, n in enumerate(sizes):
+        execute, positions = prepare([(r, 0, n)])
+        latent = execute()
+        reference.append(latent[(positions + 1) % 2 == 0].clone())
+    reference_cache, reference_ring = cache.clone(), ring.clone()
+
+    def check(schedule, graph=False):
+        execute, positions = prepare(schedule)
+        if graph:
+            execute()
+            captured = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(captured):
+                latent = execute()
+            reset()
+            captured.replay()
+        else:
+            latent = execute()
+        expected = torch.cat(
+            [reference[r][start // 2 : end // 2] for r, start, end in schedule]
+        )
+        assert torch.equal(latent[(positions + 1) % 2 == 0], expected)
+
+    order = [(2, 0, sizes[2]), (0, 0, length), (1, 0, sizes[1])]
+    for schedule in (order, order[::-1]):
+        reset()
+        check(schedule)
+        assert torch.equal(cache, reference_cache)
+        assert torch.equal(ring, reference_ring)
+    reset()
+    # Odd prefill boundaries exercise both ring-read and in-chunk pair programs.
+    for begin, end in zip(
+        (0, 1, 7, 127, 128, 12287, 12288), (1, 7, 127, 128, 12287, 12288, length)
+    ):
+        schedule = [
+            (r, begin, min(end, n))
+            for r, n in reversed(list(enumerate(sizes)))
+            if begin < min(end, n)
+        ]
+        if schedule:
+            check(schedule)
+    assert torch.equal(cache, reference_cache)
+    assert torch.equal(ring, reference_ring)
+    reset()
+    check([(r, 0, n - 3) for r, n in enumerate(sizes)])
+    for offset in range(3):
+        check(
+            [
+                (r, n - 3 + offset, n - 2 + offset)
+                for r, n in reversed(list(enumerate(sizes)))
+            ]
+        )
+    assert torch.equal(cache, reference_cache)
+    assert torch.equal(ring, reference_ring)
+    reset()
+    check(order, graph=True)
+    assert torch.equal(cache, reference_cache)
+    assert torch.equal(ring, reference_ring)
+
+
 def _on_gfx950() -> bool:
     if not current_platform.is_rocm():
         return False

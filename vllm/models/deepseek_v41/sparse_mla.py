@@ -262,6 +262,13 @@ class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
     def supports_pcp(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """SM100 proof: test_ds41_flashmla_cr2_indexer_bi_batch_chunk_pd_graph."""
+        return cls is DeepseekV4FlashMLABackend and (
+            current_platform.is_device_capability_family(100)
+        )
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV41"

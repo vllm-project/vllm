@@ -301,6 +301,16 @@ def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.cons
         tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
 
 
+def _bi_top_k_per_row(dcp_world_size: int):
+    """Without DCP, BI writes top-k in ascending index order, the order the BI
+    sparse attention reduces in; the DCP merge needs score order."""
+    from vllm.model_executor.kernels import batch_invariant
+
+    if dcp_world_size == 1:
+        return batch_invariant.top_k_per_row_prefill_index_order
+    return batch_invariant.top_k_per_row_prefill
+
+
 def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
     """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
 
@@ -316,6 +326,11 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     if num_rows == 0 or width == 0:
         return out
     assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        from vllm.model_executor.kernels.batch_invariant import cast_indexer_logits
+
+        cast_indexer_logits(logits, row_ends, out)
+        return out
     block = 1024
     splits = min(triton.cdiv(width, block), max(1, 1024 // num_rows))
     _upcast_logits_kernel[(num_rows, splits)](
@@ -760,7 +775,11 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
+                if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+                    top_k_per_row_prefill = _bi_top_k_per_row(dcp_world_size)
+                else:
+                    top_k_per_row_prefill = ops.top_k_per_row_prefill
+                top_k_per_row_prefill(
                     logits,
                     torch.zeros_like(row_ends) if row_starts is None else row_starts,
                     row_ends,
@@ -889,7 +908,14 @@ def sparse_attn_indexer(
             )
             # Keeping bf16 halves top-k/candidate reads; other top-k backends and
             # DCP need fp32. SM100 decode is varlen: one context length per row.
-            if topk_backend != "deep_select" or dcp_world_size != 1:
+            # Batch invariance scores decode rows exactly as prefill rows: paged
+            # and dense MQA logits are bitwise equal, then the same FP32 cast,
+            # candidate mask and deterministic top-k.
+            if (
+                topk_backend != "deep_select"
+                or dcp_world_size != 1
+                or envs.VLLM_BATCH_INVARIANT
+            ):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -922,16 +948,31 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+            bi_top_k_per_row = _bi_top_k_per_row(dcp_world_size)
+            assert next_n == 1, "batch-invariant indexer decode needs next_n == 1"
+            row_ends = seq_lens.reshape(-1).contiguous()
+            bi_top_k_per_row(
+                logits,
+                torch.zeros_like(row_ends),
+                row_ends,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        else:
+            # The backend comes from the layer (config is only readable at
+            # model construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
@@ -1055,6 +1096,10 @@ class SparseAttnIndexer(CustomOp):
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        # See _bi_top_k_per_row.
+        self.emits_bi_index_order = (
+            current_platform.is_cuda() and self.dcp_world_size == 1
+        )
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None

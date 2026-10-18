@@ -40,6 +40,38 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA candidate blocks")
+@pytest.mark.parametrize(
+    ("width", "block_size", "topk_blocks"),
+    # Last row is the shipped DS4.1 config: block 8, top-2048 blocks.
+    [(4096, 64, 16), (131072, 64, 64), (131072, 8, 2048)],
+)
+@pytest.mark.parametrize("rows", [2, 64, 1024])
+def test_candidate_block_selection_is_row_independent(
+    width, block_size, topk_blocks, rows
+):
+    """The BI prefill top-k consumes candidate-masked logits, so the candidate
+    set of a row must not change with the number of rows in the step."""
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _select_candidate_blocks,
+    )
+
+    set_random_seed(0)
+    base = torch.randint(0, 3, (width,), device="cuda").float()
+
+    def run(num_rows: int) -> torch.Tensor:
+        logits = base.unsqueeze(0).expand(num_rows, width).contiguous()
+        ks = torch.full((num_rows,), 1000, dtype=torch.int32, device="cuda")
+        ke = torch.full((num_rows,), width - 1000, dtype=torch.int32, device="cuda")
+        out = torch.empty(num_rows, topk_blocks, dtype=torch.int32, device="cuda")
+        _select_candidate_blocks(logits, ks, ke, topk_blocks, block_size, out)
+        return out
+
+    alone = run(1)[0]
+    batched = run(rows)
+    assert (batched.sort(1).values == alone.sort().values.unsqueeze(0)).all()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Top-K")
 @pytest.mark.parametrize("rows,columns", [(1, 12289), (12290, 704), (12290, 2048)])
 def test_bi_prefill_topk_is_independent_of_row_dispatch_and_padding(rows, columns):
@@ -2105,6 +2137,62 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 
     assert recorded["next_n"] == 1
     assert recorded["row_ends"] == [99, 100, 199, 200]
+
+
+@pytest.mark.parametrize("rows,width", [(129, 521), (12290, 6145)])
+def test_bi_bf16_indexer_cast_preserves_valid_scores_and_selector(
+    monkeypatch, rows, width
+):
+    """Aligned BF16 scores retain valid values and downstream stable selection."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA indexer score conversion")
+    from vllm.model_executor.kernels.batch_invariant import top_k_per_row_prefill
+    from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(1957)
+    stride = ((width + 127) // 128) * 128
+    storage = torch.randn(rows, stride, device="cuda", dtype=torch.bfloat16)
+    scores = storage[:, :width]
+    ends = torch.arange(rows, device="cuda", dtype=torch.int32) % (width + 1)
+    starts = torch.zeros_like(ends)
+    valid = torch.arange(width, device="cuda")[None, :] < ends[:, None]
+    actual = as_fp32_logits(scores, ends)
+    expected = scores.float()
+    assert actual.stride() == scores.stride()
+    assert torch.equal(actual[valid], expected[valid])
+
+    def select(values, count):
+        output = torch.empty(count, 512, device="cuda", dtype=torch.int32)
+        top_k_per_row_prefill(
+            values,
+            starts[:count],
+            ends[:count],
+            output,
+            count,
+            values.stride(0),
+            values.stride(1),
+            512,
+        )
+        return output
+
+    wanted = select(expected, rows)
+    assert torch.equal(select(actual, rows), wanted)
+    # The long case straddles the old 12288-row selector algorithm boundary.
+    for count in (1, rows - 2):
+        prefix = as_fp32_logits(scores[:count], ends[:count])
+        assert torch.equal(select(prefix, count), wanted[:count])
+
+    as_fp32_logits(scores, ends)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = as_fp32_logits(scores, ends)
+    scores.neg_()
+    captured.fill_(float("nan"))
+    graph.replay()
+    assert torch.equal(captured[valid], scores.float()[valid])
+    assert captured[~valid].isnan().all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Top-K")
