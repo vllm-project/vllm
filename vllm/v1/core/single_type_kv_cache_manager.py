@@ -4,7 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.math_utils import cdiv
@@ -1166,13 +1166,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
 
         """
-        retained_window = cast(
-            SlidingWindowSpec, self.kv_cache_spec
-        ).retained_window_size(
-            scheduler_block_size=self.scheduler_block_size,
-            retain_eagle_proof=self.enable_caching and self.use_eagle,
+        return max(
+            0,
+            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
-        return max(0, num_computed_tokens - retained_window + 1)
 
     def allocate_external_computed_blocks(
         self,
@@ -2652,33 +2649,16 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
-    scheduler_block_size = kwargs.get("scheduler_block_size")
-    retain_eagle_proof = kwargs.pop("retain_eagle_proof", False)
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
     # the runtime admission cap must match the recycling-aware bound the
     # startup pool sizer uses (single source of truth: the spec method).
     # R-SWA also recycles gap blocks but peak physical KV still fits the
     # full-attention bound (prefix + window <= max_model_len), so it inherits
     # FullAttentionSpec sizing without a separate admission cap.
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        if retain_eagle_proof:
-            kwargs["max_admission_blocks_per_request"] = (
-                kv_cache_spec.max_admission_blocks_per_request(
-                    max_in_flight_tokens=max_in_flight_tokens,
-                    max_model_len=max_model_len,
-                    scheduler_block_size=scheduler_block_size,
-                    retain_eagle_proof=True,
-                )
-            )
-        else:
-            # Keep the legacy override shape for ordinary SWA callers.
-            kwargs["max_admission_blocks_per_request"] = (
-                kv_cache_spec.max_admission_blocks_per_request(
-                    max_in_flight_tokens=max_in_flight_tokens,
-                    max_model_len=max_model_len,
-                )
-            )
-    elif isinstance(kv_cache_spec, (ChunkedLocalAttentionSpec, HiSparseResidentSpec)):
+    if isinstance(
+        kv_cache_spec,
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
+    ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
                 max_in_flight_tokens=max_in_flight_tokens,
