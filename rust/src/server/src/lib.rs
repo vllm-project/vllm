@@ -47,7 +47,7 @@ use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{AdmissionLimits, EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
@@ -113,13 +113,19 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         "resolved coordinator mode"
     );
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: config.transport_mode.clone(),
-        coordinator_mode,
-        model_name: metrics_model_name,
-        client_index: 0,
-        engine_stats_enabled: !config.disable_log_stats,
-    })
+    let client = EngineCoreClient::connect_with_admission_limits(
+        EngineCoreClientConfig {
+            transport_mode: config.transport_mode.clone(),
+            coordinator_mode,
+            model_name: metrics_model_name,
+            client_index: 0,
+            engine_stats_enabled: !config.disable_log_stats,
+        },
+        AdmissionLimits {
+            max_num_queued_reqs: config.max_num_queued_reqs,
+            max_num_queued_tokens: config.max_num_queued_tokens,
+        },
+    )
     .await
     .context("failed to connect to engine core")?;
 

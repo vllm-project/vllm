@@ -82,6 +82,8 @@ async fn main() -> Result<()> {
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         stream_interval: NonZeroU32::MIN,
+        max_num_queued_reqs: None,
+        max_num_queued_tokens: None,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
         tls: None,
