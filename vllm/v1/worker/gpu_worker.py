@@ -71,10 +71,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
 )
-from vllm.model_executor.warmup.kernel_warmup import (
-    deep_gemm_kernel_warmup,
-    kernel_warmup,
-)
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
@@ -654,7 +651,6 @@ class Worker(WorkerBase):
         maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            deep_gemm_kernel_warmup(self)
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             with set_current_vllm_config(self.vllm_config):
@@ -698,7 +694,6 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             set_current_vllm_config(self.vllm_config),
         ):
-            deep_gemm_kernel_warmup(self)
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
         # Profile CUDA graph memory if graphs will be captured.

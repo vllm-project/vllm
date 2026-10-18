@@ -104,21 +104,6 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
-def deep_gemm_kernel_warmup(worker: "Worker") -> None:
-    """Materialize DeepGEMM workspaces before profiling the memory budget."""
-    if getattr(worker, "_deep_gemm_warmup_done", False):
-        return
-    if (
-        envs.VLLM_USE_DEEP_GEMM
-        and is_deep_gemm_supported()
-        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
-    ):
-        deep_gemm_warmup(
-            worker.get_model(), worker.scheduler_config.max_num_batched_tokens
-        )
-    worker._deep_gemm_warmup_done = True  # type: ignore[attr-defined]
-
-
 def _warmup_bf16x3_router_gemm(
     model: torch.nn.Module,
     max_num_tokens: int,
@@ -253,7 +238,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     deepseek_v4_sparse_mla_attention_warmup(worker)
     step5_dsa_warmup(worker)
 
-    deep_gemm_kernel_warmup(worker)
+    # Deep GEMM warmup
+    do_deep_gemm_warmup = (
+        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+    )
+    if do_deep_gemm_warmup:
+        model = worker.get_model()
+        max_tokens = worker.scheduler_config.max_num_batched_tokens
+        deep_gemm_warmup(model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 

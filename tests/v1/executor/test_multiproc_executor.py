@@ -83,11 +83,8 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
     hung peer."""
     monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7")
 
-    replies = []
-
-    def dequeue(rank, *, timeout=None):
+    def dequeue(*, timeout=None):
         assert timeout is not None and 0 < timeout <= 7
-        replies.append(rank)
         if stalled:
             raise TimeoutError
         return WorkerProc.ResponseStatus.SUCCESS, result
@@ -97,14 +94,10 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
     executor.output_rank = 1
     executor.futures_queue = deque()
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
-    executor.response_mqs = [
-        SimpleNamespace(dequeue=lambda **kwargs: dequeue(0, **kwargs)),
-        SimpleNamespace(dequeue=lambda **kwargs: dequeue(1, **kwargs)),
-    ]
+    executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
 
     if stalled:
         with pytest.raises(TimeoutError, match=f"{method} timed out"):
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
-        assert replies == ([0, 1] if method == "execute_dummy_batch" else [1])

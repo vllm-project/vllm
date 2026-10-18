@@ -224,7 +224,6 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
     )
     monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
-    monkeypatch.setattr(gpu_worker, "deep_gemm_kernel_warmup", lambda _: None)
     monkeypatch.setattr(
         gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext()
     )
