@@ -48,6 +48,15 @@ from vllm.utils.deep_gemm import (
 BLOCK_SIZE = [128, 128]
 
 
+@pytest.fixture
+def non_batch_invariant(monkeypatch):
+    """Batch-invariant MoE rejects these block-FP8 scale layouts by design."""
+    from vllm import envs
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", False)
+
+
 @pytest.mark.parametrize("tokens", [0, 7, 259])
 @pytest.mark.parametrize("mapped", [False, True])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
@@ -253,6 +262,8 @@ def test_fp8_workspace_shape(workspace_dtype, num_columns):
 
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
 def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
+    from vllm import envs
+
     hidden_states = torch.randn(2, 128, device="cuda", dtype=torch.bfloat16)
     activations, scales = per_token_group_quant_fp8(
         hidden_states,
@@ -272,9 +283,13 @@ def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
 
     padding = expert_ids < 0
     assert padding.any()
+    # The batch-invariant permutation zeroes padding rows and gives them unit
+    # scales.
     torch.testing.assert_close(
         permuted_scales[padding],
-        torch.zeros_like(permuted_scales[padding]),
+        torch.full_like(
+            permuted_scales[padding], 1.0 if envs.VLLM_BATCH_INVARIANT else 0.0
+        ),
         rtol=0,
         atol=0,
     )
@@ -329,6 +344,7 @@ def make_block_quant_fp8_weights(
 @pytest.mark.parametrize("num_tokens", [16, 129, 512])
 @pytest.mark.parametrize("with_metadata", [False, True])
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+@pytest.mark.usefixtures("non_batch_invariant")
 def test_block_fp8_padding_on_graph_replay(num_tokens, with_metadata, monkeypatch):
     """Both FP8 GEMMs consume only live rows as routing changes on replay."""
     from unittest.mock import Mock
@@ -554,6 +570,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+@pytest.mark.usefixtures("non_batch_invariant")
 def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_init):
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")

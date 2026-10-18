@@ -19,6 +19,15 @@ FLOAT8_DTYPE = torch.float8_e4m3fn
 GROUP_SIZE = 128
 
 
+@pytest.fixture
+def non_batch_invariant(monkeypatch):
+    """Batch-invariant quantization rejects expert padding metadata by design."""
+    from vllm import envs
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", False)
+
+
 def test_bi_packed_quant_rejects_unsupported_padding_before_launch(monkeypatch):
     """A dense native launch must never silently overwrite expert padding."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
@@ -128,6 +137,7 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm graph test")
+@pytest.mark.usefixtures("non_batch_invariant")
 def test_silu_quant_skips_expert_padding_on_graph_replay(
     counts: list[int],
     group_size: int,
