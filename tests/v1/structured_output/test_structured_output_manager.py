@@ -25,6 +25,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.request import get_structured_output_key
 
 TOKENIZER = "gpt2"
@@ -692,6 +693,24 @@ def test_outlines_choice_with_non_bmp_characters(tokenizer):
     grammar = backend.compile_grammar(request_type, grammar_spec)
 
     assert grammar.accept_tokens("", tokenizer.encode(choices[0]))
+
+
+def test_xgrammar_compiles_choice_without_rewrite(tokenizer):
+    """Frontends that skip Python request validation send `choice` as is."""
+    choices = ["yes", "no\nplease"]
+    backend = XgrammarBackend(
+        VllmConfig(), tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    request_type, grammar_spec = get_structured_output_key(
+        StructuredOutputsParams(choice=choices)
+    )
+
+    def accepts(text: str) -> bool:
+        grammar = backend.compile_grammar(request_type, grammar_spec)
+        return grammar.accept_tokens("", tokenizer.encode(text))
+
+    assert accepts(choices[1])
+    assert not accepts("maybe")
 
 
 def test_clear_backend_waits_for_running_grammar_and_cancels_pending(
