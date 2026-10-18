@@ -830,11 +830,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Drain HB / completion notifs forwarded by the writer thread.
 
         The writer owns ``nixl_wrapper.get_new_notifs`` for push; PUSH_REG
-        notifs are handled there. Everything else is forwarded here for
-        existing accounting.
+        notifs are handled there. P learns of finished pushes from its WRITE
+        handles, so this never reports finished sends.
         """
-        assert self.transfer_topo is not None
-        notified_req_ids: set[str] = set()
         while True:
             try:
                 notif = self._pending_completion_notifs.get_nowait()
@@ -853,24 +851,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._count_consumer_notif(req_id, int(tp_size), failed_write=True)
                 continue
 
-            # Not tracked as a P-side send/process for this notif.
-            if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                self._count_consumer_notif(req_id, int(tp_size), failed_write=False)
-                continue
-
-            n_consumers = int(tp_size)
-            tp_ratio = self.transfer_topo.tp_ratio(n_consumers)
-            consumers_per_producer = -tp_ratio if n_consumers > self.world_size else 1
-            self.consumer_notification_counts_by_req[req_id] += 1
-            if (
-                self.consumer_notification_counts_by_req[req_id]
-                == consumers_per_producer
-            ):
-                notified_req_ids.add(req_id)
-                del self.consumer_notification_counts_by_req[req_id]
-                self._reqs_to_process.remove(req_id)
-                self._reqs_to_send.pop(req_id, None)
-        return notified_req_ids
+            self._count_consumer_notif(req_id, int(tp_size), failed_write=False)
+        return set()
 
     def _count_consumer_notif(
         self, req_id: str, producer_tp_size: int, failed_write: bool
@@ -882,8 +864,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """
         meta = self._recving_metadata.get(req_id)
         if meta is None:
-            # Not tracked on either side (lease may have expired before the
-            # notif arrived). Log and skip.
+            # The lease may have expired before the notif arrived.
             self.xfer_stats.record_notification_after_expiry()
             logger.error("Unrecognized request %s notif (may have expired).", req_id)
             return
@@ -948,7 +929,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
-            self.consumer_notification_counts_by_req.pop(req_id, None)
             done_sending.add(req_id)
 
         # Tell the writer to drop any state it still holds for any

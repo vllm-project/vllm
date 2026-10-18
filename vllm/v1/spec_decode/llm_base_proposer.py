@@ -37,6 +37,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -102,9 +103,7 @@ class SpecDecodeBaseProposer:
         # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
         # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
         draft_hf_config = self.draft_model_config.hf_config
-        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
-            draft_hf_config, "hc_mult"
-        ):
+        if get_compress_ratios(draft_hf_config) and hasattr(draft_hf_config, "hc_mult"):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
 
         # Unifying eagle, draft model, and parallel drafting support.
@@ -991,7 +990,7 @@ class SpecDecodeBaseProposer:
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+            attn_metadata = attn_group.build_metadata_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=draft_index
             )
             per_group_attn_metadata.append(attn_metadata)
@@ -1331,10 +1330,13 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for name in draft_attn_layer_names:
+            all_attn_layers[name].is_draft_layer = True
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
-            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            for name in draft_attn_layer_names
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
@@ -1765,20 +1767,7 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
-            kernel_block_sizes
-        ):
-            # Slot mappings are computed against the block table, which is
-            # stored at kernel-block granularity. Use the kernel block size
-            # rather than the KV cache manager's block size; the two differ
-            # when manager blocks are split for the attention kernel.
-            self.block_size = kernel_block_sizes[self.kv_cache_gid]
-        else:
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
+        self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

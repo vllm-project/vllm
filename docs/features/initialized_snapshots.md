@@ -31,6 +31,11 @@ Snapshots currently require:
   Current Hugging Face hub clients hold their connections for the process
   lifetime, so download the model in a separate step and run create with
   `HF_HUB_OFFLINE=1`, as the quickstart below does.
+- Snapshot creation defaults `NCCL_IB_DISABLE=1` for its singleton donor and
+  inherited workers because CRIU cannot capture live InfiniBand/RDMA state.
+  An explicit caller value is retained, but creation rejects an open
+  `/dev/infiniband/` descriptor before CRIU. Close non-NCCL RDMA clients before
+  capture.
 - A remote model ID and an immutable 40-character `--revision`. Local model
   directories and mutable revisions are not supported.
 - Enough disk for the artifact, with the same installed vLLM package, model
@@ -138,9 +143,13 @@ snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
   and directories. Recreate the artifact after an unclean host shutdown.
 - Restore currently requires the same host, GPU, driver, kernel, Python,
   PyTorch, installed vLLM version, model revision, engine arguments,
-  selected environment variables, and CRIU plugin binaries.
+  selected effective environment variables, and CRIU plugin binaries. An unset
+  `NCCL_IB_DISABLE` therefore matches the snapshot donor default of `1`, while
+  an explicit different value does not.
 - Only dense float16 TP1 has been validated. Other model formats depend on their
-  existing sleep level 2 reload support; NCCL state is not restored.
+  existing sleep level 2 reload support; distributed and RDMA snapshots are not
+  supported. The snapshot-only NCCL default does not change ordinary serve or
+  multi-GPU defaults.
 - CRIU support varies by kernel and driver. Preserve package, library, model,
   and generated-cache paths for the artifact lifetime.
 - A snapshot can include application secrets or request state present in the

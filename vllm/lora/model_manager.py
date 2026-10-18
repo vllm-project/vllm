@@ -40,7 +40,6 @@ from vllm.lora.utils import (
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
-    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -58,9 +57,6 @@ DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
-
-
-class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -144,20 +140,18 @@ class LoRAModelManager:
             else set()
         )
 
-        # When the engine is started with enable_mixed_moe_lora_format=True
-        # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
-        # the model's 3D flag, so 2D and 3D adapters can coexist.
+        # Mixed-format and shared-outer adapters both use FusedMoEWithLoRA.
+        # FusedMoE3DWithLoRA only implements the fused gate/up PEFT pair.
         self._enable_mixed_moe_lora_format = (
             is_moe and lora_config.enable_mixed_moe_lora_format
         )
+        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self._is_3d_moe_model = (
             self._is_moe
             and self.model.is_3d_moe_weight
             and not self._enable_mixed_moe_lora_format
+            and not self._enable_moe_shared_loras
         )
-        # Shared MoE adapters: w13 lora_A / w2 lora_B shared across experts,
-        # stored as pre-stacked experts.w{1,2,3} tensors (startup opt-in).
-        self._enable_moe_shared_loras = is_moe and lora_config.enable_moe_shared_loras
         self.packed_modules_mapping = process_packed_modules_mapping(
             self.model,
             force_2d_moe=self._enable_mixed_moe_lora_format,
@@ -328,8 +322,8 @@ class LoRAModelManager:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
             else:
                 logger.warning_once(
-                    "Connector LoRA support disabled: model does not implement "
-                    "get_num_mm_connector_tokens(). This method is required to "
+                    "Connector LoRA support disabled: get_mm_lora_token_counts() "
+                    "returned no connector token counts, which are required to "
                     "determine the connector's token budget for LoRA operations."
                 )
 
@@ -416,6 +410,7 @@ class LoRAModelManager:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
+        self._validate_moe_lora_format(lora)
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
 
@@ -1253,6 +1248,27 @@ class LoRAModelManager:
                 "after removing the prefix 'model.'."
             )
         return weights
+
+    def _validate_moe_lora_format(self, lora_model: LoRAModel) -> None:
+        if self._enable_mixed_moe_lora_format and getattr(
+            lora_model, "is_3d_lora_weight", False
+        ):
+            return
+        for module_name, module in self.modules.items():
+            if not isinstance(module, FusedMoEWithLoRA) or isinstance(
+                module, FusedMoE3DWithLoRA
+            ):
+                continue
+            module_lora = self._get_lora_layer_weights(lora_model, module_name)
+            if module_lora is not None and torch.is_tensor(module_lora.lora_a):
+                raise ValueError(
+                    f"LoRA adapter {lora_model.id} contains fused 3D MoE weights "
+                    f"for {module_name!r}, but the model uses a 2D MoE LoRA "
+                    "wrapper. Start the engine with "
+                    "enable_mixed_moe_lora_format=True "
+                    "(--enable-mixed-moe-lora-format) and set "
+                    "is_3d_lora_weight=True on the LoRA request."
+                )
 
     def _validate_modules_to_save(self, lora_model: LoRAModel) -> None:
         if not lora_model.modules_to_save:
