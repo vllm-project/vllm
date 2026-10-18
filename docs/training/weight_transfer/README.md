@@ -164,10 +164,12 @@ When running vLLM as an HTTP server, the following endpoints are available for w
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
 
 !!! warning
-    If `/update_weights` fails, the model is left mid-reload while `/health`
-    stays 200, and `/finish_weight_update` is rejected. Before generating again,
-    resend a full `/start_weight_update` → `/update_weights` →
-    `/finish_weight_update` (see [#57854](https://github.com/vllm-project/vllm/pull/57854)).
+    If `/update_weights` fails, the session ends and `/finish_weight_update` is
+    rejected. The IPC, NCCL and NCCL M2N backends put back the layers that were
+    still loading, so the model keeps serving, but it can hold a mix of old and
+    new weights; other backends can leave it mid-reload while `/health` stays
+    200. Either way, resend a full `/start_weight_update` → `/update_weights` →
+    `/finish_weight_update` before relying on the new weights.
 
 The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, sparse-NCCL, or sharded-RDT transport.
 
