@@ -171,6 +171,12 @@ class DeepseekSparseSWABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
+        if current_platform.is_xpu():
+            from vllm.models.deepseek_v4.xpu.xpu_sparse import (
+                DeepseekV4XPUSparseSWAMetadataBuilder,
+            )
+
+            return DeepseekV4XPUSparseSWAMetadataBuilder
         if current_platform.is_rocm():
             from vllm.models.deepseek_v4.amd.rocm import (
                 DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
