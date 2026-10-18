@@ -13,8 +13,18 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
 from vllm.model_executor.warmup import deep_gemm_warmup
 
 
+@pytest.fixture
+def uncached_deep_gemm_import():
+    from vllm.utils import deep_gemm
+
+    deep_gemm._load_deep_gemm.cache_clear()
+    yield
+    deep_gemm._load_deep_gemm.cache_clear()
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("vendored", [False, True])
+@pytest.mark.usefixtures("uncached_deep_gemm_import")
 def test_bi_rejects_deep_gemm_without_deterministic_control(monkeypatch, vendored):
     """A missing BI API must not be swallowed as an optional import failure."""
     from vllm import envs
@@ -36,6 +46,7 @@ def test_bi_rejects_deep_gemm_without_deterministic_control(monkeypatch, vendore
 
 
 @pytest.mark.cpu_test
+@pytest.mark.usefixtures("uncached_deep_gemm_import")
 def test_bi_configures_the_imported_deep_gemm_provider(monkeypatch):
     """MHC and grouped experts share the selected library's numerical mode."""
     from vllm import envs

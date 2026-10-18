@@ -181,8 +181,8 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 ) = None
 
 
-def _configure_deep_gemm(module):
-    if envs.VLLM_BATCH_INVARIANT:
+def _configure_deep_gemm(module, batch_invariant: bool):
+    if batch_invariant:
         configure = getattr(module, "use_deterministic_algorithms", None)
         if configure is None:
             raise RuntimeError(
@@ -198,10 +198,15 @@ def _import_deep_gemm():
 
     Prefers an externally installed ``deep_gemm`` package (so users can
     pin a specific version), then falls back to the vendored copy bundled
-    in the vLLM wheel.
+    in the vLLM wheel. Under batch invariance its deterministic mode is on.
 
     Returns ``None`` when neither source is usable.
     """
+    return _load_deep_gemm(envs.VLLM_BATCH_INVARIANT)
+
+
+@functools.cache
+def _load_deep_gemm(batch_invariant: bool):
     # 1. Try the external (pip-installed) package first.
     try:
         module = importlib.import_module("deep_gemm")
@@ -212,7 +217,7 @@ def _import_deep_gemm():
         )
     else:
         logger.debug_once("Imported deep_gemm module from site-packages")
-        return _configure_deep_gemm(module)
+        return _configure_deep_gemm(module, batch_invariant)
 
     # 2. Fall back to the vendored copy bundled in the vLLM wheel.
     try:
@@ -225,7 +230,7 @@ def _import_deep_gemm():
         logger.warning_once("Failed to import vendored deep_gemm: %s", e)
     else:
         logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
-        return _configure_deep_gemm(module)
+        return _configure_deep_gemm(module, batch_invariant)
 
     return None
 
