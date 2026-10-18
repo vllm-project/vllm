@@ -62,6 +62,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     SupportsEagle3,
     SupportsPP,
 )
@@ -79,6 +80,7 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
     finalize_mega_moe_weights,
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -571,8 +573,14 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
             "AITER MegaMoE runs on MoRI shmem; add "
             "--all2all-backend mori_high_throughput."
         )
-    if parallel_config.enable_eplb:
-        raise NotImplementedError("AITER MegaMoE does not support EPLB.")
+    if (
+        parallel_config.enable_eplb
+        and parallel_config.eplb_config.num_redundant_experts > 0
+    ):
+        raise NotImplementedError(
+            "AITER MegaMoE EPLB only permutes the routed experts across ranks; "
+            "set num_redundant_experts to 0 in --eplb-config."
+        )
     if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
         raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
 
@@ -713,6 +721,12 @@ class DeepseekV4MoE(nn.Module):
                 ),
                 prefix=f"{prefix}.experts",
             )
+            # EPLB metadata (MixtureOfExperts): a permutation of the routed
+            # experts, so physical experts = logical experts.
+            self.n_logical_experts = config.n_routed_experts
+            self.n_physical_experts = config.n_routed_experts
+            self.n_redundant_experts = 0
+            self.n_local_physical_experts = self.experts.num_routed_local_experts
             return
 
         fuse_shared_into_routed = (
@@ -1461,7 +1475,48 @@ def _make_deepseek_v4_weights_mapper(
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class DeepseekV4AiterMegaMoEMixtureOfExperts(MixtureOfExperts):
+    """EPLB over the AITER MegaMoE layers (--moe-backend aiter_mega_moe).
+
+    The other AMD MoE paths do not register: num_moe_layers stays 0.
+    """
+
+    moe_mlp_layers: list["DeepseekV4MoE"]
+
+    def extract_moe_parameters(self, example_moe: "DeepseekV4MoE | None") -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts or 0
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        raise NotImplementedError(
+            "AITER MegaMoE EPLB keeps a fixed number of physical experts."
+        )
+
+
+class DeepseekV4ForCausalLM(
+    nn.Module,
+    SupportsPP,
+    SupportsEagle3,
+    DeepseekV4AiterMegaMoEMixtureOfExperts,
+):
     model_cls = DeepseekV4Model
     finalizes_weights_during_load = False
 
@@ -1498,6 +1553,21 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
+        )
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        if not self.model.use_mega_moe:
+            self.moe_layers = []
+            self.moe_mlp_layers = []
+            self.extract_moe_parameters(None)
+            return
+        collect_moe_layers(
+            self,
+            self.model.layers,
+            self.config,
+            decoder_layer_type=DeepseekV4DecoderLayer,
+            moe_type=DeepseekV4MoE,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

@@ -9,11 +9,17 @@ import torch
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.models.deepseek_v4.amd import mega_moe as mega_moe_module
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
 )
-from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
+from vllm.models.deepseek_v4.amd.model import (
+    DeepseekV4AiterMegaMoEMixtureOfExperts,
+    DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
+    DeepseekV4MoE,
+)
 from vllm.platforms import current_platform
 
 HIDDEN = 64
@@ -229,3 +235,132 @@ def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_token
         atol=1e-4,
     )
     torch.testing.assert_close(out, 5 * x)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fuse_shared_expert", [False, True])
+def test_eplb_expert_weights_are_routed_slot_views(monkeypatch, fuse_shared_expert):
+    experts = _make_experts(
+        monkeypatch,
+        ep_rank=1,
+        ep_size=2,
+        num_experts=4,
+        fuse_shared_expert=fuse_shared_expert,
+    )
+    params = (
+        experts.w13_weight,
+        experts.w13_weight_scale,
+        experts.w2_weight,
+        experts.w2_weight_scale,
+    )
+    for param in params:
+        for slot in range(experts.num_local_experts):
+            param.data[slot].fill_(slot + 1)
+    # finalize_weights() leaves the scales as 2-D (experts * rows, cols).
+    for param in (experts.w13_weight_scale, experts.w2_weight_scale):
+        param.data = param.data.view(-1, param.shape[-1])
+    experts._runtimes = [(4096, object())]
+
+    views = experts.get_expert_weights()
+
+    assert len(views) == len(params)
+    for view, param in zip(views, params):
+        # Routed slots only (a fused shared expert is the last local slot), one
+        # row per expert, aliasing the weights the MegaMoE kernels read.
+        assert view.shape == (2, param.numel() // experts.num_local_experts)
+        assert view.data_ptr() == param.data.data_ptr()
+        for slot in range(2):
+            assert torch.all(view[slot] == slot + 1)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tokens_across_dp", [[4, 128], [4, 129]])
+def test_eplb_remaps_ids_before_runtime_choice(monkeypatch, tokens_across_dp):
+    experts = _make_experts(monkeypatch, ep_size=1, num_experts=4)
+    seen = {}
+
+    class Runtime:
+        def __init__(self, name):
+            self.name = name
+
+        def forward(self, x, topk_weights, topk_ids):
+            seen[self.name] = topk_ids
+            return x
+
+    experts._runtimes = [(128, Runtime("decode")), (4096, Runtime("prefill"))]
+    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        mega_moe_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            dp_metadata=SimpleNamespace(
+                num_tokens_across_dp_cpu=torch.tensor(tokens_across_dp)
+            )
+        ),
+    )
+    logical_to_physical = torch.tensor([[[3], [2], [1], [0]]])
+    monkeypatch.setattr(
+        mega_moe_module,
+        "eplb_map_to_physical_and_record",
+        lambda topk_ids, logical_to_physical_map, **kwargs: (
+            logical_to_physical_map[topk_ids.long(), 0].to(topk_ids.dtype)
+        ),
+    )
+    experts.set_eplb_state(
+        0,
+        torch.zeros(1, 4, dtype=torch.int32),
+        logical_to_physical,
+        torch.ones(1, 4, dtype=torch.long),
+    )
+    experts.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+
+    topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    experts(torch.zeros(2, HIDDEN), torch.ones(2, 2), topk_ids)
+
+    # Whichever runtime the DP-wide token count selects gets physical ids.
+    (ids,) = seen.values()
+    torch.testing.assert_close(ids, torch.tensor([[3, 2], [1, 0]], dtype=torch.int32))
+
+
+class _MixtureOfExpertsModel(DeepseekV4AiterMegaMoEMixtureOfExperts):
+    def __init__(self, layers, use_mega_moe):
+        self.config = SimpleNamespace()
+        self.model = SimpleNamespace(layers=layers, use_mega_moe=use_mega_moe)
+
+    set_moe_parameters = DeepseekV4ForCausalLM.set_moe_parameters
+
+
+def _moe_decoder_layer(experts):
+    moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
+    torch.nn.Module.__init__(moe)
+    moe.experts = experts
+    moe.n_routed_experts = 4
+    moe.n_shared_experts = 1
+    moe.n_logical_experts = 4
+    moe.n_physical_experts = 4
+    moe.n_redundant_experts = 0
+    moe.n_local_physical_experts = 2
+    layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
+    torch.nn.Module.__init__(layer)
+    layer.ffn = moe
+    return layer
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("use_mega_moe", [False, True])
+def test_mixture_of_experts_registers_mega_moe_layers_only(monkeypatch, use_mega_moe):
+    experts = [_make_experts(monkeypatch, ep_size=2, num_experts=4) for _ in range(2)]
+    layers = [_moe_decoder_layer(e) for e in experts]
+    model = _MixtureOfExpertsModel(layers + [torch.nn.Identity()], use_mega_moe)
+
+    model.set_moe_parameters()
+
+    assert is_mixture_of_experts(model) == use_mega_moe
+    if use_mega_moe:
+        assert model.moe_layers == experts
+        assert model.num_logical_experts == model.num_physical_experts == 4
+        assert model.num_local_physical_experts == 2
+        assert model.num_redundant_experts == 0
+        assert model.num_expert_groups == 1
+    else:
+        assert model.moe_layers == []

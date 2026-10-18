@@ -63,6 +63,40 @@ from .rebalance_execute import (
 logger = init_logger(__name__)
 
 
+def rank_load_imbalance(
+    physical_to_logical_map: torch.Tensor,
+    logical_loads: torch.Tensor,
+    ep_size: int,
+) -> float:
+    """Load imbalance of a placement; 1.0 means every rank is equally loaded.
+
+    ``physical_to_logical_map`` is ``[layers, physical experts]`` and
+    ``logical_loads`` is ``[layers, logical experts]``; replicas of a logical
+    expert split its load evenly. The result is the sum over layers of the
+    busiest rank's load divided by the sum over layers of the mean rank load.
+    Every MoE layer waits for its slowest rank, so the max is taken per layer:
+    summing a rank's load over all layers first would let skews of different
+    layers cancel out.
+    """
+    mapping = physical_to_logical_map.to(device=logical_loads.device, dtype=torch.long)
+    replica_counts = torch.zeros_like(logical_loads)
+    replica_counts.scatter_add_(
+        dim=1,
+        index=mapping,
+        src=torch.ones_like(mapping, dtype=logical_loads.dtype),
+    )
+    loads_per_replica = torch.gather(
+        logical_loads / replica_counts.clamp_min(1), dim=1, index=mapping
+    )
+    loads_per_rank = loads_per_replica.reshape(logical_loads.shape[0], ep_size, -1).sum(
+        dim=2
+    )
+    mean_load = loads_per_rank.mean(dim=1).sum()
+    if mean_load == 0:
+        return 1.0
+    return (loads_per_rank.max(dim=1).values.sum() / mean_load).item()
+
+
 def _compute_eplb_load_stats(
     num_tokens_per_rank: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -268,6 +302,11 @@ class EplbState:
         """
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
+        """
+        self.num_rebalances: int = 0
+        """
+        Number of rearrangement points reached so far, compared against
+        `eplb_config.max_rebalances`. Identical on all EP ranks.
         """
         self.should_record_tensor: torch.Tensor | None = None
         """
@@ -593,6 +632,14 @@ class EplbState:
             self.rearrange(is_profile=True)
             return
 
+        if self._rebalance_limit_reached() and not any(
+            eplb_model_state.rebalanced
+            for eplb_model_state in self.model_states.values()
+        ):
+            # The placement is final: no more counting, recording or
+            # rearranging (every rank stops on the same step).
+            return
+
         if (
             log_stats
             and self.expert_rearrangement_step
@@ -691,8 +738,19 @@ class EplbState:
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+            self.num_rebalances += 1
+            if self._rebalance_limit_reached() and ep_group.rank() == 0:
+                logger.info(
+                    "EPLB reached max_rebalances=%d; keeping the current "
+                    "expert placement.",
+                    self.num_rebalances,
+                )
 
         self._update_layer_should_record(log_stats=log_stats)
+
+    def _rebalance_limit_reached(self) -> bool:
+        max_rebalances = self.parallel_config.eplb_config.max_rebalances
+        return 0 < max_rebalances <= self.num_rebalances
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -700,7 +758,10 @@ class EplbState:
         Recording is enabled when we are close to either:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
+        Never once `eplb_config.max_rebalances` rearrangements have happened.
         """
+        if self._rebalance_limit_reached():
+            return False
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
@@ -883,40 +944,13 @@ class EplbState:
                 ):
                     logical_loads = global_expert_load_window.float()
                     ep_size = ep_group.size()
-
-                    def rank_load_imbalance(
-                        mapping: torch.Tensor,
-                        logical_loads: torch.Tensor = logical_loads,
-                        ep_size: int = ep_size,
-                    ) -> float:
-                        mapping = mapping.to(
-                            device=logical_loads.device,
-                            dtype=torch.long,
-                        )
-                        replica_counts = torch.zeros_like(logical_loads)
-                        replica_counts.scatter_add_(
-                            dim=1,
-                            index=mapping,
-                            src=torch.ones_like(mapping, dtype=logical_loads.dtype),
-                        )
-                        loads_per_replica = torch.gather(
-                            logical_loads / replica_counts.clamp_min(1),
-                            dim=1,
-                            index=mapping,
-                        )
-                        loads_per_rank = loads_per_replica.reshape(
-                            logical_loads.shape[0], ep_size, -1
-                        ).sum(dim=(0, 2))
-                        mean_load = loads_per_rank.mean()
-                        if mean_load == 0:
-                            return 1.0
-                        return (loads_per_rank.max() / mean_load).item()
-
                     current_imbalance = rank_load_imbalance(
-                        eplb_model_state.physical_to_logical_map
+                        eplb_model_state.physical_to_logical_map,
+                        logical_loads,
+                        ep_size,
                     )
                     proposed_imbalance = rank_load_imbalance(
-                        new_physical_to_logical_map
+                        new_physical_to_logical_map, logical_loads, ep_size
                     )
                     relative_improvement = (
                         current_imbalance - proposed_imbalance
@@ -926,6 +960,12 @@ class EplbState:
                         logger.info(
                             "[EPLB] Skip rearrange: imbalance %.4f -> "
                             "%.4f (no material gain)",
+                            current_imbalance,
+                            proposed_imbalance,
+                        )
+                    elif is_main_rank:
+                        logger.info(
+                            "[EPLB] Rearrange: imbalance %.4f -> %.4f",
                             current_imbalance,
                             proposed_imbalance,
                         )

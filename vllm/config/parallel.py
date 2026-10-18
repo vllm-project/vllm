@@ -77,6 +77,13 @@ class EPLBConfig:
     num_redundant_experts: int = Field(default=0, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
+    max_rebalances: int = Field(default=0, ge=0)
+    """
+    Stop rearranging experts after this many rearrangement points (a point
+    whose new placement brings no gain and is skipped also counts). The last
+    placement is kept and expert load recording stops. 0 means no limit.
+    """
+
     log_balancedness: bool = False
     """
     Log the balancedness each step of expert parallelism.
