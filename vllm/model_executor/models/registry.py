@@ -611,6 +611,10 @@ _MULTIMODAL_MODELS = {
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "VibeVoiceAsrForConditionalGeneration": (
+        "vibevoice_asr",
+        "VibeVoiceAsrForConditionalGeneration",
+    ),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
@@ -733,10 +737,6 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "TransformersMultiModalForCausalLM",
     ),
     "HunYuanVLForConditionalGeneration": (
-        "transformers",
-        "TransformersMultiModalForCausalLM",
-    ),
-    "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
