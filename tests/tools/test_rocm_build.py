@@ -47,6 +47,5 @@ def test_runtime_key_covers_runtime_inputs():
 
 
 def test_stack_key_covers_stack_inputs():
-    for stack in ("rocm", "rocm_72"):
-        dockerfile = (ROOT / f"docker/Dockerfile.{stack}_base").read_text()
-        assert context_sources(dockerfile) <= key_paths("Ks", stack=stack)
+    dockerfile = (ROOT / "docker/Dockerfile.rocm_base").read_text()
+    assert context_sources(dockerfile) <= key_paths("Ks", stack="rocm")

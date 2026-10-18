@@ -5,7 +5,7 @@
 # Upload ROCm wheels to S3 with proper index generation
 #
 # Usage: upload-rocm-wheels.sh <stack> <dir>
-#   stack  rocm (TheRock) | rocm_72;  dir  the stack's wheels plus the vLLM wheel
+#   stack  rocm (TheRock);  dir  the stack's wheels plus the vLLM wheel
 #
 # Required environment variables:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or IAM role)

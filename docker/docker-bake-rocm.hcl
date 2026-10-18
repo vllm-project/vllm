@@ -50,10 +50,6 @@ target "stack-rocm" {
   inherits   = ["_stack"]
   dockerfile = "docker/Dockerfile.rocm_base"
 }
-target "stack-rocm_72" {   # ROCm 7.2 (apt), kept for a transition period
-  inherits   = ["_stack"]
-  dockerfile = "docker/Dockerfile.rocm_72_base"
-}
 target "stack-wheels" {
   inherits = ["stack-${STACK}"]
   target   = "wheels"
