@@ -339,15 +339,16 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._realtime_context_policy = True
 
         session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
+        # Two outputs; the final sampled one (11) is not computed yet.
         session._all_token_ids.extend([10, 11])
-        session.num_computed_tokens = 5
+        session.num_computed_tokens = 4
 
         new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5, 6])
         update = StreamingUpdate.from_request(new_request)
         scheduler._update_request_as_session(session, update)
 
-        assert session.prompt_token_ids == [1, 2, 3, 10, 11, 4, 5, 6]
-        assert session.num_computed_tokens == 5
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5, 6]
+        assert session.num_computed_tokens == 4
 
     def test_process_streaming_requests_with_finish_session(self):
         """Test that a non-resumable request signals stream completion.
