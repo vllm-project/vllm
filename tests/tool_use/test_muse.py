@@ -26,6 +26,7 @@ a real tokenizer live in ``test_muse_parse_delta.py``.
 """
 
 import json
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
 
@@ -34,6 +35,7 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
+from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
 R: MuseReasoningParser
@@ -553,3 +555,61 @@ def test_channel_boundaries_match_streaming(raw, reasoning, content):
                 contents.append(delta.content or "")
         assert "".join(reasons) == (reasoning or "")
         assert "".join(contents) == (content or "")
+
+
+@pytest.mark.parametrize(
+    "value", ["25", "true", "null", "[1,2]", '{"x":1}', "3%", "1,500", " 25 "]
+)
+@pytest.mark.parametrize("request_kind", ["chat", "responses"])
+@pytest.mark.parametrize("parser_class", [MuseToolParser, MuseGlimmerToolParser])
+def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_class):
+    """String schemas disambiguate ATEM values; Glimmer keeps legacy decoding."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "count": {"type": "integer"},
+            "items": {"type": "array", "items": {"type": "integer"}},
+        },
+    }
+    function = {"name": "echo", "parameters": parameters}
+    if request_kind == "chat":
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[],
+            tools=[{"type": "function", "function": function}],
+        )
+    else:
+        request = ResponsesRequest(input="hi", tools=[{"type": "function", **function}])
+    raw = (
+        'to=echo.echo<|message|><atem:function_calls><atem:invoke name="echo.echo">'
+        f'<atem:parameter name="text">{value}</atem:parameter>'
+        '<atem:parameter name="count">25</atem:parameter>'
+        '<atem:parameter name="items">[1,2]</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eot|>"
+    )
+    expected_text = value
+    if parser_class is MuseGlimmerToolParser:
+        with suppress(ValueError):
+            expected_text = json.loads(value)
+    expected = {"text": expected_text, "count": 25, "items": [1, 2]}
+    parser = parser_class(object())
+    calls = parser.extract_tool_calls(raw, request).tool_calls
+    assert len(calls) == 1
+    assert calls[0].function.name == "echo"
+    assert json.loads(calls[0].function.arguments) == expected
+
+    for chunk in (1, 17, len(raw)):
+        parser = parser_class(object())
+        calls = []
+        for end in range(chunk, len(raw) + chunk, chunk):
+            previous, current = raw[: end - chunk], raw[:end]
+            delta = parser.extract_tool_calls_streaming(
+                previous, current, current[len(previous) :], [], [], [], request
+            )
+            if delta and delta.tool_calls:
+                calls.extend(delta.tool_calls)
+        assert len(calls) == 1
+        name, arguments = _fn_of(calls[0])
+        assert name == "echo"
+        assert json.loads(arguments) == expected

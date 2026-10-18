@@ -7,6 +7,7 @@ from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
 
 class MuseGlimmerToolParser(MuseToolParser):
+    _preserve_string_parameters = False
     _reasoning_recipients = ("self",)
     _content_recipients = (None, "user")
     _non_tool_recipients = ("self", "user")
