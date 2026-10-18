@@ -15,7 +15,11 @@ def _describe(tensor):
     return f"a different tensor of shape {tuple(tensor.shape)}"
 
 
-def _import_mori_prepare_finalize(monkeypatch):
+# The number of compute units the launch-grid config is capped at in the tests.
+_FAKE_COMPUTE_UNITS = 256
+
+
+def _import_mori_prepare_finalize(monkeypatch, compute_units=_FAKE_COMPUTE_UNITS):
     # This is a contract test for vLLM's adapter; it does not need a real MoRI
     # installation or GPU kernels.
     fake_mori = types.ModuleType("mori")
@@ -25,16 +29,27 @@ def _import_mori_prepare_finalize(monkeypatch):
     monkeypatch.setitem(sys.modules, "mori", fake_mori)
     module_name = "vllm.model_executor.layers.fused_moe.prepare_finalize.mori"
     sys.modules.pop(module_name, None)
-    return importlib.import_module(module_name)
+    module = importlib.import_module(module_name)
+    # _mori_launch_config() asks the platform for its CU count; pin it so the
+    # grid math is deterministic and needs no GPU.
+    monkeypatch.setattr(
+        "vllm.utils.platform_utils.num_compute_units",
+        lambda device_id=0: compute_units,
+        raising=False,
+    )
+    return module
 
 
 class _FakeMoriOp:
     def __init__(self):
         self.dispatch_indices = None
         self.combine_indices = None
+        self.dispatch_grid = None
+        self.combine_grid = None
 
-    def dispatch(self, a1, weights, scale, indices):
+    def dispatch(self, a1, weights, scale, indices, block_num=None, warp_per_block=None):
         self.dispatch_indices = indices
+        self.dispatch_grid = (block_num, warp_per_block)
         # Model the global dispatched layout seen with EP=16: the experts need
         # these IDs, but passing them to combine violates MoRI's contract.
         dispatch_indices = indices.repeat(16, 1)
@@ -49,8 +64,11 @@ class _FakeMoriOp:
             recv_token_num,
         )
 
-    def combine(self, fused_expert_output, weights, indices):
+    def combine(
+        self, fused_expert_output, weights, indices, block_num=None, warp_per_block=None
+    ):
         self.combine_indices = indices
+        self.combine_grid = (block_num, warp_per_block)
         return (fused_expert_output,)
 
 
@@ -103,6 +121,9 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         f"shape {router_shape}, but it received "
         f"{_describe(mori_op.dispatch_indices)}"
     )
+    assert mori_op.dispatch_grid == mori_module._mori_launch_config(
+        hidden_states.shape[0]
+    ), "dispatch() must get the (block_num, warp_per_block) _mori_launch_config picks"
 
     output = torch.empty_like(hidden_states)
     adapter.finalize(
@@ -126,3 +147,33 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         "instead of this rank's pre-dispatch routing, which silently corrupts "
         "the reduction (ROCm/mori#475)"
     )
+    assert mori_op.combine_grid == mori_module._mori_launch_config(
+        output.shape[0]
+    ), "combine() must get the (block_num, warp_per_block) _mori_launch_config picks"
+
+
+def test_mori_launch_config_is_wide_at_decode_and_prefill(monkeypatch):
+    """The tuned MI355X default is a wide 128x16 grid at both decode and
+    prefill width (DSpark inflates the real decode token count ~7x, so the
+    decode batch is out of the single-token regime and wants a wide grid)."""
+    mori_module = _import_mori_prepare_finalize(monkeypatch, compute_units=256)
+    cfg = mori_module._mori_launch_config
+    assert cfg(8) == (128, 16)
+    assert cfg(224) == (128, 16)
+    assert cfg(mori_module._MORI_WIDE_LAUNCH_MIN_TOKENS) == (128, 16)
+
+
+def test_mori_launch_config_block_num_capped_by_compute_units(monkeypatch):
+    """block_num is capped at the CU count so the grid-wide barrier stays
+    resident; warp_per_block is unaffected."""
+    mori_module = _import_mori_prepare_finalize(monkeypatch, compute_units=100)
+    assert mori_module._mori_launch_config(224) == (100, 16)
+
+
+def test_mori_launch_config_env_override(monkeypatch):
+    """The grid is env-tunable per platform (here, back to the original narrow
+    decode grid)."""
+    monkeypatch.setenv("VLLM_MORI_DECODE_BLOCKS", "64")
+    monkeypatch.setenv("VLLM_MORI_DECODE_WARPS", "4")
+    mori_module = _import_mori_prepare_finalize(monkeypatch, compute_units=256)
+    assert mori_module._mori_launch_config(224) == (64, 4)
