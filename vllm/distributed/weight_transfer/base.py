@@ -354,6 +354,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     supports_draft_weight_update: bool = True
 
+    rolls_back_failed_updates: bool = False
+    """Whether `abort_weight_update` puts the pre-update weights back.
+
+    If so, a failed `finish_weight_update` ends the session: the worker rolls
+    the model back and the trainer resends the update. Otherwise the session
+    stays open, so the trainer can retry `finish_weight_update`.
+    """
+
     defers_processing: bool = False
     """Whether `update_weights` returns before the weights are on the device.
 
@@ -491,8 +499,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     def abort_weight_update(self) -> None:
         """Undo an update that will not reach `finish_weight_update`.
 
-        The worker calls this when `start_weight_update`, `update_weights` or
-        `finish_weight_update` raises, before it drops the session and resets
+        The worker calls this when `start_weight_update` or `update_weights`
+        raises, and when `finish_weight_update` raises on an engine that sets
+        `rolls_back_failed_updates`, before it drops the session and resets
         the target model. Checkpoint-format engines put the weights the reload
         started from back in place here (`abort_layerwise_reload`) so the model
         keeps serving and the trainer can resend the update; engines that apply

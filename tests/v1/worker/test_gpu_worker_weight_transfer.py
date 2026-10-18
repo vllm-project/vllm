@@ -26,11 +26,13 @@ class _RecordingEngine:
         raise_on_start: bool = False,
         raise_on_finish: bool = False,
         raise_on_abort: bool = False,
+        rolls_back_failed_updates: bool = True,
     ):
         self.raise_on_update = raise_on_update
         self.raise_on_start = raise_on_start
         self.raise_on_finish = raise_on_finish
         self.raise_on_abort = raise_on_abort
+        self.rolls_back_failed_updates = rolls_back_failed_updates
         self.started = False
         self.finished = False
         self.closed = False
@@ -305,6 +307,24 @@ def test_finish_error_lets_engine_abort_and_drops_session():
     assert engine.calls == ["start", "update", "finish", "abort", "reset"]
     assert worker._weight_update_active is False
     assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_finish_error_keeps_session_without_rollback():
+    # With nothing to roll back, a failed finish can be retried.
+    engine = _RecordingEngine(raise_on_finish=True, rolls_back_failed_updates=False)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+    assert engine.calls == ["start", "update", "finish"]
+    assert worker._weight_update_active is True
+
+    engine.raise_on_finish = False
+    Worker.finish_weight_update(worker)
+    assert engine.calls == ["start", "update", "finish", "finish", "reset"]
+    assert worker._weight_update_active is False
 
 
 def test_abort_error_does_not_hide_the_update_error():

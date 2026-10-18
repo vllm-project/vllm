@@ -124,6 +124,8 @@ class NCCLWeightTransferEngine(
     `load_weights` using the layerwise reload lifecycle.
     """
 
+    rolls_back_failed_updates = True
+
     # Define backend-specific dataclass types
     init_info_cls = NCCLWeightTransferInitInfo
     update_info_cls = NCCLWeightTransferUpdateInfo

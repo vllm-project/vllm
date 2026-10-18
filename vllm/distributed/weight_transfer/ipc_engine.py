@@ -127,6 +127,8 @@ class IPCWeightTransferEngine(
     memory between processes on the same node.
     """
 
+    rolls_back_failed_updates = True
+
     # Define backend-specific dataclass types
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
