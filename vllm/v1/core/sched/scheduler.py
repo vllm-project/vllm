@@ -1805,7 +1805,6 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
-        is_prefill_chunk: list[bool] = []
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1840,9 +1839,6 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
-            # Capture state before _update_after_schedule advances counters.
-            # The resumed list is an explicit replay boundary.
-            is_prefill_chunk.append(req.is_prefill_chunk or idx >= num_running_reqs)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1852,7 +1848,6 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
-            is_prefill_chunk=is_prefill_chunk,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
@@ -3451,8 +3446,7 @@ class Scheduler(SchedulerInterface):
                     )
                     request.num_computed_tokens = req_num_computed_tokens
 
-                # Recompute starts a new prefill lifecycle. Keep the state in
-                # the scheduler and propagate it with CachedRequestData.
+                # Recompute starts a new prefill lifecycle.
                 request.is_prefill_chunk = True
                 self._inflight_prefills.add(request)
 

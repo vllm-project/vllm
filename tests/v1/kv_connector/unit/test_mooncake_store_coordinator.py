@@ -497,7 +497,7 @@ def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
     )
     assert hit == 64
     loaded = [i for i, v in enumerate(coord.load_mask(hashes, hit)[1]) if v]
-    # SlidingWindowManager.allocate_external_computed_blocks keeps these real.
+    # add_local_computed_blocks pads only the blocks below the retained window.
     first_allocated = (hit - swa.sliding_window - extra_retained_tokens + 1) // 8
     assert loaded == list(range(first_allocated, hit // 8))
 

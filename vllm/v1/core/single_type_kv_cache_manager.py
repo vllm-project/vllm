@@ -1171,40 +1171,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
 
-    def allocate_external_computed_blocks(
-        self,
-        request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-        record_for_zeroing: bool = True,
-    ) -> None:
-        # External hits include the MTP replay tail, but not EAGLE proof blocks.
-        # Do not cache extra retained blocks that the connector never writes.
-        num_total_computed_tokens = (
-            num_local_computed_tokens + num_external_computed_tokens
-        )
-        num_unattended_blocks = (
-            max(
-                0,
-                num_total_computed_tokens
-                - self.sliding_window
-                - self.extra_retained_tokens
-                + 1,
-            )
-            // self.block_size
-        )
-        req_blocks = self.req_to_blocks[request_id]
-        if len(req_blocks) < num_unattended_blocks:
-            req_blocks.extend(
-                [self._null_block] * (num_unattended_blocks - len(req_blocks))
-            )
-        super().allocate_external_computed_blocks(
-            request_id,
-            num_local_computed_tokens,
-            num_external_computed_tokens,
-            record_for_zeroing,
-        )
-
 
 class CircularBufferManager(FullAttentionManager):
     """Claims the ring's single block per request; prefix caching disabled."""
