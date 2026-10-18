@@ -1426,7 +1426,8 @@ def override_envs_for_invariance():
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
     import torch._inductor.config as inductor_config
 
-    inductor_config.batch_invariant = True
+    if hasattr(inductor_config, "batch_invariant"):
+        inductor_config.batch_invariant = True
 
 
 def init_batch_invariance():
