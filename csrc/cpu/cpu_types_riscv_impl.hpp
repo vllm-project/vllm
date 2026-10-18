@@ -513,6 +513,8 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     // Matches the clamping strategy used by x86 AVX-512 and ARM NEON.
     constexpr float exp_lo = -87.3365447505f;  // ln(FLT_MIN)
     constexpr float exp_hi = 88.7228391117f;   // ln(FLT_MAX)
+    rvv_mask_f32x8_t low_mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_256, BOOL_256)(
+        reg, exp_lo, VEC_ELEM_NUM);
     fixed_fp32x8_t x = RVVI(__riscv_vfmin_vf_f32, LMUL_256)(
         RVVI(__riscv_vfmax_vf_f32, LMUL_256)(reg, exp_lo, VEC_ELEM_NUM), exp_hi,
         VEC_ELEM_NUM);
@@ -554,8 +556,12 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     fixed_fp32x8_t scale = RVVI4(__riscv_vreinterpret_v_i32, LMUL_256, _f32,
                                  LMUL_256)(exponent_bits);
 
-    return FP32Vec8(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, scale, VEC_ELEM_NUM));
+    fixed_fp32x8_t result =
+        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, scale, VEC_ELEM_NUM);
+    fixed_fp32x8_t zeros =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.0f, VEC_ELEM_NUM);
+    return FP32Vec8(RVVI(__riscv_vmerge_vvm_f32, LMUL_256)(
+        result, zeros, low_mask, VEC_ELEM_NUM));
   }
 
   FP32Vec8 tanh() const {
@@ -783,6 +789,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     // Matches the clamping strategy used by x86 AVX-512 and ARM NEON.
     constexpr float exp_lo = -87.3365447505f;  // ln(FLT_MIN)
     constexpr float exp_hi = 88.7228391117f;   // ln(FLT_MAX)
+    rvv_mask_f32x16_t low_mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_512,
+                                       BOOL_512)(reg, exp_lo, VEC_ELEM_NUM);
     fixed_fp32x16_t x = RVVI(__riscv_vfmin_vf_f32, LMUL_512)(
         RVVI(__riscv_vfmax_vf_f32, LMUL_512)(reg, exp_lo, VEC_ELEM_NUM), exp_hi,
         VEC_ELEM_NUM);
@@ -822,8 +830,12 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
         RVVI4(__riscv_vreinterpret_v_i32, LMUL_512, _f32, LMUL_512)(
             RVVI(__riscv_vsll_vx_i32, LMUL_512)(biased_exp, 23, VEC_ELEM_NUM));
 
-    return FP32Vec16(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, scale, VEC_ELEM_NUM));
+    fixed_fp32x16_t result =
+        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, scale, VEC_ELEM_NUM);
+    fixed_fp32x16_t zeros =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.0f, VEC_ELEM_NUM);
+    return FP32Vec16(RVVI(__riscv_vmerge_vvm_f32, LMUL_512)(
+        result, zeros, low_mask, VEC_ELEM_NUM));
   }
 
   FP32Vec16 tanh() const {
