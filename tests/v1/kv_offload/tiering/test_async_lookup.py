@@ -370,6 +370,76 @@ class TestAsyncLookupManager:
         finally:
             mgr.shutdown()
 
+    def test_mark_miss_applies_to_pending_result(self):
+        """A pending probe keeps its submission state until it resolves."""
+        key = _key(1)
+        mgr = InMemoryLookupManager(existing_keys={key})
+        ctx = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        try:
+            assert mgr.lookup(key, ctx) is None
+            assert mgr.lookup(key, ctx_b) is None
+            token = mgr.lookup_token(key, ctx.req_id)
+            mgr.mark_miss([token])
+            state = mgr._current_state_by_key[key]
+            assert state.submission_status is LookupSubmissionStatus.PENDING
+            assert state.request_statuses[ctx.req_id] is LookupResultStatus.MARKED_MISS
+            assert mgr.lookup(key, ctx) is None
+            assert mgr.lookup(key, ctx_b) is None
+
+            mgr.flush()
+            mgr._results_ready.wait()
+            mgr._results_ready.clear()
+            assert mgr.lookup(key, ctx) is False
+            assert mgr.lookup(key, ctx_b) is True
+            assert state.submission_status is LookupSubmissionStatus.RESOLVED
+            assert state.request_statuses[ctx.req_id] is LookupResultStatus.MARKED_MISS
+        finally:
+            mgr.shutdown()
+
+    def test_mark_miss_applies_to_in_flight_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An in-flight probe cannot overwrite a deferred request miss."""
+        key = _key(1)
+        mgr = InMemoryLookupManager(existing_keys={key})
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def blocking_lookup(keys, req_context):
+            probe_started.set()
+            assert release_probe.wait(timeout=5)
+            return [True for _ in keys]
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        ctx = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        try:
+            assert mgr.lookup(key, ctx) is None
+            assert mgr.lookup(key, ctx_b) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+
+            token = mgr.lookup_token(key, ctx.req_id)
+            mgr.mark_miss([token])
+            state = mgr._current_state_by_key[key]
+            assert state.submission_status is LookupSubmissionStatus.IN_FLIGHT
+            assert state.request_statuses[ctx.req_id] is LookupResultStatus.MARKED_MISS
+            assert mgr.lookup(key, ctx) is None
+            assert mgr.lookup(key, ctx_b) is None
+
+            release_probe.set()
+            batch = mgr._pending_results.get(timeout=5)
+            mgr._pending_results.put(batch)
+            mgr.drain_results()
+            assert mgr.lookup(key, ctx) is False
+            assert mgr.lookup(key, ctx_b) is True
+            assert state.submission_status is LookupSubmissionStatus.RESOLVED
+            assert state.request_statuses[ctx.req_id] is LookupResultStatus.MARKED_MISS
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
     @pytest.mark.parametrize("flushed", [True, False], ids=["in_flight", "pending"])
     def test_mark_miss_skips_newer_unresolved_probe(self, flushed: bool):
         """A failed load reported for an older generation of a key must not

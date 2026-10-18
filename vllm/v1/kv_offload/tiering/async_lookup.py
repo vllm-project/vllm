@@ -54,7 +54,7 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class LookupToken:
-    """Lookup key plus the request and generation that observed it."""
+    """Lookup key plus the request and generation that owns it."""
 
     key: OffloadKey
     req_id: str
@@ -203,19 +203,17 @@ class AsyncLookupManager(ABC):
             state.request_statuses[req_id] = request_status
             req_states[key] = state
         request_status = state.request_statuses[req_id]
-        if request_status is LookupResultStatus.PENDING:
+        if (
+            state.submission_status is not LookupSubmissionStatus.RESOLVED
+            or request_status is LookupResultStatus.PENDING
+        ):
             return None
         return request_status is LookupResultStatus.HIT
 
     def lookup_token(self, key: OffloadKey, req_id: str) -> LookupToken:
-        """Return the resolved lookup generation held by ``req_id``."""
+        """Return the lookup generation held by ``req_id``."""
         state = self._request_states.get(req_id, {}).get(key)
         assert state is not None, f"request {req_id!r} holds no lookup for {key!r}"
-        assert state.request_statuses[req_id] in (
-            LookupResultStatus.HIT,
-            LookupResultStatus.MISS,
-            LookupResultStatus.MARKED_MISS,
-        ), f"lookup for key {key!r} is unresolved"
         return LookupToken(key=key, req_id=req_id, generation=state.generation)
 
     def flush(self) -> None:
@@ -262,9 +260,13 @@ class AsyncLookupManager(ABC):
                 assert state.submission_status is LookupSubmissionStatus.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
                 # generation must not receive a second result; stale
-                # generations were discarded above.
+                # generations were discarded above. MARKED_MISS is allowed
+                # here because a failed load may correct a probe before it
+                # resolves; that request keeps MARKED_MISS when the result
+                # arrives.
                 assert all(
-                    status is LookupResultStatus.PENDING
+                    status
+                    in (LookupResultStatus.PENDING, LookupResultStatus.MARKED_MISS)
                     for status in state.request_statuses.values()
                 ), (
                     "cached key received a second lookup result; the "
@@ -280,15 +282,19 @@ class AsyncLookupManager(ABC):
                         state.request_statuses[req_id] = result_status
 
     def mark_miss(self, tokens: Collection[LookupToken]) -> None:
-        """Mark only the request that experienced a failed promotion."""
+        """Mark only the request that experienced a failed promotion.
+
+        The probe may still be pending or in flight. Its eventual result is
+        applied to the other requests in the generation while this request
+        keeps MARKED_MISS.
+        """
         for token in tokens:
             req_states = self._request_states.get(token.req_id)
             state = req_states.get(token.key) if req_states is not None else None
             if state is None or state.generation != token.generation:
                 continue
-            if state.submission_status is not LookupSubmissionStatus.RESOLVED:
-                continue
             if state.request_statuses.get(token.req_id) not in (
+                LookupResultStatus.PENDING,
                 LookupResultStatus.HIT,
                 LookupResultStatus.MISS,
                 LookupResultStatus.MARKED_MISS,
