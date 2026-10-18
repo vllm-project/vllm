@@ -15,7 +15,12 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.trace_builder import _GRANITE_SCENARIOS, _build_granite
-from vllm.parser.granite import GraniteParser, _granite_arg_converter
+from vllm.parser.granite import (
+    GraniteParser,
+    _granite_arg_converter,
+    _granite_arg_value_extender,
+    granite_config,
+)
 
 TOOL_TOKEN = "<|tool_call|>"
 TOOL_STRING = "<tool_call>"
@@ -136,6 +141,87 @@ class TestArgConverter:
     def test_non_object_arguments_rejected(self):
         with pytest.raises(ValueError, match="JSON object"):
             _granite_arg_converter('{"name": "x", "arguments": [1]}', False)
+
+
+class TestArgValueExtender:
+    def test_unit_positions(self):
+        # Not inside a top-level string value of ``arguments`` -> None.
+        assert _granite_arg_value_extender("") is None
+        assert _granite_arg_value_extender('{"name": "fn') is None
+        assert _granite_arg_value_extender('{"name": "fn", "arguments": {') is None
+        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k') is None
+        assert _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ') is None
+        assert (
+            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": 12') is None
+        )
+        assert (
+            _granite_arg_value_extender(
+                '{"name": "fn", "arguments": {"k": {"nested": "v'
+            )
+            is None
+        )
+        assert (
+            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": ["v') is None
+        )
+        assert (
+            _granite_arg_value_extender('{"name": "fn", "arguments": {"k": "v"}}')
+            is None
+        )
+        assert _granite_arg_value_extender('{"name": "fn", "arguments": [1') is None
+
+        # Open top-level string value -> extender handles plain text & escapes,
+        # bail-outs on unescaped closing quote.
+        ext = _granite_arg_value_extender(
+            '{"name": "fn", "arguments": {"code": "hello '
+        )
+        assert ext is not None
+        assert ext("world") == "world"
+        assert ext('\\"escaped\\"') == '\\"escaped\\"'
+        assert ext("trail\\") == "trail\\"
+        assert ext('"still_escaped') == '"still_escaped'
+        assert ext('done"') is None
+
+    def test_long_string_arg_calls_converter_constantly(
+        self, mock_tokenizer, mock_request, monkeypatch
+    ):
+        calls = 0
+
+        def counting_converter(raw: str, partial: bool) -> str:
+            nonlocal calls
+            calls += 1
+            return _granite_arg_converter(raw, partial)
+
+        granite_config.cache_clear()
+        monkeypatch.setattr(
+            "vllm.parser.granite._granite_arg_converter", counting_converter
+        )
+        try:
+            counts: dict[int, int] = {}
+            for n_lines in (20, 200):
+                calls = 0
+                body = "\\n".join(
+                    f"line {i}: x = {i} + \\\"quoted\\\" + 'single'"
+                    for i in range(n_lines)
+                )
+                text = (
+                    f'{TOOL_TOKEN} [{{"name": "write", '
+                    f'"arguments": {{"content": "{body}", "mode": "w"}}}}]'
+                )
+                p = GraniteParser(mock_tokenizer)
+                results = _stream(p, mock_request, text, chunk_size=1)
+                args = _collect_args(results)
+                assert json.loads(args[0]) == {
+                    "content": "\n".join(
+                        f"line {i}: x = {i} + \"quoted\" + 'single'"
+                        for i in range(n_lines)
+                    ),
+                    "mode": "w",
+                }
+                counts[n_lines] = calls
+            # A 10x longer string value must not trigger any extra converter calls.
+            assert counts[200] == counts[20]
+        finally:
+            granite_config.cache_clear()
 
 
 class TestNonStreaming:
