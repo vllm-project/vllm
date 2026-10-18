@@ -95,6 +95,8 @@ def test_shared_external_prefix_lifetime(monkeypatch, cancel):
     assert not scheduler._shared_load_owners
     assert not scheduler._shared_load_followers
     scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    # Complete the dispatched compute step before checking deferred frees.
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
     scheduler.schedule()
     assert_scheduler_empty(scheduler)
 
@@ -146,7 +148,7 @@ def test_shared_external_prefix_load_failure(
         assert not scheduler.kv_cache_manager.get_block_ids(follower.request_id)[0]
         assert all(block.ref_cnt == 0 for block in blocks)
         assert all(block.block_hash is None for block in blocks)
-        scheduler.schedule()
+        output = scheduler.schedule()
         assert follower.status == RequestStatus.RUNNING
         assert scheduler.connector.update_state_after_alloc.call_count >= 2
         assert all(
@@ -154,6 +156,7 @@ def test_shared_external_prefix_load_failure(
             for call in scheduler.connector.update_state_after_alloc.call_args_list[1:]
         )
     scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
     scheduler.schedule()
     assert_scheduler_empty(scheduler)
 
