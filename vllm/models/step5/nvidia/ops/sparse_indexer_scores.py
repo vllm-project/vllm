@@ -191,7 +191,7 @@ def decode_summary_scores(
     return scores[:, :capacity], metadata
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TABLE_ROW", "REGIONS"])
 def _paged_scores_sm90(
     Q,
     KV,
@@ -205,10 +205,10 @@ def _paged_scores_sm90(
     W_ROW: tl.constexpr,
     W_HEAD: tl.constexpr,
     KV_PAGE: tl.constexpr,
-    TABLE_ROW: tl.constexpr,
+    TABLE_ROW,
     TABLE_COL: tl.constexpr,
     LENGTH_STRIDE: tl.constexpr,
-    REGIONS: tl.constexpr,
+    REGIONS,
     NEXT_N: tl.constexpr,
     HEADS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
