@@ -22,9 +22,7 @@ class AiterCustomAllreduce:
 
     @classmethod
     def effective_max_size(cls) -> int:
-        """
-        Max input byte size eligible for AITER custom allreduce.
-        """
+        """Max input byte size eligible for AITER custom allreduce."""
         return cls.MAX_SIZE // 2
 
     def __init__(
@@ -32,6 +30,8 @@ class AiterCustomAllreduce:
         group: ProcessGroup,
         device: int | str | torch.device,
         max_size: int | None = None,
+        *,
+        register_graph_buffers: bool = True,
     ):
         from aiter.dist.device_communicators.custom_all_reduce import (
             CustomAllreduce as _AiterCustomAllreduce,
@@ -40,7 +40,10 @@ class AiterCustomAllreduce:
         if max_size is None:
             max_size = self.MAX_SIZE
 
-        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size)
+        kwargs = {}
+        if not register_graph_buffers:
+            kwargs["enable_register_for_capturing"] = False
+        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
 
     @property
     def aiter_ca(self):
@@ -55,6 +58,20 @@ class AiterCustomAllreduce:
 
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
         return self._impl.custom_all_reduce(inp)
+
+    def should_custom_ag(self, inp: torch.Tensor) -> bool:
+        return self._impl.should_custom_ag(inp)
+
+    def should_custom_rs(self, inp: torch.Tensor, dim: int) -> bool:
+        return self._impl.should_custom_rs(inp, dim)
+
+    def custom_all_gather(self, inp: torch.Tensor, dim: int = 0) -> torch.Tensor | None:
+        return self._impl.custom_all_gather(inp, dim=dim)
+
+    def custom_reduce_scatter(
+        self, inp: torch.Tensor, out: torch.Tensor, dim: int = 0
+    ) -> torch.Tensor | None:
+        return self._impl.custom_reduce_scatter(inp, out, dim=dim)
 
     def use_1stage_fused_ar_rms(self, inp: torch.Tensor) -> bool:
         """Whether AITER's fused allreduce+RMSNorm runs as its one-stage kernel.

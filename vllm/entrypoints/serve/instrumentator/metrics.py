@@ -74,7 +74,6 @@ class _EngineHealthCollector:
 
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
-
     registry = get_prometheus_registry()
 
     Instrumentator(

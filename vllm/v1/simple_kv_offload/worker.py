@@ -36,10 +36,12 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self._num_cpu_blocks_override = num_cpu_blocks
         self.disk_path = disk_path
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
@@ -90,6 +92,7 @@ class SimpleCPUOffloadWorker:
                 tensor (attention layers) or a list of tensors (Mamba layers
                 in hybrid models). All values are included for offloading
                 by resolving to their underlying raw storage.
+
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
@@ -158,7 +161,10 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        self.num_cpu_blocks = self._resolve_num_cpu_blocks(
+            self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
+            total_bytes_per_block,
+        )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
@@ -172,13 +178,27 @@ class SimpleCPUOffloadWorker:
         else:
             self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
 
+    def _resolve_num_cpu_blocks(self, capacity_bytes: int, bytes_per_block: int) -> int:
+        local_capacity = capacity_bytes // bytes_per_block
+        requested = self._num_cpu_blocks_override
+        if requested is None:
+            return max(1, local_capacity)
+        if type(requested) is not int or not 0 < requested <= local_capacity:
+            raise ValueError(
+                f"num_cpu_blocks={requested!r} must be between 1 and "
+                f"local offload capacity {local_capacity}"
+            )
+        return requested
+
     def _init_disk_mode(
         self,
         unique_gpu_caches: dict[str, torch.Tensor],
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        num_disk_slots = self._resolve_num_cpu_blocks(
+            self.disk_capacity_bytes, total_bytes_per_block
+        )
         self.num_cpu_blocks = num_disk_slots
 
         logger.info(
@@ -304,6 +324,7 @@ class SimpleCPUOffloadWorker:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
+
         """
         metadata = self._connector_metadata
         finished_recving: set[str] = set()

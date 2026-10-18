@@ -24,13 +24,15 @@
 //     of the 16x16 output, with 8 elements alternating M rows by lane_hi
 //     (lanes 0..15 = even rows, lanes 16..31 = odd rows). See the layout
 //     diagram on `gemm_q4_wmma_kernel_16x16_1w` below for the full mapping.
-//   * No native v_global_atomic_pk_add_{f16,bf16} on gfx11; the K-split
-//     epilogue (gridDim.z > 1) emulates packed atomic add via a CAS-32
-//     retry loop on a uint32 word covering 2 fp16/bf16 lanes. Within a
-//     block we shuffle adjacent lanes via shfl_xor first so each pair of
-//     output cols goes through a single atomic — no intra-block
-//     contention. K_SPLIT == 1 keeps the original direct-write path with
-//     each block owning its 16M × 16N output tile.
+//   * No native v_global_atomic_pk_add_{f16,bf16} on gfx11. The split-K
+//     epilogue therefore stores FP32 per-split partials to scratch and a
+//     separate pass reduces them in fixed ascending-z order with a single
+//     final low-precision rounding — deterministic by construction
+//     (PR #54706). K_SPLIT == 1 keeps the original direct-write path with
+//     each block owning its 16M × 16N output tile. The legacy pre-#54706
+//     design (a CAS-32 retry loop accumulating narrowed partials directly
+//     into c, order-dependent) is kept in the store path below the
+//     partials branch for A/B comparison only.
 
 #include <cstdint>
 
@@ -182,16 +184,19 @@ __forceinline__ __device__ void dequant_4bit_8_bf16_to_bf16(uint32_t qa,
 }
 
 // ---------------------------------------------------------------------------
-// Packed atomic-add helpers used by the K-split epilogue.
+// Packed atomic-add helpers — LEGACY (pre-#54706) K-split epilogue.
 //
-// When the kernel is launched with gridDim.z > 1, multiple K-segments
-// accumulate into the same 16x16 output tile and need atomic write-back.
-// gfx11 has no native v_global_atomic_pk_add_{f16,bf16}, so we issue a
+// When the kernel is launched with partials == nullptr and gridDim.z > 1,
+// multiple K-segments accumulate into the same 16x16 output tile and the
+// legacy path atomically adds narrowed partials into a pre-zeroed c via a
 // CAS-loop on a 32-bit word covering 2 packed fp16/bf16 lanes. Within a
 // block the kernel pairs adjacent lanes via shfl_xor first, so each pair
 // of cols (n=lane_lo even, lane_lo+1) goes through a SINGLE atomic — no
 // intra-block contention on the same uint32 target. Inter-block
 // contention from gridDim.z (4-way at K_SPLIT=4) is the residual cost.
+// The addition happens in bf16/fp16 AFTER narrowing, so the result depends
+// on CAS completion order — the nondeterminism PR #54706 replaces. Kept
+// for A/B comparison only; the shipped launchers never select it.
 // ---------------------------------------------------------------------------
 
 __forceinline__ __device__ void atomic_add_pk_f16(half2* addr, half2 val) {
@@ -230,12 +235,15 @@ __forceinline__ __device__ void atomic_add_pk_bf16(bf162_t* addr, bf162_t val) {
 // K-split factor heuristic. Returns the gridDim.z to use for a given K.
 // Aim: each block does at least ~16 K-tiles (= K=256) so the per-block
 // constant overhead (LDS init, kernel prologue) is amortised. Upper
-// bound K_SPLIT=4 to cap inter-block atomic contention to 4-way.
+// bound K_SPLIT=4 — historically to cap inter-block atomic contention to
+// 4-way under the legacy CAS epilogue; now it caps the FP32 scratch and
+// reduce-pass traffic the deterministic epilogue adds.
 //
 // For typical Qwen-class shapes K ∈ {4096, 5120, 11008}, all return 4.
-// Smaller K (e.g., embedding lookups) fall back to 1 (no split, no
-// atomic). K must be divisible by (K_SPLIT × 16) for the split to be
-// valid; the heuristic checks divisibility before raising the factor.
+// Smaller K (e.g., embedding lookups) fall back to 1: no split, no
+// scratch, direct store. K must be divisible by (K_SPLIT × 16) for the
+// split to be valid; the heuristic checks divisibility before raising
+// the factor.
 __host__ __device__ static inline int compute_wmma_k_split(int size_k) {
   if (size_k >= 1024 && size_k % 64 == 0) return 4;
   if (size_k >= 512 && size_k % 32 == 0) return 2;
@@ -245,17 +253,18 @@ __host__ __device__ static inline int compute_wmma_k_split(int size_k) {
 // M-and-N-aware K-split heuristic for the v3/v4/v5 launchers.
 //
 // The original `compute_wmma_k_split` was K-only and always returns 4 for
-// Qwen-class K, which over-subscribes wave slots and pays the atomic CAS
-// epilogue once-per-K-segment per output cell. With v3/v4/v5's larger
+// Qwen-class K, which over-subscribes wave slots and pays the split-K
+// epilogue (historically the atomic CAS; now FP32 scratch + reduce) once
+// per K-segment per output cell. With v3/v4/v5's larger
 // tiles (64M × 16/32/64N) and 4 resident waves per block, the no-split
 // grid is often already well-saturated on gfx1100's 96 CUs / 3072 wave
-// slots — adding gridDim.z just adds atomic overhead.
+// slots — adding gridDim.z just adds epilogue overhead.
 //
 // Heuristic: compute the no-split block count gridDim.x × gridDim.y, then
 // pick the smallest K_SPLIT that brings total waves to at least
 // ~2× over-subscription (~6000 waves for our 3072 slots, i.e. 1500 blocks
-// at 4 waves/block). Above that threshold, K_SPLIT=1 — direct write, no
-// atomic.
+// at 4 waves/block). Above that threshold, K_SPLIT=1: no scratch, no
+// reduce pass, direct store.
 //
 // Args:
 //   size_m, size_n, size_k     — GEMM dims
@@ -373,7 +382,11 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -471,25 +484,16 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
 
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-        // Permuted (act-order): scattered global reads, no vectorization.
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        // Sequential A reads: replace 16 single-element global_load_b16 with
-        // a bulk 32-byte copy. The AMDGPU backend lowers a memcpy of this
-        // size + alignment to two `global_load_b128` instructions. size_k is
-        // a multiple of 16 (TORCH_CHECK above) and k_tile increments by 16,
-        // so k_tile + 16 is always within bounds — no tail handling needed.
-        // Note: we memcpy into the whole vector (`&a_frag`) rather than
-        // `&a_frag[0]`; ext_vector_type element addresses aren't reliably
-        // valid C pointers across compiler versions.
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes (16 × 2)");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      // Sequential A reads: replace 16 single-element global_load_b16 with
+      // a bulk 32-byte copy. The AMDGPU backend lowers a memcpy of this
+      // size + alignment to two `global_load_b128` instructions. size_k is
+      // a multiple of 16 (TORCH_CHECK above) and k_tile increments by 16,
+      // so k_tile + 16 is always within bounds — no tail handling needed.
+      // Note: we memcpy into the whole vector (`&a_frag`) rather than
+      // `&a_frag[0]`; ext_vector_type element addresses aren't reliably
+      // valid C pointers across compiler versions.
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes (16 × 2)");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -534,7 +538,21 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
   //   lane_hi == 0  →  rows 0, 2, 4, ..., 14   (even rows)
   //   lane_hi == 1  →  rows 1, 3, 5, ..., 15   (odd rows)
   // c_acc[i] corresponds to actual row m = 2*i + lane_hi at column lane_lo.
-  if (gridDim.z > 1) {
+  if (partials != nullptr) {
+    // Deterministic split-K: plain FP32 store per (z, m, n); the reduce
+    // pass fixes the accumulation order.
+    const int out_n = n_tile + lane_lo;
+    if (out_n < size_n) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              c_acc[i];
+        }
+      }
+    }
+  } else if (gridDim.z > 1) {
     // K-split path: 4 (or whatever the split factor is) K-segments per
     // output cell contend → atomic accumulation. Caller has zero-init'd c.
     //
@@ -597,25 +615,104 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_16x16_1w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int, float*) {}
 #endif
+
+// Deterministic split-K reduction for the WMMA path: one thread per output
+// element sums the grid.z FP32 partial slices in fixed ascending-z order and
+// rounds to the output dtype exactly once. Order is a pure function of the
+// launch shape, so the result is bit-reproducible for identical inputs.
+// (Kernel bodies live in q_gemm_rdna3_wmma.cu alongside their users; HIP
+// kernel templates are not shared across translation units here.)
+template <typename T>
+__global__ void reduce_partials_wmma(const float* __restrict__ partials,
+                                     T* __restrict__ c, const int z_count,
+                                     const int size_m, const int size_n) {
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (long)size_m * size_n) return;
+  const int m = (int)(idx / size_n);
+  const int n = (int)(idx % size_n);
+  float acc = 0.0f;
+  for (int z = 0; z < z_count; ++z)
+    acc += partials[((long)z * size_m + m) * size_n + n];
+  if constexpr (std::is_same<T, half>::value) {
+    c[idx] = __float2half_rn(acc);
+  } else {
+    c[idx] = __float2bfloat16(acc);
+  }
+}
+
+// FP32 split-partial scratch for one deterministic WMMA launch.
+//
+// Coverage invariant — why at::empty is safe: every scratch slot that the
+// fixed-order reducer reads, i.e. every (z, m, n) with z < k_split,
+// m < size_m, n < size_n, has EXACTLY ONE writer:
+//   * z: grid.z == k_split and each z-block stores slice blockIdx.z;
+//   * m: grid.y tiles M by the kernel's M_TILE; within a tile, wave w owns
+//     rows [16w, 16w+16) and (i, lane_hi) with out_m = m_tile + 16w + 2i +
+//     lane_hi enumerates the 16 rows of the wave uniquely (i in [0,8),
+//     lane_hi in {0,1});
+//   * n: grid.x tiles N by N_TILE; each 16-wide accumulator slice stores
+//     columns n_base + lane_lo with lane_lo in [0,16) unique per column.
+// The out_m >= size_m / out_n >= size_n guards in the store paths skip
+// only slots the reducer never reads (it iterates m < size_m,
+// n < size_n), and the store index ((z * size_m + m) * size_n + n) stays
+// inside [0, k_split * size_m * size_n) — no out-of-bounds writes either.
+// This holds for every WMMA kernel variant in this TU (16x16_1w, 32x16_2w,
+// 64x16_4w, 64x32_4w, 64x64_4w, 128x64_k16, 128x64_k32) because they all
+// share the wave/lane output mapping above; the tiled launchers pass
+// size_m = rows of the current row tile so the same argument applies per
+// tile. A stale at::empty scratch therefore never reaches the reducer.
+//
+// One-way door: the legacy CAS epilogue (partials == nullptr &&
+// gridDim.z > 1, kept for A/B comparison) accumulates into the OUTPUT
+// instead and would require a zero-initialized c if re-selected.
+static inline at::Tensor alloc_wmma_partials(int k_split, int size_m,
+                                             int size_n) {
+  return at::empty(
+      {k_split, size_m, size_n},
+      at::TensorOptions()
+          .dtype(at::kFloat)
+          .device(at::Device(at::kCUDA, c10::cuda::current_device())));
+}
+
+template <typename T>
+static inline void launch_wmma_reduce(const at::Tensor& partials, T* c,
+                                      int k_split, int size_m, int size_n,
+                                      cudaStream_t stream) {
+  const long total = (long)size_m * size_n;
+  const int threads = 256;
+  const int blocks = (int)((total + threads - 1) / threads);
+  reduce_partials_wmma<T><<<blocks, threads, 0, stream>>>(
+      partials.data_ptr<float>(), c, k_split, size_m, size_n);
+}
 
 template <typename T>
 void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // 1 wave per block (32 lanes), 16x16 C tile per block. gridDim.z splits
   // K so that more blocks (and therefore more waves) are in flight; with
-  // K_SPLIT > 1 the kernel switches to atomic write-back at the epilogue.
+  // K_SPLIT > 1 the kernel stores FP32 partials and a reduce pass fixes
+  // the accumulation order.
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(32);
   dim3 grid((size_n + 15) / 16, (size_m + 15) / 16, k_split);
+  // k_split == 1: single writer per cell, the kernel's direct-store path is
+  // already deterministic. k_split > 1: FP32 partials + fixed-order reduce.
+  at::Tensor partials;
+  float* partials_ptr = nullptr;
+  if (k_split > 1) {
+    partials = alloc_wmma_partials(k_split, size_m, size_n);
+    partials_ptr = partials.data_ptr<float>();
+  }
   gemm_q4_wmma_kernel_16x16_1w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, partials_ptr);
+  if (k_split > 1)
+    launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -657,7 +754,11 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -757,16 +858,8 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     V16 a_frag, b_frag;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -793,7 +886,21 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
   // Each wave owns rows [m_tile + wave_id*16 .. + 16) of the output tile.
   const int m_tile_wave = m_tile + wave_id * 16;
 
-  if (gridDim.z > 1) {
+  if (partials != nullptr) {
+    // Deterministic split-K: plain FP32 store per (z, m, n); the reduce
+    // pass fixes the accumulation order.
+    const int out_n = n_tile + lane_lo;
+    if (out_n < size_n) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              c_acc[i];
+        }
+      }
+    }
+  } else if (gridDim.z > 1) {
     // K-split atomic path. Pair-shuffle within wave to halve atomic count.
     // shfl_xor here is wave-local (wave32 semantics) so each wave does its
     // own pairing — the two waves don't interact during the store.
@@ -844,16 +951,15 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_32x16_2w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fallback to v1 for size_m < 32. With M-tile=32 the v2 block has 2 waves
   // working on rows [0..15] and [16..31]; at M < 32 the second wave processes
   // out-of-range M rows (zero-padded a_frag → wmma produces nothing useful)
@@ -862,9 +968,9 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
   // max-num-seqs=32 lands at M≈32 steady-state; the M=16 sliver is edge),
   // but the fallback costs nothing and is the right shape.
   if (size_m < 32) {
-    launch_gemm_q4_wmma_16x16_1w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_16x16_1w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -875,9 +981,17 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split(size_k);
   dim3 block(64);
   dim3 grid((size_n + 15) / 16, (size_m + 31) / 32, k_split);
+  at::Tensor partials;
+  float* partials_ptr = nullptr;
+  if (k_split > 1) {
+    partials = alloc_wmma_partials(k_split, size_m, size_n);
+    partials_ptr = partials.data_ptr<float>();
+  }
   gemm_q4_wmma_kernel_32x16_2w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, partials_ptr);
+  if (k_split > 1)
+    launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -917,7 +1031,11 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1019,16 +1137,8 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     V16 a_frag, b_frag;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1051,7 +1161,21 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
   // ---- Store C ---- Each wave owns 16 M-rows of the output tile.
   const int m_tile_wave = m_tile + wave_id * 16;
 
-  if (gridDim.z > 1) {
+  if (partials != nullptr) {
+    // Deterministic split-K: plain FP32 store per (z, m, n); the reduce
+    // pass fixes the accumulation order.
+    const int out_n = n_tile + lane_lo;
+    if (out_n < size_n) {
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              c_acc[i];
+        }
+      }
+    }
+  } else if (gridDim.z > 1) {
     // K-split atomic path. Pair-shuffle within wave to halve atomic count.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;
@@ -1100,21 +1224,20 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x16_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v2 for M < 64 (would waste 1+ waves on out-of-range rows).
   if (size_m < 64) {
-    launch_gemm_q4_wmma_32x16_2w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_32x16_2w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -1122,9 +1245,17 @@ void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 16);
   dim3 block(128);
   dim3 grid((size_n + 15) / 16, (size_m + 63) / 64, k_split);
+  at::Tensor partials;
+  float* partials_ptr = nullptr;
+  if (k_split > 1) {
+    partials = alloc_wmma_partials(k_split, size_m, size_n);
+    partials_ptr = partials.data_ptr<float>();
+  }
   gemm_q4_wmma_kernel_64x16_4w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, partials_ptr);
+  if (k_split > 1)
+    launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -1158,7 +1289,11 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1264,16 +1399,8 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     V16 a_frag, b_frag0, b_frag1;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1302,6 +1429,22 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
   // Helper: store one v8fp32 accumulator's 8 outputs (covers 16 N-cols at
   // n_base via lane_lo + interleaved M rows m_tile_wave + 2i + lane_hi).
   auto store_acc = [&](const v8fp32& acc, int n_base) {
+    if (partials != nullptr) {
+      // Deterministic split-K: plain FP32 store per (z, m, n). Each element
+      // has one writer per z-slice and the reduce pass fixes the
+      // accumulation order, so the result is bit-reproducible.
+      const int out_n = n_base + lane_lo;
+      if (out_n >= size_n) return;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              acc[i];
+        }
+      }
+      return;
+    }
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
@@ -1352,23 +1495,22 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x32_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int, float*) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v3 when M < 64 (small-M decode/prefill stays on the
   // narrower 64M × 16N path) or when N < 32 (tile would waste a wave on
   // out-of-range cols).
   if (size_m < 64 || size_n < 32) {
-    launch_gemm_q4_wmma_64x16_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_64x16_4w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
@@ -1376,9 +1518,17 @@ void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 32);
   dim3 block(128);
   dim3 grid((size_n + 31) / 32, (size_m + 63) / 64, k_split);
+  at::Tensor partials;
+  float* partials_ptr = nullptr;
+  if (k_split > 1) {
+    partials = alloc_wmma_partials(k_split, size_m, size_n);
+    partials_ptr = partials.data_ptr<float>();
+  }
   gemm_q4_wmma_kernel_64x32_4w<T><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, partials_ptr);
+  if (k_split > 1)
+    launch_wmma_reduce<T>(partials, c, k_split, size_m, size_n, stream);
 }
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -1412,7 +1562,11 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1510,16 +1664,8 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) {
-          T v = a_row[b_q_perm[k_tile + i]];
-          a_frag[i] = bitcast_elem<T, E>(v);
-        }
-      } else {
-        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+      static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
@@ -1547,6 +1693,22 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
   // ---- Store C ---- Each wave owns 16M × 64N. Helper writes one acc slice.
   const int m_tile_wave = m_tile + wave_id * 16;
   auto store_acc = [&](const v8fp32& acc, int n_base) {
+    if (partials != nullptr) {
+      // Deterministic split-K: plain FP32 store per (z, m, n). Each element
+      // has one writer per z-slice and the reduce pass fixes the
+      // accumulation order, so the result is bit-reproducible.
+      const int out_n = n_base + lane_lo;
+      if (out_n >= size_n) return;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              acc[i];
+        }
+      }
+      return;
+    }
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
@@ -1611,7 +1773,11 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1712,8 +1878,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
       dequant_into(next_buf, k_next);
     }
 
-    // A-load: vectorized 256-bit. b_q_perm branch removed from V7 hot path
-    // to eliminate ~450 ISA instructions of dead code (6× icache bloat).
+    // A-load: vectorized 256-bit.
     V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
     if (a_row_ptr) {
       __builtin_memcpy(&a_frag, a_row_ptr + k_tile, sizeof(a_frag));
@@ -1741,6 +1906,22 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
   // ---- Store C ---- Each wave owns 16M × 64N.
   const int m_tile_wave = m_tile + wave_id * 16;
   auto store_acc = [&](const v8fp32& acc, int n_base) {
+    if (partials != nullptr) {
+      // Deterministic split-K: plain FP32 store per (z, m, n). Each element
+      // has one writer per z-slice and the reduce pass fixes the
+      // accumulation order, so the result is bit-reproducible.
+      const int out_n = n_base + lane_lo;
+      if (out_n >= size_n) return;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              acc[i];
+        }
+      }
+      return;
+    }
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
@@ -1810,7 +1991,11 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset,
+    // Deterministic split-K: non-null => each block stores its FP32 partial
+    // to partials[(z*size_m + m)*size_n + n]; a separate pass then reduces
+    // the z-slices in fixed order with a single low-precision rounding.
+    float* __restrict__ partials) {
   using E = typename WmmaNative<T>::elem;
   using V16 = typename WmmaNative<T>::v16;
 
@@ -1953,6 +2138,22 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
   // ---- Store C ---- Same as V7.
   const int m_tile_wave = m_tile + wave_id * 16;
   auto store_acc = [&](const v8fp32& acc, int n_base) {
+    if (partials != nullptr) {
+      // Deterministic split-K: plain FP32 store per (z, m, n). Each element
+      // has one writer per z-slice and the reduce pass fixes the
+      // accumulation order, so the result is bit-reproducible.
+      const int out_n = n_base + lane_lo;
+      if (out_n >= size_n) return;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          partials[((long)blockIdx.z * size_m + out_m) * size_n + out_n] =
+              acc[i];
+        }
+      }
+      return;
+    }
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
@@ -2006,53 +2207,80 @@ template <typename T>
 __global__ void gemm_q4_wmma_kernel_64x64_4w(const T*, const uint32_t*,
                                              const uint32_t*, const T*, T*,
                                              const int, const int, const int,
-                                             const int, const int, const int*) {
-}
+                                             const int, const int, float*) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k16(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               const int*) {}
+                                               const int, const int, float*) {}
 template <typename T>
 __global__ void gemm_q4_wmma_kernel_128x64_k32(const T*, const uint32_t*,
                                                const uint32_t*, const T*, T*,
                                                const int, const int, const int,
-                                               const int, const int,
-                                               const int*) {}
+                                               const int, const int, float*) {}
 #endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
-                                  const int* b_q_perm, T* c, int size_m,
-                                  int size_n, int size_k, int groups,
-                                  int zero_offset, cudaStream_t stream) {
+                                  T* c, int size_m, int size_n, int size_k,
+                                  int groups, int zero_offset,
+                                  cudaStream_t stream) {
   // Fall back to v4 when N < 64 (would waste 1+ waves on out-of-range cols).
   if (size_m < 64 || size_n < 64) {
-    launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_wmma_64x32_4w<T>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
     return;
   }
 
   // V8 (128M × 64N, K=32/iter, 8-wave dequant) when K%32==0 and gs≥32.
-  // Falls back to V7 otherwise. V7/V8 read A sequentially, so act-order
-  // (b_q_perm != null) must skip them and use v5, which honors the perm.
-  if (size_m >= 128 && b_q_perm == nullptr) {
+  // Falls back to V7 otherwise.
+  if (size_m >= 128) {
     const int k_split =
         compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
     const int groupsize = size_k / groups;
     dim3 block(256);
-    dim3 grid((size_n + 63) / 64, (size_m + 127) / 128, k_split);
-    if (size_k % 32 == 0 && groupsize >= 32 && (size_k / k_split) % 32 == 0) {
-      gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
-          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm);
-    } else {
-      gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
-          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-          zero_offset, b_q_perm);
+    if (k_split == 1) {
+      // Single writer per cell: the kernel's direct-store path is already
+      // deterministic — no scratch, no reduce pass (same invariant as the
+      // 64x64 path below). No row tiling either: tiling exists only to
+      // bound the FP32 scratch, which is not allocated here; grid.y tiles
+      // M by 128 internally for any size_m.
+      dim3 grid((size_n + 63) / 64, (size_m + 127) / 128, 1);
+      if (size_k % 32 == 0 && groupsize >= 32) {
+        gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
+            a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
+            groups, zero_offset, /*partials=*/nullptr);
+      } else {
+        gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
+            a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
+            groups, zero_offset, /*partials=*/nullptr);
+      }
+      return;
+    }
+    // Deterministic split-K, row-tiled so the FP32 scratch bound
+    //   scratch_bytes = k_split * TILE_M * size_n * 4
+    // stays independent of the caller's M (k_split <= 4 here).
+    constexpr int TILE_M = 512;
+    at::Tensor partials =
+        alloc_wmma_partials(k_split, std::min(TILE_M, size_m), size_n);
+    float* partials_ptr = partials.data_ptr<float>();
+    for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+      const int rows = std::min(TILE_M, size_m - row0);
+      const T* a_t = a + (long)row0 * size_k;
+      T* c_t = c + (long)row0 * size_n;
+      dim3 grid((size_n + 63) / 64, (rows + 127) / 128, k_split);
+      if (size_k % 32 == 0 && groupsize >= 32 && (size_k / k_split) % 32 == 0) {
+        gemm_q4_wmma_kernel_128x64_k32<T><<<grid, block, 0, stream>>>(
+            a_t, b_q_weight, b_qzeros, b_scales, c_t, rows, size_n, size_k,
+            groups, zero_offset, partials_ptr);
+      } else {
+        gemm_q4_wmma_kernel_128x64_k16<T><<<grid, block, 0, stream>>>(
+            a_t, b_q_weight, b_qzeros, b_scales, c_t, rows, size_n, size_k,
+            groups, zero_offset, partials_ptr);
+      }
+      launch_wmma_reduce<T>(partials, c_t, k_split, rows, size_n, stream);
     }
     return;
   }
@@ -2060,10 +2288,29 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
   // 4 waves per block (128 threads), 64M × 64N tile per block.
   const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 64);
   dim3 block(128);
-  dim3 grid((size_n + 63) / 64, (size_m + 63) / 64, k_split);
-  gemm_q4_wmma_kernel_64x64_4w<T><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  if (k_split == 1) {
+    // Single writer per cell: the kernel's direct-store path is already
+    // deterministic — no scratch, no reduce pass.
+    dim3 grid((size_n + 63) / 64, (size_m + 63) / 64, 1);
+    gemm_q4_wmma_kernel_64x64_4w<T><<<grid, block, 0, stream>>>(
+        a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+        zero_offset, /*partials=*/nullptr);
+    return;
+  }
+  constexpr int TILE_M = 512;
+  at::Tensor partials =
+      alloc_wmma_partials(k_split, std::min(TILE_M, size_m), size_n);
+  float* partials_ptr = partials.data_ptr<float>();
+  for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+    const int rows = std::min(TILE_M, size_m - row0);
+    const T* a_t = a + (long)row0 * size_k;
+    T* c_t = c + (long)row0 * size_n;
+    dim3 grid((size_n + 63) / 64, (rows + 63) / 64, k_split);
+    gemm_q4_wmma_kernel_64x64_4w<T><<<grid, block, 0, stream>>>(
+        a_t, b_q_weight, b_qzeros, b_scales, c_t, rows, size_n, size_k, groups,
+        zero_offset, partials_ptr);
+    launch_wmma_reduce<T>(partials, c_t, k_split, rows, size_n, stream);
+  }
 }
 
 }  // namespace gptq_rdna3_wmma
@@ -2078,7 +2325,6 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
 //   b_q_weight[K/8, N]          uint32 (already shuffled via gptq_shuffle)
 //   b_qzeros  [groups, N/8]     uint32 (packed 4-bit zeros)
 //   b_scales  [groups, N]       half or bfloat16
-//   b_g_idx   [K] or empty      int32 (act-order permutation; empty=identity)
 //   use_v2_format               bool   (true = GPTQv2, no +1 zero offset)
 //
 // Output:
@@ -2091,8 +2337,7 @@ void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
 
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
-                                   torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx, bool use_v2_format) {
+                                   torch::Tensor b_scales, bool use_v2_format) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
   TORCH_CHECK(b_qzeros.is_cuda(), "b_qzeros must be a CUDA/HIP tensor");
@@ -2122,18 +2367,13 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(size_k % 16 == 0, "WMMA path requires K % 16 == 0");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  // Always zero-init the output: some V3-V8 boundary threads may exit
-  // without writing their output cell (e.g. out_m >= size_m), leaving
-  // uninitialized garbage when torch::empty is used.  The cost is
-  // negligible (< 1.5% of prefill time on gfx1100).
-  at::Tensor c = torch::zeros({size_m, size_n}, opts);
-
-  const int* g_idx_ptr = nullptr;
-  if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
-    TORCH_CHECK(b_g_idx.scalar_type() == torch::kInt32,
-                "b_g_idx must be int32");
-    g_idx_ptr = (const int*)b_g_idx.data_ptr();
-  }
+  // Every path writes each output element exactly once: direct store when
+  // k_split == 1, otherwise the fixed-order FP32 reduce over per-split
+  // partials (whose scratch coverage invariant is documented at
+  // alloc_wmma_partials). c therefore needs no zero-initialization.
+  // One-way door: the legacy CAS epilogue ADDS into c and would require
+  // torch::zeros here if it were ever re-selected.
+  at::Tensor c = torch::empty({size_m, size_n}, opts);
 
   const int zero_offset = use_v2_format ? 0 : 1;
 
@@ -2148,15 +2388,15 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
-        g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
-        zero_offset, stream);
+        (half*)c.data_ptr(), size_m, size_n, size_k, groups, zero_offset,
+        stream);
   } else {
     vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_64x64_4w<
         vllm::gptq_rdna3_wmma::bf16_t>(
         (const vllm::gptq_rdna3_wmma::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(),
-        (const vllm::gptq_rdna3_wmma::bf16_t*)b_scales.data_ptr(), g_idx_ptr,
+        (const vllm::gptq_rdna3_wmma::bf16_t*)b_scales.data_ptr(),
         (vllm::gptq_rdna3_wmma::bf16_t*)c.data_ptr(), size_m, size_n, size_k,
         groups, zero_offset, stream);
   }

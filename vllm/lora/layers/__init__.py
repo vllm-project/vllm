@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.lora.layers.classifier import ClassificationHeadWithLoRA
 from vllm.lora.layers.column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
@@ -42,4 +43,5 @@ __all__ = [
     "LoRAMappingType",
     "FusedMoEWithLoRA",
     "FusedMoE3DWithLoRA",
+    "ClassificationHeadWithLoRA",
 ]

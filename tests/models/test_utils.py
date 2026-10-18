@@ -217,3 +217,25 @@ def test_get_rename_mapper_keeps_only_renames():
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
         assert mapper._map_name(name) is None
         assert renames._map_name(name) == name
+
+
+def test_weights_mapper_stacks_one_weight_into_several_shards():
+    """One checkpoint tensor can feed more than one shard of a stacked
+    parameter, and a dropped name stays dropped rather than reappearing as a
+    shard of the stacked one."""
+    mapper = WeightsMapper(
+        orig_to_new_substr={"layers.1.k_proj.": None},
+        orig_to_new_stacked={".k_proj.": (".qkv_proj.", ["k", "v"])},
+    )
+    weight = torch.ones(2)
+    weights = [(f"layers.{i}.k_proj.weight", weight) for i in (0, 1)]
+
+    mapped = list(mapper.apply(weights))
+
+    assert [(name, w.shard_id) for name, w in mapped] == [
+        ("layers.0.qkv_proj.weight", "k"),
+        ("layers.0.qkv_proj.weight", "v"),
+    ]
+    # Each shard needs its own tensor object, but they alias one allocation.
+    assert mapped[0][1] is not mapped[1][1]
+    assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr() == weight.data_ptr()

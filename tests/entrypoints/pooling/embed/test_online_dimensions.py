@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
-"""
+"""Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`."""
 
 import openai
 import pytest
 
 from tests.conftest import HfRunner
-from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
+from tests.models.language.pooling.embed_utils import (
+    float_embeddings,
+    run_embedding_correctness_test,
+)
 from tests.models.utils import EmbedModelInfo
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
@@ -97,7 +98,7 @@ async def test_matryoshka(
         if dimensions is not None:
             assert len(embeddings.data[0].embedding) == dimensions
 
-        vllm_outputs = [d.embedding for d in embeddings.data]
+        vllm_outputs = float_embeddings(embeddings)
         run_embedding_correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:
