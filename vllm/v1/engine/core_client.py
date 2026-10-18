@@ -1381,7 +1381,10 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("reset_encoder_cache")
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.call_utility_async("sleep", level, mode)
+        # Fan out explicitly at this layer too, mirroring wake_up_async and
+        # reset_prefix_cache_async, instead of relying on subclasses to
+        # override call_utility_async with an all-engine broadcast.
+        await self.call_utility_all_async("sleep", level, mode)
 
     async def release_kv_cache_memory_async(self) -> None:
         await self.call_utility_async("release_kv_cache_memory")

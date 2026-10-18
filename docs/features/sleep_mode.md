@@ -240,18 +240,28 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
 ```
 
 The initial prototype requires Linux/CUDA, the V2 runner in a local EngineCore
-process and the `cumem` backend. Tensor parallelism is supported through the
-`uni`, `mp` and `ray` executors (validated with single-node `mp` and `ray`
-TP2; multi-node Ray placement shares the same executor path but is not yet
-exercised); data, pipeline and context parallelism, expert parallelism and
-EPLB are rejected.
+process and the `cumem` backend. Tensor, data and pipeline parallelism are
+supported through the `uni`, `mp` and `ray` executors, and expert parallelism
+is supported for MoE models (validated on single node with `mp`/`ray` TP2,
+`mp` DP2 and PP2, and MoE TP2 with and without expert parallelism; multi-node
+Ray placement shares the same executor path but is not yet exercised). Data
+parallelism requires sleeping through the async engine path, which fans sleep
+out to every engine core. Expert parallelism combined with data parallelism is
+rejected because the all2all groups then span engine cores with independent
+idle boundaries. Context parallelism (prefill and decode) and EPLB are
+rejected: decode context parallelism would need TP larger than the model's
+KV head count, and prefill context parallelism requires an MLA sparse backend.
 Only unquantized `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM` models with FULL
-graphs and no `torch.compile` are accepted. Additional weight offloaders, KV
-transfer, microbatching, LoRA, speculative decoding, live weight updates and
-communicator suspension are excluded. Level 0 retains its existing behavior.
-Level 2, selective KV discard and another sleep after a partial wake are
-rejected. Partial wake does not permit inference or recapture until all memory
-is awake.
+or FULL_DECODE_ONLY graphs and no `torch.compile` are covered by validation.
+Other architectures can be opted in through the comma-separated
+`VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS` environment variable at the user's
+own risk (validated once on H20 with the hybrid linear-attention
+`Qwen3_5ForConditionalGeneration`, whose GDN backend resolves to
+FULL_DECODE_ONLY). Additional weight offloaders, KV transfer, microbatching,
+LoRA, speculative decoding, live weight updates and communicator suspension
+are excluded. Level 0 retains its existing behavior. Level 2, selective KV
+discard and another sleep after a partial wake are rejected. Partial wake does
+not permit inference or recapture until all memory is awake.
 
 Under tensor parallelism, every rank discards and recaptures graphs in
 lockstep through the executor's collective RPCs: the graphs embed cross-rank

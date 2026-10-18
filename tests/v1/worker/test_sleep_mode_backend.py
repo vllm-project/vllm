@@ -68,6 +68,12 @@ def test_graph_discard_preserves_workspaces_and_avoids_driver_pressure(
         "pp",
         "dp",
         "ep",
+        "moe",
+        "dcp",
+        "ep_dp",
+        "qwen3_5_mm",
+        "full_decode_only",
+        "pcp",
         "eplb",
         "compile",
         "inproc",
@@ -117,10 +123,31 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
         pc.pipeline_parallel_size = 2
     elif unsupported == "dp":
         pc.data_parallel_size = 2
+    elif unsupported == "dcp":
+        pc.tensor_parallel_size = 2
+        pc.decode_context_parallel_size = 2
+        pc.distributed_executor_backend = "mp"
     elif unsupported == "ep":
         pc.tensor_parallel_size = 2
         pc.distributed_executor_backend = "mp"
         pc.enable_expert_parallel = True
+    elif unsupported == "moe":
+        mc.architectures = ["Qwen3MoeForCausalLM"]
+    elif unsupported == "qwen3_5_mm":
+        mc.architectures = ["Qwen3_5ForConditionalGeneration"]
+        monkeypatch.setattr(
+            "vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS",
+            {"Qwen3_5ForConditionalGeneration"},
+        )
+    elif unsupported == "full_decode_only":
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    elif unsupported == "ep_dp":
+        pc.tensor_parallel_size = 2
+        pc.data_parallel_size = 2
+        pc.enable_expert_parallel = True
+        pc.distributed_executor_backend = "mp"
+    elif unsupported == "pcp":
+        pc.prefill_context_parallel_size = 2
     elif unsupported == "eplb":
         pc.tensor_parallel_size = 2
         pc.distributed_executor_backend = "mp"
@@ -134,7 +161,17 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
         monkeypatch.setattr("vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", False)
     elif unsupported == "checkpoint":
         monkeypatch.setenv("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", "1")
-    if unsupported in (None, "tp", "tp_ray"):
+    if unsupported in (
+        None,
+        "tp",
+        "tp_ray",
+        "pp",
+        "dp",
+        "ep",
+        "moe",
+        "qwen3_5_mm",
+        "full_decode_only",
+    ):
         validate_graph_sleep(config)
     else:
         with pytest.raises(ValueError, match="Graph-discard sleep requires"):

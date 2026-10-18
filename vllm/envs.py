@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     VLLM_SLEEP_DISCARD_GRAPHS: bool = False
+    VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS: set[str] = set()
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
@@ -619,6 +620,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SLEEP_DISCARD_GRAPHS": lambda: bool(
         int(os.getenv("VLLM_SLEEP_DISCARD_GRAPHS", "0"))
     ),
+    # Comma-separated architecture names that extend the validated model
+    # allowlist of graph-discard sleep. Entries are NOT covered by CI
+    # validation; enabling them is at the user's own risk.
+    "VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS": lambda: {
+        name.strip()
+        for name in os.getenv("VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS", "").split(",")
+        if name.strip()
+    },
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]

@@ -621,8 +621,13 @@ class ModelCudaGraphManager(CudaGraphManager):
 
     def discard_full_graphs(self) -> None:
         """Release owned graphs and outputs after the worker has synchronized."""
-        if self.cudagraph_mode != CUDAGraphMode.FULL:
-            raise ValueError("Graph discard supports FULL mode only")
+        if (
+            self.cudagraph_mode.decode_mode() != CUDAGraphMode.FULL
+            or self.cudagraph_mode.has_piecewise_cudagraphs()
+        ):
+            raise ValueError(
+                "Graph discard supports FULL and FULL_DECODE_ONLY modes only"
+            )
         self._graphs_captured = False
         self._sleep_partial = True
         for graph in self.graphs.values():
