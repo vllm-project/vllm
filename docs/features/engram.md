@@ -96,6 +96,27 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
 
+## Disk offload (DeepSeek V4.1)
+
+When the tables fit in neither GPU nor host memory (for example on an APU,
+where both are the same RAM), `disk_offload` reads them from the checkpoint
+files instead. Each rank memory-maps only its own rows, and each step copies
+the rows it needs to the GPU through the OS page cache. Frequent rows stay
+cached; the rest come from storage, so a local NVMe drive is recommended.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+  --engram-config '{"disk_offload": true}' --enforce-eager
+```
+
+- Replaces `cpu_offload`; cannot be combined with `dp_shared_memory`,
+  `use_thp`, or `embedding_across_dp`.
+- The checkpoint must stay on local disk (a directory or a complete Hugging
+  Face cache snapshot).
+- The lookup runs on the host, so it cannot be captured in a CUDA graph. Use
+  `--enforce-eager`, or `VLLM_USE_BREAKABLE_CUDAGRAPH=1` with
+  `-cc.cudagraph_mode=PIECEWISE`; other graph modes are rejected at startup.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
@@ -143,3 +164,6 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- `disk_offload` supports DeepSeek V4.1 only, needs `--enforce-eager` or
+  piecewise breakable CUDA graphs, and is unsupported with elastic expert
+  parallelism.

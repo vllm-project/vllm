@@ -54,8 +54,23 @@ class EngramConfig:
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
     startup takes longer. Requires cpu_offload without dp_shared_memory."""
 
+    disk_offload: bool = False
+    """Leave the tables in the checkpoint's safetensors files and read the rows
+    each step needs through the OS page cache. Neither device nor pinned host
+    memory holds the tables, which matters where pinned memory comes out of the
+    same pool as device memory (unified-memory APUs). Replaces cpu_offload.
+    DeepSeek V4.1 only."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.disk_offload:
+            if self.dp_shared_memory or self.use_thp or self.embedding_across_dp:
+                raise ValueError(
+                    "disk_offload cannot be combined with dp_shared_memory, "
+                    "use_thp or embedding_across_dp"
+                )
+            # The tables stay on disk, so there is no host copy to offload.
+            self.cpu_offload = False
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -80,6 +95,8 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if self.disk_offload and model_config.architecture != "DeepseekV41ForCausalLM":
+            raise ValueError("disk_offload supports DeepSeek V4.1 Engram tables only.")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -93,6 +110,8 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.disk_offload and parallel_config.enable_elastic_ep:
+            raise ValueError("disk_offload is not supported with elastic EP.")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")

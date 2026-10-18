@@ -910,6 +910,26 @@ def _local_snapshot_dirs(model_name_or_path: str, cache_dir: str | None) -> list
     return [path for path in snapshots.iterdir() if path.is_dir()]
 
 
+def local_checkpoint_dir(
+    model_name_or_path: str,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> Path | None:
+    """The local directory of an already-downloaded checkpoint, or None."""
+    if os.path.isdir(model_name_or_path):
+        return Path(model_name_or_path)
+    with suppress(OSError, ValueError):
+        return Path(
+            hf_api().snapshot_download(
+                model_name_or_path,
+                revision=revision,
+                cache_dir=cache_dir,
+                local_files_only=True,
+            )
+        )
+    return None
+
+
 def drop_checkpoint_cache(
     model_name_or_path: str,
     revision: str | None = None,
@@ -917,23 +937,12 @@ def drop_checkpoint_cache(
 ) -> None:
     if sys.platform != "linux":
         return
-    checkpoint_dirs: list[Path] = []
-    if os.path.isdir(model_name_or_path):
-        checkpoint_dirs = [Path(model_name_or_path)]
-    else:
-        with suppress(OSError, ValueError):
-            checkpoint_dirs = [
-                Path(
-                    hf_api().snapshot_download(
-                        model_name_or_path,
-                        revision=revision,
-                        cache_dir=cache_dir,
-                        local_files_only=True,
-                    )
-                )
-            ]
-        if not checkpoint_dirs:
-            checkpoint_dirs = _local_snapshot_dirs(model_name_or_path, cache_dir)
+    checkpoint_dir = local_checkpoint_dir(model_name_or_path, revision, cache_dir)
+    checkpoint_dirs = (
+        [checkpoint_dir]
+        if checkpoint_dir is not None
+        else _local_snapshot_dirs(model_name_or_path, cache_dir)
+    )
     if not checkpoint_dirs:
         logger.info_once(
             "No local checkpoint found for %s; skipping page-cache eviction",
