@@ -45,6 +45,29 @@ def test_cuda_device_count_stateless():
     assert ray.get(actor.get_count.remote()) == 0
 
 
+def test_stateless_process_group_send_keys_include_source_rank():
+    store = torch.distributed.HashStore()
+    sender_zero = StatelessProcessGroup(rank=0, world_size=3, store=store)
+    sender_one = StatelessProcessGroup(rank=1, world_size=3, store=store)
+    receiver = StatelessProcessGroup(rank=2, world_size=3, store=store)
+
+    sender_zero.send_obj("from zero", dst=2)
+    sender_one.send_obj("from one", dst=2)
+
+    assert receiver.recv_obj(src=0) == "from zero"
+    assert receiver.recv_obj(src=1) == "from one"
+
+    sender_zero.send(torch.tensor([0]), dst=2)
+    sender_one.send(torch.tensor([1]), dst=2)
+
+    torch.testing.assert_close(
+        receiver.recv(torch.empty(1, dtype=torch.long), src=0), torch.tensor([0])
+    )
+    torch.testing.assert_close(
+        receiver.recv(torch.empty(1, dtype=torch.long), src=1), torch.tensor([1])
+    )
+
+
 def cpu_worker(rank, WORLD_SIZE, port1, port2):
     pg1 = StatelessProcessGroup.create(
         host="127.0.0.1", port=port1, rank=rank, world_size=WORLD_SIZE
