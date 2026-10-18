@@ -3,7 +3,11 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_block_argmax,
+    spec_step_seed,
+    tl_rand32,
+)
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
 
 
@@ -191,6 +195,16 @@ def _compute_global_logprobs_and_logsumexp(
 
 
 @triton.jit
+def _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
+    next_local_pos = tl.load(
+        expanded_local_pos_ptr + logit_idx + 1,
+        mask=logit_idx + 1 < num_logits,
+        other=0,
+    )
+    return next_local_pos == 0
+
+
+@triton.jit
 def _compute_local_logits_stats_kernel(
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
@@ -221,17 +235,17 @@ def _compute_local_logits_stats_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
+    num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
-    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
 
-    if draft_step_idx >= num_speculative_steps:
-        # Bonus token. Max/argmax and summed exponentials are not needed.
+    if _is_bonus_logit(expanded_local_pos_ptr, logit_idx, num_logits):
+        # Max/argmax and summed exponentials are not needed.
         return
 
+    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
@@ -419,14 +433,17 @@ def _compute_local_residual_mass_kernel(
     # [max_num_reqs]
     temp_ptr,
     vocab_size,
-    num_speculative_steps,
+    num_logits,
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
+    # Adaptive verification can end before num_speculative_steps.
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
-    if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
+    if draft_step_idx == 0 or _is_bonus_logit(
+        expanded_local_pos_ptr, logit_idx, num_logits
+    ):
         # The acceptance threshold, h, looks one position ahead and sums
         # over: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0). Tokens at the
         # first and last (bonus) positions aren't needed for this computation.
@@ -566,7 +583,8 @@ def _rejection_kernel(
             verifying &= is_valid_draft
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
-            u = tl_rand32(seed, pos, includes_zero=False)
+            step_seed = spec_step_seed(seed, i) if USE_BLOCK_VERIFICATION else seed
+            u = tl_rand32(step_seed, pos, includes_zero=False)
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -1130,7 +1148,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -1201,7 +1219,7 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_speculative_steps,
+                num_logits,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,

@@ -223,7 +223,7 @@ def run_vlm2vec_qwen2vl(seed: int):
     from peft import PeftConfig, PeftModel
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.renderers.chat_utils import load_chat_template
 
     model_id = "TIGER-Lab/VLM2Vec-Qwen2VL-2B"
 

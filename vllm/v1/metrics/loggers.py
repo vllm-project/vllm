@@ -43,6 +43,9 @@ logger = init_logger(__name__)
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
 
+# User-facing reason labels for frontend admission rejections.
+ADMISSION_REASONS = ("max_num_queued_reqs", "max_num_queued_tokens")
+
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
@@ -101,6 +104,9 @@ class AggregateStatLoggerBase(StatLoggerBase):
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...
+
+    def record_admission_rejection(self, reason: str) -> None:  # noqa
+        """Record a frontend admission rejection. Optional for custom loggers."""
 
 
 class LoggingStatLogger(StatLoggerBase):
@@ -633,6 +639,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 counter_corrupted_requests, per_engine_labelvalues
             )
 
+        if vllm_config.watermark_config is not None:
+            counter_watermark_requests = self._counter_cls(
+                name="vllm:watermark_requests",
+                documentation=(
+                    "Finished requests by watermark status "
+                    "(only with watermark_config)."
+                ),
+                labelnames=labelnames + ["status"],
+            )
+            self.counter_watermark_requests: dict[str, dict[int, Counter]] = {}
+            for status in ("watermarked", "skipped", "not_watermarked"):
+                per_engine_labelvalues_with_status = {
+                    idx: labelvalues + [status]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.counter_watermark_requests[status] = create_metric_per_engine(
+                    counter_watermark_requests, per_engine_labelvalues_with_status
+                )
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -815,6 +840,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         request_num_preemptions_buckets = histogram_buckets(
             "request_num_preemptions", overrides=custom_buckets
         )
+
+        #
+        # Frontend admission
+        #
+        counter_admission_rejections = self._counter_cls(
+            name="vllm:admission_rejections",
+            documentation=(
+                "Number of admission attempts rejected by a queue limit, by reason."
+            ),
+            labelnames=["model_name", "reason"],
+        )
+        self.admission_rejections = {
+            reason: counter_admission_rejections.labels(
+                model_name=model_name, reason=reason
+            )
+            for reason in ADMISSION_REASONS
+        }
 
         #
         # Histograms of counts
@@ -1203,6 +1245,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )
+        if self.vllm_config.watermark_config is not None:
+            counter_watermark = self.counter_watermark_requests
+            counter_watermark["watermarked"][engine_idx].inc(
+                iteration_stats.num_watermarked_reqs
+            )
+            counter_watermark["skipped"][engine_idx].inc(
+                iteration_stats.num_watermark_skipped_reqs
+            )
+            counter_watermark["not_watermarked"][engine_idx].inc(
+                iteration_stats.num_not_watermarked_reqs
+            )
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )
@@ -1275,6 +1328,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+    def record_admission_rejection(self, reason: str) -> None:
+        self.admission_rejections[reason].inc()
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
@@ -1382,6 +1438,11 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def record_admission_rejection(self, reason: str) -> None:
+        """Record one frontend admission rejection on aggregate loggers."""
+        for stat_logger in self.stat_loggers:
+            stat_logger.record_admission_rejection(reason)
 
     def log(self):
         for logger in self.stat_loggers:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for storage-block kernel-block selection in prepare_kernel_block_sizes."""
+"""CPU tests for the kpool indexer's kernel block selection."""
 
 from types import SimpleNamespace
 
@@ -11,20 +11,14 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
 from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.mla import indexer as indexer_mod
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerBackend,
-    KpoolTailBackend,
-)
-from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-    ROCMAiterMLASparseBackend,
-)
+from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
-from vllm.v1.worker.utils import prepare_kernel_block_sizes
+from vllm.v1.worker.utils import prepare_kernel_block_sizes, select_common_block_size
 
 pytestmark = pytest.mark.cpu_test
 
 # ``index_kpool`` of zai-org/GLM-5.3-Flash: one indexer state pools 4
-# compressed states (hence storage_block_size = page * 4).
+# compressed states (hence a kernel block is page * 4 tokens).
 INDEX_KPOOL = 4
 
 # The hybrid KDA/mamba manager floors at TP8..TP1; 640 is the geometry of the
@@ -59,14 +53,17 @@ def _prepare(
     spec: MLAAttentionSpec, backends: list[type[AttentionBackend]]
 ) -> list[int]:
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
+        kv_cache_tensors=[],
     )
-    attn_groups = [[SimpleNamespace(backend=backend) for backend in backends]]
+    attn_groups = [
+        [SimpleNamespace(backend=backend, kv_cache_spec=spec) for backend in backends]
+    ]
     return prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
 
 @pytest.mark.parametrize("manager_block", TP_FLOOR_MANAGER_BLOCKS)
-def test_prepare_uses_storage_block_for_the_kpool_group(
+def test_kpool_group_maps_pool_pages(
     monkeypatch: pytest.MonkeyPatch, manager_block: int
 ):
     """The bug: on ROCm, kpool groups must get 128/256 - not the 640-4352
@@ -78,54 +75,43 @@ def test_prepare_uses_storage_block_for_the_kpool_group(
     """
     _mock_rocm_platform(monkeypatch)
     spec = _kpool_storage_spec(manager_block)
-    expected_storage = 256 if manager_block % 256 == 0 else 128
-    assert spec.storage_block_size == expected_storage
+    expected = 256 if manager_block % 256 == 0 else 128
 
-    selected = _prepare(
-        spec,
-        [ROCMAiterMLASparseBackend, DeepseekV32IndexerBackend, KpoolTailBackend],
-    )
-    assert selected == [expected_storage]
+    # The kpool group's AttentionGroup selects its kernel block this way.
+    selected = [
+        select_common_block_size(manager_block, [Glm5NextIndexerBackend], [spec])
+    ]
+    assert selected == [expected]
     assert selected != [manager_block]
     # The hybrid block-table split stays integral.
     assert manager_block % selected[0] == 0
 
 
-def test_prepare_falls_back_when_storage_block_is_not_supported():
-    """No storage block, or a storage block the backends reject (e.g. the
-    CUDA indexer's exact ``[64]`` vs a 128-token storage block): selection is
-    `select_common_block_size`'s answer, unchanged from no-fix behavior.
-    """
+def test_prepare_uses_the_backend_vote():
+    """Unpacked groups take `select_common_block_size`'s answer."""
 
     class Fixed64Backend:
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return [64]
 
         @staticmethod
         def get_name() -> str:
             return "FIXED64"
 
-    # Storage block the group's backend does not accept -> backend vote (64).
-    spec = _kpool_storage_spec(640)
-    assert spec.storage_block_size == 128
-    assert _prepare(spec, [Fixed64Backend]) == [64]
-
-    # No storage block at all (any non-kpool MLA model) -> backend vote.
     plain_spec = MLAAttentionSpec(
         block_size=640,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
     )
-    assert plain_spec.storage_block_size is None
     assert _prepare(plain_spec, [Fixed64Backend]) == [64]
 
     # ...and with backends that accept the manager block, the manager wins,
     # exactly as on main.
     class AcceptAllBackend:
         @staticmethod
-        def get_supported_kernel_block_sizes():
+        def get_supported_kernel_block_sizes(kv_cache_spec=None):
             return [MultipleOf(1)]
 
         @staticmethod
