@@ -210,6 +210,7 @@ class CMakeExtension(Extension):
 CMAKE_ENV_VARS = (
     "CMAKE_ARGS",
     "CMAKE_TOOLCHAIN_FILE",
+    "CMAKE_PREFIX_PATH",
     "CMAKE_GENERATOR_PLATFORM",
     "CMAKE_GENERATOR_TOOLSET",
     "CMAKE_C_COMPILER_LAUNCHER",
@@ -261,15 +262,24 @@ class cmake_build_ext(build_ext):
                 plat_specifier += "-pydebug"
             self.build_temp = os.path.join(build.build_base, f"temp.{plat_specifier}")
 
-    def cmake_cache_is_stale(self, build_env: CMakeBuildEnv, stamp: Path) -> bool:
-        """Whether the CMake cache was configured for another `build_env`."""
+    def changed_build_env(self, build_env: CMakeBuildEnv, stamp: Path) -> list[str]:
+        """Fields and env vars of `build_env` that differ from the ones the
+        CMake cache was configured with, or `stamp`'s name if unreadable."""
         if not Path(self.build_temp, "CMakeCache.txt").exists():
-            return False
+            return []
         try:
-            configured_env = json.loads(stamp.read_text())
-        except (OSError, ValueError):
-            configured_env = None
-        return configured_env != build_env
+            configured = json.loads(stamp.read_text())
+            configured_vars = configured["env"]
+            changed = [
+                k for k, v in build_env.items() if k != "env" and configured.get(k) != v
+            ]
+            return changed + [
+                var
+                for var, v in build_env["env"].items()
+                if configured_vars.get(var) != v
+            ]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return [stamp.name]
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -410,8 +420,11 @@ class cmake_build_ext(build_ext):
         )
         stamp = Path(self.build_temp, "vllm_build_env.json")
         fresh = []
-        if self.cmake_cache_is_stale(build_env, stamp):
-            logger.warning("Build environment changed; reconfiguring CMake.")
+        if changed := self.changed_build_env(build_env, stamp):
+            logger.warning(
+                "Build environment changed (%s); reconfiguring CMake.",
+                ", ".join(changed),
+            )
             fresh = ["--fresh"]
             # Rewritten on success, so a failed configure is redone fresh.
             stamp.unlink(missing_ok=True)

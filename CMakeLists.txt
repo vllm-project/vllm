@@ -525,7 +525,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       # Generate sources:
       set(MACHETE_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-      file(GLOB MACHETE_CUTLASS_LIBRARY_SRCS ${CUTLASS_DIR}/python/cutlass_library/*.py)
+      file(GLOB MACHETE_CUTLASS_LIBRARY_SRCS ${cutlass_SOURCE_DIR}/python/cutlass_library/*.py)
       run_source_generator(Machete
         LOG machete_generation.log
         STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generated/generate.hash
@@ -535,7 +535,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
           ${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/vllm_cutlass_library_extension.py
           ${MACHETE_CUTLASS_LIBRARY_SRCS}
         COMMAND ${CMAKE_COMMAND} -E env
-          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${cutlass_SOURCE_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT})
 
       # Add machete generated sources
@@ -640,7 +640,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       run_source_generator(Marlin
         LOG marlin_generation.log
         STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.hash
-        OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/kernel_selector.h
+        OUTPUTS
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/kernel_selector.h
+          ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/*kernel_*.cu
         INPUTS ${MARLIN_GEN_SCRIPT}
         KEY "(ARCH:${CUDA_ARCHS_STR})"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}
@@ -1065,7 +1067,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
     # Add MLA-specific include directories only to MLA source files
     set_source_files_properties(${CUTLASS_MLA_SRCS}
-      PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
+      PROPERTIES INCLUDE_DIRECTORIES "${cutlass_SOURCE_DIR}/examples/77_blackwell_fmha;${cutlass_SOURCE_DIR}/examples/common")
     message(STATUS "Building CUTLASS MLA for archs: ${MLA_ARCHS}")
   else()
     message(STATUS "Not building CUTLASS MLA as no compatible archs were found.")
@@ -1311,7 +1313,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     run_source_generator("Marlin MOE"
       LOG moe_marlin_generation.log
       STAMP ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.hash
-      OUTPUTS ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/kernel_selector.h
+      OUTPUTS
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/kernel_selector.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/*kernel_*.cu
       INPUTS ${MOE_MARLIN_GEN_SCRIPT}
       KEY "(ARCH:${CUDA_ARCHS_STR})"
       COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=$ENV{PYTHONPATH}

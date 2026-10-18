@@ -41,18 +41,20 @@ endfunction()
 
 #
 # Generate sources by running `COMMAND`, unless `STAMP` already holds the key
-# for `INPUTS` (files hashed) and `KEY` (extra string) and the `OUTPUTS` glob
+# for `INPUTS` (files hashed) and `KEY` (extra string) and every `OUTPUTS` glob
 # matches something. The stamp is kept next to the generated sources so it is
 # shared across build directories, and removed before regenerating so an
-# interrupted run is redone. `INPUTS` also rerun configure when edited.
+# interrupted run is redone. Editing `INPUTS`, or another build directory
+# regenerating (rewriting `STAMP`), reruns configure.
 #
-# run_source_generator(<name> LOG <file> STAMP <file> OUTPUTS <glob>
+# run_source_generator(<name> LOG <file> STAMP <file> OUTPUTS <globs...>
 #                      INPUTS <files...> [KEY <string>] COMMAND <cmd...>)
 #
 function (run_source_generator NAME)
   cmake_parse_arguments(PARSE_ARGV 1 _GEN
-    "" "LOG;STAMP;OUTPUTS;KEY" "INPUTS;COMMAND")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_GEN_INPUTS})
+    "" "LOG;STAMP;KEY" "OUTPUTS;INPUTS;COMMAND")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_GEN_INPUTS} ${_GEN_STAMP})
 
   set(_HASHES "")
   foreach (_INPUT IN LISTS _GEN_INPUTS)
@@ -66,10 +68,16 @@ function (run_source_generator NAME)
   if (EXISTS "${_GEN_STAMP}")
     file(READ "${_GEN_STAMP}" _LAST_KEY)
   endif()
-  file(GLOB _OUTPUTS "${_GEN_OUTPUTS}")
+  set(_OUTPUTS_FOUND TRUE)
+  foreach (_GLOB IN LISTS _GEN_OUTPUTS)
+    file(GLOB _MATCHES "${_GLOB}")
+    if (NOT _MATCHES)
+      set(_OUTPUTS_FOUND FALSE)
+    endif()
+  endforeach()
   message(STATUS "${NAME} generation key: ${_KEY}")
   message(STATUS "Last run ${NAME} generation key: ${_LAST_KEY}")
-  if ("${_LAST_KEY}" STREQUAL "${_KEY}" AND _OUTPUTS)
+  if ("${_LAST_KEY}" STREQUAL "${_KEY}" AND _OUTPUTS_FOUND)
     message(STATUS "${NAME} generation inputs have not changed, skipping generation.")
     return()
   endif()
