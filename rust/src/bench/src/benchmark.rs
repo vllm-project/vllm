@@ -634,7 +634,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         let total_output_tokens: usize = input_requests.iter().map(|r| r.expected_output_len).sum();
         println!("Dry run stats:");
         println!("  Total prompts: {}", input_requests.len());
-        println!("  Total input tokens: {total_input_tokens}");
+        println!("  Estimated total input tokens: {total_input_tokens}");
         println!("  Total expected output tokens: {total_output_tokens}");
         println!(
             "  Avg input tokens: {:.1}",
@@ -1071,7 +1071,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m, Vec::new())
     } else {
         calculate_metrics(
-            &input_requests,
             &outputs,
             benchmark_duration,
             &config.selected_percentiles,
@@ -1098,7 +1097,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         ) {
             let ss = steady_state::compute(
                 &outputs,
-                &input_requests,
                 &window,
                 &config.selected_percentiles,
                 config.backend.is_pooling(),

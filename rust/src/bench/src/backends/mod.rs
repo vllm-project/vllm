@@ -52,6 +52,18 @@ pub struct ChunkUsage {
     pub prompt_tokens: Option<u64>,
 }
 
+impl ChunkUsage {
+    /// Apply usage without replacing a valid estimate with a zero placeholder.
+    pub fn apply(&self, output: &mut RequestFuncOutput) {
+        if let Some(tokens) = self.completion_tokens {
+            output.output_tokens = tokens as usize;
+        }
+        if let Some(tokens) = self.prompt_tokens.filter(|&tokens| tokens > 0) {
+            output.prompt_len = tokens as usize;
+        }
+    }
+}
+
 use crate::cli::BackendKind;
 use crate::error::Result;
 

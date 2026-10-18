@@ -129,12 +129,7 @@ impl OpenAIChatBackend {
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
                             if let Some(ref usage) = data.usage {
-                                if let Some(ct) = usage.completion_tokens {
-                                    output.output_tokens = ct as usize;
-                                }
-                                if let Some(pt) = usage.prompt_tokens {
-                                    output.prompt_len = pt as usize;
-                                }
+                                usage.apply(&mut output);
                             }
                         }
                     }
@@ -481,5 +476,21 @@ mod tests {
         assert!(output.success, "{}", output.error);
         assert_eq!(output.prompt_len, 100);
         assert_eq!(output.output_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn test_zero_prompt_tokens_keeps_client_prompt_len() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, Some(0)),
+            model: "test-model".to_string(),
+            prompt_len: 100,
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.prompt_len, 100);
     }
 }
