@@ -230,6 +230,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_num_preemptions_sum",
     "vllm:request_num_preemptions_bucket",
     "vllm:request_num_preemptions_count",
+    "vllm:request_reasoning_effort_total",
 ]
 
 EXPECTED_METRICS_MM = [

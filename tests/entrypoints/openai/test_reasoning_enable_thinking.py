@@ -10,9 +10,14 @@ is injected automatically.
 
 import pytest
 from openai.types.shared import Reasoning
+from prometheus_client import REGISTRY
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.reasoning_effort_metrics import (
+    init_reasoning_effort_metrics,
+    record_reasoning_effort,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -143,3 +148,27 @@ class TestResponsesReasoningEffort:
         )
         params = request.build_chat_params(None, "auto", {"medium": "low"})
         assert params.chat_template_kwargs["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(
+    ("chat_template_kwargs", "label"),
+    [
+        ({"reasoning_effort": "high"}, "high"),
+        ({"reasoning_effort": "template_specific"}, "other"),
+        ({"reasoning_effort": 42}, "other"),
+        ({}, "unset"),
+    ],
+)
+def test_reasoning_effort_metric_labels_are_bounded(chat_template_kwargs, label):
+    init_reasoning_effort_metrics(model_name="test-model")
+
+    def count() -> float | None:
+        return REGISTRY.get_sample_value(
+            "vllm:request_reasoning_effort_total",
+            {"model_name": "test-model", "reasoning_effort": label},
+        )
+
+    before = count()
+    assert before is not None
+    record_reasoning_effort(chat_template_kwargs)
+    assert count() == before + 1

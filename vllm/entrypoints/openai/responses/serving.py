@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.serving import (
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort_metrics import record_reasoning_effort
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -380,6 +381,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
         if isinstance(render_result, ErrorResponse):
             return render_result
+        record_reasoning_effort(self._effective_chat_template_kwargs(request))
         messages = render_result.messages
         engine_inputs = [render_result.engine_input]
 

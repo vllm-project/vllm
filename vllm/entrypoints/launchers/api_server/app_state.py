@@ -36,6 +36,14 @@ async def init_app_state(
             model_name=cast(str, vllm_config.model_config.served_model_name)
         )
 
+    from vllm.entrypoints.openai.reasoning_effort_metrics import (
+        init_reasoning_effort_metrics,
+    )
+
+    init_reasoning_effort_metrics(
+        model_name=cast(str, vllm_config.model_config.served_model_name)
+    )
+
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
