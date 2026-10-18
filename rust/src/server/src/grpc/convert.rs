@@ -4,7 +4,6 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -305,9 +304,6 @@ fn convert_structured_output(
         }
     };
     params.backend = StructuredOutputBackend::Xgrammar;
-    params
-        .validate()
-        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -800,41 +796,6 @@ mod tests {
             let params = lower_structured_output(so.clone()).expect("convert ok");
             assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
         }
-    }
-
-    #[test]
-    fn grpc_rejects_constraints_xgrammar_cannot_enforce() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        for (so, message) in [
-            (StructuredOutput::Regex("a\0b".to_string()), "NUL character"),
-            (
-                StructuredOutput::Choice(super::pb::decoding_parameters::StringChoices {
-                    choices: vec![],
-                }),
-                "choice cannot be empty",
-            ),
-            (
-                StructuredOutput::Json(r#"{"type": "array", "uniqueItems": true}"#.to_string()),
-                "not supported by xgrammar",
-            ),
-        ] {
-            let err = lower_structured_output(so).unwrap_err();
-            assert!(err.message().contains(message), "{}", err.message());
-        }
-    }
-
-    #[test]
-    fn grpc_rejects_empty_grammar_before_engine() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
