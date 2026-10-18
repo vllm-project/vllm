@@ -87,7 +87,7 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
         args,
         app,
         supported_tasks=(task,),
-        model_config=MockModelConfig(),  # type: ignore[arg-type]
+        model_config=MockModelConfig(),
     )
 
     routes = get_all_http_routes(app)

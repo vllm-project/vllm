@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from pydantic import TypeAdapter, ValidationError
 
 from tests.utils import large_gpu_mark
 from tests.v1.sample.utils import (
@@ -20,10 +21,11 @@ from tests.v1.sample.utils import (
     compute_correct_cumulative_logprob,
     get_test_batch,
 )
-from vllm import SamplingParams
+from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
+from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -87,6 +89,7 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
 def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
     return SimpleNamespace(
         max_logprobs=max_logprobs,
+        max_model_len=16,
         logits_processors=None,
         is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
@@ -145,7 +148,7 @@ def _repeat_logprob_config(
 def _run_and_validate(
     vllm_model: VllmRunner,
     test_prompts: list[str],
-    vllm_sampling_params: SamplingParams,
+    vllm_sampling_params: SamplingParams | list[SamplingParams],
     hf_logprobs: list[list[torch.Tensor]],
     hf_outputs: list[tuple[list[int], str]],
     logprob_prompt_logprob_list: BatchLogprobsSpecType,
@@ -163,11 +166,12 @@ def _run_and_validate(
         # Extract request-level (prompt)logprobs config
         num_top_logprobs, num_top_prompt_logprobs = logprob_prompt_logprob
 
+        assert vllm_result.prompt_token_ids is not None
         # Test whether sampled token output is consistent between vLLM and HF
         # vLLM prompt+completion should match HF output
         if temperature == 0.0:
             assert (
-                vllm_result.prompt_token_ids + vllm_result.outputs[0].token_ids
+                vllm_result.prompt_token_ids + list(vllm_result.outputs[0].token_ids)
                 == hf_output[0]
             )
         else:
@@ -191,7 +195,9 @@ def _run_and_validate(
 
                 # Confirm that the output token appears among the logprobs
                 assert token_id in logprobs
-                token_in_topk = logprobs[token_id].rank <= num_top_logprobs
+                rank = logprobs[token_id].rank
+                assert rank is not None
+                token_in_topk = rank <= num_top_logprobs
 
                 # If the output token is not included in the top K
                 # logprob, it can return 1 more data
@@ -207,8 +213,10 @@ def _run_and_validate(
 
             output_text = vllm_result.outputs[0].text
             output_string_from_most_likely_tokens_lst: list[str] = []
-            for top_logprobs in vllm_result.outputs[0].logprobs:
-                top_logprob = next(iter(top_logprobs.values()))
+            for output_logprobs in vllm_result.outputs[0].logprobs:
+                assert output_logprobs is not None
+                top_logprob = next(iter(output_logprobs.values()))
+                assert top_logprob.decoded_token is not None
                 output_string_from_most_likely_tokens_lst.append(
                     top_logprob.decoded_token
                 )
@@ -226,8 +234,9 @@ def _run_and_validate(
 
             # Compare vLLM sample logprobs to HF
             vllm_sample_logprobs = vllm_result.outputs[0].logprobs
-            for i, top_logprobs in enumerate(vllm_sample_logprobs):
-                for token_id, sample_logprob in top_logprobs.items():
+            for i, sample_logprobs in enumerate(vllm_sample_logprobs):
+                assert sample_logprobs is not None
+                for token_id, sample_logprob in sample_logprobs.items():
                     if temperature == 0.0 or i == 0:
                         logprob = sample_logprob.logprob
                         torch.testing.assert_close(
@@ -271,9 +280,9 @@ def _run_and_validate(
 
                 # Confirm that the prompt token appears among the logprobs
                 assert prompt_token_id in prompt_logprobs
-                token_in_topk = (
-                    prompt_logprobs[prompt_token_id].rank <= num_top_prompt_logprobs
-                )
+                prompt_rank = prompt_logprobs[prompt_token_id].rank
+                assert prompt_rank is not None
+                token_in_topk = prompt_rank <= num_top_prompt_logprobs
 
                 # If the prompt token is not included in the top K
                 # logprob, it can return 1 more data
@@ -294,9 +303,10 @@ def _run_and_validate(
             # 1:.
             vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
             for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
-                for token_id, logprob in vllm_prompt_logprob_dict.items():
+                assert vllm_prompt_logprob_dict is not None
+                for token_id, prompt_lp in vllm_prompt_logprob_dict.items():
                     torch.testing.assert_close(
-                        logprob.logprob,
+                        prompt_lp.logprob,
                         hf_logprob[0][i][token_id].item(),
                         atol=2e-2,
                         rtol=2e-2,
@@ -435,24 +445,58 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
         )
 
 
-def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
-    """The candidate count is bounded by max_logprobs."""
+def test_prompt_logprob_token_ids_validation():
+    """Rows may be ragged (-1 padded); the width is bounded by max_logprobs."""
     model_config = _model_config(vocab_size=100, max_logprobs=4)
 
     def verify(**kwargs):
-        SamplingParams(**kwargs).verify(
+        params = SamplingParams(**kwargs)
+        params.verify(
             model_config,
             speculative_config=None,
             structured_outputs_config=None,
             tokenizer=None,
         )
+        return params.prompt_logprob_token_ids
 
-    verify(prompt_logprob_token_ids=[1, 2, 3, 4])
+    assert verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]]).tolist() == [
+        [-1] * 4,
+        [1, -1, -1, -1],
+        [4, 3, 2, 1],
+    ]
+    # Any integer layout is normalized to what the worker uploads:
+    # C-contiguous native int32.
+    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
+    ids = verify(prompt_logprob_token_ids=odd)
+    assert ids.dtype == np.int32 and ids.flags.c_contiguous
+    assert ids.tolist() == [[1, 2], [3, -1]]
+    # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
+    adapter = TypeAdapter(SamplingParams)
+    for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
+        with pytest.raises(ValidationError):
+            adapter.validate_json(f'{{"prompt_logprob_token_ids": {bad}}}')
 
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=np.array([1, 2]))
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=[1, 2])
+    for bad_ids in ([[None]], [[2**63]], [[[1]]], [[[1], 2]]):
+        with pytest.raises(VLLMValidationError, match="integer token ids"):
+            verify(prompt_logprob_token_ids=bad_ids)
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
     # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
-        verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
-
+        verify(prompt_logprob_token_ids=[[1], [1, 2, 3, 4, 5]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [100]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [-2]])
+    with pytest.raises(VLLMValidationError, match="non-empty"):
+        verify(prompt_logprob_token_ids=[[], []])
+    # Rows are bounded by max_model_len before the table is padded.
+    with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
+        verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
     with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
         verify(prompt_logprob_start=3)
@@ -474,8 +518,9 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         structured_outputs_config=None,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
     )
-    params = SamplingParams(prompt_logprob_token_ids=[1, 2])
+    params = SamplingParams(prompt_logprob_token_ids=[[1, 2]])
     with patch.object(SamplingParams, "verify"):
         with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
@@ -607,7 +652,9 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         total_token_with_logprobs = 0
         positive_values = 0
         for output in results[0].outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 for token_id in logprobs:
                     logprob = logprobs[token_id]
                     if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
@@ -648,6 +695,7 @@ def test_prompt_logprobs_mode():
             )
             assert results[0].prompt_logprobs is not None
             assert results[0].prompt_logprobs[1] is not None
+            assert results[0].prompt_token_ids is not None
             tok_id = results[0].prompt_token_ids[1]
             values[mode] = results[0].prompt_logprobs[1][tok_id].logprob
         finally:
@@ -1228,10 +1276,12 @@ def test_spec_decode_logprobs(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
     # Collect logprobs outputs from reference LLM.
-    ref_logprobs = []
+    ref_logprobs: list[Logprob] = []
     for results in ref_results:
         for output in results.outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 ref_logprobs.extend(logprobs.values())
     del ref_llm
     torch.accelerator.empty_cache()
@@ -1249,10 +1299,12 @@ def test_spec_decode_logprobs(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
     # Collect logprobs outputs from spec decode LLM.
-    spec_logprobs = []
+    spec_logprobs: list[Logprob] = []
     for results in spec_results:
         for output in results.outputs:
+            assert output.logprobs is not None
             for logprobs in output.logprobs:
+                assert logprobs is not None
                 spec_logprobs.extend(logprobs.values())
     del spec_llm
     torch.accelerator.empty_cache()
@@ -1326,6 +1378,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
                 "Unexpected number of prompt logprob positions"
             )
 
+            assert sampling_params.prompt_logprobs is not None
             # Each position should have the requested number of logprobs
             for pos, logprobs_dict in enumerate(prompt_logprobs):
                 if logprobs_dict is not None:  # First token may be None
@@ -1353,7 +1406,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
 
 
 def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
-    """Fixed-ID scores stay row-aligned across chunked prefill and preemption."""
+    """Per-row scores stay row-aligned across chunked prefill and preemption."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     prompts = [
@@ -1364,14 +1417,9 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     ] + [f"Tell me about the number {i}: " for i in range(32)]
 
     start = 2
-    candidate_ids = [10, 100, 1000, 10000]
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=40,
-        min_tokens=20,
-        prompt_logprob_token_ids=candidate_ids,
-        prompt_logprob_start=start,
-    )
+
+    def candidate_ids(j):
+        return [10 + j, 100 + j, 1000 + j, 10000 + j]
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",
@@ -1382,21 +1430,64 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
         disable_log_stats=False,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        token_prompts = [
+            TokensPrompt(prompt_token_ids=tokenizer(p).input_ids) for p in prompts
+        ]
+
+        def make_params(row_ids):
+            return [
+                SamplingParams(
+                    temperature=0.0,
+                    max_tokens=40,
+                    min_tokens=20,
+                    prompt_logprob_token_ids=[
+                        row_ids(j)
+                        for j in range(len(p["prompt_token_ids"]) - 1 - start)
+                    ],
+                    prompt_logprob_start=start,
+                )
+                for p in token_prompts
+            ]
+
         metrics_before = vllm_model.llm.get_metrics()
-        outputs = vllm_model.llm.generate(prompts, sampling_params)
+        full_params = make_params(candidate_ids)
+        for params in full_params:  # the array form, as a top-k tensor would be
+            params.prompt_logprob_token_ids = np.array(params.prompt_logprob_token_ids)
+        outputs = vllm_model.llm.generate(token_prompts, full_params)
 
         for i, output in enumerate(outputs):
             scores = output.prompt_token_id_logprobs
-            assert scores is not None, f"Output {i} missing fixed-ID scores"
+            assert scores is not None, f"Output {i} missing per-row scores"
             expected_shape = (
                 len(output.prompt_token_ids) - 1 - start,
-                len(candidate_ids),
+                4,
             )
             assert scores.shape == expected_shape, (
                 f"Output {i} scored {scores.shape}, expected {expected_shape}"
             )
             assert math.isfinite(float(scores.min()))
             assert float(scores.max()) <= 1e-3, "logprobs must be <= 0"
+
+        # Ragged rows: each row keeps a prefix of the candidates and must
+        # reproduce that prefix of the full scores, with -inf padding. On ROCm
+        # the second generate call picks its own kernels, which moves bf16
+        # tails by up to 0.19; a misaligned row is off by nats either way.
+        ragged_atol = 0.2 if current_platform.is_rocm() else 1e-2
+        ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
+        ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
+        for output, ragged_output in zip(outputs, ragged_outputs):
+            expected = np.full_like(output.prompt_token_id_logprobs, -np.inf)
+            for j in range(len(expected)):
+                n = 1 + j % 4
+                expected[j, :n] = output.prompt_token_id_logprobs[j, :n]
+            np.testing.assert_allclose(
+                ragged_output.prompt_token_id_logprobs, expected, atol=ragged_atol
+            )
+
+        # The row count is checked against the prompt at admission.
+        with pytest.raises(VLLMValidationError, match="scored rows"):
+            vllm_model.llm.generate(token_prompts[0], ragged_params[1])
 
         metrics_after = vllm_model.llm.get_metrics()
         preemptions_before = next(
@@ -1413,31 +1504,32 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     # unchunked, unpreempted run of the same requests. Batch composition moves
     # bf16 tail logprobs by a few percent; a misaligned row differs by nats.
     with VllmRunner(
-        "Qwen/Qwen3-0.6B",
-        max_model_len=512,
-        max_logprobs=64,
-        gpu_memory_utilization=0.25,
+        "Qwen/Qwen3-0.6B", max_model_len=512, gpu_memory_utilization=0.25
     ) as reference:
-        reference_outputs = reference.llm.generate(prompts, sampling_params)
-        own_ids = [list(dict.fromkeys(o.prompt_token_ids)) for o in reference_outputs]
+        reference_outputs = reference.llm.generate(token_prompts, full_params)
         self_scored = reference.llm.generate(
-            prompts,
+            token_prompts,
             [
                 SamplingParams(
-                    max_tokens=1, prompt_logprobs=0, prompt_logprob_token_ids=ids
+                    max_tokens=1,
+                    prompt_logprobs=0,
+                    prompt_logprob_token_ids=[[t] for t in p["prompt_token_ids"][1:]],
                 )
-                for ids in own_ids
+                for p in token_prompts
             ],
         )
     for output, ref in zip(outputs, reference_outputs):
         np.testing.assert_allclose(
-            output.prompt_token_id_logprobs, ref.prompt_token_id_logprobs, rtol=0.1
+            output.prompt_token_id_logprobs,
+            ref.prompt_token_id_logprobs,
+            rtol=0.1,
+            atol=0.2,
         )
-    for output, ids in zip(self_scored, own_ids):
-        scores = output.prompt_token_id_logprobs
+    for output in self_scored:
+        scores = output.prompt_token_id_logprobs[:, 0]
         for row, target in enumerate(output.prompt_token_ids[1:]):
             expected = output.prompt_logprobs[row + 1][target].logprob
-            assert scores[row, ids.index(target)] == pytest.approx(expected, abs=1e-3)
+            assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
 def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
@@ -1449,13 +1541,7 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
-    prompt = "The capital of France is Paris. " * 20
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=1,
-        prompt_logprob_token_ids=[10, 100, 1000],
-        skip_reading_prefix_cache=False,
-    )
+    text = "The capital of France is Paris. " * 20
 
     with VllmRunner(
         "Qwen/Qwen3-0.6B",
@@ -1463,6 +1549,15 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         enable_prefix_caching=True,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
+        token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 1, 1)),
+            skip_reading_prefix_cache=False,
+        )
+
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))

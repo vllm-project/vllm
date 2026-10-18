@@ -135,6 +135,46 @@ def _fused_add_gemma_rms_norm_impl(
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def _layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def _nemotron_layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.nemotron_layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_nemotron_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -1024,7 +1064,11 @@ class xpu_ops:
             "when block_table is disabled, cu_seqlens_k is needed"
         )
         if out is None:
-            out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+            out = torch.empty(
+                q.shape[:-1] + (v.shape[-1],),
+                dtype=q.dtype,
+                device=q.device,
+            )
         real_window_size: tuple[int, int]
         if window_size is None:
             real_window_size = (-1, -1)
@@ -1047,8 +1091,8 @@ class xpu_ops:
             block_table=block_table,
             s_aux=s_aux,
             window_size=real_window_size,
-            # alibi_slopes = alibi_slopes,
-            # softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            softcap=softcap,
             return_softmax_lse=return_softmax_lse,
             q_descale=q_descale,
             k_descale=k_descale,
@@ -1265,6 +1309,32 @@ class xpu_ops:
                 direct_register_custom_op(
                     op_name="xpu_fused_add_gemma_rms_norm",
                     op_func=_fused_add_gemma_rms_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_layer_norm",
+                    op_func=_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_layer_norm",
+                    op_func=_fused_add_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "nemotron_layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_nemotron_layer_norm",
+                    op_func=_nemotron_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_nemotron_layer_norm",
+                    op_func=_fused_add_nemotron_layer_norm_impl,
                     mutates_args=["input", "residual"],
                 )
 
