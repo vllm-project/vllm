@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
-from vllm.entrypoints.pooling.types import PoolingEngineInput, PoolingServeContext
+from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
 from vllm.inputs import tokens_input
 from vllm.pooling_params import PoolingParams
 

@@ -20,7 +20,7 @@ from vllm.tracing import (
 from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Span, Tracer, init_otel_trace_provider
 
 from ..base.io_processor import PoolingIOProcessor
-from ..types import PoolingServeContext
+from ..typing import PoolingServeContext
 
 TO_S = 1000_000_000
 TO_MS = 1000_000

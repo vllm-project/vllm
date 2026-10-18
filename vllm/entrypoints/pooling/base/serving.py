@@ -27,7 +27,7 @@ from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
-from ..types import AnyPoolingRequest, PoolingServeContext
+from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 from .observability import TO_S, ObservabilityMixin
 

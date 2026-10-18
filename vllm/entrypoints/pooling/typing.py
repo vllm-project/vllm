@@ -40,7 +40,7 @@ from .pooling.protocol import (
     PoolingResponse,
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
-from .scoring.types import ScoreData, ScoringData
+from .scoring.typing import ScoreData, ScoringData
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest

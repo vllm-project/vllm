@@ -16,7 +16,7 @@ from vllm.entrypoints.pooling.embed.io_processor import (
 )
 from vllm.entrypoints.pooling.late_chunking import build_late_chunking_metadata
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.pooling.types import (
+from vllm.entrypoints.pooling.typing import (
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
 )

@@ -33,7 +33,7 @@ from ..late_chunking import (
     prepare_late_chunking_input,
 )
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
-from ..types import (
+from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     ChunkedEmbeddingMetadata,

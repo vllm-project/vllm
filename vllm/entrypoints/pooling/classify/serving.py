@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
 
 from ..base.serving import PoolingServing
-from ..types import PoolingServeContext
+from ..typing import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
     ClassificationData,

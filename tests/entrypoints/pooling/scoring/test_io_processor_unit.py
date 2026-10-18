@@ -18,9 +18,9 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
-from vllm.entrypoints.pooling.scoring.types import ScoringData
+from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
-from vllm.entrypoints.pooling.types import OfflineScoringInputsContext
+from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
 

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.entrypoints.pooling.base.observability import ObservabilityMixin
-from vllm.entrypoints.pooling.types import PoolingServeContext
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.tracing import SpanAttributes
 from vllm.tracing.otel import _IS_OTEL_AVAILABLE
 

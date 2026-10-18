@@ -20,7 +20,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ..types import (
+from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeChatRenderParams,

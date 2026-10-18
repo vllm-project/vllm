@@ -13,7 +13,7 @@ from vllm.utils.serial_utils import EmbedDType, Endianness
 from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingBaseServing
 from ..factories import init_pooling_io_processors
-from ..types import AnyPoolingRequest, PoolingServeContext
+from ..typing import AnyPoolingRequest, PoolingServeContext
 from ..utils import (
     BytesEncodingFormat,
     JsonEncodingFormat,

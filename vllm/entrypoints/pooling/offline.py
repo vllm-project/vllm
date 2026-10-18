@@ -23,8 +23,8 @@ from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
-from .scoring.types import ScoreInput
-from .types import (
+from .scoring.typing import ScoreInput
+from .typing import (
     AnyOfflineInputsContext,
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
