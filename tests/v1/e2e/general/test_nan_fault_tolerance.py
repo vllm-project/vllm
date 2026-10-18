@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end CUDA coverage for NaN fault tolerance.
 
-The suite uses Qwen3.5-0.8B and needs only one CUDA GPU. It bounds the KV cache
+The suite uses Qwen3-0.6B and needs only one CUDA GPU. It bounds the KV cache
 to 32 blocks, so it is suitable for an H200 (and substantially smaller GPUs).
 
 Run all scenarios from the repository root:
@@ -29,7 +29,7 @@ from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
-MODEL = "Qwen/Qwen3.5-0.8B-Base"
+MODEL = "Qwen/Qwen3-0.6B"
 FORCED_TOKEN_ID = 42
 MAX_TOKENS = 8
 
@@ -109,8 +109,7 @@ def _run_abort_cache_recovery(
         ignore_eos=True,
         allowed_token_ids=[FORCED_TOKEN_ID],
     )
-    # CUDA may increase the block size to fit the GDN state. MTP drops the
-    # last matched block, so it needs a second full block for a cache hit.
+    # Keep enough prompt blocks for a cache hit after speculative verification.
     block_size = runner.llm.llm_engine.vllm_config.cache_config.block_size
     prompt = TokensPrompt(
         prompt_token_ids=[FORCED_TOKEN_ID]
@@ -207,7 +206,6 @@ def test_nan_abort_cache_recovery(
         distributed_executor_backend="uni",
         disable_log_stats=False,
         enforce_eager=cudagraph_mode == CUDAGraphMode.NONE,
-        limit_mm_per_prompt={"image": 0, "video": 0},
         compilation_config={
             "cudagraph_mode": cudagraph_mode,
             "cudagraph_capture_sizes": [1, 4],
@@ -228,7 +226,7 @@ def test_nan_abort_cache_recovery(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires NVIDIA CUDA")
 @single_gpu_only
-def test_async_cudagraph_speculative_nan_abort_cache_recovery(
+def test_async_cudagraph_ngram_nan_abort_cache_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise per-request NaN aggregation across speculative logit rows."""
@@ -249,10 +247,11 @@ def test_async_cudagraph_speculative_nan_abort_cache_recovery(
         async_scheduling=True,
         distributed_executor_backend="uni",
         disable_log_stats=False,
-        limit_mm_per_prompt={"image": 0, "video": 0},
         speculative_config={
-            "method": "mtp",
+            "method": "ngram",
             "num_speculative_tokens": 3,
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
         },
         compilation_config={
             "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
