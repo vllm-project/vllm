@@ -191,14 +191,18 @@ class InputProcessor:
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
+                    raise VLLMValidationError(
+                        "sampling distribution replay requires temperature > 0",
+                        parameter="temperature",
+                        value=params.temperature,
                     )
                 if params.top_k <= 0:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         "sampling distribution replay requires top_k > 0 to "
                         "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
+                        "and avoid potential OOMs",
+                        parameter="top_k",
+                        value=params.top_k,
                     )
             if params.thinking_token_budget is not None and (
                 self.vllm_config.reasoning_config is None

@@ -74,11 +74,15 @@ def test_trace_longer_than_remaining_context_is_truncated():
     assert params.max_tokens == 4
 
 
-def _validate(enable_trace_replay: bool) -> None:
-    """Run _validate_params' trace gating with the rest of verify() stubbed."""
+def _validate(
+    enable_trace_replay: bool,
+    params: SamplingParams | None = None,
+    return_sampling_mask: bool = False,
+) -> None:
+    """Run _validate_params' feature gating with the rest of verify() stubbed."""
     processor = SimpleNamespace(
         model_config=SimpleNamespace(
-            return_sampling_mask=False,
+            return_sampling_mask=return_sampling_mask,
             enable_trace_replay=enable_trace_replay,
             is_diffusion=False,
         ),
@@ -94,7 +98,8 @@ def _validate(enable_trace_replay: bool) -> None:
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )
-    params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
+    if params is None:
+        params = SamplingParams(trace_decode_token_ids=[1, 2, 3])
     with patch.object(SamplingParams, "verify"):
         InputProcessor._validate_params(processor, params, ("generate",))
 
@@ -106,6 +111,14 @@ def test_trace_request_rejected_when_feature_disabled():
 
 def test_trace_request_accepted_when_feature_enabled():
     _validate(enable_trace_replay=True)
+
+
+@pytest.mark.parametrize(
+    "params", [SamplingParams(temperature=0.0, top_k=8), SamplingParams(top_k=0)]
+)
+def test_sampling_mask_request_without_bounded_sampling_is_a_client_error(params):
+    with pytest.raises(VLLMValidationError, match="sampling distribution replay"):
+        _validate(False, params, return_sampling_mask=True)
 
 
 def test_trace_replay_requires_v2_model_runner():
