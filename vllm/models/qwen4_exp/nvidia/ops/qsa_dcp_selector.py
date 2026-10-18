@@ -131,6 +131,12 @@ def pack_qsa_dcp_candidates(
     return packed
 
 
+def _select_topk_num_warps(block_n: int) -> int:
+    # One program sorts BLOCK_N int64 keys; 32 warps for 2048 keys
+    # (DCP 4 x top-k 512) is 1.4x faster than 8 on A100.
+    return min(32, max(4, block_n // 64))
+
+
 def select_qsa_dcp_topk(rank_major: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     """Write the global top-k of a rank-major candidate gather to ``out``.
 
@@ -150,7 +156,7 @@ def select_qsa_dcp_topk(rank_major: torch.Tensor, out: torch.Tensor) -> torch.Te
             TOPK=topk,
             DCP_WORLD=world,
             BLOCK_N=block_n,
-            num_warps=min(16, max(4, block_n // 256)),
+            num_warps=_select_topk_num_warps(block_n),
         )
     return out
 
@@ -338,7 +344,7 @@ def warmup_qsa_dcp_selector(
         TOPK=block_topk,
         DCP_WORLD=selector_shard.world_size,
         BLOCK_N=block_n,
-        num_warps=min(16, max(4, block_n // 256)),
+        num_warps=_select_topk_num_warps(block_n),
         grid=(rows,),
     )
     _expand_localize_qsa_indices_kernel.warmup(
