@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -15,11 +16,29 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 
 PADDING_SLOT_ID = -1
+
+
+@lru_cache(maxsize=32)
+def request_synthetic_acceptance_rates(
+    length: float, num_speculative_tokens: int, device: torch.device
+) -> torch.Tensor | None:
+    """Cache the minimum-variance rate schedule; zero selects real acceptance."""
+    if length == 0:
+        return None
+    from vllm.config import SpeculativeConfig
+
+    rates = SpeculativeConfig._acceptance_length_to_rates(
+        length, num_speculative_tokens
+    )
+    return async_tensor_h2d(
+        unconditional_to_conditional_rates(rates), dtype=torch.float32, device=device
+    )
 
 
 def next_power_of_2(n: int) -> int:

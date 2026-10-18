@@ -10,7 +10,10 @@ from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+from vllm.v1.spec_decode.utils import (
+    request_synthetic_acceptance_rates,
+    unconditional_to_conditional_rates,
+)
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -254,6 +257,7 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         verify_draft_sampled: torch.Tensor,
+        synthetic_rates: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -277,7 +281,7 @@ class RejectionSampler:
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
-            self.synthetic_conditional_rates,
+            synthetic_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
             **self._watermarking_kwargs(
@@ -307,6 +311,18 @@ class RejectionSampler:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         num_reqs = input_batch.num_reqs
+        synthetic_lengths = self.sampler.sampling_states.synthetic_acceptance_lengths[
+            input_batch.idx_mapping_np
+        ]
+        synthetic_length = float(synthetic_lengths[0])
+        assert np.all(synthetic_lengths == synthetic_length), (
+            "All requests in a batch must use the same synthetic_acceptance_length."
+        )
+        synthetic_rates = self.synthetic_conditional_rates
+        if synthetic_length >= 0:
+            synthetic_rates = request_synthetic_acceptance_rates(
+                synthetic_length, self.num_speculative_steps, logits.device
+            )
 
         if logits.shape[0] <= max_chunk_logits:
             # One chunk covers the batch. Adaptive verification compacts the logits
@@ -348,6 +364,7 @@ class RejectionSampler:
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
                 verify_draft_sampled[lo:hi],
+                synthetic_rates,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
