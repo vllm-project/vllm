@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.logger import init_logger
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.prefill_lane import PrefillJob, PrefillLane
@@ -96,6 +98,8 @@ class PrefillLaneConnector(KVConnectorBase_V1, SupportsHMA):
         self._pending: list[PrefillJob] = []
         # Whether the last step ran any request, i.e. someone would stall.
         self._busy = False
+        # Set once a lane job fails; later prompts take the normal path.
+        self._disabled = False
         # Worker side.
         self.lane: PrefillLane | None = None
 
@@ -118,11 +122,17 @@ class PrefillLaneConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
+        results = self.get_transfer_results(finished_req_ids)
+        return None, results.finished_recving or None
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
         assert self.lane is not None
         meta = self._get_connector_metadata()
         idle = isinstance(meta, PrefillLaneMetadata) and meta.idle
-        done = self.lane.take_finished(_IDLE_WAIT_S if idle else 0.0)
-        return None, done or None
+        done, failed = self.lane.take_finished(_IDLE_WAIT_S if idle else 0.0)
+        return KVConnectorTransferResults(finished_recving=done, failed_recving=failed)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -147,7 +157,8 @@ class PrefillLaneConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         if (
-            not (self._busy or self.always)
+            self._disabled
+            or not (self._busy or self.always)
             or request.num_computed_tokens
             or request.mm_features
             or request.prompt_embeds is not None
@@ -166,6 +177,15 @@ class PrefillLaneConnector(KVConnectorBase_V1, SupportsHMA):
         if num_tokens < self.min_tokens:
             return 0, False
         return num_tokens, True
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput"):
+        if connector_output.failed_recving and not self._disabled:
+            logger.warning(
+                "Prefill lane failed on %s; disabling it, prompts are recomputed "
+                "on the normal path.",
+                sorted(connector_output.failed_recving),
+            )
+            self._disabled = True
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int

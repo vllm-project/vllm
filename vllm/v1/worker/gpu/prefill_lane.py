@@ -107,6 +107,7 @@ class PrefillLaneRunner(GPUModelRunner):
             kernel_block_sizes=self.kernel_block_sizes,
             **main.block_table_kwargs,
         )
+        self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -214,6 +215,7 @@ class PrefillLane:
         self.jobs: queue.Queue[PrefillJob] = queue.Queue()
         self.num_pending = 0
         self.done: list[str] = []
+        self.failed: list[str] = []
         self.cond = threading.Condition()
         self.thread = threading.Thread(
             target=self._loop, name="prefill-lane", daemon=True
@@ -231,14 +233,16 @@ class PrefillLane:
             self.num_pending += 1
         self.jobs.put(job)
 
-    def take_finished(self, wait_s: float = 0.0) -> set[str]:
-        """Return the jobs finished so far; with wait_s, wait that long for one
-        if none has finished and some are still running."""
+    def take_finished(self, wait_s: float = 0.0) -> tuple[set[str], set[str]]:
+        """Return the jobs finished so far and the subset that failed; with
+        wait_s, wait that long for one if none has finished and some are still
+        running."""
         with self.cond:
             if wait_s and not self.done and self.num_pending:
                 self.cond.wait(wait_s)
             done, self.done = self.done, []
-        return set(done)
+            failed, self.failed = self.failed, []
+        return set(done), set(failed)
 
     def _loop(self) -> None:
         torch.accelerator.set_device_index(self.device)
@@ -246,9 +250,19 @@ class PrefillLane:
         with use_tp_lane(), torch.cuda.stream(self.stream), torch.inference_mode():
             while True:
                 job = self.jobs.get()
-                self.runner.prefill(job, self.chunk_tokens)
-                self.stream.synchronize()
+                req_id = job.new_req.req_id
+                failed = False
+                try:
+                    self.runner.prefill(job, self.chunk_tokens)
+                    self.stream.synchronize()
+                except Exception:
+                    # Report the job as a failed load so the scheduler recomputes
+                    # it on the normal path instead of waiting on it forever.
+                    logger.exception("Prefill lane failed on %s", req_id)
+                    failed = True
                 with self.cond:
                     self.num_pending -= 1
-                    self.done.append(job.new_req.req_id)
+                    self.done.append(req_id)
+                    if failed:
+                        self.failed.append(req_id)
                     self.cond.notify_all()
