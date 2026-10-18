@@ -29,7 +29,7 @@ def _bge_m3_config(io_processor_plugin=None):
     model_config.hf_config.to_dict.return_value = {}
     model_config.architecture = "BgeM3EmbeddingModel"
 
-    vllm_config = MagicMock(model_config=model_config)
+    vllm_config = MagicMock(model_config=model_config, io_transfer_config=None)
     renderer = MagicMock()
     renderer._executor = MagicMock()
     chat_template_config = MagicMock(

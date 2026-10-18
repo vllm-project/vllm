@@ -277,11 +277,12 @@ def get_pooling_invocation_types(
         ]
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from .pooling.api_router import create_pooling, pooling
-        from .pooling.protocol import PoolingRequest
+        from .pooling.api_router import create_pooling, pooling, pooling_inference
+        from .pooling.protocol import GeneratePoolingRequest, PoolingRequest
 
         invocation_types += [
             (PoolingRequest, (pooling, create_pooling)),
+            (GeneratePoolingRequest, (pooling, pooling_inference)),
         ]
 
     return invocation_types
