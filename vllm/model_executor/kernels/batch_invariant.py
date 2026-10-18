@@ -45,6 +45,8 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
             "hc_collapse",
             "sparse_metadata",
             "combine_swa_first_indices",
+            "topk_lens_by_position",
+            "gather_replay_batch",
             "cast_indexer_logits",
             "dequant_gather_nvfp4",
             "sparse_decode_gather",
@@ -291,6 +293,72 @@ def combine_swa_first_indices(
         *out,
     )
     return out
+
+
+def topk_lens_by_position(
+    token_to_req: torch.Tensor,
+    is_valid: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    compress_ratio: int,
+    top_k: int,
+    lengths: torch.Tensor,
+) -> None:
+    """Write each token's compressed top-k length from its position,
+    ``max(min((pos + 1) // compress_ratio, top_k), 0)``, as
+    ``combine_topk_swa_indices`` gives prefill rows; invalid tokens get 0."""
+    require_batch_invariant_kernel()
+    torch.ops.vllm_batch_invariant.topk_lens_by_position(
+        token_to_req,
+        is_valid,
+        query_start_loc,
+        seq_lens,
+        compress_ratio,
+        top_k,
+        lengths,
+    )
+
+
+def gather_replay_batch(
+    query_start_loc: torch.Tensor,
+    dropped_before: torch.Tensor,
+    seq_lens: torch.Tensor,
+    replay_start: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mappings: torch.Tensor,
+    num_reqs: int,
+    kept_rows: int,
+    rows: torch.Tensor,
+    kept_query_start_loc: torch.Tensor,
+    kept_positions: torch.Tensor,
+    kept_slot_mappings: torch.Tensor,
+    kept_kv_start: torch.Tensor,
+    prev_dropped_before: torch.Tensor | None = None,
+    select: torch.Tensor | None = None,
+) -> None:
+    """Gather a replay stage's trailing rows of each request: their batch rows,
+    query offsets, positions, slot mappings and window KV start (no lower
+    than ``seq_len - kept_rows`` for a trimmed request); with
+    ``prev_dropped_before`` also each row's index among the previous stage's
+    rows."""
+    require_batch_invariant_kernel()
+    torch.ops.vllm_batch_invariant.gather_replay_batch(
+        query_start_loc,
+        dropped_before,
+        seq_lens,
+        replay_start,
+        positions,
+        slot_mappings,
+        num_reqs,
+        kept_rows,
+        prev_dropped_before,
+        rows,
+        kept_query_start_loc,
+        kept_positions,
+        kept_slot_mappings,
+        kept_kv_start,
+        select,
+    )
 
 
 def silu_mul_bf16(

@@ -270,6 +270,140 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     assert build.batch.query_start_loc.tolist() == [0, 1, 4, 4 + WINDOW]
 
 
+def _replay_gather_case(kept_rows, prev_kept_rows=None):
+    """A batch of decodes and prefills, trimmed to their last ``kept_rows``
+    rows (and, for a later stage, the previous stage's ``prev_kept_rows``)."""
+    query_lens = [1, 300, 100, 5000, 7, 129]
+    seq_lens = [500, 300, 300, 9000, 7, 4000]
+    trims = [False, True, False, True, True, True]
+
+    def dropped(rows):
+        kept = [min(q, rows) if t else q for q, t in zip(query_lens, trims)]
+        return torch.tensor(
+            [0, *np.cumsum([q - k for q, k in zip(query_lens, kept)])],
+            dtype=torch.int32,
+            device=DEVICE,
+        ), sum(kept)
+
+    dropped_before, num_kept = dropped(kept_rows)
+    prev = dropped(prev_kept_rows)[0] if prev_kept_rows else None
+    num_tokens = sum(query_lens)
+    gen = torch.Generator().manual_seed(kept_rows)
+    inputs = dict(
+        query_start_loc=torch.tensor(
+            [0, *np.cumsum(query_lens)], dtype=torch.int32, device=DEVICE
+        ),
+        dropped_before=dropped_before,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
+        replay_start=torch.tensor(
+            [0, 10, 0, 6000, 0, 3990], dtype=torch.int32, device=DEVICE
+        ),
+        positions=torch.randint(1 << 40, (num_tokens,), generator=gen).to(DEVICE),
+        slot_mappings=torch.randint(1 << 40, (3, num_tokens), generator=gen).to(DEVICE),
+    )
+    return inputs, len(query_lens), num_kept, prev
+
+
+def _gather_reference(inputs, num_reqs, kept_rows, prev):
+    qsl, dropped = inputs["query_start_loc"].tolist(), inputs["dropped_before"]
+    dropped = dropped.tolist()
+    rows, kept_qsl, kv_start, select = [], [0] * (num_reqs + 1), [], []
+    for r in range(num_reqs):
+        begin, end = qsl[r], qsl[r + 1]
+        kept_begin, kept_end = begin - dropped[r], end - dropped[r + 1]
+        kept_qsl[0] = kept_begin if r == 0 else kept_qsl[0]
+        kept_qsl[r + 1] = kept_end
+        start = int(inputs["replay_start"][r])
+        if kept_end - kept_begin < end - begin:
+            start = max(start, int(inputs["seq_lens"][r]) - kept_rows)
+        kv_start.append(start)
+        first = end - (kept_end - kept_begin)
+        rows += [first + i for i in range(kept_end - kept_begin)]
+        if prev is not None:
+            select += [
+                first + i - int(prev[r + 1]) for i in range(kept_end - kept_begin)
+            ]
+    return rows, kept_qsl, kv_start, select
+
+
+@pytest.mark.parametrize(
+    "kept_rows,prev_kept_rows", [(WINDOW, None), (2541, None), (1001, 2541)]
+)
+def test_bi_gather_replay_batch_matches_reference(kept_rows, prev_kept_rows):
+    """The batch-invariant replay gather keeps each request's trailing rows,
+    their positions, slot mappings and window KV start, and for a later stage
+    each row's index among the previous stage's rows. At one stage of the
+    window it writes exactly what the Triton gather writes."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        batch_invariant_quant_kernel_available,
+        gather_replay_batch,
+    )
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    if not batch_invariant_quant_kernel_available():
+        pytest.skip("needs the batch-invariant extension")
+    inputs, num_reqs, num_kept, prev = _replay_gather_case(kept_rows, prev_kept_rows)
+
+    def outputs():
+        num_tokens = inputs["positions"].shape[0]
+        return dict(
+            rows=torch.full((num_tokens,), -5, dtype=torch.int64, device=DEVICE),
+            kept_query_start_loc=torch.full(
+                (num_reqs + 1,), -5, dtype=torch.int32, device=DEVICE
+            ),
+            kept_positions=torch.full((num_tokens,), -5, device=DEVICE).long(),
+            kept_slot_mappings=torch.full((3, num_tokens), -5, device=DEVICE).long(),
+            kept_kv_start=torch.full((num_reqs,), -5, dtype=torch.int32).to(DEVICE),
+        )
+
+    out = outputs()
+    select = None if prev is None else torch.full_like(out["rows"], -5)
+    gather_replay_batch(
+        **inputs,
+        num_reqs=num_reqs,
+        kept_rows=kept_rows,
+        **out,
+        prev_dropped_before=prev,
+        select=select,
+    )
+    rows, kept_qsl, kv_start, ref_select = _gather_reference(
+        inputs, num_reqs, kept_rows, prev
+    )
+    assert out["rows"][:num_kept].tolist() == rows
+    assert out["kept_query_start_loc"].tolist() == kept_qsl
+    assert out["kept_kv_start"].tolist() == kv_start
+    row_index = torch.tensor(rows, device=DEVICE)
+    assert torch.equal(out["kept_positions"][:num_kept], inputs["positions"][row_index])
+    assert torch.equal(
+        out["kept_slot_mappings"][:, :num_kept],
+        inputs["slot_mappings"][:, row_index],
+    )
+    if select is not None:
+        assert select[:num_kept].tolist() == ref_select
+    if kept_rows == WINDOW:
+        triton_out = outputs()
+        model_state._gather_replay_batch_kernel[(num_reqs,)](
+            inputs["query_start_loc"],
+            inputs["dropped_before"],
+            inputs["seq_lens"],
+            inputs["replay_start"],
+            inputs["positions"],
+            inputs["slot_mappings"],
+            inputs["slot_mappings"].stride(0),
+            triton_out["rows"],
+            triton_out["kept_query_start_loc"],
+            triton_out["kept_positions"],
+            triton_out["kept_slot_mappings"],
+            triton_out["kept_slot_mappings"].stride(0),
+            triton_out["kept_kv_start"],
+            WINDOW,
+            NUM_GROUPS=3,
+            BLOCK=1024,
+        )
+        for name, value in triton_out.items():
+            assert torch.equal(out[name], value), name
+
+
 def test_prompt_logprobs_requests_keep_their_rows(state):
     """Every prompt row of a prompt-logprobs request is read, so it never
     trims; the other prefills still do."""

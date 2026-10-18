@@ -38,6 +38,21 @@ void combine_swa_first_indices(const torch::Tensor& topk,
                                int64_t compress_ratio, int64_t top_k, int64_t m,
                                int64_t n, torch::Tensor& output,
                                torch::Tensor& lengths);
+void topk_lens_by_position(const torch::Tensor& token_to_req,
+                           const torch::Tensor& is_valid,
+                           const torch::Tensor& query_start_loc,
+                           const torch::Tensor& seq_lens,
+                           int64_t compress_ratio, int64_t top_k,
+                           torch::Tensor& lengths);
+void gather_replay_batch(
+    const torch::Tensor& query_start_loc, const torch::Tensor& dropped_before,
+    const torch::Tensor& seq_lens, const torch::Tensor& replay_start,
+    const torch::Tensor& positions, const torch::Tensor& slot_mappings,
+    int64_t num_reqs, int64_t kept_rows,
+    const std::optional<torch::Tensor>& prev_dropped_before,
+    torch::Tensor& rows, torch::Tensor& kept_query_start_loc,
+    torch::Tensor& kept_positions, torch::Tensor& kept_slot_mappings,
+    torch::Tensor& kept_kv_start, const std::optional<torch::Tensor>& select);
 
 void cast_indexer_logits(const torch::Tensor& input,
                          const torch::Tensor& row_ends, torch::Tensor& output);
@@ -120,6 +135,18 @@ TORCH_LIBRARY(vllm_batch_invariant, ops) {
       "Tensor seq_lens, Tensor gather_lens, int window, int compress_ratio, "
       "int top_k, int m, int n, Tensor(a!) output, Tensor(b!) lengths) -> ()");
   ops.def(
+      "topk_lens_by_position(Tensor token_to_req, Tensor is_valid, "
+      "Tensor query_start_loc, Tensor seq_lens, int compress_ratio, "
+      "int top_k, Tensor(a!) lengths) -> ()");
+  ops.def(
+      "gather_replay_batch(Tensor query_start_loc, Tensor dropped_before, "
+      "Tensor seq_lens, Tensor replay_start, Tensor positions, "
+      "Tensor slot_mappings, int num_reqs, int kept_rows, "
+      "Tensor? prev_dropped_before, Tensor(a!) rows, "
+      "Tensor(b!) kept_query_start_loc, Tensor(c!) kept_positions, "
+      "Tensor(d!) kept_slot_mappings, Tensor(e!) kept_kv_start, "
+      "Tensor(f!)? select) -> ()");
+  ops.def(
       "cast_indexer_logits(Tensor input, Tensor row_ends, Tensor(a!) output) "
       "-> ()");
   ops.def(
@@ -174,6 +201,9 @@ TORCH_LIBRARY_IMPL(vllm_batch_invariant, CUDA, ops) {
   ops.impl("sparse_metadata", &vllm::batch_invariant::sparse_metadata);
   ops.impl("combine_swa_first_indices",
            &vllm::batch_invariant::combine_swa_first_indices);
+  ops.impl("topk_lens_by_position",
+           &vllm::batch_invariant::topk_lens_by_position);
+  ops.impl("gather_replay_batch", &vllm::batch_invariant::gather_replay_batch);
   ops.impl("cast_indexer_logits", &vllm::batch_invariant::cast_indexer_logits);
   ops.impl("dequant_gather_nvfp4",
            &vllm::batch_invariant::dequant_gather_nvfp4);

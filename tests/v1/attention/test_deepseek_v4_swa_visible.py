@@ -678,6 +678,47 @@ def test_v41_bi_combine_swa_first_replays_in_cuda_graph():
     assert torch.equal(out[0], expected[0]) and torch.equal(out[1], expected[1])
 
 
+@pytest.mark.parametrize("compress_ratio", [1, 2, 4])
+@pytest.mark.parametrize("seq_len", [1, 127, 128, 129, 700, 2600, 16384])
+def test_v41_bi_topk_lens_by_position(seq_len, compress_ratio):
+    """Decode rows (1 to 7 per request, as spec verify gives) get the top-k
+    length prefill rows get at the same position, max(min((pos + 1) //
+    compress_ratio, top_k), 0); padding rows get 0."""
+    from vllm.model_executor.kernels.batch_invariant import topk_lens_by_position
+
+    _require_bi_kernels()
+    query_lens = [1, 7, 3, 1]
+    seq_lens = [seq_len, seq_len + 6, max(seq_len, 3), 2 * seq_len]
+    starts = [0]
+    for q in query_lens:
+        starts.append(starts[-1] + q)
+    tokens = starts[-1] + 5  # padding rows past the batch
+    token_to_req = torch.cat(
+        [torch.full((q,), r) for r, q in enumerate(query_lens)] + [torch.full((5,), 77)]
+    )
+    is_valid = torch.arange(tokens) < starts[-1]
+    is_valid[2] = False
+    lengths = torch.full((tokens,), 12345, dtype=torch.int32, device="cuda")
+    topk_lens_by_position(
+        token_to_req.int().cuda(),
+        is_valid.cuda(),
+        torch.tensor(starts, dtype=torch.int32, device="cuda"),
+        torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
+        compress_ratio,
+        512,
+        lengths,
+    )
+    expected = []
+    for token in range(tokens):
+        if not is_valid[token]:
+            expected.append(0)
+            continue
+        r = int(token_to_req[token])
+        pos = seq_lens[r] - query_lens[r] + token - starts[r]
+        expected.append(max(min((pos + 1) // compress_ratio, 512), 0))
+    assert lengths.tolist() == expected
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):
