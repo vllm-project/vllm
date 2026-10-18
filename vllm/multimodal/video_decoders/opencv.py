@@ -77,45 +77,31 @@ class OpenCVVideoBackendMixin:
         return cap
 
     @classmethod
-    def _count_frames_demux(cls, data: bytes) -> int:
-        """Count frames without decoding, using OpenCV's demuxer-only mode.
-
-        ``CAP_PROP_FORMAT == -1`` makes the FFMPEG backend hand out packets
-        instead of decoded frames, so counting grabs costs a container scan
-        rather than a full decode. Returns 0 when demuxing is unavailable.
-        """
-        # NOTE: buf must stay referenced until after release(). OpenCV's
-        # Python stream binding does not safely own the stream object, and
-        # reading through a freed one segfaults the interpreter.
+    def demux_count_frames(cls, data: bytes) -> int:
+        """Count frames with OpenCV's demuxer-only mode."""
+        # NOTE: buf must stay referenced until after release().
+        # OpenCV's Python stream binding does not safely own the stream object
         buf = BytesIO(data)
         demux_cap = cv2.VideoCapture(
             buf, cls.get_cv2_video_api(), [cv2.CAP_PROP_FORMAT, -1]
         )
-        if not demux_cap.isOpened():
-            return 0
         count = 0
         while demux_cap.grab():
             count += 1
         demux_cap.release()
+        if count == 0:
+            raise ValueError("Could not determine the number of video frames")
         return count
 
     @staticmethod
     def get_video_metadata(data: bytes) -> VideoSourceMetadata:
-        """Read the source metadata, recovering it when the header lacks it.
-
-        Opens its own capture, so the frame-counting pass may read the
-        stream to its end without affecting frame sampling.
-        """
         cap = OpenCVVideoBackendMixin.open_video_capture(data)
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if total_frames_num <= 0:
-            # Streamed WebM/MKV and raw H.264 carry no frame count in their
-            # headers; the FFMPEG backend reports a bogus negative value.
-            # Count frames via a demux-only pass, without decoding.
-            total_frames_num = OpenCVVideoBackendMixin._count_frames_demux(data)
-            if total_frames_num == 0:
-                raise ValueError("Could not determine the number of video frames")
+            # Streamed WebM/MKV and raw H.264 miss frame count in headers;
+            # We need to use demux frames count for retrieval
+            total_frames_num = OpenCVVideoBackendMixin.demux_count_frames(data)
             duration = total_frames_num / original_fps if original_fps > 0 else 0
             return VideoSourceMetadata(total_frames_num, original_fps, duration)
         # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
