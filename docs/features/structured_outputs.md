@@ -210,6 +210,17 @@ Note that you can use reasoning with any provided structured outputs feature. Th
 
 See also: [full example](../../examples/features/structured_outputs/README.md)
 
+With `--structured-outputs-config.enable_in_reasoning=False` (the default), the
+output grammar applies after reasoning ends. Engine-based reasoning parsers have
+a narrow exception for single-token implicit reasoning ends, such as GLM's
+`<tool_call>`, which also start the constrained response.
+
+While reasoning, vLLM masks an implicit end if the grammar rejects it as its first
+token, preventing a transition that would fail the request with a grammar error.
+Implicit ends that the grammar accepts remain allowed. The explicit reasoning-end
+token (for example, `</think>`) and other reasoning tokens remain unconstrained by
+the output grammar.
+
 !!! note
     When using Qwen3 Coder models with reasoning enabled, structured outputs might become disabled if the reasoning content does not get parsed into the `reasoning` field separately (v0.11.2+).
     To use both features together, you must explicitly enable structured outputs in reasoning mode.
