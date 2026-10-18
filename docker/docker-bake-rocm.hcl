@@ -65,10 +65,6 @@ variable "UCX_BRANCH" {
   default = ""
 }
 
-variable "ROCSHMEM_BRANCH" {
-  default = ""
-}
-
 variable "DEEPEP_BRANCH" {
   default = ""
 }
