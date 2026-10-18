@@ -5,7 +5,7 @@
 
 The stream-translation entry point is
 :meth:`CohereServingChatV2._chat_completion_stream_to_v2`, which turns an
-async iterable of OpenAI SSE chunks into Cohere's
+async iterable of OpenAI chunk objects into Cohere's
 ``message-start → (content|tool-call|citation)* → message-end → [DONE]``
 event stream.
 
@@ -15,7 +15,7 @@ state machine.
 """
 
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
 import pytest
@@ -26,10 +26,7 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
 from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource,
 )
-from vllm.entrypoints.cohere.protocol import (
-    CohereChatV2Request,
-    MessageStartEvent,
-)
+from vllm.entrypoints.cohere.protocol import MessageStartEvent
 from vllm.entrypoints.cohere.serving import (
     _DONE_FRAME,
     CohereServingChatV2,
@@ -41,6 +38,7 @@ from vllm.entrypoints.cohere.serving import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -85,9 +83,8 @@ def _make_chunk(
     usage: dict[str, Any] | None = None,
     omit_choices: bool = False,
     citations: list[Any] | None = None,
-) -> str:
-    """Build the ``data: {...}\\n\\n`` SSE frame the production code
-    consumes."""
+) -> ChatCompletionStreamResponse:
+    """Build the raw chat chunk the production converter consumes."""
     delta: dict[str, Any] = {}
     if role is not None:
         delta["role"] = role
@@ -119,27 +116,23 @@ def _make_chunk(
         payload["choices"] = []
     if usage is not None:
         payload["usage"] = usage
-    # Use ChatCompletionStreamResponse to normalize the payload shape.
-    chunk = ChatCompletionStreamResponse.model_validate(payload)
-    return f"data: {chunk.model_dump_json(exclude_none=False)}\n\n"
+    return ChatCompletionStreamResponse.model_validate(payload)
 
 
-def _make_done() -> str:
-    return "data: [DONE]\n\n"
-
-
-async def _stream_from(items: list[str]) -> AsyncGenerator[str, None]:
+async def _stream_from(
+    items: Sequence[ChatCompletionStreamResponse | ErrorResponse],
+) -> AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None]:
     for item in items:
         yield item
 
 
-async def _drain(serving: CohereServingChatV2, items: list[str]) -> list[str]:
+async def _drain(
+    serving: CohereServingChatV2,
+    items: Sequence[ChatCompletionStreamResponse | ErrorResponse],
+) -> list[str]:
     """Drive ``_chat_completion_stream_to_v2`` over ``items`` and collect
     the emitted SSE frames."""
-    request = CohereChatV2Request(
-        model="m", messages=[{"role": "user", "content": "hi"}], stream=True
-    )
-    gen = serving._chat_completion_stream_to_v2(_stream_from(items), request)
+    gen = serving._chat_completion_stream_to_v2(_stream_from(items))
     return [frame async for frame in gen]
 
 
@@ -793,15 +786,14 @@ class TestChatCompletionStreamToV2:
         assert "content-end" not in types
 
     @pytest.mark.asyncio
-    async def test_done_marker_in_middle_closes_open_block(self):
-        # Some upstreams send [DONE] without a trailing usage-only chunk.
+    async def test_stream_exhaustion_closes_open_block_without_usage(self):
+        # The raw stream may finish without a trailing usage-only chunk.
         # The translator must still emit message-end before [DONE] so
         # Cohere clients don't hang.
         serving = _serving(is_reasoning_model=True)
         items = [
             _make_chunk(role="assistant"),
             _make_chunk(content="Hi"),
-            _make_done(),
         ]
         frames = await _drain(serving, items)
         types = [_parse_event(f)["type"] for f in frames[:-1]]
@@ -815,72 +807,65 @@ class TestChatCompletionStreamToV2:
         assert frames[-1] == _DONE_FRAME
 
     @pytest.mark.asyncio
-    async def test_skips_empty_and_non_data_lines(self):
+    @pytest.mark.parametrize("block_type", [None, "text", "thinking", "tool_call"])
+    async def test_upstream_error_preserves_message(self, block_type):
         serving = _serving()
-        items = [
-            "\n",
-            "event: ping\n\n",
-            _make_chunk(role="assistant"),
-            "data: \n\n",  # empty data
-            _make_chunk(content="Hi"),
-            _make_chunk(
-                omit_choices=True,
-                usage={
-                    "prompt_tokens": 1,
-                    "completion_tokens": 1,
-                    "total_tokens": 2,
-                },
-            ),
-        ]
+        items: list[ChatCompletionStreamResponse | ErrorResponse] = []
+        if block_type is not None:
+            items.append(_make_chunk(role="assistant"))
+            if block_type == "text":
+                items.append(_make_chunk(content="Hi"))
+            elif block_type == "thinking":
+                items.append(_make_chunk(reasoning="Thinking"))
+            else:
+                items.append(
+                    _make_chunk(
+                        tool_calls=[
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "search", "arguments": '{"q":'},
+                            }
+                        ]
+                    )
+                )
+        items.append(serving.create_error_response(ValueError("backend failed")))
+
         frames = await _drain(serving, items)
         assert frames[-1] == _DONE_FRAME
-        # Should still produce a complete lifecycle.
-        types = [_parse_event(f)["type"] for f in frames[:-1]]
-        assert types[0] == "message-start"
-        assert types[-1] == "message-end"
+        events = [_parse_event(frame) for frame in frames[:-1]]
+        error_ends = [event for event in events if event["type"] == "message-end"]
+        assert len(error_ends) == 1
+        assert error_ends[0]["delta"] == {
+            "finish_reason": "ERROR",
+            "error": "backend failed",
+        }
+        assert events[-1] == error_ends[0]
+        if block_type is not None:
+            assert events[-2]["type"] == (
+                "tool-call-end" if block_type == "tool_call" else "content-end"
+            )
 
     @pytest.mark.asyncio
-    async def test_exception_in_chunk_parsing_emits_error_message_end(self):
-        # An invalid JSON payload after the first chunk triggers the
-        # error path: a synthetic message-end with finish_reason=ERROR
-        # followed by [DONE].
-        serving = _serving()
-        items = [
-            _make_chunk(role="assistant"),
-            "data: {not valid json}\n\n",
-        ]
-        frames = await _drain(serving, items)
-        assert frames[-1] == _DONE_FRAME
-        # Find the error-shaped message-end.
-        error_end = _parse_event(frames[-2])
-        assert error_end["type"] == "message-end"
-        assert error_end["delta"]["finish_reason"] == "ERROR"
-        assert "error" in error_end["delta"]
-
-    @pytest.mark.asyncio
-    async def test_error_message_end_is_sanitized(self):
+    @pytest.mark.parametrize("started", [False, True])
+    async def test_error_message_end_is_sanitized(self, started):
         # The client-visible ``error`` field on the terminal message-end
         # must be routed through ``sanitize_message`` so tracebacks,
         # host filesystem paths, and Python object memory addresses
         # can't leak from a mid-stream exception into the SSE payload.
         serving = _serving()
 
-        async def _raises_mid_stream() -> AsyncGenerator[str, None]:
-            yield _make_chunk(role="assistant")
+        async def _raises_mid_stream() -> AsyncGenerator[
+            ChatCompletionStreamResponse | ErrorResponse, None
+        ]:
+            if started:
+                yield _make_chunk(role="assistant")
             raise RuntimeError(
                 "boom <Foo at 0x7fabc0deface> reading /Users/dev/vllm/x.py"
             )
 
-        request = CohereChatV2Request(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            stream=True,
-        )
         frames = [
-            f
-            async for f in serving._chat_completion_stream_to_v2(
-                _raises_mid_stream(), request
-            )
+            f async for f in serving._chat_completion_stream_to_v2(_raises_mid_stream())
         ]
         assert frames[-1] == _DONE_FRAME
         error_end = _parse_event(frames[-2])
