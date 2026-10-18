@@ -8,6 +8,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_nonstreaming
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -83,10 +84,16 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
             parallel_tool_calls_names=["get_weather", "search_hotels"],
             # xfail markers
             xfail_streaming={},
-            xfail_nonstreaming={
-                "test_malformed_input": (
-                    "Parser sets tools_called=True even when tool_calls is "
-                    "empty (detects start token but fails to parse)"
-                ),
-            },
+            xfail_nonstreaming={},
         )
+
+    def test_malformed_input_preserves_content(
+        self, tool_parser, test_config: ToolParserTestConfig
+    ):
+        # This fixture contains the outer marker but no complete tool-call match.
+        malformed_input = test_config.malformed_input_outputs[1]
+        extracted = run_tool_extraction_nonstreaming(tool_parser, malformed_input)
+
+        assert extracted.tools_called is False
+        assert extracted.tool_calls == []
+        assert extracted.content == malformed_input
