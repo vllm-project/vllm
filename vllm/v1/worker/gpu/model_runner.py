@@ -986,7 +986,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
             if dummy_input_batch.num_reqs == 0:
-                return
+                # This rank owns no dummy request, but it can own a real one
+                # later. Profile its sampler on one local row. Do not add a
+                # collective here: only some ranks take this branch.
+                dummy_input_batch = InputBatch.make_dummy(1, 1, self.input_buffers)
+                logits = logits.new_zeros(1, self.vocab_size)
         else:
             logits = self.model.compute_logits(hidden_states)
 
