@@ -240,7 +240,7 @@ class ExpertMapManager:
         self._init_aiter_shared_experts_topK_buffer()
 
         if self.use_ep and self.rocm_aiter_enabled:
-            expert_mask = self._expert_mask
+            expert_mask = self.expert_mask
             assert expert_mask is None or torch.all(
                 (expert_mask == 0) | (expert_mask == 1)
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
@@ -357,7 +357,7 @@ class ExpertMapManager:
         """Check if expert is assigned to this rank."""
         if self._expert_map is None:
             return True
-        return bool(self._expert_map[global_id] != -1)
+        return self._expert_map[global_id] != -1
 
     def get_local_expert_ids(self) -> list[int]:
         """Get list of global IDs for experts on this rank."""
@@ -441,12 +441,7 @@ class ExpertMapManager:
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
         device = torch.get_default_device()
-        if device.type == "meta":
-            # Meta-device construction (e.g. IPC weight-cache loading) never
-            # materializes plain attributes, but host-side queries need real
-            # data. The kernel-facing copy is the RoutedExperts buffer, which
-            # the IPC loader re-registers with the daemon's real tensor.
-            device = torch.device("cpu")
+        device = device if device.type != "meta" else torch.device("cpu")
         with device:
             (
                 self._local_num_experts,
