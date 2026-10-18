@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from collections.abc import Iterable, Mapping
 
 import torch
 from torch import nn
-from transformers import BatchFeature, Idefics3ImageProcessor
+from transformers import BatchFeature, Idefics3ImageProcessor, Idefics3Processor
 from transformers.models.idefics3.image_processing_idefics3 import (
     MAX_IMAGE_SIZE,
     _resize_output_size_rescale_to_max_len,
@@ -34,20 +33,9 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
-    MultiModalDataItems,
-)
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-    BaseMultiModalProcessor,
-    BaseProcessingInfo,
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.colultravbert import (
@@ -55,8 +43,13 @@ from vllm.transformers_utils.configs.colultravbert import (
     UltraBertConfig,
 )
 from vllm.transformers_utils.processor import cached_get_image_processor
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .idefics3 import (
+    Idefics3DummyInputsBuilder,
+    Idefics3ImagePixelInputs,
+    Idefics3MultiModalProcessor,
+    Idefics3ProcessingInfo,
+)
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLateInteraction,
@@ -65,10 +58,6 @@ from .interfaces import (
 from .interfaces_base import default_pooling_type
 from .siglip import SiglipVisionModel
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
-
-IMAGE_TOKEN = "<image>"
-FAKE_IMAGE_TOKEN = "<fake_token_around_image>"
-GLOBAL_IMAGE_TOKEN = "<global-img>"
 
 
 class UltraBertAttention(nn.Module):
@@ -324,28 +313,7 @@ def get_capped_longest_edge(
     return tile_size
 
 
-def image_prompt(rows: int, cols: int, image_seq_len: int) -> str:
-    tile = IMAGE_TOKEN * image_seq_len
-    global_view = f"{FAKE_IMAGE_TOKEN}{GLOBAL_IMAGE_TOKEN}{tile}{FAKE_IMAGE_TOKEN}"
-    if rows == 0 and cols == 0:
-        return global_view
-    grid = "".join(
-        "".join(
-            f"{FAKE_IMAGE_TOKEN}<row_{r}_col_{c}>{tile}" for c in range(1, cols + 1)
-        )
-        + "\n"
-        for r in range(1, rows + 1)
-    )
-    return f"{grid}\n{global_view}"
-
-
-class ColUltraVBertImagePixelInputs(TensorSchema):
-    type: Literal["pixel_values"] = "pixel_values"
-    pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
-    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
-
-
-class ColUltraVBertProcessingInfo(BaseProcessingInfo):
+class ColUltraVBertProcessingInfo(Idefics3ProcessingInfo):
     def get_hf_config(self) -> ColUltraVBertConfig:
         return self.ctx.get_hf_config(ColUltraVBertConfig)
 
@@ -358,8 +326,13 @@ class ColUltraVBertProcessingInfo(BaseProcessingInfo):
             processor_cls_overrides=Idefics3ImageProcessor,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
+    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
+        return self.ctx.init_processor(
+            Idefics3Processor,
+            image_processor=self.get_image_processor(),
+            tokenizer=self.get_tokenizer(),
+            image_seq_len=self.get_hf_config().image_seq_len,
+        )
 
     def get_longest_edge(self, *, image_width: int, image_height: int) -> int:
         image_processor = self.get_image_processor()
@@ -375,120 +348,80 @@ class ColUltraVBertProcessingInfo(BaseProcessingInfo):
             max_image_tiles,
         )
 
-    def get_num_image_tokens(self, *, image_width: int, image_height: int) -> int:
+    def _get_image_feature_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[int, int, int]:
         edge = self.get_longest_edge(image_width=image_width, image_height=image_height)
-        _, rows, cols = self.get_image_processor().get_number_of_image_patches(
+        return processor.image_processor.get_number_of_image_patches(
             image_height, image_width, {"size": {"longest_edge": edge}}
         )
-        return (rows * cols + 1) * self.get_hf_config().image_seq_len
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-        edge = image_processor.size["longest_edge"]
-        tile = image_processor.max_image_size["longest_edge"]
+        processor = self.get_hf_processor()
+        edge = processor.image_processor.size["longest_edge"]
+        tile = processor.image_processor.max_image_size["longest_edge"]
         sizes = [ImageSize(width=edge, height=h) for h in range(tile, edge + 1, tile)]
         return max(
             sizes,
             key=lambda s: self.get_num_image_tokens(
-                image_width=s.width, image_height=s.height
+                image_width=s.width,
+                image_height=s.height,
+                processor=processor,
+                mm_kwargs={},
             ),
         )
 
 
-class ColUltraVBertDummyInputsBuilder(
-    BaseDummyInputsBuilder[ColUltraVBertProcessingInfo],
-):
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return IMAGE_TOKEN * mm_counts.get("image", 0)
-
+class ColUltraVBertDummyInputsBuilder(Idefics3DummyInputsBuilder):
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
-
+        size = self.info.get_image_size_with_most_features()
         return {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=size.width,
+                height=size.height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             )
         }
 
 
-class ColUltraVBertMultiModalProcessor(
-    BaseMultiModalProcessor[ColUltraVBertProcessingInfo],
-):
-    def _process_images(self, images: list, **kwargs: object) -> BatchFeature:
-        items = ImageProcessorItems(images)
-        image_processor = self.info.get_image_processor()
-        pixel_values, grids = [], []
-        for i in range(len(items)):
-            size = items.get_image_size(i)
-            edge = self.info.get_longest_edge(
-                image_width=size.width, image_height=size.height
-            )
-            outputs = image_processor(
-                [[items.get(i)]],
-                size={"longest_edge": edge},
-                return_row_col_info=True,
-                return_tensors="pt",
-            )
-            pixel_values.append(outputs["pixel_values"][0])
-            grids.append([outputs["rows"][0][0], outputs["cols"][0][0]])
-        return BatchFeature(
-            {
-                "pixel_values": torch.cat(pixel_values),
-                "num_patches": torch.tensor([len(p) for p in pixel_values]),
-                "image_grid": torch.tensor(grids),
-            }
-        )
-
+class ColUltraVBertMultiModalProcessor(Idefics3MultiModalProcessor):
     def _call_hf_processor(
         self,
         hf_data: Mapping[str, object],
         hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        return self.info.ctx.call_hf_processor(self._process_images, hf_data)
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        num_patches = hf_inputs.get("num_patches", torch.empty(0))
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            image_grid=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-        )
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
-
-        def get_replacement(item_idx: int) -> PromptUpdateDetails:
-            grid = out_mm_kwargs["image"][item_idx]["image_grid"].data
-            rows, cols = grid.tolist()
-            text = image_prompt(rows, cols, config.image_seq_len)
-            token_ids = cached_encode(tokenizer, text, add_special_tokens=False)
-            return PromptUpdateDetails.select_token_id(token_ids, config.image_token_id)
-
-        return [
-            PromptReplacement(
-                modality="image",
-                target=[config.image_token_id],
-                replacement=get_replacement,
+        # Each image tiles at its own capped longest edge, which the HF
+        # processor only takes per call.
+        images = ImageProcessorItems(hf_data["images"])
+        outputs = []
+        for i in range(len(images)):
+            size = images.get_image_size(i)
+            edge = self.info.get_longest_edge(
+                image_width=size.width, image_height=size.height
             )
-        ]
+            outputs.append(
+                super()._call_hf_processor(
+                    {**hf_data, "images": [images.get(i)]},
+                    {**hf_kwargs, "size": {"longest_edge": edge}},
+                )
+            )
+        return BatchFeature(
+            {
+                key: torch.cat([output[key] for output in outputs], dim=1)
+                for key in ("pixel_values", "pixel_attention_mask")
+            }
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -542,14 +475,16 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> ColUltraVBertImagePixelInputs | None:
+    ) -> Idefics3ImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
 
         size = self.config.vision_config.image_size
-        return ColUltraVBertImagePixelInputs(
+        return Idefics3ImagePixelInputs(
+            type="pixel_values",
             pixel_values=pixel_values,
+            pixel_attention_mask=kwargs.pop("pixel_attention_mask"),
             num_patches=kwargs.pop("num_patches"),
             resolve_bindings={"h": size, "w": size},
         )

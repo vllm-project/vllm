@@ -3,14 +3,50 @@
 
 import pytest
 import torch
+from transformers import Idefics3ImageProcessor
 
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
+from vllm.model_executor.models.colultravbert import get_capped_longest_edge
 
 MODEL_NAME = "athrael-soju/ColUltraVBERT"
 DTYPE = "bfloat16"
 PAGE_PROMPT = "User:<image>Describe the image.<end_of_utterance>\nAssistant:"
 IMAGE_SEQ_LEN = 64
 EMBEDDING_DIM = 768
+LONGEST_EDGE = 3072
+TILE_SIZE = 512
+MAX_IMAGE_TILES = 27
+
+
+def page_grid(width: int, height: int) -> tuple[int, int]:
+    edge = get_capped_longest_edge(
+        height, width, LONGEST_EDGE, TILE_SIZE, MAX_IMAGE_TILES
+    )
+    processor = Idefics3ImageProcessor(
+        size={"longest_edge": LONGEST_EDGE},
+        max_image_size={"longest_edge": TILE_SIZE},
+    )
+    _, rows, cols = processor.get_number_of_image_patches(
+        height, width, {"size": {"longest_edge": edge}}
+    )
+    return rows, cols
+
+
+# Grids from the checkpoint's own UltraVBertImageProcessor.
+@pytest.mark.parametrize(
+    ("width", "height", "grid"),
+    [
+        (1700, 2200, (5, 4)),
+        (2200, 1700, (4, 5)),
+        (2000, 2000, (5, 5)),
+        (4000, 1000, (2, 6)),
+        (1000, 4000, (6, 2)),
+        (300, 200, (4, 6)),
+        (3000, 2400, (4, 5)),
+    ],
+)
+def test_colultravbert_tile_cap(width, height, grid):
+    assert page_grid(width, height) == grid
 
 
 @pytest.fixture(scope="module")
@@ -81,4 +117,10 @@ def test_colultravbert_image_token_embed(colultravbert_model, image_assets):
     emb = torch.tensor(outputs[0])
     assert emb.dim() == 2
     assert emb.shape[1] == EMBEDDING_DIM
-    assert emb.shape[0] >= 2 * IMAGE_SEQ_LEN
+
+    rows, cols = page_grid(*image.size)
+    tokenizer = colultravbert_model.llm.get_tokenizer()
+    prompt_ids = req_outputs[0].prompt_token_ids
+    image_tokens = prompt_ids.count(tokenizer.convert_tokens_to_ids("<image>"))
+    assert image_tokens == (rows * cols + 1) * IMAGE_SEQ_LEN
+    assert emb.shape[0] == len(prompt_ids)

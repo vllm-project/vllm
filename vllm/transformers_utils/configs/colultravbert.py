@@ -92,7 +92,7 @@ class ColUltraVBertConfig(PreTrainedConfig):
         self.connector_norm = connector_norm
         self.hidden_size = text_config.hidden_size
 
-        kwargs.setdefault("architectures", ["UltraVBertModel"])
+        kwargs.setdefault("architectures", ["ColUltraVBertForRetrieval"])
         super().__init__(**kwargs)
 
     @property
