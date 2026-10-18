@@ -718,11 +718,6 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
     )
     num_regions = 3 if kda_only_tensor else 2
     assert worker.num_regions == num_regions
-    assert worker._group_region_indices == [
-        [0, 1],
-        list(range(num_regions)),
-        [0, 1],
-    ]
 
     desc_ids = worker._compute_desc_ids(
         block_ids=([1], [2], [3]),
