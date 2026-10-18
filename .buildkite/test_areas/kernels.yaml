@@ -510,6 +510,36 @@ steps:
       - vllm/model_executor/layers/quantization/utils/quant_utils.py
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_modular_kernel_combinations.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "not multigpu" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI300) MoE Kernels Multi-GPU"
+  key: amd-moe-kernels-multi-gpu-mi300
+  dind: false
+  device: mi300_2
+  num_devices: 2
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe/test_modular_kernel_combinations.py
+  - tests/kernels/moe/modular_kernel_tools/
+  - tests/kernels/utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/distributed/device_communicators/
+  - vllm/distributed/parallel_state.py
+  - vllm/envs.py
+  - vllm/config
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - 'VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s kernels/moe/test_modular_kernel_combinations.py -k "multigpu"'
 
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
