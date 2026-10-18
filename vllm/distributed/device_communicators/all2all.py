@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import torch
@@ -665,6 +667,13 @@ class _NixlEPV2State:
     kwargs: dict[str, Any]  # built for these get_handle() args; later calls must match
     max_num_ep_ranks: int
     num_sms: int  # active SMs per dispatch
+    elastic: bool = False  # elastic EP: the newest manager tears down
+
+
+def _wait_for_peers(store: Any, ranks: list[int], prefix: str) -> None:
+    """Wait for ranks' published nixl_ep_v2 metadata; the Store's wait
+    releases the GIL, so serving goes on."""
+    store.wait([f"{prefix}/{r}" for r in ranks], timedelta(seconds=300))
 
 
 def _nixl_ep_v2_num_sms(num_launch_sms: int) -> int:
@@ -758,17 +767,15 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
     """
 
     _state: _NixlEPV2State | None = None
+    _newest: "NixlEPV2All2AllManager | None" = None  # owns the teardown
     _lock = threading.RLock()
+    _PREFIX = "nixl_ep_v2"  # publish / connect_ranks key prefix
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert has_nixl_ep_v2(), (
             "nixl_ep_v2 needs nixl.runtime.ep: install a NIXL build with "
             "NIXL EP v2 for this PyTorch version (see the warning above if it "
             "was found but failed to import)."
-        )
-        # A joining rank would wait for a cohort that never builds the buffer.
-        assert not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH, (
-            "nixl_ep_v2 does not support elastic EP scale-up yet"
         )
         if tcp_store_group is None:
             tcp_store_group = StatelessProcessGroup(
@@ -777,6 +784,7 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
                 store=dist.PrefixStore("nixl_ep_v2", cpu_group.get_group_store()),
             )
         super().__init__(cpu_group, tcp_store_group)
+        NixlEPV2All2AllManager._newest = self
 
     @property
     def max_num_ep_ranks(self) -> int:
@@ -801,7 +809,14 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
         """
         with NixlEPV2All2AllManager._lock:
             if NixlEPV2All2AllManager._state is None:
+                t0 = time.perf_counter()
                 NixlEPV2All2AllManager._state = self._make_state(kwargs)
+                logger.info(
+                    "nixl_ep_v2 build %d %s: build_s=%.3f",
+                    self.world_size,
+                    self._mode(self.world_size),
+                    time.perf_counter() - t0,
+                )
             state = NixlEPV2All2AllManager._state
             # One buffer serves every MoE layer, so every layer must ask for
             # the same sizes.
@@ -824,6 +839,20 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
         parallel_config = get_current_vllm_config().parallel_config
         max_num_ep_ranks = nixl_ep_v2_max_ep_size(parallel_config)
         domain_size = nixl_ep_v2_domain_size(parallel_config)
+        sizing = dict(
+            num_max_tokens_per_rank=kwargs["num_max_tokens_per_rank"],
+            hidden=kwargs["hidden"],
+            num_topk=kwargs["num_topk"],
+            use_fp8_dispatch=kwargs["use_fp8_dispatch"],
+            num_experts_per_rank=kwargs["num_local_experts"],
+            prefer_overlap_with_compute=envs.VLLM_NIXL_EP_V2_PREFER_OVERLAP,
+            allow_multiple_reduction=envs.VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION,
+            explicitly_destroy=True,
+        )
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            return self._make_joiner_state(
+                ElasticBuffer, kwargs, sizing, max_num_ep_ranks, domain_size
+            )
         if 0 < domain_size < self.world_size:
             # A domain smaller than the NVLink domain makes nixl_ep_v2 treat
             # NVLink neighbours as remote and send to them the scale-out
@@ -852,14 +881,7 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
             num_ranks=self.world_size,
             store=self.tcp_store_group.store,
             bootstrap_id="nixl_ep_v2",
-            num_max_tokens_per_rank=kwargs["num_max_tokens_per_rank"],
-            hidden=kwargs["hidden"],
-            num_topk=kwargs["num_topk"],
-            use_fp8_dispatch=kwargs["use_fp8_dispatch"],
-            num_experts_per_rank=kwargs["num_local_experts"],
-            prefer_overlap_with_compute=envs.VLLM_NIXL_EP_V2_PREFER_OVERLAP,
-            allow_multiple_reduction=envs.VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION,
-            explicitly_destroy=True,
+            **sizing,
             **world,
         )
         return _NixlEPV2State(
@@ -867,7 +889,161 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
             dict(kwargs),
             max_num_ep_ranks,
             _nixl_ep_v2_num_sms(buffer.num_launch_sms),
+            parallel_config.enable_elastic_ep,
         )
+
+    def _make_joiner_state(
+        self,
+        buffer_cls: Any,
+        kwargs: dict[str, Any],
+        sizing: dict[str, Any],
+        max_num_ep_ranks: int,
+        domain_size: int,
+    ) -> _NixlEPV2State:
+        """Build a joining rank's buffer and connect it to every other rank.
+
+        The joiner builds a one-rank cohort at its own place in the maximum
+        world (a cohort of one accepts no num_group_scaleup_ranks), so it is
+        alone live: its warm-up touches no peer. commit_ep_size makes the new
+        world live once the existing ranks commit it.
+        """
+        world = _nixl_ep_v2_world_args(
+            self.rank, self.world_size, max_num_ep_ranks, domain_size
+        )
+        del world["num_group_scaleup_ranks"]
+        store = self.tcp_store_group.store
+        buffer = buffer_cls(
+            rank_idx=0,
+            num_ranks=1,
+            store=store,
+            bootstrap_id=f"{self._PREFIX}/join/{self.rank}",
+            connect_group=False,
+            **sizing,
+            **world,
+        )
+        buffer.publish(store=store, key_prefix=self._PREFIX)
+        peers = [r for r in range(self.world_size) if r != self.rank]
+        t0 = time.perf_counter()
+        _wait_for_peers(store, peers, self._PREFIX)
+        t1 = time.perf_counter()
+        buffer.connect_ranks(peers, store=store, key_prefix=self._PREFIX)
+        logger.info(
+            "nixl_ep_v2 join %d: wait_s=%.3f connect_s=%.3f",
+            self.rank,
+            t1 - t0,
+            time.perf_counter() - t1,
+        )
+        return _NixlEPV2State(
+            buffer,
+            dict(kwargs),
+            max_num_ep_ranks,
+            _nixl_ep_v2_num_sms(buffer.num_launch_sms),
+            elastic=True,
+        )
+
+    def _mode(self, ep_size: int) -> str:
+        """The kernels' mode for an EP size; equal on every rank.
+
+        Direct needs the live world in one NVLink domain, so a world larger
+        than a domain is hybrid. NIXL_EP_ADAPTIVE_MODE overrides inside one domain,
+        as at the buffer's first build.
+        """
+        state = NixlEPV2All2AllManager._state
+        assert state is not None
+        if ep_size > state.buffer.max_num_scaleup_ranks:
+            return "hybrid"
+        return os.environ.get("NIXL_EP_ADAPTIVE_MODE", "direct")
+
+    def stage_ep_size(self) -> None:
+        """Connect the joining ranks while serving goes on (prepare thread).
+
+        A shrink stages nothing: the leavers stay live until the commit.
+        """
+        with NixlEPV2All2AllManager._lock:
+            state = NixlEPV2All2AllManager._state
+            assert state is not None
+            buffer, store = state.buffer, self.tcp_store_group.store
+            target = list(range(self.world_size))
+            # The frontend refuses other sizes; this backs it up.
+            buffer.masks_of(target)
+            joiners = sorted(
+                set(target) - set(buffer.get_connected_ranks()) - {self.rank}
+            )
+            if not joiners:
+                return
+            buffer.publish(store=store, key_prefix=self._PREFIX)
+            t0 = time.perf_counter()
+            _wait_for_peers(store, joiners, self._PREFIX)
+            t1 = time.perf_counter()
+            buffer.connect_ranks(joiners, store=store, key_prefix=self._PREFIX)
+            logger.info(
+                "nixl_ep_v2 stage %d: wait_s=%.3f connect_s=%.3f",
+                self.world_size,
+                t1 - t0,
+                time.perf_counter() - t1,
+            )
+
+    def commit_ep_size(self) -> None:
+        """Make the new world live (engine thread, between steps, outside
+        capture); a shrink then drops the leavers."""
+        with NixlEPV2All2AllManager._lock:
+            state = NixlEPV2All2AllManager._state
+            assert state is not None
+            buffer = state.buffer
+            leavers = [r for r in buffer.get_connected_ranks() if r >= self.world_size]
+            mode = self._mode(self.world_size)
+            t0 = time.perf_counter()
+            # Stage and commit together: a set_topology in between would
+            # discard the staged world.
+            # The kernels derive the mode from the staged domains.
+            buffer.stage_topology(
+                num_active_sms=state.num_sms,
+                active_ranks=list(range(self.world_size)),
+            )
+            buffer.commit_topology()
+            if leavers:
+                buffer.disconnect_ranks(leavers)
+                buffer.commit_topology()
+            torch.accelerator.synchronize()
+            logger.info(
+                "nixl_ep_v2 commit %d %s: commit_s=%.4f",
+                self.world_size,
+                mode,
+                time.perf_counter() - t0,
+            )
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        # Joiners only: the buffer is still its one-rank world, so the warm-up
+        # touches no peer and there is nothing to mask.
+        state = NixlEPV2All2AllManager._state
+        assert state is not None
+        assert state.buffer.get_active_ranks() == [self.rank]
+        yield
+
+    def destroy(self) -> None:
+        """Tear the buffer down on a leaving rank or at shutdown, under
+        elastic EP only (a fixed EP size keeps its shutdown as it was).
+
+        A retired manager returns at once: the newest one owns the buffer.
+        """
+        state = NixlEPV2All2AllManager._state
+        if (
+            NixlEPV2All2AllManager._newest is not self
+            or state is None
+            or not state.elastic
+        ):
+            return
+        buffer = state.buffer
+        # Go solo first: the buffer's destroy() is a barrier over the live
+        # world.
+        buffer.stage_topology(num_active_sms=state.num_sms, active_ranks=[self.rank])
+        buffer.commit_topology()
+        if peers := buffer.get_connected_ranks():
+            buffer.disconnect_ranks(peers)
+            buffer.commit_topology()
+        buffer.destroy()
+        NixlEPV2All2AllManager._state = None
 
     @property
     def num_sms(self) -> int:

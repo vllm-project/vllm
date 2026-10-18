@@ -116,17 +116,188 @@ def test_nixl_ep_v2_manager(world: int, domain_size: int) -> None:
 
 
 def test_nixl_ep_v2_manager_init_guards(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The manager refuses an unusable nixl_ep_v2 and elastic EP scale-up."""
+    """The manager refuses an unusable nixl_ep_v2."""
     from vllm.distributed.device_communicators import all2all
 
     monkeypatch.setattr(all2all, "has_nixl_ep_v2", lambda: False)
     with pytest.raises(AssertionError, match="nixl_ep_v2 needs nixl.runtime.ep"):
         all2all.NixlEPV2All2AllManager(cpu_group=None)
 
-    monkeypatch.setattr(all2all, "has_nixl_ep_v2", lambda: True)
-    monkeypatch.setenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "1")
-    with pytest.raises(AssertionError, match="scale-up"):
-        all2all.NixlEPV2All2AllManager(cpu_group=None)
+
+class _FakeElasticBuffer:
+    """Records the elastic calls of an ElasticBuffer at (rank // 4, rank % 4)
+    in a world of 4-GPU domains."""
+
+    num_launch_sms = 26
+    max_num_scaleup_ranks = 4
+
+    def __init__(self, rank: int, connected: list[int]):
+        self.rank, self.connected, self.calls = rank, list(connected), []
+        self.active = [rank]
+
+    def masks_of(self, ranks):
+        self.calls.append(("masks_of", list(ranks)))
+
+    def get_connected_ranks(self):
+        return list(self.connected)
+
+    def get_active_ranks(self):
+        return list(self.active)
+
+    def publish(self, store, key_prefix):
+        self.calls.append(("publish", key_prefix))
+
+    def connect_ranks(self, ranks, store, key_prefix):
+        self.calls.append(("connect_ranks", list(ranks)))
+        self.connected += ranks
+
+    def disconnect_ranks(self, ranks):
+        self.calls.append(("disconnect_ranks", list(ranks)))
+        self.connected = [r for r in self.connected if r not in ranks]
+
+    def stage_topology(self, *, num_active_sms, active_ranks):
+        self.calls.append(("stage_topology", num_active_sms, active_ranks))
+        self.active = active_ranks
+
+    def commit_topology(self):
+        self.calls.append(("commit_topology",))
+
+    def destroy(self):
+        self.calls.append(("destroy",))
+
+
+def _fake_manager(
+    monkeypatch: pytest.MonkeyPatch, rank: int, world: int, buffer, elastic=True
+):
+    """A NixlEPV2All2AllManager at EP rank `rank` of `world` over `buffer`,
+    without process groups."""
+    import torch
+
+    from vllm.distributed.device_communicators.all2all import (
+        NixlEPV2All2AllManager,
+        _NixlEPV2State,
+    )
+
+    store = types.SimpleNamespace(waited=[])
+    store.wait = lambda keys, timeout: store.waited.append(keys)
+    mgr = object.__new__(NixlEPV2All2AllManager)
+    mgr.rank, mgr.world_size = rank, world
+    mgr.tcp_store_group = types.SimpleNamespace(store=store)
+    monkeypatch.setattr(NixlEPV2All2AllManager, "_newest", mgr)
+    monkeypatch.setattr(
+        NixlEPV2All2AllManager,
+        "_state",
+        _NixlEPV2State(buffer, {}, 16, 16, elastic),
+    )
+    monkeypatch.delenv("NIXL_EP_ADAPTIVE_MODE", raising=False)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    return mgr, store
+
+
+@pytest.mark.cpu_test
+def test_nixl_ep_v2_grow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A grow from 4 to 8 ranks: stage connects the joiners while serving
+    goes on; commit makes the 8 live, hybrid as they span two domains."""
+    buffer = _FakeElasticBuffer(1, [0, 2, 3])
+    mgr, store = _fake_manager(monkeypatch, 1, 8, buffer)
+    mgr.stage_ep_size()
+    assert store.waited == [[f"nixl_ep_v2/{r}" for r in range(4, 8)]]
+    assert buffer.calls == [
+        ("masks_of", list(range(8))),
+        ("publish", "nixl_ep_v2"),
+        ("connect_ranks", [4, 5, 6, 7]),
+    ]
+    buffer.calls.clear()
+    mgr.commit_ep_size()
+    assert buffer.calls == [
+        ("stage_topology", 16, list(range(8))),
+        ("commit_topology",),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_nixl_ep_v2_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shrink from 8 to 4 ranks stages nothing; commit makes the first
+    domain live, direct, then drops the leavers."""
+    buffer = _FakeElasticBuffer(1, [0, 2, 3, 4, 5, 6, 7])
+    mgr, store = _fake_manager(monkeypatch, 1, 4, buffer)
+    mgr.stage_ep_size()
+    assert buffer.calls == [("masks_of", list(range(4)))]
+    assert store.waited == []
+    buffer.calls.clear()
+    mgr.commit_ep_size()
+    assert buffer.calls == [
+        ("stage_topology", 16, list(range(4))),
+        ("commit_topology",),
+        ("disconnect_ranks", [4, 5, 6, 7]),
+        ("commit_topology",),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_nixl_ep_v2_joiner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A joiner builds a one-rank cohort at its own place in the maximum
+    world, connects to every other rank, and warms up alone."""
+    from vllm.distributed.device_communicators.all2all import NixlEPV2All2AllManager
+
+    mgr, store = _fake_manager(monkeypatch, 5, 8, None)
+    built = {}
+
+    def fake_buffer(**kwargs):
+        built.update(kwargs)
+        return _FakeElasticBuffer(5, [])
+
+    monkeypatch.setenv("VLLM_NIXL_EP_V2_NUM_SMS", "0")
+    state = mgr._make_joiner_state(fake_buffer, {}, {"hidden": 256}, 16, 4)
+    assert built == dict(
+        rank_idx=0,
+        num_ranks=1,
+        store=store,
+        bootstrap_id="nixl_ep_v2/join/5",
+        connect_group=False,
+        hidden=256,
+        max_num_scaleout_ranks=4,
+        max_num_scaleup_ranks=4,
+        scaleout_rank_idx=1,
+        scaleup_rank_idx=1,
+    )
+    assert state.elastic
+    assert state.buffer.calls == [
+        ("publish", "nixl_ep_v2"),
+        ("connect_ranks", [0, 1, 2, 3, 4, 6, 7]),
+    ]
+    monkeypatch.setattr(NixlEPV2All2AllManager, "_state", state)
+    with mgr.mask_remote_ranks():
+        pass
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "newest, elastic", [(True, True), (False, True), (True, False)]
+)
+def test_nixl_ep_v2_destroy(
+    newest: bool, elastic: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the newest manager under elastic EP tears the buffer down, alone
+    live first so the destroy waits for no peer."""
+    from vllm.distributed.device_communicators.all2all import NixlEPV2All2AllManager
+
+    buffer = _FakeElasticBuffer(6, [0, 1, 2, 3, 4, 5, 7])
+    mgr, _ = _fake_manager(monkeypatch, 6, 8, buffer, elastic)
+    if not newest:
+        monkeypatch.setattr(NixlEPV2All2AllManager, "_newest", None)
+    mgr.destroy()
+    if not (newest and elastic):
+        assert buffer.calls == []
+        return
+    assert buffer.calls == [
+        ("stage_topology", 16, [6]),
+        ("commit_topology",),
+        ("disconnect_ranks", [0, 1, 2, 3, 4, 5, 7]),
+        ("commit_topology",),
+        ("destroy",),
+    ]
+    assert NixlEPV2All2AllManager._state is None
 
 
 # Async EPLB under elastic EP needs the nixl package; the domain size ignores it.

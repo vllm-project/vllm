@@ -74,7 +74,7 @@ def can_reuse_fused_moe_kernel(parallel_config: ParallelConfig) -> bool:
     The EP backend must preserve its CUDA graph entries when ranks are connected,
     disconnected, masked, or unmasked.
     """
-    return parallel_config.all2all_backend == "nixl_ep"
+    return parallel_config.all2all_backend in ("nixl_ep", "nixl_ep_v2")
 
 
 def nixl_ep_v2_max_ep_size(parallel_config: ParallelConfig) -> int:
@@ -110,7 +110,9 @@ def nixl_ep_v2_domain_size(parallel_config: ParallelConfig) -> int:
         elastic EP, which puts the whole maximum world in one domain.
 
     Raises:
-        ValueError: If VLLM_NIXL_EP_V2_DOMAIN_SIZE is negative.
+        ValueError: If VLLM_NIXL_EP_V2_DOMAIN_SIZE is negative, or under
+            elastic EP the domains break nixl_ep_v2's caps (at most 128 GPUs
+            per domain and 32 domains) or do not hold whole DP engines.
 
     """
     domain_size = envs.VLLM_NIXL_EP_V2_DOMAIN_SIZE
@@ -120,8 +122,22 @@ def nixl_ep_v2_domain_size(parallel_config: ParallelConfig) -> int:
         )
     max_ep_size = nixl_ep_v2_max_ep_size(parallel_config)
     if domain_size:
-        return min(domain_size, max_ep_size)
-    return max_ep_size if parallel_config.enable_elastic_ep else 0
+        domain_size = min(domain_size, max_ep_size)
+    elif parallel_config.enable_elastic_ep:
+        domain_size = max_ep_size
+    if parallel_config.enable_elastic_ep and (
+        domain_size > 128
+        or max_ep_size // domain_size > 32
+        or domain_size % parallel_config.world_size
+    ):
+        raise ValueError(
+            f"nixl_ep_v2: elastic EP needs NVLink domains of at most 128 GPUs, "
+            f"at most 32 of them, each holding whole DP engines of "
+            f"{parallel_config.world_size} GPUs; got domains of {domain_size} "
+            f"GPUs for a max EP size of {max_ep_size}. Set "
+            "VLLM_NIXL_EP_V2_DOMAIN_SIZE"
+        )
+    return domain_size
 
 
 def batch_transfer_weights(
@@ -208,6 +224,8 @@ class ElasticEPScalingExecutor:
         )
         self._async_future: Future[None] | None = None
         self._group_cleanup_future: Future[None] | None = None
+        # The expert maps this rank's CUDA graphs were captured with.
+        self._captured_expert_maps: list[torch.Tensor | None] | None = None
 
     @property
     def worker(self):
@@ -583,6 +601,12 @@ class ElasticEPScalingExecutor:
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
+        if self._can_reuse_fused_moe_kernel() and self._captured_expert_maps is None:
+            # Reused graphs are never recaptured and keep reading the expert
+            # maps they were captured with; update_physical_experts_metadata
+            # below replaces them, and a freed map's memory gets reused. Its
+            # entries for this rank's own slots stay valid in every world.
+            self._captured_expert_maps = [m.expert_map for m in moe_modules]
         with set_current_vllm_config(self.worker.vllm_config):
             model.set_eplb_state(
                 eplb_model_state.expert_load_pass_buffer,
@@ -649,6 +673,9 @@ class ElasticEPScalingExecutor:
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
+            # After the existing ranks commit the new world (switch_and_prepare)
+            # and before this rank's first forward: make it live here too.
+            get_ep_all2all_manager().commit_ep_size()
         if not self._can_reuse_fused_moe_kernel():
             # warm_and_capture's dummy run warms the deferred dp/ep groups.
             self.warm_and_capture()
