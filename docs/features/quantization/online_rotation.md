@@ -116,6 +116,10 @@ and optional draft loading, so both models can reference the target registry
 without duplicating the checkpoint namespace. Missing or invalid sign/mixing
 tensors fail validation before inference.
 
+Preparation runs on the top-level model configuration. Nested model views
+created by `VllmConfig.with_hf_config` defer to the outer model, which resolves
+target paths and owns the rotation parameters.
+
 If the norm receives a residual, execution is:
 
 ```text
