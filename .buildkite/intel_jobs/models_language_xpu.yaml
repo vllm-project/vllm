@@ -116,10 +116,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation)'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation) %N'
   key: language-models-test-extended-generation
   device: intel_gpu
   timeout_in_minutes: 80
+  parallelism: 3
   optional: true
   working_dir: .
   no_plugin: true
@@ -147,7 +148,7 @@ steps:
     sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py || true &&
     MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src || true &&
     CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' || true &&
-    pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) || true'
+    pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 18GB) Language Models (PPL)'
   key: language-models-test-ppl
   device: intel_gpu
@@ -174,10 +175,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation_ppl_test || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling)'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) %N'
   key: language-models-test-extended-pooling
   device: intel_gpu
   timeout_in_minutes: 120
+  parallelism: 3
   optional: true
   working_dir: .
   no_plugin: true
@@ -200,11 +202,12 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/pooling -m not core_model || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB)'
+    pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (MTEB) %N'
   key: language-models-test-mteb
   device: intel_gpu
   timeout_in_minutes: 68
+  parallelism: 3
   optional: true
   working_dir: .
   no_plugin: true
@@ -227,4 +230,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install peft &&
     cd tests &&
-    pytest -v -s models/language/pooling_mteb_test || true'
+    pytest -v -s models/language/pooling_mteb_test --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
