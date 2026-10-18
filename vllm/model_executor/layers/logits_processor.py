@@ -168,9 +168,13 @@ class LogitsProcessor(PluggableLayer):
             # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
             # path); other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+            # Other heads keep cuBLAS, which batch invariance runs without
+            # split-K.
             if (
                 envs.VLLM_BATCH_INVARIANT
                 and current_platform.is_device_capability_family(100)
+                and flat.dtype == lm_head.weight.dtype == torch.bfloat16
+                and flat.shape[-1] % 8 == 0
             ):
                 from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant
 

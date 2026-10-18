@@ -22,10 +22,11 @@ _KERNEL = FixedBf16Gemm()
 
 
 def _bf16_fixed_mm(a: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    a, weight = a.contiguous(), weight.contiguous()
     _KERNEL._validate_inputs(a, weight, torch.float32)
     if a.shape[0] == 0:
         return torch.empty((0, weight.shape[0]), device=a.device, dtype=torch.float32)
-    return _KERNEL(a.contiguous(), weight.contiguous(), torch.float32)
+    return _KERNEL(a, weight, torch.float32)
 
 
 def _bf16_fixed_mm_fake(a: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

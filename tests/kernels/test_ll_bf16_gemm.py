@@ -25,7 +25,14 @@ def _require_sm90_and_cutedsl():
 
 
 @pytest.mark.parametrize(
-    "shape", [(7, 61, 256), (17, 384, 5120), (33, 2048, 5120), (17, 129280, 5120)]
+    "shape",
+    [
+        (7, 61, 256),
+        (5, 40, 264),
+        (17, 384, 5120),
+        (33, 2048, 5120),
+        (17, 129280, 5120),
+    ],
 )
 @torch.inference_mode()
 def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
@@ -48,6 +55,7 @@ def test_fixed_bf16_projection_preserves_rows_in_batches_and_graph(shape):
     linear = linear_batch_invariant(a.unsqueeze(0), weight)
     assert torch.equal(linear.cpu(), oracle.bfloat16().unsqueeze(0))
     assert torch.equal(actual[:1], bf16_fixed_mm(a[:1], weight))
+    assert torch.equal(bf16_fixed_mm(a.t().contiguous().t(), weight), actual)
     torch.library.opcheck(
         torch.ops.vllm.bf16_fixed_mm.default,
         (a, weight),
