@@ -54,10 +54,7 @@ class TestAsyncLookupManager:
         state = mgr._current_state_by_key[_key(1)]
         assert not hasattr(state, "probe_result")
         assert state.request_statuses["r1"] is LookupResultStatus.PENDING
-        assert (
-            state.submission_status
-            is LookupSubmissionStatus.PENDING
-        )
+        assert state.submission_status is LookupSubmissionStatus.PENDING
         mgr.flush()
         assert (
             mgr._current_state_by_key[_key(1)].submission_status
@@ -368,9 +365,7 @@ class TestAsyncLookupManager:
     def test_mark_miss_unknown_token_is_noop(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         try:
-            mgr.mark_miss(
-                [LookupToken(key=_key(99), req_id="missing", generation=0)]
-            )
+            mgr.mark_miss([LookupToken(key=_key(99), req_id="missing", generation=0)])
             assert _key(99) not in mgr._current_state_by_key
         finally:
             mgr.shutdown()

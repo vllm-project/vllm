@@ -184,8 +184,7 @@ class AsyncLookupManager(ABC):
             if state is None or (
                 state.submission_status is LookupSubmissionStatus.RESOLVED
                 and any(
-                    status
-                    in (LookupResultStatus.MISS, LookupResultStatus.MARKED_MISS)
+                    status in (LookupResultStatus.MISS, LookupResultStatus.MARKED_MISS)
                     for status in state.request_statuses.values()
                 )
             ):
