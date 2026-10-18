@@ -290,7 +290,7 @@ class TestStreaming:
         text = (
             f"{DSML_FUNC_START}\n"
             f"{DSML_INVOKE_PREFIX}Read{DSML_INVOKE_NAME_END}\n"
-            f'<{_PARAM_OPEN.format(name="file_path", is_str="true")}/tmp/a'
+            f"<{_PARAM_OPEN.format(name='file_path', is_str='true')}/tmp/a"
             f"{DSML_INVOKE_END}\n"
             f"{DSML_FUNC_END}"
         )

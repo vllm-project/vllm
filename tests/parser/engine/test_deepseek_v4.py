@@ -1470,7 +1470,7 @@ WRITE_CALL_HEAD = (
     f"{DSML_INVOKE_PREFIX}write_file{DSML_INVOKE_NAME_END}\n"
     f"{_param('path', 'true', '/repo/app.py')}\n"
     f"{_param('mode', 'false', '644')}\n"
-    f'<{_PARAM_OPEN.format(name="content", is_str="true")}'
+    f"<{_PARAM_OPEN.format(name='content', is_str='true')}"
 )
 WRITE_CALL_TAIL = f"{_PARAM_CLOSE}\n{DSML_INVOKE_END}\n{DSML_TOOL_END}"
 CONTENT_LINE = (
@@ -1568,14 +1568,14 @@ class TestArgValueExtender:
             (
                 f"{DSML_TOOL_START}\n"
                 f"{DSML_INVOKE_PREFIX}WebFetch{DSML_INVOKE_NAME_END}\n"
-                f'<{_PARAM_OPEN.format(name="url", is_str="true")}https://example.com',
+                f"<{_PARAM_OPEN.format(name='url', is_str='true')}https://example.com",
                 "WebFetch",
                 {"url": "https://example.com"},
             ),
             (
                 f"{DSML_TOOL_START}\n"
                 f"{DSML_INVOKE_PREFIX}Read{DSML_INVOKE_NAME_END}\n"
-                f'<{_PARAM_OPEN.format(name="file_path", is_str="true")}/tmp/a'
+                f"<{_PARAM_OPEN.format(name='file_path', is_str='true')}/tmp/a"
                 f"{DSML_INVOKE_END}\n{DSML_TOOL_END}",
                 "Read",
                 {"file_path": "/tmp/a"},
@@ -1602,4 +1602,3 @@ class TestArgValueExtender:
                 results.append((finish_delta, text))
             assert collect_function_name(results) == expected_name
             assert json.loads(collect_tool_arguments(results)) == expected_args
-
