@@ -1861,7 +1861,7 @@ class MhcFusedTileLangKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1 if compile_key.tile_n == 2 else 16
+        num_tokens = 16 if compile_key.tok > 1 or compile_key.tile_n != 2 else 1
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         hc_mult3 = hc_mult * (2 + hc_mult)

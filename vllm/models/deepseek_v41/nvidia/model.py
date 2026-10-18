@@ -377,6 +377,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_post_alpha = 2.0
         if vllm_config.kernel_config.enable_jit_warmup and current_platform.is_cuda():
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _MHC_FUSED_TILELANG_KERNEL,
                 mhc_fused_post_pre_splits,
             )
             from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
@@ -438,6 +439,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                         hc_mult=self.hc_mult,
                         **variant,
                     )
+            # The fused post + pre-norm GEMM, at every M under batch invariance.
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                vllm_config, hidden_size=self.hidden_size, hc_mult=self.hc_mult
+            )
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
         self.hc_attn_fn = nn.Parameter(

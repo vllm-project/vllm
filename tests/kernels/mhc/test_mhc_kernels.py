@@ -99,6 +99,25 @@ def test_fused_mhc_keeps_the_same_reduction_across_dispatch_bands(
     assert mhc_fused_post_pre_split_config(1, 5119, 4) is None
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_fused_mhc_warmup_inputs_dispatch_to_their_keys(monkeypatch, batch_invariant):
+    """Warming each fused-mHC key launches the kernel that key names."""
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        _MHC_FUSED_TILELANG_KERNEL as kernel,
+    )
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64)
+    )
+    keys = kernel.get_warmup_keys(config, hidden_size=5120, hc_mult=4)
+    assert len(keys) == 2
+    for key in keys:
+        rows = kernel.warmup_inputs(key)["residual_in"].shape[0]
+        assert kernel.dispatch(num_tokens=rows, hidden_size=5120, hc_mult=4) == key
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
