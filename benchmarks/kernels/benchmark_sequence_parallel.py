@@ -56,6 +56,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tp_group,
+    graph_capture,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -230,6 +231,7 @@ def capture_graph(
     op: Callable[[], torch.Tensor],
     stream: torch.cuda.Stream,
     cpu_group: dist.ProcessGroup,
+    device: torch.device,
 ) -> torch.cuda.CUDAGraph:
     stream.wait_stream(torch.cuda.current_stream())
     dist.barrier(group=cpu_group)
@@ -240,7 +242,10 @@ def capture_graph(
     dist.barrier(group=cpu_group)
 
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
+    # tensor_model_parallel_all_reduce (used by the "baseline" candidate) may
+    # dispatch to an IPC-backed custom all-reduce; graph_capture() is what
+    # makes that graph-safe, matching how real serving captures CUDA graphs.
+    with graph_capture(device=device), torch.cuda.graph(graph, stream=stream):
         op()
     torch.cuda.current_stream().wait_stream(stream)
     dist.barrier(group=cpu_group)
@@ -421,7 +426,9 @@ def benchmark_shape(
     keepalive: list[object] = []
     for name, ops in candidates.items():
         stream = torch.cuda.Stream()
-        candidate_graphs[name] = [capture_graph(op, stream, cpu_group) for op in ops]
+        candidate_graphs[name] = [
+            capture_graph(op, stream, cpu_group, device) for op in ops
+        ]
         keepalive.append(stream)
 
     times = benchmark_graphs(
