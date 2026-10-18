@@ -86,6 +86,19 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Resolved whenever the connector is set; valid while it is not None.
+    connector_handler: KVConnectorRequestHandler
+
+    @property
+    def connector(self) -> KVConnectorBase_V1 | None:
+        return self._connector
+
+    @connector.setter
+    def connector(self, connector: KVConnectorBase_V1 | None) -> None:
+        self._connector = connector
+        if connector is not None:
+            self.connector_handler = get_request_handler(connector)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -181,9 +194,6 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config,
                 role=KVConnectorRole.SCHEDULER,
                 kv_cache_config=self.kv_cache_config,
-            )
-            self.connector_handler: KVConnectorRequestHandler = get_request_handler(
-                self.connector
             )
             if self.log_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()

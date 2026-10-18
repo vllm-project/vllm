@@ -164,13 +164,6 @@ class NoOpKVConnectorMetadata(KVConnectorMetadata):
     """Mark a step that must skip connector transfer hooks."""
 
 
-class ConnectorInitState(enum.Enum):
-    """Worker initialization state."""
-
-    INITIALIZING = enum.auto()
-    READY = enum.auto()
-
-
 class KVConnectorInitStatus(ABC):
     """Worker-to-scheduler status for asynchronous connector initialization."""
 
@@ -838,32 +831,35 @@ class KVConnectorBase_V1(ABC):
 
 
 class SupportsAsyncInit(KVConnectorBase_V1):
-    """Connectors that can initialize asynchronously with Model Runner V2.
+    """Connectors that initialize asynchronously with Model Runner V2.
 
-    Inherit this instead of KVConnectorBase_V1. Inheriting only declares the
-    capability; enable_async_init() opts in. Callers reach these hooks through
-    get_request_handler(), so other connectors carry no readiness API.
+    Inherit this instead of KVConnectorBase_V1 and implement is_init_done(),
+    which reports the current worker's setup; how it runs is up to the connector.
+    Serving must work without this connector so vllm can hide its startup
+    latency. Readiness is monotonic; activation waits for all workers' reports
+    during ordinary engine steps. Idle engines do not poll. Metadata reporting,
+    output updates, stats, reset and shutdown must remain safe while
+    initializing. Requests admitted before readiness are never shown to this
+    connector, except as finished request IDs on the worker, which must be
+    ignored. Callers reach these hooks through get_request_handler(), so other
+    connectors carry no readiness API.
     """
 
-    # Synchronous until enable_async_init(). Class-level so connectors need no
-    # extra constructor state for the default path.
+    # Class-level so instances built without __init__ default to synchronous.
     _async_init_enabled = False
     _connector_ready = True
 
-    def enable_async_init(self) -> None:
-        """Opt into async initialization with Model Runner V2.
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        self.enable_async_init()
 
-        When enabled, serving must work without this connector so vllm can hide
-        connector startup latency while serving requests.
-        Readiness is monotonic; activation waits for all workers' reports during
-        ordinary engine steps. Idle engines do not poll. Metadata reporting,
-        output updates, stats, reset and shutdown must remain safe while
-        initializing. Raise failures from get_connector_init_state().
-        Requests admitted before readiness are never shown to this connector,
-        except as finished request IDs on the worker, which must be ignored.
-        """
-        if self._async_init_enabled:
-            raise RuntimeError("Asynchronous connector initialization is one-shot")
+    def enable_async_init(self) -> None:
+        """Validate the deployment and start waiting for worker readiness."""
         if not self._vllm_config.use_v2_model_runner:
             raise ValueError(
                 "Asynchronous connector initialization requires Model Runner V2"
@@ -883,18 +879,23 @@ class SupportsAsyncInit(KVConnectorBase_V1):
         self._ready_connector_ranks: set[int] = set()
 
     @abstractmethod
-    def get_connector_init_state(self) -> ConnectorInitState:
-        """Return this worker's initialization state."""
+    def is_init_done(self) -> bool:
+        """Whether the current worker's setup has finished; raise on failure.
+
+        Polled on workers only, once per engine step until it returns True.
+        """
         raise NotImplementedError
 
     def is_connector_ready(self) -> bool:
-        """Whether this connector can accept new requests."""
+        """Whether this connector can accept new requests.
+
+        Workers latch their own is_init_done(); the scheduler waits for every
+        worker's report.
+        """
         if not self._async_init_enabled:
             return True
         if self._role == KVConnectorRole.WORKER and not self._connector_ready:
-            self._connector_ready = (
-                self.get_connector_init_state() == ConnectorInitState.READY
-            )
+            self._connector_ready = self.is_init_done()
         return self._connector_ready
 
     def requires_allocation_tracking(self) -> bool:

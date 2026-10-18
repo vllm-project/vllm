@@ -4,6 +4,7 @@ import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -13,12 +14,12 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    ConnectorInitState,
     CopyBlocksOp,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorInitStatus,
     KVConnectorMetadata,
+    KVConnectorRequestHandler,
     KVConnectorRole,
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
@@ -212,7 +213,6 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
-        self._handlers = [get_request_handler(c) for c in self._connectors]
 
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
@@ -233,10 +233,15 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
-    def enable_async_init(self) -> None:
-        raise RuntimeError("Enable asynchronous initialization on child connectors")
+    @cached_property
+    def _handlers(self) -> list[KVConnectorRequestHandler]:
+        return [get_request_handler(c) for c in self._connectors]
 
-    def get_connector_init_state(self) -> ConnectorInitState:
+    def enable_async_init(self) -> None:
+        # Readiness is derived from children, which enable their own.
+        pass
+
+    def is_init_done(self) -> bool:
         # Readiness is derived from children; see is_connector_ready().
         raise NotImplementedError
 

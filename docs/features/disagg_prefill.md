@@ -128,11 +128,11 @@ The figure below shows how the worker connector works with the attention module 
 ### Asynchronous connector initialization
 
 `KVConnectorBase_V1` connectors are ready by default. A connector that permits
-GPU-only serving during initialization can call `enable_async_init()` once in
-both its scheduler and worker constructors. Its worker must implement
-`get_connector_init_state()`, returning `ConnectorInitState.INITIALIZING` until
-initialization succeeds, then `ConnectorInitState.READY`. Raise any initialization
-error from that hook; errors terminate the engine.
+GPU-only serving during initialization can inherit `SupportsAsyncInit` instead
+(Model Runner V2 only) and implement `is_init_done()`. The hook reports whether
+the current worker's setup has finished; how that setup runs is up to the
+connector. Raise any initialization error from that hook; errors terminate the
+engine.
 
 Readiness is latched: this interface supports startup, not runtime disable or
 reconfiguration. The scheduler activates a connector only after every worker has
@@ -150,10 +150,10 @@ including chunked prefill, preemption and completion notifications. With
 children can serve while others initialize. Only opt into asynchronous startup
 when skipping the connector is valid; a required P/D transfer cannot be skipped.
 
-Scheduler-side callers route request hooks through `connector.request_handler`,
-which owns exclusions, metadata filtering and completion cleanup. Connector
-implementations keep their existing hooks; `MultiConnector` uses each child's
-handler to apply the same rules independently.
+Scheduler-side callers route request hooks through a handler resolved once per
+connector with `get_request_handler()`, which owns exclusions, metadata filtering
+and completion cleanup. Connector implementations keep their existing hooks;
+`MultiConnector` uses each child's handler to apply the same rules independently.
 
 Request exclusion does not hide physical block reuse. The scheduler-local
 `SchedulerOutput.kv_connector_block_state.allocated_block_ids` includes allocations
@@ -170,7 +170,7 @@ connector is initializing. Request transfer hooks are skipped until the
 scheduler sends real metadata. Background allocation or other initialization
 work remains the connector's responsibility.
 
-Async initialization requires Model Runner V2. `enable_async_init()` raises during
+Async initialization requires Model Runner V2. `SupportsAsyncInit` raises during
 construction if Model Runner V1 is selected, including automatic fallback to V1.
 It also currently rejects multi-rank `external_launcher` and Ray pipeline
 parallelism due to limitations in collecting readiness from every worker in those
