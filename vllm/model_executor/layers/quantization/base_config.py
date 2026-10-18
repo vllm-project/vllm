@@ -84,11 +84,14 @@ class QuantizeMethodBase(ABC):
         """
         return
 
-    def dequantize_weight(self, layer: nn.Module) -> torch.Tensor:
+    def dequantize_weight(
+        self, layer: nn.Module
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Materialize a serialized quantized weight for requantization."""
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
-            "dequantize_weight. Please open an issue."
+            "dequantize_weight, so re-quantization from this checkpoint is "
+            "not supported. Please open an issue."
         )
 
 
@@ -328,6 +331,9 @@ def resolve_quant_method(
         UnquantizedLinearMethod,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
 
     prefix = quant_config.strip_model_root_prefix(prefix)
     base_quant_method = quant_config.get_quant_method(layer, prefix)
@@ -355,11 +361,6 @@ def resolve_quant_method(
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
 
-        if isinstance(layer, RoutedExperts):
-            raise NotImplementedError(
-                "Requantizing checkpoint-quantized MoE layers is not supported."
-            )
-
         online_quant_method = quant_config.online_quantization_config.get_quant_method(
             layer, prefix
         )
@@ -368,7 +369,7 @@ def resolve_quant_method(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
 
-        assert isinstance(online_quant_method, OnlineLinearBase)
+        assert isinstance(online_quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
         online_quant_method.set_requantization_source(base_quant_method)
 
         # The online method dequantizes the checkpoint method before requantizing.

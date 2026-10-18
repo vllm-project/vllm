@@ -20,7 +20,13 @@ from einops import rearrange
 from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -230,6 +236,12 @@ def _configure_ling_fp8_quant_config(
 
     quant_config.ignored_layers_match_mode = "suffix"
     hf_quant_config = getattr(config, "quantization_config", None)
+    if hf_quant_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_quant_config = getattr(
+            getattr(model_config, "hf_config", None), "quantization_config", None
+        )
     if not isinstance(hf_quant_config, dict):
         return
 
@@ -526,6 +538,26 @@ class BailingMoeV3MLAAttention(nn.Module):
             g_out = self.num_heads * self.v_head_dim
         else:
             g_out = 0
+        block_size = (
+            quant_config.weight_block_size
+            if _is_block_fp8_config(quant_config)
+            else None
+        )
+        self.replicate_g_proj = (
+            self.gated_attention_proj_granularity_type == "head_wise"
+            and tp_size > 1
+            and block_size is not None
+            and g_out <= block_size[0]
+            and not _is_fp8_module_excluded(quant_config, f"{prefix}.g_proj")
+            and self.num_local_heads % block_size[0] != 0
+        )
+        # A gate spanning at most one FP8 row block cannot split its scales
+        # across TP ranks. Replicate it and select each rank's heads instead.
+        self.g_proj_start = (
+            get_tensor_model_parallel_rank() * self.num_local_heads
+            if self.replicate_g_proj
+            else 0
+        )
         self.g_proj = (
             ColumnParallelLinear(
                 self.hidden_size,
@@ -533,6 +565,7 @@ class BailingMoeV3MLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.g_proj",
+                disable_tp=self.replicate_g_proj,
             )
             if g_out > 0
             else None
@@ -581,9 +614,12 @@ class BailingMoeV3MLAAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor):
         attn_out = self.mla_attn(positions, hidden_states)
         if self.g_proj is not None:
-            gate = torch.sigmoid(self.g_proj(hidden_states)[0].float()).to(
-                hidden_states.dtype
-            )
+            gate = self.g_proj(hidden_states)[0]
+            if self.replicate_g_proj:
+                gate = gate[
+                    ..., self.g_proj_start : self.g_proj_start + self.num_local_heads
+                ]
+            gate = torch.sigmoid(gate.float()).to(hidden_states.dtype)
             if self.gated_attention_proj_granularity_type == "head_wise":
                 attn_out = attn_out.view(-1, self.num_local_heads, self.v_head_dim)
                 attn_out = attn_out * gate.unsqueeze(-1)
