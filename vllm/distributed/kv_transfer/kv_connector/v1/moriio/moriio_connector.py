@@ -2039,7 +2039,7 @@ class MoRIIOConnectorWorker:
             remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
             ]
-            cur_remote_engine_sessions = []
+            cur_remote_engine_sessions: list[Any] = []
             for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
                 remote_metas = remote_layer_map[ln]
                 if len(remote_metas) != len(local_metas):
