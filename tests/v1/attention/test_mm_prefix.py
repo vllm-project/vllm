@@ -640,7 +640,6 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
 @pytest.mark.parametrize(
     "query_len,seq_len,spans,expected,unclamped_expected",
     [

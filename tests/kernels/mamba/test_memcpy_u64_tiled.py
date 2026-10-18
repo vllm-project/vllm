@@ -37,7 +37,7 @@ try:
     import pytest
 
     pytestmark = pytest.mark.skipif(
-        not current_platform.is_cuda(),
+        not current_platform.is_cuda_alike(),
         reason="_memcpy_u64_tiled needs CUDA/Triton",
     )
     _parametrize = pytest.mark.parametrize

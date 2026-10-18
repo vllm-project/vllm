@@ -12,13 +12,14 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
-    skip_if_not_cuda,
+    skip_if_not_cuda_alike,
     skip_unsupported,
 )
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
 
 
 @skip_unsupported
@@ -714,8 +715,10 @@ def test_logprobs_without_batch_invariance_should_fail(
         pytest.fail(fail_msg)
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize(
+    "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+)
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
 ):

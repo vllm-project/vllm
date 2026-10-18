@@ -912,8 +912,6 @@ def test_concat_and_cache_ds_mla(
     seed: int,
     device: str,
 ) -> None:
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
     if kv_lora_rank != 512:
@@ -1018,8 +1016,6 @@ def test_concat_and_cache_ds_mla(
 def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
     """NoPE matches zero RoPE, clears valid tails, and preserves unused slots."""
     dtype = torch.bfloat16
-    if current_platform.is_rocm():
-        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     num_tokens, num_blocks = 3, 2
     set_random_seed(0)
     torch.set_default_device(device)

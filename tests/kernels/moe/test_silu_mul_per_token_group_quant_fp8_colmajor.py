@@ -15,7 +15,7 @@ from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
-FLOAT8_DTYPE = torch.float8_e4m3fn
+FLOAT8_DTYPE = current_platform.fp8_dtype()
 GROUP_SIZE = 128
 
 
@@ -86,10 +86,6 @@ def reference_with_clamp(
 
 @pytest.mark.parametrize("T", [128, 256, 512])
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="ROCm does not support DeepGemm.",
-)
 def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
     set_random_seed(42)
 
@@ -136,7 +132,9 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
     clean_x = x.clone()
     ends = torch.empty(len(counts), device=DEVICE, dtype=torch.int32)
     output_dtype = (
-        FLOAT8_DTYPE if scale_format == "packed" else current_platform.fp8_dtype()
+        torch.float8_e4m3fn
+        if scale_format == "packed"
+        else current_platform.fp8_dtype()
     )
     output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=output_dtype)
 
@@ -204,10 +202,6 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
 @pytest.mark.parametrize("T", [128, 256, 512])
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
 @pytest.mark.parametrize("clamp_limit", [7.0, 10.0])
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="ROCm does not support DeepGemm.",
-)
 def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
     set_random_seed(42)
 

@@ -420,7 +420,7 @@ class TestTritonTopkTopp:
         """
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
-        if not current_platform.is_cuda():
+        if not current_platform.is_cuda_alike():
             pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
         vocab_size = 131072
         batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31

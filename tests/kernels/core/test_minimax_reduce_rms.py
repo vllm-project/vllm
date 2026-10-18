@@ -280,8 +280,8 @@ def test_minimax_reduce_rms_qk(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="CUDA and Triton required",
+    not current_platform.is_cuda_alike() or not HAS_TRITON,
+    reason="CUDA or ROCm and Triton required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 128, 333, 2049])
 @pytest.mark.parametrize("hidden_dims", [(3072, 512), (768, 256), (3000, 500)])

@@ -51,8 +51,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
     ("meta-llama/Llama-3.2-1B-Instruct", backend, CPU_BLOCK_SIZES, False)
     for backend in _ATTN_BACKENDS
 ]
-# HMA / Mamba models are only tested on CUDA (not ROCm).
-if current_platform.is_cuda():
+if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
         ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
@@ -318,7 +317,9 @@ def test_cpu_offloading(
         del llm
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_cpu_offloading_metrics() -> None:
     """Verify that offloading Prometheus metrics (new flat and deprecated
     labeled) are emitted after stores and loads."""
@@ -555,8 +556,8 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="HMA mamba-align CPU offload test is CUDA-only",
+    not current_platform.is_cuda_alike(),
+    reason="HMA mamba-align CPU offload test requires CUDA or ROCm",
 )
 @pytest.mark.parametrize(
     "model,block_size,tp_size",

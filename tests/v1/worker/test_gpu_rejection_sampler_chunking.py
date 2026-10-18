@@ -67,7 +67,9 @@ def test_iter_request_chunks_preserves_request_boundaries():
     ]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_chunked_scores_match_full_batch(logprobs_mode: str):
     device = torch.device("cuda")
@@ -140,7 +142,9 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
     assert sampling_mask_tensors is None
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     device = torch.device("cuda")
     num_reqs = 3

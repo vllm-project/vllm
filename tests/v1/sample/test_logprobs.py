@@ -1579,7 +1579,7 @@ def test_token_logprobs_large_batch_int64_row_offset():
     illegal memory access. Run over a batch where batch_size * vocab_size > 2**31
     and check the highest-offset row matches a reference log-softmax.
     """
-    if not current_platform.is_cuda():
+    if not current_platform.is_cuda_alike():
         pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
     from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 

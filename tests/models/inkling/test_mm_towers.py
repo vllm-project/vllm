@@ -15,8 +15,8 @@ import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_cuda():
-    pytest.skip("requires CUDA", allow_module_level=True)
+if not current_platform.is_cuda_alike():
+    pytest.skip("requires CUDA or ROCm", allow_module_level=True)
 
 from vllm.models.inkling.common.towers import fold_timespace_to_depth
 from vllm.models.inkling.nvidia.ops.mm_towers import dmel_embed_sum_norm, rmsnorm_gelu

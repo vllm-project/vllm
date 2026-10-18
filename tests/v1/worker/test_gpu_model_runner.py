@@ -1482,8 +1482,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Attention backend FLASHINFER is only supported on CUDA.",
+    not current_platform.is_cuda_alike(),
+    reason="Requires a CUDA or ROCm GPU.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
     """The GPU model runner creates different views into the
@@ -1527,7 +1527,11 @@ def test_hybrid_attention_mamba_tensor_shapes():
     )
     cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
-    attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum.TRITON_ATTN
+        if current_platform.is_rocm()
+        else AttentionBackendEnum.FLASHINFER
+    )
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=cache_config,
@@ -1918,8 +1922,8 @@ def test_is_uniform_decode() -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Attention backend FLASHINFER is only supported on CUDA.",
+    not current_platform.is_cuda_alike(),
+    reason="Requires a CUDA or ROCm GPU.",
 )
 def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     """Test that a ValueError is raised when max_num_seqs exceeds the
@@ -1962,7 +1966,11 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     )
     cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
-    attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum.TRITON_ATTN
+        if current_platform.is_rocm()
+        else AttentionBackendEnum.FLASHINFER
+    )
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=cache_config,

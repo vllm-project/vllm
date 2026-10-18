@@ -225,11 +225,17 @@ def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     torch.testing.assert_close(sink.w2_weight, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_sink_packed_weight_forward_matches_expert_sum(monkeypatch) -> None:
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_rank", lambda: 1)
-    sink = moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
+    if current_platform.is_rocm():
+        from vllm.models.inkling.amd import moe as sink_moe
+    else:
+        from vllm.models.inkling.nvidia import moe as sink_moe
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_rank", lambda: 1)
+    sink = sink_moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
         device="cuda", dtype=torch.bfloat16
     )
     torch.manual_seed(1)

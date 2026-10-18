@@ -338,7 +338,9 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
 def test_postprocess_state_scalar_with_int32_mapping(
     num_sampled: int, expected_value: int
@@ -386,7 +388,9 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     ("computed", "sampled", "expected_column"),
     [(4, 3, 0), (4, 4, 0), (4, 5, 1), (8, 8, 1), (8, 9, 2)],

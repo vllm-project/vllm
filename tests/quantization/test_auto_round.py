@@ -60,8 +60,8 @@ MODELS = [
     pytest.param(
         "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="AWQ AutoRound model only supports CUDA/XPU backend for now.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="AWQ AutoRound model only supports CUDA/ROCm/XPU backend for now.",
         ),
         id="auto_round:auto_awq",
     ),
@@ -76,16 +76,16 @@ MODELS = [
     pytest.param(
         "INC4AI/Qwen3-8B-MXFP8-AR",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="MXFP8 AutoRound model only supports CUDA/ROCm/XPU backend for now.",
         ),
         id="auto_round:llm_compressor_mxfp8",
     ),
     pytest.param(
         "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda()),
-            reason="Block-wise AutoRound model only supports CUDA backend for now.",
+            not (current_platform.is_cuda_alike()),
+            reason="Block-wise AutoRound model only supports CUDA/ROCm for now.",
         ),
         id="auto_round:block_wise_fp8_on_cuda",
     ),
@@ -95,16 +95,16 @@ QWEN3_AUTOROUND_MODELS = [
     pytest.param(
         "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-1.7B MXFP4 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-1.7B MXFP4 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:mxfp4:qwen3-1p7b",
     ),
     pytest.param(
         "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:w4a16:qwen3-30b-a3b",
     ),
@@ -119,8 +119,8 @@ QWEN3_AUTOROUND_MODELS = [
     pytest.param(
         "INCModel/Qwen3-30B-A3B-12L-MXFP8-test",
         marks=pytest.mark.skipif(
-            not (current_platform.is_cuda() or current_platform.is_xpu()),
-            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/XPU.",
+            not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/ROCm/XPU.",
         ),
         id="auto_round:mxfp8:qwen3-30b-a3b",
     ),
@@ -151,9 +151,9 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     not (
         current_platform.is_cpu()
         or current_platform.is_xpu()
-        or current_platform.is_cuda()
+        or current_platform.is_cuda_alike()
     ),
-    reason="Only supports CPU/XPU/CUDA backend.",
+    reason="Only supports CPU/XPU/CUDA/ROCm backend.",
 )
 @pytest.mark.parametrize("model", MODELS + QWEN3_AUTOROUND_MODELS)
 def test_auto_round_model(vllm_runner, model):

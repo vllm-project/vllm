@@ -24,6 +24,10 @@ requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="QSA kernels require CUDA and Triton",
 )
+requires_qsa_metadata_kernels = pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not HAS_TRITON,
+    reason="QSA metadata kernels require CUDA or ROCm and Triton",
+)
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
@@ -247,7 +251,7 @@ def _qsa_sparse_paged_attention_reference(
     return output
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
@@ -299,7 +303,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     assert metadata.visible_blocks.tolist() == [65, 66, 67, 68] * 3 + [0] * 4
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
@@ -466,7 +470,7 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
     assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
     builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
@@ -571,7 +575,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
     torch.testing.assert_close(compressed_cache, expected_compressed)
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 @pytest.mark.parametrize("num_reqs", [2, 3, 4, 7, 8, 9])
 def test_qsa_triton_metadata_matches_pytorch(
@@ -661,7 +665,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         torch.testing.assert_close(actual_k_work, expected_k_work)
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     device = torch.device("cuda")
     num_mapped_tokens = 4096

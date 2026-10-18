@@ -25,11 +25,11 @@ fp8_dtype = current_platform.fp8_dtype()
 DEVICE = current_platform.device_type
 FP8_MAX = torch.finfo(fp8_dtype).max
 
-# The kernel uses fp8 e4m3 conversion, so it is CUDA-only and needs SM89+
-# (Ada/Hopper). There is no Triton fallback.
+# On CUDA the kernel uses fp8 e4m3 conversion and needs SM89+ (Ada/Hopper).
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
-    reason="situ_and_mul_quant persistent kernel requires CUDA SM89+ (fp8 e4m3).",
+    not current_platform.is_cuda_alike()
+    or (current_platform.is_cuda() and not current_platform.has_device_capability(89)),
+    reason="situ_and_mul_quant persistent kernel requires CUDA SM89+ or ROCm.",
 )
 
 # Kimi-K3 baked SITU params. Only (d=3072, beta=4.0, linear_beta=25.0,

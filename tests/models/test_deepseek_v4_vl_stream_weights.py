@@ -11,7 +11,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="CUDA implementations"
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm implementations"
 )
 
 
@@ -49,7 +49,21 @@ def _v41_wrapper():
     return DeepseekV41ForCausalLM
 
 
-@pytest.mark.parametrize("wrapper", [_v4_wrapper, _v41_wrapper], ids=["v4", "v41"])
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        _v4_wrapper,
+        pytest.param(
+            _v41_wrapper,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="the ROCm V4.1 wrapper sorts the weights instead of "
+                "streaming them",
+            ),
+        ),
+    ],
+    ids=["v4", "v41"],
+)
 def test_load_weights_streams_language_model_group(wrapper) -> None:
     model = object.__new__(wrapper())
     nn.Module.__init__(model)

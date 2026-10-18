@@ -73,7 +73,8 @@ def _single_group_reference(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 @pytest.mark.parametrize("skip_padding", [False, True])
 def test_kimi_grouped_topk_masks_padding_when_enabled(skip_padding: bool):
