@@ -657,12 +657,9 @@ impl EngineCoreClient {
         );
 
         let result: Result<()> = async {
+            // The engine that receives it wakes the other ranks if they are idle.
             if let Some(coordinator) = self.coordinator.as_ref() {
-                let snapshot = coordinator.snapshot();
-                req.current_wave = snapshot.current_wave;
-                if !snapshot.engines_running {
-                    coordinator.notify_first_request(engine_id.clone())?;
-                }
+                req.current_wave = coordinator.snapshot().current_wave;
             }
 
             debug!(
@@ -823,6 +820,18 @@ impl EngineCoreClient {
             None,
             Vec::<JsonValue>::new(),
             BTreeMap::from([("init_info".to_string(), init_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Release the trainer connection without shutting down inference.
+    pub async fn shutdown_weight_transfer_engine(&self) -> Result<()> {
+        self.collective_rpc(
+            "shutdown_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
         )
         .await?;
         Ok(())

@@ -8,6 +8,7 @@ validated by this test module.
 """
 
 import asyncio
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config
+from .utils import create_request, create_vllm_config, maybe_update_block_size
 
 
 def noop_shutdown():
@@ -147,6 +148,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -203,6 +205,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -241,8 +244,10 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
-    # __new__ skips __init__, where this cache is created. register_kv_caches clears it.
+    # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
+    worker._layout_by_peer = OrderedDict()
+    worker._acked_layout_peers = set()
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
@@ -392,6 +397,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -405,8 +411,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         )
         worker = connector.connector_worker
 
-        backing = torch.empty((4, 64), dtype=torch.float16)
-        fa_cache = backing[:2, :16]
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_cache_width = (
+            fa_spec.page_size_bytes
+            // torch.tensor([], dtype=torch.float16).element_size()
+        )
+        backing = torch.empty((4, fa_cache_width), dtype=torch.float16)
+        fa_cache = backing[:2]
         gdn_cache = backing[:3]
 
         with patch.object(
@@ -438,6 +449,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
@@ -567,6 +579,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
+        block_size=maybe_update_block_size(16),
     )
     kv_cache_config = make_hybrid_gdn_kv_cache_config(
         vllm_config.cache_config.block_size
