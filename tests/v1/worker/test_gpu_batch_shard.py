@@ -292,25 +292,22 @@ def test_shard_grammar_output(tp_size: int):
     max_num_reqs = 32
     num_reqs = 12
     slots = rng.choice(np.arange(max_num_reqs), size=num_reqs, replace=False)
-    k = rng.integers(0, 4, size=num_reqs)
-    cu = np.zeros(num_reqs + 1, dtype=np.int32)
-    np.cumsum(1 + k, out=cu[1:])
+    mask_stride = 4
     owner = slots % tp_size
 
     # Grammar requests: every other request, in a scrambled order.
     req_ids = [f"req-{i}" for i in range(num_reqs)]
     grammar_idx = list(rng.permutation(np.arange(0, num_reqs, 2)))
     grammar_req_ids = [req_ids[i] for i in grammar_idx]
-    num_grammar_rows = sum(int(cu[i + 1] - cu[i]) for i in grammar_idx)
+    num_grammar_rows = len(grammar_idx) * mask_stride
     bitmask = rng.integers(0, 2**31, size=(num_grammar_rows, 4), dtype=np.int32)
-    input_batch = SimpleNamespace(req_ids=req_ids, cu_num_logits_np=cu)
 
     # Global row offset of each grammar request within the bitmask.
     row_offsets = {}
     cursor = 0
     for i in grammar_idx:
         row_offsets[i] = cursor
-        cursor += int(cu[i + 1] - cu[i])
+        cursor += mask_stride
 
     grammar_output = GrammarOutput(
         structured_output_request_ids=grammar_req_ids,
@@ -320,7 +317,7 @@ def test_shard_grammar_output(tp_size: int):
     kept_total = 0
     for rank in range(tp_size):
         local_req_ids = [req_ids[i] for i in range(num_reqs) if owner[i] == rank]
-        local = _shard_grammar_output(grammar_output, input_batch, local_req_ids)
+        local = _shard_grammar_output(grammar_output, local_req_ids)
         expected_idx = [i for i in grammar_idx if owner[i] == rank]
         if not expected_idx:
             assert local is None
@@ -329,7 +326,7 @@ def test_shard_grammar_output(tp_size: int):
         assert local.structured_output_request_ids == [req_ids[i] for i in expected_idx]
         expected_rows = np.concatenate(
             [
-                np.arange(row_offsets[i], row_offsets[i] + cu[i + 1] - cu[i])
+                np.arange(row_offsets[i], row_offsets[i] + mask_stride)
                 for i in expected_idx
             ]
         )
