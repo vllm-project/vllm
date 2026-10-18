@@ -2856,6 +2856,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
+    assert!(sampling_mask_output.aux_output_keys.is_none());
     assert_eq!(
         sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
         vec![vec![2, 12, 16, 17, 18]]
@@ -2899,6 +2900,12 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        aux_output_keys: Some(
+                            [
+                                "r3:block-0",
+                                "r3-tail:end",
+                            ],
+                        ),
                     },
                 ],
                 scheduler_stats: None,
