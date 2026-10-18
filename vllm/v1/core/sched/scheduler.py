@@ -2414,6 +2414,7 @@ class Scheduler(SchedulerInterface):
                 spec_decode_scheduled_k=(
                     scheduler_output.num_spec_tokens_to_schedule
                     if self.dynamic_sd_lookup is not None
+                    and scheduler_output.num_scheduled_tokens
                     else None
                 ),
             )
