@@ -2196,6 +2196,9 @@ class VllmConfig:
                 " and install the matching kernels."
             )
 
+        self.parallel_config.resolve_ubatch_capacity(
+            self.use_v2_model_runner, self.scheduler_config.max_num_seqs
+        )
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 

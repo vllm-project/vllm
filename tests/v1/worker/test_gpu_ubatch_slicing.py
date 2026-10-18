@@ -12,6 +12,7 @@ threaded execution of the microbatches.
 import threading
 from contextlib import nullcontext
 from dataclasses import replace
+from itertools import product
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -289,6 +290,8 @@ def _sync_dp(
     num_reqs_per_rank: list[int] | None = None,
     num_ubatches: int = 2,
     dp_rank: int = 0,
+    parallel_config: ParallelConfig | None = None,
+    cg_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -301,7 +304,7 @@ def _sync_dp(
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
     reduced = torch.zeros(6, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
-    reduced[1] = CUDAGraphMode.NONE.value
+    reduced[1] = cg_mode.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
@@ -312,7 +315,7 @@ def _sync_dp(
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
-                cg_mode=CUDAGraphMode.NONE,
+                cg_mode=cg_mode,
                 num_tokens=num_tokens_per_rank[dp_rank],
                 num_reqs=8,
             ),
@@ -321,7 +324,8 @@ def _sync_dp(
             uniform_token_count=uniform_token_counts[dp_rank] or None,
             dp_size=dp_size,
             dp_rank=dp_rank,
-            parallel_config=ParallelConfig(
+            parallel_config=parallel_config
+            or ParallelConfig(
                 enable_dbo=num_ubatches == 2,
                 ubatch_size=num_ubatches,
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
@@ -530,7 +534,7 @@ def _make_dbo_config() -> VllmConfig:
 
 
 @pytest.mark.parametrize("graph_size", [127, 128, 129])
-@pytest.mark.parametrize("num_ubatches", [2, 3, 4])
+@pytest.mark.parametrize("num_ubatches", [2, 3, 4, 8])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA and FA3")
 @torch.inference_mode()
 def test_flash_attention_staging_multistep_graph(
@@ -1322,21 +1326,30 @@ def test_conditional_decode_preserves_token_position_and_kv_mapping(padded, k, n
 
 
 @pytest.mark.parametrize(
-    "padded,k,counts", [(11, 3, [5, 11, 6, 3]), (17, 4, [12, 17, 4, 7])]
+    "padded,k,counts",
+    [
+        (11, 3, [5, 11, 6, 3]),
+        (17, 4, [12, 17, 4, 7]),
+        (127, (2, 3, 4, 8, 2), [63, 127, 8]),
+    ],
 )
 def test_staged_prepare_matches_captured_regions_across_steps(padded, k, counts):
     """Unequal physical regions keep stable buffers and clear stale metadata."""
     runner = object.__new__(UBatchRunner)
-    runner.num_ubatches = k
+    active_counts = (k,) if isinstance(k, int) else k
+    capacity = max(active_counts)
+    runner.num_ubatches = capacity
     runner.stage_real_tokens = True
     runner.dcp_size = 1
     runner.dcp_rank = 0
     runner.cp_interleave = 1
     runner.ubatch_query_start_loc = [
-        torch.zeros(padded + 1, dtype=torch.int32) for _ in range(k)
+        torch.zeros(padded + 1, dtype=torch.int32) for _ in range(capacity)
     ]
-    runner.ubatch_seq_lens = [torch.zeros(padded, dtype=torch.int32) for _ in range(k)]
-    runner.ubatch_dcp_local_seq_lens = [None] * k
+    runner.ubatch_seq_lens = [
+        torch.zeros(padded, dtype=torch.int32) for _ in range(capacity)
+    ]
+    runner.ubatch_dcp_local_seq_lens = [None] * capacity
     runner.attn_groups = []
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     seen = []
@@ -1348,8 +1361,10 @@ def test_staged_prepare_matches_captured_regions_across_steps(padded, k, counts)
     runner.model_state = SimpleNamespace(prepare_attn=prepare_attn)
     runner._make_forward_contexts = lambda *args: []
     buffers = InputBuffers(padded, padded, torch.device("cpu"))
-    captured = create_ubatch_slices(InputBatch.make_dummy(padded, padded, buffers), k)
-    for n in counts:
+    for k, n in product(active_counts, counts):
+        captured = create_ubatch_slices(
+            InputBatch.make_dummy(padded, padded, buffers), k
+        )
         seen.clear()
         batch = _make_input_batch(
             [1] * n, list(range(100, 100 + n)), buffers, padded, padded
@@ -1366,7 +1381,7 @@ def test_staged_prepare_matches_captured_regions_across_steps(padded, k, counts)
         )
         with guard:
             state = runner.prepare(
-                batch, (), torch.zeros(0, padded), CUDAGraphMode.FULL
+                batch, (), torch.zeros(0, padded), CUDAGraphMode.FULL, num_ubatches=k
             )
         assert state.slices == captured
         assert (state.staged_rows is not None) == (n != padded)
@@ -1795,3 +1810,216 @@ def test_fa3_staging_rejects_batch_invariant_scheduler(
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     reason = runner._real_token_staging_unsupported_reason()
     assert reason is not None and "VLLM_BATCH_INVARIANT" in reason
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 8])
+def test_explicit_ubatch_count_overrides_dbo(enabled, k):
+    config = ParallelConfig(enable_dbo=enabled, ubatch_size=k)
+    config.resolve_ubatch_capacity(True, 256)
+    assert config.num_ubatches == k
+    assert config.use_ubatching == (k > 1)
+    assert not config.auto_ubatching
+
+
+def _make_auto_graph_manager(
+    monkeypatch, fixed=0, capable=True, capture_sizes=(64, 128, 256, 512)
+):
+    parallel = ParallelConfig(
+        enable_dbo=True, ubatch_size=fixed, all2all_backend="nixl_ep"
+    )
+    parallel.data_parallel_size = 8
+    parallel.resolve_ubatch_capacity(True, 512)
+    compilation = CompilationConfig(
+        cudagraph_mode="FULL",
+        cudagraph_capture_sizes=list(capture_sizes),
+        max_cudagraph_capture_size=max(capture_sizes),
+    )
+    compilation.post_init_cudagraph_sizes()
+    config = SimpleNamespace(
+        parallel_config=parallel,
+        scheduler_config=SimpleNamespace(max_num_seqs=512),
+        compilation_config=compilation,
+        speculative_config=None,
+        cache_config=SimpleNamespace(use_kda_recoverssm=False),
+    )
+    monkeypatch.setattr(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
+    manager = CudaGraphManager(
+        config,
+        torch.device("cpu"),
+        CUDAGraphMode.FULL,
+        1,
+        ubatch_runner=SimpleNamespace(stage_real_tokens=capable),
+    )
+    manager._graphs_captured = True
+    return parallel, manager
+
+
+@pytest.mark.parametrize("fixed", [0, 2, 3, 4, 8])
+def test_capture_candidates_cover_active_counts(monkeypatch, fixed):
+    config, manager = _make_auto_graph_manager(monkeypatch, fixed)
+    captures = manager._capture_descs[CUDAGraphMode.FULL]
+    assert len(captures) == len(set(captures))
+    for size in (64, 128, 256, 512):
+        expected = {1, fixed} if fixed else {1, *range(2, min(8, size // 32) + 1)}
+        assert {d.num_ubatches for d in captures if d.num_tokens == size} == expected
+    assert config.num_ubatches == (fixed or 8)
+
+
+@pytest.mark.parametrize(
+    "loads,k",
+    [
+        ([63, 97], 2),
+        ([64, 64], 2),
+        ([97, 97], 2),
+        ([96, 160], 3),
+        ([128, 160], 4),
+        ([256, 256], 8),
+        ([96, 180, 256], 2),
+        ([63, 97, 80, 80, 80, 80, 80, 80], 2),
+    ],
+)
+def test_auto_dp_selection_agrees_on_every_rank(monkeypatch, loads, k):
+    """Real graph selection checks every rank, including a small interior tail."""
+    config, manager = _make_auto_graph_manager(monkeypatch)
+    descriptors = []
+    for rank in range(len(loads)):
+        desc, sync = _sync_dp(
+            loads,
+            [1] * len(loads),
+            cudagraph_manager=manager,
+            num_reqs_per_rank=loads,
+            dp_rank=rank,
+            parallel_config=config,
+            cg_mode=CUDAGraphMode.FULL,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.num_ubatches == k
+        assert sync is not None and not sync.eager
+        assert sync.num_tokens_across_dp.tolist() == [desc.num_tokens] * len(loads)
+        descriptors.append(desc)
+    assert len(set(descriptors)) == 1
+
+
+def test_auto_selection_uses_available_smaller_full_graph(monkeypatch):
+    config, manager = _make_auto_graph_manager(monkeypatch)
+    for key, candidates in manager._candidates.items():
+        manager._candidates[key] = [d for d in candidates if d.num_ubatches != 4]
+    desc, _ = _sync_dp(
+        [128, 160],
+        [1, 1],
+        cudagraph_manager=manager,
+        num_reqs_per_rank=[128, 160],
+        parallel_config=config,
+        cg_mode=CUDAGraphMode.FULL,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL and desc.num_ubatches == 3
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_auto_eager_fallback_does_not_need_uncaptured_workspace_slots(
+    monkeypatch, captured
+):
+    config, manager = _make_auto_graph_manager(monkeypatch, capture_sizes=(64,))
+    desc, sync = _sync_dp(
+        [256, 256],
+        [1, 1],
+        cudagraph_manager=manager if captured else None,
+        num_reqs_per_rank=[256, 256],
+        parallel_config=config,
+    )
+    assert desc.cg_mode == CUDAGraphMode.NONE and desc.num_ubatches == 2
+    assert sync is not None and sync.eager
+
+
+def test_auto_selection_without_staging_keeps_dual_eager_fallback(monkeypatch):
+    config, manager = _make_auto_graph_manager(monkeypatch, capable=False)
+    desc, _ = _sync_dp(
+        [96, 160],
+        [1, 1],
+        cudagraph_manager=manager,
+        num_reqs_per_rank=[96, 160],
+        parallel_config=config,
+        cg_mode=CUDAGraphMode.FULL,
+    )
+    assert desc.cg_mode == CUDAGraphMode.NONE and desc.num_ubatches == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph replay")
+def test_one_runner_replays_graphs_with_different_active_counts():
+    """Graph keys, threaded handoff and output restore survive 2/3/4/8/2."""
+    from vllm.v1.worker.ubatching import dbo_num_ubatches
+
+    config = _make_dbo_config()
+    config.parallel_config.ubatch_size = 8
+    runner = _make_execution_runner(config)
+    device = torch.device("cuda:0")
+    padded = 127
+    buffers = InputBuffers(padded, padded, device)
+    batch = InputBatch.make_dummy(padded, padded, buffers)
+    inputs = _make_model_inputs(padded, device)
+    inputs["input_ids"] = batch.input_ids
+    inputs["positions"] = batch.positions
+    trace: list[tuple[str, int]] = []
+    model = _YieldingModel(trace)
+    captures = {}
+    for k in (2, 3, 4, 8):
+        slices = create_ubatch_slices(batch, k)
+        state = _make_ubatch_state(config, slices)
+        runner.run(model, inputs, state)
+        trace.clear()
+        graph = torch.cuda.CUDAGraph()
+        finish = runner.begin_capturable_run(model, inputs, state, for_capture=True)
+        with torch.cuda.graph(graph, stream=runner.capture_stream):
+            output = finish()
+        assert trace == [(phase, i) for phase in ("enter", "exit") for i in range(k)]
+        assert dbo_num_ubatches() == 1
+        captures[k] = graph, output, slices
+    for step, k in enumerate((2, 3, 4, 8, 2, 8, 3)):
+        graph, output, slices = captures[k]
+        n = 63
+        batch = _make_input_batch([1] * n, [100] * n, buffers, padded, padded)
+        batch.input_ids.copy_(torch.arange(padded, device=device) + step)
+        batch.positions.fill_(step + 1)
+        expected = (batch.input_ids[:n].float() * 2 + batch.positions[:n]).clone()
+        slots = torch.arange(padded, device=device).unsqueeze(0)
+        rows = stage_decode_tokens(batch, (), slots, slices)
+        graph.replay()
+        output[: rows.numel()] = output[rows]
+        restore_staged_inputs(batch, (), slots, rows)
+        torch.testing.assert_close(output[:n, 0], expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            batch.input_ids[:n], torch.arange(n, device=device).int() + step
+        )
+        torch.testing.assert_close(slots[0, :n], torch.arange(n, device=device))
+
+
+@pytest.mark.parametrize("k", [2, 3, 4, 8])
+@pytest.mark.parametrize(
+    "loads", [[80, 80], [64, 96], [63, 97], [63, 97, 80, 80, 80, 80, 80, 80]]
+)
+def test_fixed_dp_count_keeps_full_for_imbalanced_loads(monkeypatch, k, loads):
+    config, manager = _make_auto_graph_manager(monkeypatch, fixed=k)
+    descriptors = []
+    for rank in range(len(loads)):
+        desc, sync = _sync_dp(
+            loads,
+            [1] * len(loads),
+            cudagraph_manager=manager,
+            num_reqs_per_rank=loads,
+            dp_rank=rank,
+            parallel_config=config,
+            cg_mode=CUDAGraphMode.FULL,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.num_tokens == 128 and desc.num_ubatches == k
+        assert sync is not None and not sync.eager
+        descriptors.append(desc)
+    assert len(set(descriptors)) == 1
