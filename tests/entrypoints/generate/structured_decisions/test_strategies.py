@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
     StructuredDecisionError,
+    UnsupportedQuestion,
     build_question,
 )
 from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
@@ -43,12 +44,16 @@ from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
     ClefFlashStrategy,
     D3Strategy,
+    DecisionLimits,
     DiffusionGemmaCanvasStrategy,
+    GuiActorStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
     NextTokenStrategy,
     ReadContext,
     cap_pixels,
+    check_question_media,
+    check_question_type,
     reply_label_ids,
     select_read_strategy,
     state_text,
@@ -111,6 +116,8 @@ def test_strategy_selection():
     assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
     d3 = model("D3ForSequenceClassification", "raw_logits")
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
+    gui_actor = model("GuiActorForConditionalGeneration", "raw_logits")
+    assert select_read_strategy(gui_actor, ("classify",)) is GuiActorStrategy
 
 
 def test_route_is_registered_by_default():
@@ -783,6 +790,264 @@ async def test_d3_rejects_instructions(d3):
     )
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
+    engine.encode.assert_not_called()
+
+
+# ── box / ground: the model-side contract, without a checkpoint ──────────────
+
+GUI_ACTOR_LIMITS = DecisionLimits(
+    max_questions=64,
+    max_options=0,
+    labeled=False,
+    primitives=frozenset({"box", "ground"}),
+)
+
+
+def test_check_question_type_allows_unrestricted_models():
+    # A model that declares no primitives answers every type its prompt can
+    # carry, so the check is a no-op.
+    limits = DecisionLimits(max_questions=64, max_options=26)
+    check_question_type("choice", limits)
+    check_question_type("box", limits)
+
+
+def test_check_question_type_refuses_an_unanswered_type():
+    with pytest.raises(UnsupportedQuestion, match="answers box, ground"):
+        check_question_type("choice", GUI_ACTOR_LIMITS)
+    with pytest.raises(UnsupportedQuestion, match="answers box, ground"):
+        check_question_type("noul", GUI_ACTOR_LIMITS)
+    check_question_type("box", GUI_ACTOR_LIMITS)
+
+
+def test_an_unknown_type_is_still_a_bad_request_everywhere():
+    # check_question_type passes an unknown name through: it is a malformed
+    # request (400 via build_question), not a refusal (501), on any model.
+    check_question_type("nope", GUI_ACTOR_LIMITS)
+    with pytest.raises(StructuredDecisionError, match="unknown question type"):
+        parse_questions(
+            SimpleNamespace(
+                questions={
+                    "q": SimpleNamespace(
+                        type="nope", instructions="", criteria=None, model_extra=None
+                    )
+                }
+            ),
+            GUI_ACTOR_LIMITS,
+        )
+
+
+def test_a_label_model_refuses_spatial_questions_before_building():
+    # The refusal is by type, before any build: against a GUI-Actor model's
+    # max_options=0, a choice question must be a 501, not a "too many options"
+    # 400 from build_question. parse_questions is where that ordering lives.
+    from vllm.entrypoints.generate.structured_decisions.protocol import (
+        StructuredDecisionRequest,
+    )
+
+    request = StructuredDecisionRequest(
+        model="microsoft/GUI-Actor-7B-Qwen2.5-VL",
+        state="s",
+        questions={"team": {"type": "choice", "criteria": {"a": None, "b": None}}},
+    )
+    with pytest.raises(UnsupportedQuestion, match="answers box, ground"):
+        parse_questions(request, GUI_ACTOR_LIMITS)
+
+
+def test_check_question_type_501_is_not_a_bad_request():
+    # A refusal must not be reported as a malformed request: the same request
+    # would be valid against another model.
+    assert issubclass(UnsupportedQuestion, NotImplementedError)
+    assert not issubclass(UnsupportedQuestion, StructuredDecisionError)
+
+
+def test_check_question_media_needs_an_image():
+    question = build_question("q", "box", "the Pay button", None, 0, labeled=False)
+    check_question_media([question], {"image": ["https://example.org/a.png"]})
+    with pytest.raises(StructuredDecisionError, match="needs image input"):
+        check_question_media([question], {})
+    # Media of another modality does not satisfy it.
+    with pytest.raises(StructuredDecisionError, match="needs image input"):
+        check_question_media([question], {"video": ["https://example.org/a.mp4"]})
+
+
+def test_check_question_media_ignores_label_questions():
+    question = build_question("q", "choice", "", {"a": None}, 26)
+    check_question_media([question], {})
+
+
+@pytest.fixture
+def gui_actor(engine_and_renderer, monkeypatch):
+    """A GuiActorStrategy over a fake engine.
+
+    The pointer tokens are added to the tokenizer's vocabulary by hand: the
+    served checkpoint ships them, the Qwen tokenizer here does not.
+    """
+    engine, online_renderer = engine_and_renderer
+    tokenizer = online_renderer.renderer.get_tokenizer()
+    extra = {
+        "<|recipient|>": 200000,
+        "<|diff_marker|>": 200001,
+        "<|pointer_start|>": 200002,
+        "<|pointer_end|>": 200003,
+        "<|pointer_pad|>": 200004,
+    }
+    vocab = {**tokenizer.get_vocab(), **extra}
+    monkeypatch.setattr(tokenizer, "get_vocab", lambda: vocab)
+    engine.model_config.hf_config.pointer_temperature = 1.0
+    engine.model_config.hf_config.vision_config = SimpleNamespace(spatial_merge_size=2)
+
+    async def encode(prompt, params, request_id, **kwargs):
+        # A 4x4 merged grid, with all the mass on the second row's columns.
+        n_h = n_w = 4
+        grid = torch.zeros(n_h, n_w)
+        grid[1, :] = 1.0
+        logits = torch.log(grid.clamp_min(1e-30)).reshape(-1)
+        yield PoolingRequestOutput(
+            request_id, PoolingOutput(logits), prompt["prompt_token_ids"], 0, True
+        )
+
+    engine.encode.side_effect = encode
+    strategy = GuiActorStrategy(ReadContext(engine, online_renderer, None, "auto", {}))
+    return strategy, engine
+
+
+def test_gui_actor_limits_expose_only_spatial_primitives(gui_actor):
+    strategy, _ = gui_actor
+    limits = strategy.limits()
+    assert limits.primitives == frozenset({"box", "ground"})
+    assert not limits.labeled
+    assert limits.max_options == 0
+
+
+def test_gui_actor_reads_the_grounding_system_prompt_by_default(gui_actor):
+    strategy, _ = gui_actor
+    assert strategy.render_state(None) == GuiActorStrategy.GROUNDING_SYSTEM_MESSAGE
+    assert strategy.render_state("a screenshot") == "a screenshot"
+
+
+def test_gui_actor_needs_its_special_tokens(engine_and_renderer):
+    # A tokenizer missing any token the prompt writes cannot serve it: the click
+    # action's placeholder, and the assistant head's <|recipient|>, would both
+    # encode as plain text. Refuse to build rather than serve a prompt the
+    # checkpoint never saw.
+    engine, online_renderer = engine_and_renderer
+    engine.model_config.hf_config.pointer_temperature = 1.0
+    with pytest.raises(ValueError, match="special tokens") as excinfo:
+        GuiActorStrategy(ReadContext(engine, online_renderer, None, "auto", {}))
+    # Every prompt token is named, not only the pointer triple.
+    assert "<|recipient|>" in str(excinfo.value)
+    assert "<|pointer_pad|>" in str(excinfo.value)
+
+
+def test_gui_actor_prompt_ends_with_the_click_action(gui_actor):
+    """The pointer placeholder is what the head reads, so the prompt must carry
+    it in the click action the checkpoint was trained on."""
+    strategy, _ = gui_actor
+    placeholder = "<|pointer_start|><|pointer_pad|><|pointer_end|>"
+    assert strategy.CLICK_ACTION_JSON % placeholder == (
+        '{"action": "click", "coordinate": '
+        "[<|pointer_start|><|pointer_pad|><|pointer_end|>]}"
+    )
+    assert strategy.ASSISTANT_HEAD.endswith("<|recipient|>os\n")
+
+
+@pytest.mark.asyncio
+async def test_gui_actor_rejects_a_label_question(gui_actor):
+    # read() refuses a type it cannot ground before fetching media or encoding:
+    # the serving layer checks first, but the strategy stays defensive.
+    strategy, engine = gui_actor
+    question = build_question("q", "choice", "", {"a": None}, 26)
+    with pytest.raises(UnsupportedQuestion, match="does not answer 'choice'"):
+        await strategy.read(
+            [question],
+            None,
+            "a screenshot",
+            request_id="req",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+            media={"image": ["https://example.org/shot.png"]},
+        )
+    engine.encode.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "type_name,expected",
+    [
+        ("box", {"top": 0.25, "bottom": 0.5}),
+        ("ground", {"point": [500, 375]}),
+    ],
+)
+async def test_gui_actor_decodes_the_read(gui_actor, monkeypatch, type_name, expected):
+    # Rendering and the media fetch need a real Qwen processor; the decode
+    # wiring from the engine's patch logits to the answer is what is under test.
+    strategy, engine = gui_actor
+
+    async def render(state, instruction, image):
+        # The grid the pipeline produced, in patches: a 4x4 merged grid at
+        # spatial_merge_size 2. ``_merged_grid`` reads it rather than
+        # reprocessing the image.
+        return {
+            "type": "multimodal",
+            "prompt_token_ids": [1, 2, 3],
+            "mm_kwargs": {
+                "image": [
+                    {"image_grid_thw": SimpleNamespace(data=torch.tensor([[1, 8, 8]]))}
+                ]
+            },
+        }
+
+    class Connector:
+        async def fetch_image_async(self, url):
+            # The connector wraps the decoded image; the strategy takes .media.
+            return SimpleNamespace(media=object())
+
+    monkeypatch.setattr(strategy, "_render", render)
+    monkeypatch.setattr(
+        type(strategy), "_connector", property(lambda self: Connector())
+    )
+
+    question = build_question("q", type_name, "the Pay button", None, 0, labeled=False)
+    [read] = await strategy.read(
+        [question],
+        None,
+        "a screenshot",
+        request_id="req",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+        media={"image": ["https://example.org/shot.png"]},
+    )
+    assert read.probs == [] and read.label_mass == 1.0
+    assert read.output_tokens == 0
+    if type_name == "box":
+        assert read.spatial["box"]["top"] == pytest.approx(expected["top"], abs=0.02)
+        assert read.spatial["box"]["bottom"] == pytest.approx(
+            expected["bottom"], abs=0.02
+        )
+    else:
+        # The mass sits on row 1 of 4, so the weighted row centre is (1+0.5)/4.
+        assert read.spatial["point"] == expected["point"]
+    # The mass is entirely inside the answer, so its confidence is one.
+    assert read.spatial["confidence"] == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_gui_actor_needs_exactly_one_image(gui_actor):
+    strategy, engine = gui_actor
+    question = build_question("q", "box", "the Pay button", None, 0, labeled=False)
+    with pytest.raises(StructuredDecisionError, match="exactly one image"):
+        await strategy.read(
+            [question],
+            None,
+            "a screenshot",
+            request_id="req",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+            media={"image": []},
+        )
     engine.encode.assert_not_called()
 
 

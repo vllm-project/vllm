@@ -19,6 +19,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
     ModelArchConfigConvertorBase,
+    assert_no_foreign_gui_actor,
 )
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
@@ -135,7 +136,93 @@ def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, archit
         assert not hasattr(config, "decision_config")
 
 
-def _assert_model_arch_config(model_config, expected: dict):
+def _write_pointer_checkpoint(
+    path: Path,
+    with_pointer: bool,
+    architecture="Qwen2_5_VLForConditionalGeneration",
+    with_tensors=True,
+):
+    """A Qwen2.5-VL checkpoint directory whose weights may carry the GUI-Actor
+    pointer head, and whose config may name the reference pointer class."""
+    import torch
+    from safetensors.torch import save_file
+    from transformers import Qwen2_5_VLConfig
+
+    tensors = {"model.embed_tokens.weight": torch.zeros(4, 4, dtype=torch.float16)}
+    if with_pointer and with_tensors:
+        tensors["multi_patch_pointer_head.projection_enc.0.weight"] = torch.zeros(
+            4, 4, dtype=torch.float16
+        )
+    save_file(tensors, str(path / "model.safetensors"))
+    config = Qwen2_5_VLConfig(architectures=[architecture])
+    config.name_or_path = str(path)
+    return config
+
+
+@pytest.mark.parametrize("with_pointer", [False, True])
+def test_gui_actor_pointer_head_selects_its_architecture(tmp_path, with_pointer):
+    """The head's tensors, not config.json, are the signal: a config can claim
+    the pointer tokens without a trained head, and that model would serve random
+    grounding scores."""
+    config = _write_pointer_checkpoint(tmp_path, with_pointer)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    assert converted.architectures == [
+        "GuiActorForConditionalGeneration"
+        if with_pointer
+        else "Qwen2_5_VLForConditionalGeneration"
+    ]
+
+
+def test_gui_actor_reference_pointer_class_selects_its_architecture(tmp_path):
+    """A checkpoint saved by the reference layer names ``...WithPointer``, which
+    identifies it without reading the weights."""
+    config = _write_pointer_checkpoint(
+        tmp_path,
+        True,
+        architecture="Qwen2_5_VLForConditionalGenerationWithPointer",
+        with_tensors=False,
+    )
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    assert converted.architectures == ["GuiActorForConditionalGeneration"]
+
+
+@pytest.mark.parametrize(
+    "architectures,model_type,rejected",
+    [
+        # The reference layer's pointer class over a backbone this release
+        # cannot serve. Its model type has no convertor, so only this check
+        # sees it.
+        (["Qwen3_VLForConditionalGenerationWithPointer"], "qwen3_vl", True),
+        (["Qwen3_5ForConditionalGenerationWithPointer"], "qwen3_5", True),
+        (["Qwen2_5_VLForConditionalGenerationWithPointer"], "qwen2_5_vl", False),
+        # An ordinary checkpoint of another backbone is none of our business.
+        (["Qwen3VLForConditionalGeneration"], "qwen3_vl", False),
+        (["LlamaForCausalLM"], "llama", False),
+    ],
+)
+def test_only_qwen25vl_gui_actor_checkpoints_load(architectures, model_type, rejected):
+    """A pointer checkpoint must not load as a plain backbone elsewhere."""
+    config = SimpleNamespace(architectures=architectures, model_type=model_type)
+    if rejected:
+        with pytest.raises(ValueError, match="Qwen2.5-VL backbones only"):
+            assert_no_foreign_gui_actor(config)
+    else:
+        assert_no_foreign_gui_actor(config)
+
+
+def _assert_model_arch_config(
+    model_config, expected: dict, check_head_size: bool = True
+):
     """Assert model_arch_config matches expected values."""
     model_arch_config = model_config.model_arch_config
     assert model_arch_config.architectures == expected["architectures"]

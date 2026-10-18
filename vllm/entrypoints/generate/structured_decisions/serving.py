@@ -8,10 +8,15 @@ from fastapi import Request
 from vllm.entrypoints.openai.decisions.question_types import (
     Question,
     StructuredDecisionError,
+    UnsupportedQuestion,
     build_question,
 )
 from vllm.entrypoints.openai.decisions.serving import BaseServingDecisions
-from vllm.entrypoints.openai.decisions.strategies import DecisionLimits
+from vllm.entrypoints.openai.decisions.strategies import (
+    DecisionLimits,
+    check_question_media,
+    check_question_type,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 from .protocol import (
@@ -38,6 +43,9 @@ def parse_questions(
             raise StructuredDecisionError(
                 f"question {qid!r}: unknown field(s) {sorted(spec.model_extra)}"
             )
+        # Before building: a refused type is a 501, not this model's option
+        # limit returning 400 for a well-formed request.
+        check_question_type(spec.type, limits)
         questions.append(
             build_question(
                 qid,
@@ -80,6 +88,7 @@ class ServingStructuredDecisions(BaseServingDecisions):
         try:
             questions = parse_questions(request, self.limits)
             media = self._media(request)
+            check_question_media(questions, media)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(self.strategy.num_requests(questions))
             trace_headers = (
@@ -99,18 +108,28 @@ class ServingStructuredDecisions(BaseServingDecisions):
                 trace_headers=trace_headers,
                 media=media,
             )
+            # Inside the try: a question type validates its answer against the
+            # primitive's contract and raises StructuredDecisionError, which is
+            # a 400 by definition. Building the answers outside would turn that
+            # into a 500.
+            answers: dict[str, dict[str, Any]] = {}
+            diagnostics: dict[str, QuestionDiagnostics] = {}
+            for q, read in zip(questions, reads):
+                answers[q.id] = q.type.answer(
+                    q, read.probs, read.label_mass, spatial=read.spatial
+                )
+                diagnostics[q.id] = QuestionDiagnostics(
+                    label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
+                )
+        except UnsupportedQuestion as e:
+            # A question type this model does not answer is a refusal, so it
+            # maps to 501 rather than the 400 a bad request gets.
+            return self.create_error_response(NotImplementedError(str(e)))
         except StructuredDecisionError as e:
             return self.create_error_response(e)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
-        answers: dict[str, dict[str, Any]] = {}
-        diagnostics: dict[str, QuestionDiagnostics] = {}
-        for q, read in zip(questions, reads):
-            answers[q.id] = q.type.answer(q, read.probs, read.label_mass)
-            diagnostics[q.id] = QuestionDiagnostics(
-                label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
-            )
         return StructuredDecisionResponse(
             id=request_id,
             model=self.models.model_name(lora_request),

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -1135,6 +1136,67 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
             pooler_config.use_activation = False
 
 
+class GuiActorForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    """GUI-Actor answers each question off one prefill of its whole prompt.
+
+    The pointer head's encoder side reads the embed-layer hidden states of
+    the image, which the serving capture holds only for the tokens this step
+    computed. A prompt that is chunked, or whose image prefix came from the
+    cache, leaves the capture without the image's tokens, so both are disabled.
+
+    vLLM hashes multimodal content, so its prefix cache cannot collide two
+    equal-size screenshots. The reference serving layer keyed its image prefix
+    by token ids and did -- that wrong-answer bug is why the answer is read
+    from a fresh whole-prompt prefill here.
+    """
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.enable_chunked_prefill:
+            scheduler_config.enable_chunked_prefill = False
+            logger.info(
+                "GUI-Actor: disabling chunked prefill (the pointer head reads "
+                "the image's embed-layer tokens, which a chunk other than "
+                "this step's does not capture)."
+            )
+
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            cache_config.enable_prefix_caching = False
+            logger.info(
+                "GUI-Actor: disabling prefix caching (a cached image prefix "
+                "skips the embed-layer forward, so the head's encoder side "
+                "has no image tokens to score)."
+            )
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # The head's fitted calibration scalar; the read strategy applies it to
+        # the confidence it derives. Validated here, since a hand-edited
+        # config.json can carry anything.
+        hf_config = model_config.hf_config
+        temperature = getattr(hf_config, "pointer_temperature", None) or 1.0
+        try:
+            value = float(temperature)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"pointer_temperature must be a number, got {temperature!r}"
+            ) from e
+        if not (value > 0 and math.isfinite(value)):
+            raise ValueError(
+                f"pointer_temperature must be finite and positive, got {value}"
+            )
+        hf_config.pointer_temperature = value
+
+        # The head returns raw patch logits, so the answer decode can rescale
+        # the confidence without re-running the model.
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1188,6 +1250,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "GuiActorForConditionalGeneration": GuiActorForConditionalGenerationConfig,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501

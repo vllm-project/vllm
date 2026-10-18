@@ -27,6 +27,52 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
 
+#: The pointer head's tensor prefix in a GUI-Actor checkpoint. Its presence in
+#: the weights, rather than a config field, is what identifies the checkpoint.
+POINTER_HEAD_PREFIX = "multi_patch_pointer_head."
+
+
+def assert_no_foreign_gui_actor(hf_config: PreTrainedConfig) -> None:
+    """Reject a GUI-Actor checkpoint over a backbone this release cannot serve.
+
+    Such a checkpoint names the reference layer's pointer class, but vLLM routes
+    only Qwen2.5-VL's model type to the convertor that recognizes it. Without
+    this check the checkpoint would load as a plain backbone, its pointer tensors
+    would go unmatched, and serving would quietly score a random token for the
+    pointer placeholder.
+
+    The architecture name is the signal: it is exact, and reading it costs
+    nothing, unlike scanning the weights.
+    """
+    architectures = getattr(hf_config, "architectures", None) or []
+    if not any(name.endswith("WithPointer") for name in architectures):
+        return
+    if getattr(hf_config, "model_type", None) == "qwen2_5_vl":
+        return
+    raise ValueError(
+        "GUI-Actor checkpoints are supported on Qwen2.5-VL backbones only in "
+        f"this release, but {architectures[0]!r} is over "
+        f"{hf_config.model_type!r}"
+    )
+
+
+def _safetensors_have_prefix(model: str, prefix: str, revision: str | None) -> bool:
+    """Whether a checkpoint's weights carry a tensor under ``prefix``.
+
+    Reads only the safetensors headers, so no tensor data is loaded. A hub
+    failure is reported as "no such tensors" rather than raised: this runs while
+    building every Qwen2.5-VL config, and a model with no pointer head must not
+    be made to fail because the hub is unreachable.
+    """
+    try:
+        return any(
+            name.startswith(prefix)
+            for name in get_safetensors_params_metadata(model, revision=revision)
+        )
+    except Exception:
+        logger.warning("Could not read %s's weight names from the hub", model)
+        return False
+
 
 class ModelArchConfigConvertorBase:
     def __init__(
@@ -35,6 +81,10 @@ class ModelArchConfigConvertorBase:
         hf_text_config: PreTrainedConfig,
         revision: str | None = None,
     ):
+        # Every model type's convertor inherits from this one, so this is the
+        # only place a GUI-Actor checkpoint over an unsupported backbone is
+        # still visible: its own model type has no convertor to route to.
+        assert_no_foreign_gui_actor(hf_config)
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
@@ -674,6 +724,59 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         super().__init__(hf_config, hf_text_config, revision)
 
 
+def is_gui_actor_checkpoint(
+    hf_config: PreTrainedConfig, revision: str | None = None
+) -> bool:
+    """Whether a checkpoint is served by ``GuiActorForConditionalGeneration``.
+
+    Two signals, either of which is enough: the checkpoint names the reference
+    layer's pointer class in ``architectures``, or its weights carry the pointer
+    head's tensors. The tensors are the authority -- a config can claim the
+    pointer token ids without a trained head, and such a model would serve random
+    grounding scores -- but a GUI-Actor checkpoint saved by the reference layer
+    names ``...WithPointer`` in its config, which is exact and costs no download.
+
+    Only a multimodal root config can be one. A sub-config such as the
+    ``text_config`` vLLM builds the language model from has no ``vision_config``,
+    and matching it here would rewrite that sub-config too: the class would then
+    construct itself from inside its own ``__init__``, forever.
+    """
+    if getattr(hf_config, "vision_config", None) is None:
+        return False
+    architectures = getattr(hf_config, "architectures", None) or []
+    if any(name.endswith("WithPointer") for name in architectures):
+        return True
+    # ``GuiActorForConditionalGeneration`` builds its language model through
+    # ``init_vllm_registered_model(architectures=["Qwen2ForCausalLM"])``, which
+    # lands here again with the *root* config and that explicit architecture.
+    # Matching on the weights there would replace the requested language model
+    # with this class, which then builds itself again, forever -- and every
+    # round allocates another copy of the model. So the weight check only
+    # applies to a config that still names a Qwen2.5-VL architecture.
+    if not any("Qwen2_5_VL" in name for name in architectures):
+        return False
+    model_path = getattr(hf_config, "name_or_path", None)
+    return bool(model_path) and _safetensors_have_prefix(
+        model_path, POINTER_HEAD_PREFIX, revision
+    )
+
+
+class GuiActorModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        # Registered for ``model_type == "qwen2_5_vl"``, so every Qwen2.5-VL
+        # checkpoint reaches here; the check narrows it to GUI-Actor's. Mutate
+        # hf_config (like the Qwen3.5/Omni rewrites above) because model-class
+        # resolution reads hf_config.architectures.
+        if is_gui_actor_checkpoint(hf_config, revision):
+            hf_config.architectures = ["GuiActorForConditionalGeneration"]
+        super().__init__(hf_config, hf_text_config, revision)
+
+
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -839,6 +942,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "qwen2_5_vl": GuiActorModelArchConfigConvertor,
     "longcat_flash": LongCatFlashModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,

@@ -6,6 +6,7 @@ import pytest
 
 from vllm.entrypoints.openai.decisions.question_types import (
     QUESTION_TYPES,
+    BoxQuestion,
     Option,
     Question,
     QuestionType,
@@ -177,3 +178,159 @@ def test_registered_type_plugs_in():
             register_question_type(BinaryQuestion)
     finally:
         del QUESTION_TYPES["test_binary"]
+
+
+def box(qid="pay", instructions="the Pay button"):
+    return build_question(qid, "box", instructions, None, 0, labeled=False)
+
+
+def ground(qid="cart", instructions="the cart icon"):
+    return build_question(qid, "ground", instructions, None, 0, labeled=False)
+
+
+def test_spatial_types_take_no_options():
+    for q in (box(), ground()):
+        assert q.labels == ()
+        assert q.options == ()
+        assert not q.type.uses_options
+        assert q.type.needs_media == frozenset({"image"})
+
+
+def test_spatial_instructions_name_a_target():
+    for build in (box, ground):
+        with pytest.raises(StructuredDecisionError, match="must name a target"):
+            build(instructions="   ")
+        with pytest.raises(StructuredDecisionError, match="must name a target"):
+            build(instructions=None)
+
+
+def test_spatial_criteria_is_ignored():
+    # criteria is unused; a spatial type returns no options whatever it holds.
+    assert box().type.parse_options("q", {"x": None}) == []
+    assert box().type.parse_options("q", None) == []
+
+
+def test_spatial_options_are_refused(monkeypatch):
+    # A future spatial type that returned options would be caught rather than
+    # silently treated as a label question.
+    monkeypatch.setattr(
+        BoxQuestion, "parse_options", lambda self, qid, criteria: [Option("x")]
+    )
+    with pytest.raises(StructuredDecisionError, match="take no options"):
+        build_question("q", "box", "target", None, 0, labeled=False)
+
+
+def test_box_answer_shape():
+    q = box()
+    answer = q.type.answer(
+        q,
+        [],
+        1.0,
+        {
+            "type": "box",
+            "box": {"left": 0.1, "right": 0.4, "top": 0.2, "bottom": 0.5},
+            "confidence": 0.9,
+        },
+    )
+    assert answer == {
+        "type": "box",
+        "box": {"top": 0.2, "bottom": 0.5, "left": 0.1, "right": 0.4},
+        "confidence": 0.9,
+    }
+
+
+def test_ground_answer_shape():
+    q = ground()
+    answer = q.type.answer(
+        q,
+        [],
+        1.0,
+        {
+            "type": "ground",
+            "point": [512, 300],
+            "confidence": 0.7,
+            "topk_points": [[100, 100], [900, 900]],
+        },
+    )
+    assert answer == {
+        "type": "ground",
+        "point": [512, 300],
+        "confidence": 0.7,
+        "topk_points": [[100, 100], [900, 900]],
+    }
+
+
+def test_ground_answer_defaults_topk_to_none():
+    q = ground()
+    answer = q.type.answer(q, [], 1.0, {"point": (0, 0), "confidence": 0.5})
+    assert answer["topk_points"] is None
+
+
+@pytest.mark.parametrize(
+    "answer,match",
+    [
+        ({"box": {"left": 0.1, "right": 0.4, "top": 0.2}, "confidence": 0.9}, "bottom"),
+        (
+            {
+                "box": {"left": 0.8, "right": 0.2, "top": 0.2, "bottom": 0.5},
+                "confidence": 0.9,
+            },
+            "left must be less than its right",
+        ),
+        (
+            {
+                "box": {"left": 0.1, "right": 0.4, "top": 0.5, "bottom": 0.5},
+                "confidence": 0.9,
+            },
+            "top must be less than its bottom",
+        ),
+        (
+            {
+                "box": {"left": -0.1, "right": 0.4, "top": 0.2, "bottom": 0.5},
+                "confidence": 0.9,
+            },
+            r"left' must be in \[0, 1\]",
+        ),
+        (
+            {
+                "box": {"left": 0.1, "right": 0.4, "top": 0.2, "bottom": 0.5},
+                "confidence": 1.5,
+            },
+            "confidence must be in",
+        ),
+    ],
+)
+def test_box_answer_rejects_bad_boxes(answer, match):
+    with pytest.raises(StructuredDecisionError, match=match):
+        box().type.answer(box(), [], 1.0, answer)
+
+
+@pytest.mark.parametrize(
+    "answer,match",
+    [
+        ({"point": [1000, 0], "confidence": 0.5}, "point coordinates must be 0-999"),
+        ({"point": [-1, 0], "confidence": 0.5}, "point coordinates must be 0-999"),
+        ({"point": [0], "confidence": 0.5}, r"point must be an \[x, y\] pair"),
+        ({"point": [0, 0], "confidence": 1.5}, "confidence must be in"),
+        (
+            {"point": [0, 0], "confidence": 0.5, "topk_points": [[1000, 0]]},
+            "topk_points coordinates must be 0-999",
+        ),
+    ],
+)
+def test_ground_answer_rejects_bad_points(answer, match):
+    with pytest.raises(StructuredDecisionError, match=match):
+        ground().type.answer(ground(), [], 1.0, answer)
+
+
+def test_spatial_answer_without_a_read_is_rejected():
+    # A spatial question always needs the read's decoded answer; the label
+    # probabilities carry nothing for it.
+    with pytest.raises(StructuredDecisionError, match="has no answer of this model"):
+        box().type.answer(box(), [], 1.0, None)
+
+
+def test_existing_types_still_accept_the_spatial_kwarg():
+    # The label types ignore it, so the caller can pass it unconditionally.
+    q = choice()
+    assert q.type.answer(q, [0.2, 0.8], 0.5, spatial=None)["choice"] == "outage"
