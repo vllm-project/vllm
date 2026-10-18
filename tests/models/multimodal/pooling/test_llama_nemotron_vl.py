@@ -10,7 +10,6 @@ Both variants share a SigLIP vision encoder with a bidirectional LLaMA backbone.
 
 from collections.abc import Sequence
 from io import BytesIO
-from pathlib import Path
 
 import pybase64 as base64
 import pytest
@@ -202,13 +201,6 @@ def test_models(
 
 RERANKER_MODELS = ["nvidia/llama-nemotron-rerank-vl-1b-v2"]
 
-# The tokenizer's built-in chat template is not suitable for the Score/Rerank
-# APIs (it's inherited from the base LLM).  We must use the provided override.
-_RERANKER_SCORE_TEMPLATE = (
-    Path(__file__).parents[4]
-    / "examples/pooling/score/template/nemotron-vl-rerank.jinja"
-).read_text()
-
 RERANKER_TEXT_QUERY = "How is AI improving the intelligence and capabilities of robots?"
 RERANKER_TEXT_DOCS = [
     "AI enables robots to perceive, plan, and act autonomously.",
@@ -281,7 +273,11 @@ def _run_vllm_reranker(
     dtype: str,
     input_cases: Sequence[RerankerCase],
 ) -> list[list[float]]:
-    """Run all vLLM reranker cases in one model lifecycle."""
+    """Run all vLLM reranker cases in one model lifecycle.
+
+    The checkpoint declares its score template in its Sentence Transformers
+    config, so no chat template is passed.
+    """
     with vllm_runner(
         model,
         runner="pooling",
@@ -298,11 +294,7 @@ def _run_vllm_reranker(
             if not has_images:
                 queries = [query] * len(docs)
                 doc_texts = [doc_text for doc_text, _ in docs]
-                outputs = vllm_model.score(
-                    queries,
-                    doc_texts,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                outputs = vllm_model.score(queries, doc_texts)
             else:
                 query_params = [
                     ScoreMultiModalParam(
@@ -334,11 +326,7 @@ def _run_vllm_reranker(
                         )
                     doc_params.append(ScoreMultiModalParam(content=content))
 
-                raw_outputs = vllm_model.llm.score(
-                    query_params,
-                    doc_params,
-                    chat_template=_RERANKER_SCORE_TEMPLATE,
-                )
+                raw_outputs = vllm_model.llm.score(query_params, doc_params)
                 outputs = [output.outputs.score for output in raw_outputs]
 
             scores_per_case.append(outputs)
