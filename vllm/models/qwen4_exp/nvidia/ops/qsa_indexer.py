@@ -11,6 +11,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 
 from .qsa_dcp_selector import merge_qsa_dcp_topk
 
@@ -628,7 +629,7 @@ def qsa_select_paged_prefill(
     max_states = triton.cdiv(max_seq_len, compress_ratio)
     if selector_shard is not None:
         max_states = selector_shard.max_local_length(max_states)
-    logits_width = triton.cdiv(max_states, 64) * 64
+    logits_width = round_up(max_states, 64)
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
