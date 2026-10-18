@@ -1571,9 +1571,6 @@ def test_one_sided_dispatch_format_preserves_payload_capacity(
     "input_dtype",
     [torch.float32, torch.float8_e4m3fn, torch.float8_e5m2, torch.int8],
 )
-@pytest.mark.skipif(
-    not has_flashinfer_nvlink_one_sided(), reason="Requires FI dispatch-format API"
-)
 def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtype):
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         flashinfer_one_sided_dispatch_layout,

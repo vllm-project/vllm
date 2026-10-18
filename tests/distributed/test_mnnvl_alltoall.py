@@ -45,7 +45,7 @@ def _has_sys_ptrace() -> bool:
     return False
 
 
-def _spawn_workers(worker_fn, world_size, *, dp_size=None):
+def _spawn_workers(worker_fn, world_size, *, dp_size=None, cleanup_one_sided=False):
     """Spawn one process per GPU, run worker_fn, assert all succeed.
 
     Uses an mp.Queue to propagate worker tracebacks back to the parent
@@ -63,7 +63,16 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     for rank in range(world_size):
         p = mp.Process(
             target=_run_worker,
-            args=(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue),
+            args=(
+                rank,
+                world_size,
+                port,
+                worker_fn,
+                dp_size,
+                dp_port,
+                err_queue,
+                cleanup_one_sided,
+            ),
         )
         p.start()
         procs.append(p)
@@ -86,7 +95,9 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     )
 
 
-def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
+def _run_worker(
+    rank, world_size, port, worker_fn, dp_size, dp_port, err_queue, cleanup_one_sided
+):
     """Per-process setup: device, distributed env, then call worker_fn.
 
     Args:
@@ -94,6 +105,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
                  Otherwise use tp=world_size (default for EP-based tests).
         dp_port: Separate port for the DP master (only used when dp_size is set).
         err_queue: Queue for propagating tracebacks to the parent process.
+        cleanup_one_sided: Release FlashInfer one-sided cached workspaces on exit.
 
     """
     try:
@@ -105,7 +117,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
             init_test_distributed_environment(world_size, 1, rank, port)
         worker_fn(rank, world_size)
         torch.distributed.barrier()
-        if has_flashinfer_nvlink_one_sided():
+        if cleanup_one_sided:
             from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
 
             # Release cached tensor deleters while their JIT library is loaded,
@@ -364,6 +376,7 @@ def test_one_sided_manager_lifecycle(world_size):
         _one_sided_lifecycle_worker,
         world_size,
         dp_size=world_size,
+        cleanup_one_sided=True,
     )
 
 
@@ -494,6 +507,7 @@ def test_one_sided_manager_workspace_grow(world_size):
         _one_sided_workspace_grow_worker,
         world_size,
         dp_size=world_size,
+        cleanup_one_sided=True,
     )
 
 
@@ -1089,8 +1103,7 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                 factor = torch.where(
                     local, received.topk_weights * (recv_ids + 1), 0
                 ).sum(-1, keepdim=True)
-                # Consume both packed activation and scale bytes so corrupted
-                # payloads cannot pass by only having the correct shape.
+                # Check payload-dependent values, not only receive shapes.
                 value = received.hidden_states.float().mean(-1, keepdim=True)
                 value += received.hidden_states_scale.float().mean(-1, keepdim=True)
                 expert_output = torch.where(
@@ -1122,6 +1135,7 @@ def test_one_sided_dispatch_combine(world_size, padded_mxfp8):
         partial(_one_sided_data_worker, padded_mxfp8=padded_mxfp8),
         world_size,
         dp_size=world_size,
+        cleanup_one_sided=True,
     )
 
 
@@ -1144,51 +1158,51 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
     assert device_communicator is not None
     previous_manager = device_communicator.all2all_manager
     device_communicator.all2all_manager = manager
-    hidden = 256
-    local_experts = 8
-    token_counts = [0 if empty_rank else 3, 7]
-    num_tokens = token_counts[rank]
-    adapter = FlashInferNVLinkOneSidedPrepareAndFinalize(
-        max_num_tokens=16,
-        top_k=2,
-        num_experts=local_experts * world_size,
-        hidden_size=hidden,
-    )
-    quant_config = FusedMoEQuantConfig.make()
-    reduce_impl = TopKWeightAndReduceNoOP()
-    torch.manual_seed(42 + rank)
-    x = torch.randn(num_tokens, hidden, device=DEVICE, dtype=torch.bfloat16)
-    token = torch.arange(num_tokens, device=DEVICE, dtype=torch.int32)
-    # Alternate between two experts on one rank and experts on different ranks.
-    ids = torch.stack((token % local_experts, (token + 1) % local_experts), dim=1)
-    ids[:, 1] += (token % 2) * local_experts
-    weights = torch.empty(num_tokens, 2, device=DEVICE, dtype=torch.float32)
-    weights[:, 0] = 0.25
-    weights[:, 1] = 0.75
-    output = torch.empty_like(x)
-
-    def round_trip():
-        received, scales, _, recv_ids, recv_weights = adapter.prepare(
-            x, weights, ids, local_experts * world_size, None, False, quant_config
-        )
-        assert scales is None
-        assert recv_ids is not None and recv_weights is not None
-        local = (recv_ids >= rank * local_experts) & (
-            recv_ids < (rank + 1) * local_experts
-        )
-        factor = torch.where(local, recv_weights * (recv_ids + 1), 0).sum(
-            dim=-1, keepdim=True
-        )
-        expert_output = torch.where(
-            local.any(dim=-1, keepdim=True), received.float() * factor, 0
-        ).to(torch.bfloat16)
-        adapter.finalize(output, expert_output, weights, ids, False, reduce_impl)
-
-    def check_output():
-        expected = x.float() * (weights * (ids + 1)).sum(dim=-1, keepdim=True)
-        torch.testing.assert_close(output.float(), expected, rtol=2e-2, atol=5e-2)
-
     try:
+        hidden = 256
+        local_experts = 8
+        token_counts = [0 if empty_rank else 3, 7]
+        num_tokens = token_counts[rank]
+        adapter = FlashInferNVLinkOneSidedPrepareAndFinalize(
+            max_num_tokens=16,
+            top_k=2,
+            num_experts=local_experts * world_size,
+            hidden_size=hidden,
+        )
+        quant_config = FusedMoEQuantConfig.make()
+        reduce_impl = TopKWeightAndReduceNoOP()
+        torch.manual_seed(42 + rank)
+        x = torch.randn(num_tokens, hidden, device=DEVICE, dtype=torch.bfloat16)
+        token = torch.arange(num_tokens, device=DEVICE, dtype=torch.int32)
+        # Alternate between two experts on one rank and experts on different ranks.
+        ids = torch.stack((token % local_experts, (token + 1) % local_experts), dim=1)
+        ids[:, 1] += (token % 2) * local_experts
+        weights = torch.empty(num_tokens, 2, device=DEVICE, dtype=torch.float32)
+        weights[:, 0] = 0.25
+        weights[:, 1] = 0.75
+        output = torch.empty_like(x)
+
+        def round_trip():
+            received, scales, _, recv_ids, recv_weights = adapter.prepare(
+                x, weights, ids, local_experts * world_size, None, False, quant_config
+            )
+            assert scales is None
+            assert recv_ids is not None and recv_weights is not None
+            local = (recv_ids >= rank * local_experts) & (
+                recv_ids < (rank + 1) * local_experts
+            )
+            factor = torch.where(local, recv_weights * (recv_ids + 1), 0).sum(
+                dim=-1, keepdim=True
+            )
+            expert_output = torch.where(
+                local.any(dim=-1, keepdim=True), received.float() * factor, 0
+            ).to(torch.bfloat16)
+            adapter.finalize(output, expert_output, weights, ids, False, reduce_impl)
+
+        def check_output():
+            expected = x.float() * (weights * (ids + 1)).sum(dim=-1, keepdim=True)
+            torch.testing.assert_close(output.float(), expected, rtol=2e-2, atol=5e-2)
+
         with _make_forward_context(
             rank, world_size, num_tokens, num_tokens_across_dp=token_counts
         ):
@@ -1221,8 +1235,8 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
                     graph.replay()
                 check_output()
     finally:
-        torch.accelerator.synchronize()
         device_communicator.all2all_manager = previous_manager
+        torch.accelerator.synchronize()
         manager.cleanup()
 
 
@@ -1241,6 +1255,7 @@ def test_one_sided_prepare_finalize(empty_rank, cuda_graph):
         ),
         2,
         dp_size=2,
+        cleanup_one_sided=True,
     )
 
 
@@ -1329,7 +1344,12 @@ def test_one_sided_combine_low_precision(world_size, monkeypatch):
     than raising, so this asserts the combined values are exactly right.
     """
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "1")
-    _spawn_workers(_one_sided_low_precision_worker, world_size, dp_size=world_size)
+    _spawn_workers(
+        _one_sided_low_precision_worker,
+        world_size,
+        dp_size=world_size,
+        cleanup_one_sided=True,
+    )
 
 
 # ---------------------------------------------------------------------------

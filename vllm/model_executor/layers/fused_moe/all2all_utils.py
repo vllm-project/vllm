@@ -59,14 +59,15 @@ def flashinfer_one_sided_dispatch_layout(
     input_dtype: torch.dtype | None = None,
 ) -> FlashInferOneSidedDispatchLayout:
     """Return the one-sided activation payload layout."""
+    if input_dtype is not None and input_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "flashinfer_nvlink_one_sided unpacked inputs must be float16 "
+            f"or bfloat16, got {input_dtype}"
+        )
+
     from flashinfer.fused_moe import QuantFormat
 
     if input_dtype is not None:
-        if input_dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError(
-                "flashinfer_nvlink_one_sided unpacked inputs must be float16 "
-                f"or bfloat16, got {input_dtype}"
-            )
         return FlashInferOneSidedDispatchLayout(
             QuantFormat.FP16 if input_dtype == torch.float16 else QuantFormat.BF16
         )
