@@ -378,6 +378,33 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif() # _C HIP endif
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  define_extension_target(
+    _vllm_batch_invariant_C
+    DESTINATION vllm
+    LANGUAGE CUDA
+    SOURCES
+      "csrc/batch_invariant/block32_scaled_mm.cu"
+      "csrc/batch_invariant/ordered_topk.cu"
+      "csrc/batch_invariant/expert_permute.cu"
+      "csrc/batch_invariant/hc_collapse.cu"
+      "csrc/batch_invariant/sparse_metadata.cu"
+      "csrc/batch_invariant/cache_gather.cu"
+      "csrc/batch_invariant/sparse_decode_gather.cu"
+      "csrc/batch_invariant/top_k.cu"
+      "csrc/batch_invariant/silu_mul_bf16.cu"
+      "csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu"
+      "csrc/batch_invariant/torch_bindings.cpp"
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    WITH_SOABI)
+  target_compile_options(_vllm_batch_invariant_C PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
+    $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_HALF_CONVERSIONS__>
+    $<$<COMPILE_LANGUAGE:CUDA>:-U__CUDA_NO_BFLOAT16_CONVERSIONS__>)
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)

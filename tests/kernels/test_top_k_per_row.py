@@ -40,6 +40,77 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Top-K")
+@pytest.mark.parametrize("rows,columns", [(1, 12289), (12290, 704), (12290, 2048)])
+def test_bi_prefill_topk_is_independent_of_row_dispatch_and_padding(rows, columns):
+    """BF16 ties retain their local indices across the 12288-query boundary."""
+    from vllm.model_executor.kernels.batch_invariant import top_k_per_row_prefill
+
+    top_k = 512
+    prototype = (torch.arange(columns) % 17 - 8).float().bfloat16().float()
+    prototype[1] = -torch.inf
+    prototype[-1] = torch.nan
+    choices = [columns, 0, 1, 511, 512, 513]
+    lengths = torch.tensor(choices, dtype=torch.int32).repeat((rows + 5) // 6)[:rows]
+    starts = torch.where(lengths == columns, 0, 17).to(torch.int32)
+    ends = starts + lengths
+    expected = torch.full((rows, top_k), -1, dtype=torch.int32)
+    for start, length in set(zip(starts.tolist(), lengths.tolist())):
+        order = sorted(
+            (i for i in range(length) if float(prototype[start + i]) > -float("inf")),
+            key=lambda i: (float(prototype[start + i]), i),
+            reverse=True,
+        )[:top_k]
+        reference = torch.full((top_k,), -1, dtype=torch.int32)
+        reference[: len(order)] = torch.tensor(order, dtype=torch.int32)
+        expected[(starts == start) & (lengths == length)] = reference
+
+    packed = torch.empty((rows, columns * 2 + 17), device="cuda", dtype=torch.float32)
+    scores = packed[:, : columns * 2 : 2]
+    scores.copy_(prototype.to("cuda"))
+    starts, ends = starts.cuda(), ends.cuda()
+    positions = torch.arange(columns, device="cuda")
+    scores.masked_fill_(
+        (positions < starts[:, None]) | (positions >= ends[:, None]), float("nan")
+    )
+    output = torch.empty((rows, top_k), device="cuda", dtype=torch.int32)
+
+    def select(destination):
+        top_k_per_row_prefill(
+            scores,
+            starts,
+            ends,
+            destination,
+            rows,
+            scores.stride(0),
+            scores.stride(1),
+            top_k,
+        )
+
+    select(output)
+    assert torch.equal(output.cpu(), expected)
+    if rows > 12288:
+        assert torch.equal(output[0], output[12288])
+        serial = torch.empty((1, top_k), device="cuda", dtype=torch.int32)
+        top_k_per_row_prefill(
+            scores[12288:12289],
+            starts[12288:12289],
+            ends[12288:12289],
+            serial,
+            1,
+            scores.stride(0),
+            scores.stride(1),
+            top_k,
+        )
+        assert torch.equal(serial[0], output[12288])
+    graph_output = torch.empty_like(output)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        select(graph_output)
+    graph.replay()
+    assert torch.equal(graph_output, output)
+
+
 COOPERATIVE_TOPK_BACKEND = pytest.param(
     "cooperative_topk",
     marks=pytest.mark.skipif(
@@ -2034,3 +2105,55 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 
     assert recorded["next_n"] == 1
     assert recorded["row_ends"] == [99, 100, 199, 200]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Top-K")
+@pytest.mark.parametrize("top_k", [1, 64, 512, 513, 2048])
+@pytest.mark.parametrize("data", ["random", "ties", "special"])
+@torch.inference_mode()
+def test_bi_prefill_topk_matches_reference_kernel(top_k, data):
+    """The staged/early-exit BI Top-K returns exactly the reference kernel's
+    indices and order for every row length, including unstaged long rows; the
+    index-order variant returns the same set sorted by index, -1 last."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        require_batch_invariant_kernel,
+    )
+
+    require_batch_invariant_kernel()
+    set_random_seed(top_k)
+    lengths = [0, 1, 7, 511, 512, 513, 2047, 2048, 2049, 4097, 16384, 16385, 20011]
+    rows = len(lengths) * 3
+    columns = max(lengths) + 31
+    if data == "random":
+        scores = torch.randn(rows, columns, device="cuda")
+    elif data == "ties":
+        scores = torch.randint(-4, 4, (rows, columns), device="cuda").float()
+    else:
+        scores = torch.randn(rows, columns, device="cuda").bfloat16().float()
+        scores[:, ::5] = -torch.inf
+        scores[:, 1::7] = torch.nan
+        scores[:, 2::11] = -0.0
+        scores[:, 3::11] = 0.0
+        scores[:, 4::13] = torch.inf
+    lengths_t = torch.tensor(lengths * 3, dtype=torch.int32, device="cuda")
+    starts = torch.tensor(
+        [0] * len(lengths) + [5] * len(lengths) + [31] * len(lengths),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    ends = starts + lengths_t
+    outputs = []
+    for op in (
+        "top_k_per_row_prefill",
+        "top_k_per_row_prefill_reference",
+        "top_k_per_row_prefill_index_order",
+    ):
+        out = torch.full((rows, top_k), -7, dtype=torch.int32, device="cuda")
+        getattr(torch.ops.vllm_batch_invariant, op)(
+            scores, starts, ends, out, rows, scores.stride(0), scores.stride(1), top_k
+        )
+        outputs.append(out)
+    assert torch.equal(outputs[0], outputs[1])
+    sentinel = torch.iinfo(torch.int32).max
+    by_index = torch.where(outputs[1] >= 0, outputs[1], sentinel).sort(-1).values
+    assert torch.equal(outputs[2], torch.where(by_index == sentinel, -1, by_index))
