@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import itertools
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -384,13 +385,15 @@ class CudaGraphManager:
             return
 
         capture_sizes = sorted(capture_sizes)
-        descs_by_mode: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
         decode_descs = self._get_decode_capture_descs(capture_sizes)
         if decode_descs:
-            descs_by_mode[self.cudagraph_mode.decode_mode()] = decode_descs
+            descs_by_mode[self.cudagraph_mode.decode_mode()].extend(decode_descs)
         mixed_descs = self._get_mixed_capture_descs(capture_sizes)
         if mixed_descs:
-            descs_by_mode[self.cudagraph_mode.mixed_mode()] = mixed_descs
+            descs_by_mode[self.cudagraph_mode.mixed_mode()].extend(mixed_descs)
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
