@@ -6,14 +6,13 @@ To train your own draft models for optimized speculative decoding, see [vllm-pro
 
 ## vLLM Speculation Methods
 
-vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models, PARD and MLP provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
+vLLM supports a variety of methods of speculative decoding. Model-based methods such as EAGLE, MTP, draft models and PARD provide the best latency reduction, while simpler methods such as n-gram and suffix decoding provide modest speedups without increasing workload during peak traffic.
 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
-- [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
@@ -33,7 +32,6 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
-| MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
 | Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
