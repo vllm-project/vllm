@@ -9,7 +9,7 @@ This page lists the active reviewers and describes the role. See the [committers
 Community members can reach out to the reviewers below for help with PRs in their areas, for example in the `#pr-reviews` Slack channel. Reviewers will add their areas of expertise to this list.
 Sorted alphabetically by GitHub handle:
 
-- [@andylolu2](https://github.com/andylolu2)
+- [@andylolu2](https://github.com/andylolu2): Mistral models, speculative decoding, quantization, scheduler, MLA
 - [@bnellnm](https://github.com/bnellnm) MoE, Quantization layers
 - [@BowenBao](https://github.com/BowenBao)
 - [@cjackal](https://github.com/cjackal): Multimodality; KV Connector and offload
@@ -30,7 +30,7 @@ Sorted alphabetically by GitHub handle:
 - [@Rohan138](https://github.com/Rohan138): ROCm performance, CI, torch.compile fusions
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
-- [@TheEpicDolphin](https://github.com/TheEpicDolphin)
+- [@TheEpicDolphin](https://github.com/TheEpicDolphin): Spec decode
 - [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath): KV cache offloading, LoRA
 - [@vllmellm](https://github.com/vllmellm)
 - [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake

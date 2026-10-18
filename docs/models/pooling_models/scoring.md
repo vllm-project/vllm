@@ -49,7 +49,7 @@ The three supported scoring functions are as illustrated in the figure below.
 | `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
 | `ModernBertForSequenceClassification` | ModernBERT-based | `Alibaba-NLP/gte-reranker-modernbert-base`, etc. | N/A | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`(see note), etc. | [mxbai_rerank_v2.jinja](../../../examples/pooling/score/template/mxbai_rerank_v2.jinja) | ✅︎ | ✅︎ |
-| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B`(see note), etc. | [qwen3_reranker.jinja](../../../examples/pooling/score/template/qwen3_reranker.jinja) | ✅︎ | ✅︎ |
+| `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B`(see note), `polaria-tech/zerank-2-reranker-vllm`(see note), etc. | [qwen3_reranker.jinja](../../../examples/pooling/score/template/qwen3_reranker.jinja), [zerank2.jinja](../../../examples/pooling/score/template/zerank2.jinja) | ✅︎ | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | N/A | ✅︎ | |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | N/A | ✅︎ | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | N/A | \* | \* |
@@ -86,6 +86,13 @@ The three supported scoring functions are as illustrated in the figure below.
 
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    ```
+
+!!! note
+    `polaria-tech/zerank-2-reranker-vllm` is [zeroentropy/zerank-2-reranker](https://huggingface.co/zeroentropy/zerank-2-reranker) converted to `Qwen3ForSequenceClassification`; it returns zerank-2's calibrated score `sigmoid(logit / 5)`. Serve it with [zerank2.jinja](../../../examples/pooling/score/template/zerank2.jinja), which also supports the `instruction` request field.
+
+    ```bash
+    vllm serve polaria-tech/zerank-2-reranker-vllm --chat-template examples/pooling/score/template/zerank2.jinja
     ```
 
 #### Multimodal Models
@@ -448,6 +455,8 @@ Score templates are supported for **cross-encoder** models only. If you are usin
 
 Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/online_serving/README.md#chat-template)).
 
+For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
+
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
 - **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
@@ -456,6 +465,31 @@ Like chat templates, the score template receives a `messages` list. For scoring,
 This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
 
 Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja)
+
+#### Templates declared by Sentence Transformers checkpoints
+
+vLLM does not apply a checkpoint's chat template by default, since many rerankers inherit an unrelated template from their base LLM. The exception is a Sentence Transformers (v5.4+) `CrossEncoder` with a single `sequence-classification` Transformer module whose `sentence_bert_config.json` declares the `message` modality. Sentence Transformers formats the pairs of such checkpoints as `query`/`document` messages, so vLLM does the same with the saved template:
+
+```json
+{
+    "transformer_task": "sequence-classification",
+    "modality_config": {
+        "text": {"method": "forward", "method_output_name": "logits"},
+        "message": {"method": "forward", "method_output_name": "logits", "format": "flat"}
+    },
+    "module_output_name": "scores",
+    "processing_kwargs": {"chat_template": {"add_generation_prompt": true}}
+}
+```
+
+- The default chat template is used, unless `processing_kwargs.chat_template.chat_template` names another template saved with the tokenizer (e.g. `additional_chat_templates/score.jinja` for `"score"`).
+- The other `processing_kwargs.chat_template` settings, such as `add_generation_prompt`, are passed to the template; the request's `chat_template_kwargs` override them.
+- Message contents are passed as strings, as with `--chat-template`.
+- vLLM does not restore the template suffix after truncation (`restore_suffix`). Use `max_tokens_per_doc` rather than `truncate_prompt_tokens` to truncate long documents.
+- `--chat-template` (or the `chat_template` argument of `LLM.score`) takes precedence over the saved template and its settings.
+- Models with a built-in score template keep using it.
+
+The template in use is logged at startup.
 
 ### Enable/disable activation
 
