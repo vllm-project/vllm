@@ -25,9 +25,11 @@ DP_SIZE = 2
 # Fault-detection timeout budget:
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
 # - nixl_ep: kernel masks the dead rank after Buffer's default timeout_ms=30000 (30s).
-# - Deadline (45s): slowest fallback (30s) + margin.
+# - Deadline (75s): slowest fallback (30s) + margin. The margin needs to
+# absorb slow startup on loaded CI hosts — 45s has failed twice this week
+# (#2028, #2037) with the detection arriving just past the deadline.
 CPU_DISTRIBUTED_TIMEOUT_S = 30
-FAULT_DETECTION_DEADLINE_S = 45
+FAULT_DETECTION_DEADLINE_S = 75
 
 
 # Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank`` at
