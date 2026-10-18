@@ -8,6 +8,7 @@ import pytest
 import torch
 from pydantic import ConfigDict
 
+from vllm.config.aux_output import AuxOutputConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import MultiModalConfig
@@ -337,7 +338,7 @@ def test_lora_config_hash_ignores_target_modules_order(a, b):
     )
 
 
-@pytest.mark.parametrize("base", [LoRAConfig, MultiModalConfig])
+@pytest.mark.parametrize("base", [LoRAConfig, MultiModalConfig, AuxOutputConfig])
 def test_config_hash_includes_new_fields_by_default(base):
     """A field added to a migrated config must enter the hash without
     anyone listing it."""
