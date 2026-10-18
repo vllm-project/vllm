@@ -37,6 +37,7 @@ from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
+from .io_transfer import IOTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -421,6 +422,8 @@ class VllmConfig:
         default_factory=EncoderCacheManagerConfig
     )
     """The configurations for custom encoder cache manager."""
+    io_transfer_config: IOTransferConfig | None = None
+    """The configurations for distributed IO data transfer."""
     reasoning_config: ReasoningConfig | None = None
     """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
@@ -554,6 +557,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.ec_transfer_config:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.io_transfer_config:
+            vllm_factors.append(self.io_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.aux_output_config.compute_hash())

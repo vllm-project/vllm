@@ -16,6 +16,7 @@ from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.engram import EngramConfig
 from vllm.config.fault_tolerance import FaultToleranceConfig
+from vllm.config.io_transfer import IOTransferConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
@@ -91,6 +92,8 @@ __all__ = [
     "ECTransferConfig",
     # From vllm.config.engram
     "EngramConfig",
+    # From vllm.config.io_transfer
+    "IOTransferConfig",
     # From vllm.config.kernel
     "KernelConfig",
     # From vllm.config.kv_events
