@@ -17,14 +17,20 @@
 #
 # Environment variables:
 #   S3_BUCKET   - Bucket name (default: vllm-wheels)
-#   VARIANT     - ROCm variant (default: rocm721)
+#   ROCM_BASE_DOCKERFILE - default ROCm stack whose variant the root index serves
+#                          (default: docker/Dockerfile.rocm_base)
+#   VARIANT     - override the ROCm variant derived from ROCM_BASE_DOCKERFILE
 #   DRY_RUN     - Set to 1 for preview mode (same as --dry-run)
 
 set -euo pipefail
 
 # ======== Configuration ========
 BUCKET="${S3_BUCKET:-vllm-wheels}"
-VARIANT="${VARIANT:-rocm721}"
+if [[ -z "${VARIANT:-}" ]]; then
+    # shellcheck source=.buildkite/scripts/rocm/stack.sh
+    source .buildkite/scripts/rocm/stack.sh "${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
+    VARIANT="$ROCM_STACK_VARIANT"
+fi
 DRY_RUN="${DRY_RUN:-0}"
 FORCE_VERSION=""
 

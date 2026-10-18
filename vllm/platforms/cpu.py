@@ -216,9 +216,6 @@ class CpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
 
-        if model_config is not None:
-            model_config.disable_cascade_attn = True
-
         # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
         # which is still being resolved while this platform class is loading.
         from vllm.triton_utils import HAS_TRITON
@@ -292,10 +289,9 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 256
-        elif not cache_config.user_specified_block_size:
-            cache_config.block_size = 128
-
-        if not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
+        elif (
+            cache_config.user_specified_block_size and cache_config.block_size % 32 != 0
+        ):
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -323,7 +319,7 @@ class CpuPlatform(Platform):
                     mamba_backend,
                 )
 
-        # Lagecy setting
+        # Legacy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
             kv_cache_space = int(os.environ[env_key])
@@ -535,15 +531,24 @@ class CpuPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         model_config = vllm_config.model_config
-        if model_config is None or not model_config.is_hybrid:
+        if model_config is None:
             return
-
-        # reconcile attention and mamba page sizes
         backend_classes = cls._find_non_ssm_backends(vllm_config)
         if not backend_classes:
             return
 
-        pre_block_size = vllm_config.cache_config.block_size
+        # Not in check_and_update_config(), which reruns with every
+        # VllmConfig.__post_init__ and would undo the hybrid alignment below.
+        cache_config = vllm_config.cache_config
+        if not cache_config.user_specified_block_size:
+            cache_config.block_size = cls._preferred_block_size_for_backends(
+                backend_classes, 128, vllm_config
+            )
+        if not model_config.is_hybrid:
+            return
+
+        # reconcile attention and mamba page sizes
+        pre_block_size = cache_config.block_size
         cls._align_hybrid_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 

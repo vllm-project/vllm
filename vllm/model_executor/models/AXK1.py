@@ -29,6 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import AXK1Config
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -78,7 +79,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -116,7 +116,6 @@ class AXK1MoE(nn.Module):
         self.ep_size = self.ep_group.size()
         assert config.n_routed_experts is not None
         assert config.num_experts_per_tok is not None
-        assert config.scoring_func is not None
         assert config.hidden_act is not None
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int | None = config.n_shared_experts
@@ -134,7 +133,7 @@ class AXK1MoE(nn.Module):
             config.n_routed_experts,
             prefix=f"{prefix}.gate",
         )
-        if config.topk_method == "noaux_tc":
+        if getattr(config, "topk_method", "noaux_tc") == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
@@ -186,7 +185,7 @@ class AXK1MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
+            scoring_func=getattr(config, "scoring_func", "sigmoid"),
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
@@ -645,11 +644,10 @@ class AXK1DecoderLayer(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
     def _is_layer_sparse(self) -> bool:
-        assert self.config.moe_layer_freq is not None
         return (
             self.config.n_routed_experts is not None
             and self.layer_idx >= self.config.first_k_dense_replace
-            and self.layer_idx % self.config.moe_layer_freq == 0
+            and self.layer_idx % getattr(self.config, "moe_layer_freq", 1) == 0
         )
 
     def forward(

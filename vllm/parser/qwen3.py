@@ -25,6 +25,7 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -84,6 +85,64 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
                 params[name] = _trim_wrapping_newlines(value)
 
     return json.dumps(params, ensure_ascii=False)
+
+
+# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=")
+
+
+def _param_value_end_window(text: str) -> str:
+    """Return the suffix of *text* that may still grow into a value end."""
+    start = text.rfind("<")
+    if start == -1:
+        return ""
+    tail = text[start:]
+    return tail if _PARAM_VALUE_END_RE.fullmatch(tail, partial=True) else ""
+
+
+def _param_value_extender(
+    raw_args: str, trim_newlines: bool
+) -> ArgValueExtender | None:
+    """Extend the open trailing ``<parameter=...>`` value of *raw_args*.
+
+    The extender streams exactly what the converter would for the same text.
+    With *trim_newlines* it follows ``_trim_wrapping_newlines``: it drops a
+    leading newline of the value and holds back a trailing one.
+    """
+    match = _PARTIAL_PARAM_RE.search(_PARAM_RE.sub("", raw_args))
+    if match is None:
+        return None
+    name, value = match.group(1), match.group(2)
+    # A repeated key keeps its first position, so its value is not last.
+    if any(m.group(1) == name for m in _PARAM_RE.finditer(raw_args)):
+        return None
+
+    window = _param_value_end_window(value)
+    started = bool(value)
+    held = "\n" if trim_newlines and value.endswith("\n") and value != "\n" else ""
+
+    def extend(delta: str) -> str | None:
+        nonlocal window, started, held
+        text = window + delta
+        if _PARAM_VALUE_END_RE.search(text):
+            return None
+        window = _param_value_end_window(text)
+        if trim_newlines:
+            text = held + delta
+            if not started and text:
+                started = True
+                text = text.removeprefix("\n")
+            held = "\n" if text.endswith("\n") else ""
+            text = text[: len(text) - len(held)]
+        else:
+            text = delta
+        return json.dumps(text, ensure_ascii=False)[1:-1]
+
+    return extend
+
+
+def _qwen3_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    return _param_value_extender(raw_args, trim_newlines=True)
 
 
 @functools.cache
@@ -169,9 +228,36 @@ def qwen3_config(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
+            # regression issue 58227
+            # <function=...</tool_call>
+            # function name is not closed, go to content
+            (ParserState.TOOL_NAME, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+            # regression issue 58227
+            # <function=...<tool_call>
+            # unclosed tool call followed by another tool call
+            (ParserState.TOOL_NAME, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
+            # regression issue 58227
+            # <function=...<function=
+            # unclosed function name followed by another function name
+            (ParserState.TOOL_NAME, "FUNC_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+            ),
+            # regression issue 58227
+            # <function=abc>...<function=
+            (ParserState.TOOL_ARGS, "FUNC_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
             ),
             (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
                 ParserState.TOOL_ARGS,
@@ -196,6 +282,7 @@ def qwen3_config(
             ),
         },
         arg_converter=_qwen3_arg_converter,
+        arg_value_extender=_qwen3_arg_value_extender,
         stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
