@@ -699,6 +699,12 @@ class Worker(WorkerBase):
         torch.accelerator.empty_cache()
         reserved_before = torch.accelerator.memory_reserved(self.device)
         allocated_before = torch.accelerator.memory_allocated(self.device)
+        # The reset below also clears the peak ``memory_profiling`` reads on
+        # exit, and profile_run's own peak (encoder cache, sampler) can sit
+        # above the ladder's. Keep it so the pinned check takes the larger one.
+        self._pinned_profile_run_peak_bytes = torch.accelerator.max_memory_allocated(
+            self.device
+        )
         torch.accelerator.reset_peak_memory_stats(self.device)
         try:
             for num_tokens in widths:
@@ -733,11 +739,18 @@ class Worker(WorkerBase):
     ) -> int:
         """Check a pinned KV size against the profile and report it."""
         allocator_overhead = getattr(self, "_pinned_allocator_overhead_bytes", 0)
+        # The attention ladder reset the peak counter, so add back whatever of
+        # profile_run's peak the final measurement no longer reflects.
+        non_kv_cache_memory = profile_result.non_kv_cache_memory + max(
+            0,
+            getattr(self, "_pinned_profile_run_peak_bytes", 0)
+            - profile_result.after_profile.torch_peak,
+        )
         # Manual control deliberately ignores gpu_memory_utilization, so the
         # budget is the whole free device, not the utilization slice.
         fits_kv_cache_memory_bytes = (
             self.init_snapshot.free_memory
-            - profile_result.non_kv_cache_memory
+            - non_kv_cache_memory
             - cudagraph_memory_estimate_applied
             - allocator_overhead
         )
@@ -753,7 +766,7 @@ class Worker(WorkerBase):
                 f"({format_gib(kv_cache_memory_bytes)} GiB) does not fit on "
                 f"this rank. Of {format_gib(self.init_snapshot.free_memory)} "
                 f"GiB free at startup the model needs "
-                f"{format_gib(profile_result.non_kv_cache_memory)} GiB for "
+                f"{format_gib(non_kv_cache_memory)} GiB for "
                 f"weights, workspaces and its activation peak"
                 + (
                     f", {format_gib(cudagraph_memory_estimate_applied)} GiB for "
@@ -784,7 +797,7 @@ class Worker(WorkerBase):
             "gpu_memory_utilization config.",
             format_gib(self.init_snapshot.free_memory),
             format_gib(kv_cache_memory_bytes),
-            format_gib(profile_result.non_kv_cache_memory),
+            format_gib(non_kv_cache_memory),
             format_gib(fits_kv_cache_memory_bytes - kv_cache_memory_bytes),
         )
         return reserve_mm_ipc_gpu_memory(
@@ -807,7 +820,40 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
 
         """
+        pinned_kv_cache_memory_bytes = self.cache_config.kv_cache_memory_bytes
         maybe_apply_startup_plan(self)
+
+        # A startup plan restores the size a fully profiled earlier boot of this
+        # exact configuration measured, so it keeps the fast path the plan
+        # exists for. Only a size the operator pinned is measured below.
+        if pinned_kv_cache_memory_bytes is None and (
+            kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes
+        ):
+            # still need a profile run which compiles the model for
+            # max_num_batched_tokens
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
+
+            msg = (
+                f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
+                f"GiB, reserved {format_gib(kv_cache_memory_bytes)} GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory_bytes is suggested and update it "
+                "correspondingly."
+            )
+            logger.info(msg)
+            return reserve_mm_ipc_gpu_memory(
+                kv_cache_memory_bytes,
+                self.model_config.multimodal_config,
+                getattr(self.parallel_config, "_api_process_count", 1),
+            )
 
         # Pinning the KV size decides how much memory the cache takes, not how
         # much the rest of the model needs: weights, workspaces and the
