@@ -8,6 +8,12 @@ This config reuses :func:`qwen3_config` with a distinct name.
 
 When ``enable_thinking=False`` or ``force_nonempty_content=True`` and
 content is empty, reasoning and content are swapped.
+
+The stock chat template frames each parameter value as ``\\n{value}\\n``,
+so one leading and one trailing newline are trimmed as markup. That makes a
+value's own edge newline unrecoverable. :class:`NemotronV3CompactParser` is
+for a compact template that renders ``<parameter=NAME>{value}</parameter>``
+and keeps values verbatim.
 """
 
 from __future__ import annotations
@@ -16,7 +22,13 @@ import dataclasses
 import functools
 from typing import TYPE_CHECKING
 
-from vllm.parser.qwen3 import CHATML_TURN_BOUNDARIES, Qwen3Parser, qwen3_config
+from vllm.parser.mimo import _mimo_arg_converter
+from vllm.parser.qwen3 import (
+    CHATML_TURN_BOUNDARIES,
+    Qwen3Parser,
+    _param_value_extender,
+    qwen3_config,
+)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -39,6 +51,18 @@ def nemotron_v3_config(thinking: bool = True) -> ParserEngineConfig:
     )
 
 
+@functools.cache
+def nemotron_v3_compact_config(thinking: bool = True) -> ParserEngineConfig:
+    return dataclasses.replace(
+        nemotron_v3_config(thinking=thinking),
+        name="nemotron_v3_compact",
+        arg_converter=_mimo_arg_converter,
+        arg_value_extender=functools.partial(
+            _param_value_extender, trim_newlines=False
+        ),
+    )
+
+
 class NemotronV3Parser(Qwen3Parser):
     """Nemotron V3 parser: same format as Qwen3, with Nemotron-specific
     behavior: when ``enable_thinking=False`` or
@@ -57,10 +81,14 @@ class NemotronV3Parser(Qwen3Parser):
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=nemotron_v3_config(thinking=thinking),
+            parser_engine_config=self._engine_config(thinking),
             **kwargs,
         )
         self._streamed_reasoning: list[str] = []
+
+    @staticmethod
+    def _engine_config(thinking: bool) -> ParserEngineConfig:
+        return nemotron_v3_config(thinking=thinking)
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
@@ -111,3 +139,13 @@ class NemotronV3Parser(Qwen3Parser):
             reasoning, content = content, reasoning
 
         return reasoning, content
+
+
+class NemotronV3CompactParser(NemotronV3Parser):
+    """Nemotron V3 parser for the compact template, where parameter values
+    are rendered verbatim and edge newlines are part of the value.
+    """
+
+    @staticmethod
+    def _engine_config(thinking: bool) -> ParserEngineConfig:
+        return nemotron_v3_compact_config(thinking=thinking)

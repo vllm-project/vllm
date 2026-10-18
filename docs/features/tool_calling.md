@@ -532,6 +532,14 @@ Flags: `--tool-call-parser step3p5 --reasoning-parser step3p5 --enable-auto-tool
 
 The parser supports `auto`, `required`, and named tools.
 
+### NVIDIA Nemotron 3 / 3.5 Models (`qwen3_coder`, `nemotron_v3_compact`)
+
+Nemotron 3 and 3.5 models use the Qwen3-Coder tool call format. With the checkpoint's chat template, use `--tool-call-parser qwen3_coder --reasoning-parser nemotron_v3 --enable-auto-tool-choice`.
+
+The stock template frames every parameter value in a leading and trailing newline (`<parameter=NAME>\n{value}\n</parameter>`), so the parser strips one of each as template markup. A string argument that should itself start or end with a newline loses it, for example a file written by a coding tool loses its final newline.
+
+To keep string arguments verbatim, serve the model with a chat template that renders values without the wrapper newlines (`<parameter=NAME>{value}</parameter>`), both in the tool-call instructions and when rendering past tool calls, and use `--tool-call-parser nemotron_v3_compact`. Do not use `nemotron_v3_compact` with the stock template: values that do not end in a newline would keep the template's wrapper newlines.
+
 ### Olmo 3 Models (`olmo3`)
 
 Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).

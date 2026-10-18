@@ -43,6 +43,7 @@ from vllm.parser.engine.registered_adapters import (
     MiMoParser,
     MinimaxM2Parser,
     MinimaxM3Parser,
+    NemotronV3CompactParser,
     NemotronV3Parser,
     Plamo3Parser,
     Qwen3Parser,
@@ -707,6 +708,16 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+def _build_nemotron_v3_compact(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="nemotron_v3_compact",
+        parser_cls=NemotronV3CompactParser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
+
+
 def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
     """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
     content after ``</think>``."""
@@ -1338,6 +1349,7 @@ _BUILDERS: dict[str, Any] = {
     "minimax_m2": _build_minimax_m2,
     "minimax_m3": _build_minimax_m3,
     "nemotron_v3": _build_nemotron_v3,
+    "nemotron_v3_compact": _build_nemotron_v3_compact,
     "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,

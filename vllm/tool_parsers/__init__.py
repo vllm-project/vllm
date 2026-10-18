@@ -170,6 +170,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "mistral_tool_parser",
         "MistralToolParser",
     ),
+    "nemotron_v3_compact": (
+        "nemotron_v3_compact_tool_parser",
+        "NemotronV3CompactToolParser",
+    ),
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",

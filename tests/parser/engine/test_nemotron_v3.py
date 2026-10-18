@@ -23,7 +23,7 @@ from tests.parser.engine.streaming_helpers import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.parser.nemotron_v3 import NemotronV3Parser
+from vllm.parser.nemotron_v3 import NemotronV3CompactParser, NemotronV3Parser
 
 _THINK_START_ID = 50
 _THINK_END_ID = 51
@@ -176,6 +176,81 @@ class TestStreaming:
         assert args_text
         parsed = json.loads(args_text)
         assert parsed == {"city": "Tokyo"}
+
+
+def _tool_call(value: str) -> str:
+    return (
+        "<tool_call>\n"
+        "<function=write_file>\n"
+        f"<parameter=content>{value}</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+
+class TestWrappedValueNewlines:
+    """The stock template frames values as ``\\n{value}\\n``; one leading and
+    one trailing newline are template markup and must be trimmed."""
+
+    def test_wrapper_newlines_are_trimmed(self, parser):
+        result = parser.extract_tool_calls(
+            _tool_call("\nalpha\n\nomega\n"), _make_request()
+        )
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"content": "alpha\n\nomega"}
+
+
+@pytest.fixture
+def compact_parser():
+    return NemotronV3CompactParser(make_mock_tokenizer(_VOCAB))
+
+
+class TestCompactValues:
+    """With the compact template (``<parameter=NAME>{value}</parameter>``)
+    values are verbatim, so edge newlines are data and must survive."""
+
+    @pytest.mark.parametrize(
+        "value",
+        ["alpha\n\nomega\n", "\nalpha", "\n", "\n\n", "", "plain", "a\nb"],
+    )
+    def test_non_streaming_preserves_value(self, compact_parser, value):
+        result = compact_parser.extract_tool_calls(_tool_call(value), _make_request())
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "write_file"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"content": value}
+
+    @pytest.mark.parametrize(
+        "value", ["alpha\n\nomega\n", "\nalpha", "\n", "", "plain"]
+    )
+    @pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+    def test_streaming_preserves_value(self, value, chunk_size):
+        parser = NemotronV3CompactParser(make_mock_tokenizer(_VOCAB))
+        text = _tool_call(value)
+        chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+        results = simulate_tool_streaming(parser, _make_request(), chunks)
+        assert collect_function_name(results) == "write_file"
+        assert json.loads(collect_tool_arguments(results)) == {"content": value}
+
+    def test_keeps_nemotron_content_swap(self, compact_parser):
+        request = _make_request(enable_thinking=False)
+        reasoning, content = compact_parser.extract_reasoning(
+            "The answer is 42.", request
+        )
+        assert content == "The answer is 42."
+        assert reasoning is None
+
+
+def test_compact_tool_parser_is_registered():
+    from vllm.tool_parsers import ToolParserManager
+    from vllm.tool_parsers.nemotron_v3_compact_tool_parser import (
+        NemotronV3CompactToolParser,
+    )
+
+    assert (
+        ToolParserManager.get_tool_parser("nemotron_v3_compact")
+        is NemotronV3CompactToolParser
+    )
 
 
 class TestParseDeltaTokenIdFiltering:
