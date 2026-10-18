@@ -60,6 +60,22 @@ def _compile_tensor_core_configs(
         deep_gemm.bf16_gemm_nt(a[:m], weight, out[:m])
 
 
+def compile_tensor_core_rows(weight: torch.Tensor, rows: int) -> None:
+    """Compile ``weight``'s DeepGEMM configs for up to ``rows`` rows now, for a
+    weight whose largest batches (such as speculative verification at the
+    lm_head) arrive only while serving."""
+    if (
+        not _uses_tensor_core(weight)
+        or rows <= _WARMED_M.get(weight.shape, 0)
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return
+    a = weight.new_zeros((rows, weight.shape[1]))
+    out = torch.empty((rows, weight.shape[0]), device=a.device, dtype=torch.float32)
+    _compile_tensor_core_configs(a, weight, out)
+    _deterministic_deep_gemm().bf16_gemm_nt(a, weight, out)
+
+
 def _bf16_fixed_mm(a: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     a, weight = a.contiguous(), weight.contiguous()
     _KERNEL._validate_inputs(a, weight, torch.float32)

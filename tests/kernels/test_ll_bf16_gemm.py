@@ -113,6 +113,27 @@ def test_tensor_core_bf16_projection_rows_ignore_batch(monkeypatch, n, k):
     assert torch.equal(replayed, reference[100:196])
 
 
+def test_tensor_core_rows_compile_before_serving(monkeypatch):
+    """The lm_head runs every row count up to its largest step up front, so a
+    later verification batch finds its DeepGEMM config already compiled."""
+    from types import SimpleNamespace
+
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant as bi
+
+    monkeypatch.setattr(envs, "VLLM_BI_BF16_GEMM", "tensor_core")
+    monkeypatch.setattr(bi, "_WARMED_M", {})
+    rows: list[int] = []
+    deep_gemm = SimpleNamespace(bf16_gemm_nt=lambda a, w, out: rows.append(len(a)))
+    monkeypatch.setattr(bi, "_deterministic_deep_gemm", lambda: deep_gemm)
+    weight = torch.zeros(128, 256, dtype=torch.bfloat16, device="cuda")
+    bi.compile_tensor_core_rows(weight, 5)
+    assert rows == [1, 2, 3, 4, 5]
+    bi.compile_tensor_core_rows(weight, 3)
+    bi._compile_tensor_core_configs(weight[:4], weight, torch.empty(4, 128))
+    assert rows == [1, 2, 3, 4, 5]
+
+
 def _ref(a, b):
     return torch.mm(a.float(), b.float().T)
 
