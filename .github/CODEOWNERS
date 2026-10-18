@@ -165,6 +165,9 @@
 .readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
 
+# Model recipes
+/recipes @esmeetu
+
 # Linting
 /tools/pre_commit/.markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
