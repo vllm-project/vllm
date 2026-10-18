@@ -84,7 +84,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class _FinishedInFlightKV:
-    """Block ids of a finished request, kept until its in-flight outputs arrive."""
+    """Released block IDs, kept until finished/preempted work returns."""
 
     block_ids: tuple[int, ...]
     num_in_flight_tokens: int
@@ -997,6 +997,12 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
+                if request_id in self._finished_inflight_kv:
+                    # A preempted load may still fail, even in drop-output mode.
+                    # Drain it before allocating a new generation of blocks.
+                    skip_request(request_queue)
+                    continue
+
                 if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
@@ -1682,6 +1688,7 @@ class Scheduler(SchedulerInterface):
         )
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        self._track_inflight_kv(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -2849,25 +2856,27 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
-        # Keep ordered block IDs while outputs are in flight; a load failure may
-        # be reported after this request is gone.
-        if (
-            self.connector is not None
-            and request.num_in_flight_tokens > 0
-            and len(self.kv_cache_config.kv_cache_groups) == 1
-        ):
-            (block_ids,) = self.kv_cache_manager.get_block_ids(request_id)
-            if block_ids:
-                self._finished_inflight_kv[request_id] = _FinishedInFlightKV(
-                    block_ids=tuple(block_ids),
-                    num_in_flight_tokens=request.num_in_flight_tokens,
-                )
+        self._track_inflight_kv(request)
 
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
 
         return kv_xfer_params, ec_xfer_params
+
+    def _track_inflight_kv(self, request: Request) -> None:
+        # A load failure can arrive after finishing or preempting its request.
+        if (
+            self.connector is not None
+            and request.num_in_flight_tokens > 0
+            and len(self.kv_cache_config.kv_cache_groups) == 1
+        ):
+            (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+            if block_ids:
+                self._finished_inflight_kv[request.request_id] = _FinishedInFlightKV(
+                    block_ids=tuple(block_ids),
+                    num_in_flight_tokens=request.num_in_flight_tokens,
+                )
 
     def _retire_finished_inflight_kv(
         self, num_scheduled_tokens: dict[str, int]
@@ -3544,14 +3553,21 @@ class Scheduler(SchedulerInterface):
         total_failed_requests += len(sync_failed_req_ids)
         total_failed_tokens += num_failed_tokens
 
-        # Finished requests cannot repair their cached KV under either policy.
-        # Scan every record. A finished request absent from this batch may have
+        # Released blocks cannot be repaired in place under either policy.
+        # Scan every record. A request absent from this batch may have
         # computed its suffix in a later batch using a block that failed here.
         finished_blocks_to_evict: set[int] = set()
-        for record in self._finished_inflight_kv.values():
+        for req_id, record in self._finished_inflight_kv.items():
             for idx, block_id in enumerate(record.block_ids):
                 if block_id in invalid_block_ids:
                     finished_blocks_to_evict.update(record.block_ids[idx:])
+                    request = self.requests.get(req_id)
+                    if request is not None and not request.is_finished():
+                        # Preemption already reset its counters. Discard all
+                        # outstanding output computed from the rejected KV.
+                        request.drop_stale_output = True
+                        sync_failed_req_ids.add(req_id)
+                        total_failed_requests += 1
                     break
         if finished_blocks_to_evict:
             self.kv_cache_manager.evict_blocks(finished_blocks_to_evict)
