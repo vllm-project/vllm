@@ -240,7 +240,8 @@ class EngineClient(ABC):
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
-                after draining.
+                after pausing. With ``mode="keep"``, in-flight requests are
+                preempted and rescheduled on resume.
 
         """
         ...

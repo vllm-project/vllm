@@ -1002,7 +1002,9 @@ class AsyncLLM(EngineClient):
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
-                draining. Set to ``False`` to preserve cache for faster resume.
+                pausing. With ``mode="keep"``, in-flight requests are
+                preempted and rescheduled on resume. Set to ``False`` to
+                preserve cache for faster resume.
 
         """
         if clear_cache:
