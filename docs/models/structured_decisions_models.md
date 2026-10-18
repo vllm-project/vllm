@@ -304,12 +304,16 @@ vllm serve Cloudflare/clef-omni
 
 ### Decision 3.0
 
-The Decision 3.0 models ([`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) and
-its smaller variants such as `vllm-sr/d3-mini` and `vllm-sr/d3-edge`) are a
-Qwen3.5 backbone with an answer-code readout: one forward pass per question,
-and the readout scores the question's options at the last token. vLLM detects
-the checkpoint's `decision_config.json` and serves it as a classification
-model.
+The Decision 3.0 models are a Qwen3.5 backbone with an answer-code readout:
+one forward pass per question, and the readout scores the question's options
+at the last token. vLLM detects the checkpoint's `decision_config.json` and
+serves it as a classification model. All six sizes take the same command:
+[`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) (27B),
+[`vllm-sr/d3-flash`](https://huggingface.co/vllm-sr/d3-flash) (9B),
+[`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini) (4B),
+[`vllm-sr/d3-nano`](https://huggingface.co/vllm-sr/d3-nano) (2B),
+[`vllm-sr/d3-lite`](https://huggingface.co/vllm-sr/d3-lite) (0.8B) and
+[`vllm-sr/d3-edge`](https://huggingface.co/vllm-sr/d3-edge) (0.6B).
 
 ```bash
 vllm serve vllm-sr/d3
@@ -355,4 +359,4 @@ vllm serve LiquidAI/d1-3B
 - A `choice` whose option names are all single letters is labeled with those
   letters.
 - When each request carries one question over a state that changes from
-  request to request, `--no-enable-prefix-caching` lowers latency.
+  request to request, `--disable-prefix-caching` lowers latency.

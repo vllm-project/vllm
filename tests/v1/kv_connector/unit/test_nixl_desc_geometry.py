@@ -25,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
@@ -127,6 +130,7 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
+    worker_cls=NixlPushConnectorWorker,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
@@ -170,7 +174,7 @@ def _make_packed_mla_view_worker(
         patch.object(bw, "get_current_attn_backends", return_value=backends),
         patch("threading.Thread"),
     ):
-        worker = NixlPushConnectorWorker(
+        worker = worker_cls(
             config,
             "producer" if pp_size > 1 else "consumer",
             KVCacheConfig(num_blocks, tensors, groups),
@@ -181,11 +185,18 @@ def _make_packed_mla_view_worker(
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls", [NixlPullConnectorWorker, NixlPushConnectorWorker]
+)
 @pytest.mark.parametrize("num_layers", [1, 2])
-def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
+def test_packed_mla_pp1_transfers_whole_rows(num_layers, worker_cls):
+    # BLHNC packs every layer's page of a block in one row: register the row
+    # once so a block is one descriptor, not one per layer.
     layouts = {f"L{i}": (i * 128, 128) for i in range(num_layers)}
     stride = num_layers * 128
-    worker, raw = _make_packed_mla_view_worker(layouts, stride)
+    worker, raw = _make_packed_mla_view_worker(layouts, stride, worker_cls=worker_cls)
+    assert worker.num_regions == 1
+    assert worker.num_descs == 4
     assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
     # One packed region -> one run of 4 whole rows.
     assert worker.src_blocks_data.tolist() == [[raw.data_ptr(), stride, 0, stride, 4]]
@@ -194,6 +205,35 @@ def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     assert metadata.packed_member_layouts == layouts
+
+
+@pytest.mark.cpu_test
+def test_per_layer_peer_addresses_pages_inside_packed_rows():
+    # E.g. a HiSparse decoder reading a BLHNC prefiller's whole-row region.
+    remote, raw = _make_packed_mla_view_worker({"L0": (64, 128)}, 192)
+    metadata = msgspec.msgpack.decode(
+        remote.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    assert metadata.block_lens == [192]
+    local = SimpleNamespace(region_names=["L0"])
+    bw.NixlBaseConnectorWorker._split_remote_packed_rows(local, metadata)
+    assert metadata.kv_caches_base_addr == [raw.data_ptr() + 64]
+    assert metadata.block_lens == [128]
+    assert metadata.block_strides == [192]
+    assert metadata.region_names == ["L0"]
+    assert metadata.packed_member_layouts == {}
+
+
+@pytest.mark.cpu_test
+def test_packed_rows_reject_a_peer_packing_rows_differently():
+    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128), "L1": (128, 64)}, 192)
+    consumer, _ = _make_packed_mla_view_worker({"L0": (64, 128), "L1": (0, 64)}, 192)
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    metadata.engine_id = "remote"
+    with pytest.raises(RuntimeError, match="Packed KV block rows differ"):
+        consumer.add_remote_agent(metadata)
 
 
 @pytest.mark.cpu_test

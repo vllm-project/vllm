@@ -55,6 +55,8 @@ class ForwardBench:
         iters: int,
         samples: int,
         state_views: list[torch.Tensor],
+        name: str,
+        profile_prefix: str | None = None,
     ):
         self.runner = runner
         self.batch = batch
@@ -62,6 +64,8 @@ class ForwardBench:
         self.iters = iters
         self.samples = samples
         self.state_views = state_views
+        self.name = name
+        self.profile_prefix = profile_prefix
         self.phase = "warmup"
         self.result: dict[str, Any] = {}
 
@@ -193,6 +197,20 @@ class ForwardBench:
             ),
         )
         self.result["latency_us"] = self._time(graph)
+        from vllm.benchmarks.forward.profile import profile_graph
+
+        # Each replay restores the state views, then (multi-rank) rendezvouses,
+        # before the timed forward.
+        skip = len(self.state_views) + (world.world_size > 1)
+        summary = profile_graph(graph, self.name, self.profile_prefix, skip)
+        if summary is not None:
+            self.result["profile"] = {
+                "summary": f"{self.profile_prefix}.kernels.json",
+                "span_us": summary["span_us"],
+                "busy_us": summary["busy_us"],
+                "activities": summary["activities"],
+                "top_kernels": summary["kernels"][:10],
+            }
         del graph
         return output
 
