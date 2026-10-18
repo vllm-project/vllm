@@ -56,7 +56,6 @@ class BeamAttention(nn.Module):
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
-        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.layer_id = extract_layer_index(prefix)
@@ -106,7 +105,6 @@ class BeamAttention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
-            reduce_results=reduce_results,
         )
 
         # Affine and parameter-free per-head Q/K norms share `rms_norm_eps`.

@@ -6,7 +6,6 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -27,7 +26,6 @@ class BeamMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -43,7 +41,6 @@ class BeamMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
-            reduce_results=reduce_results,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -61,9 +58,7 @@ class BeamMLP(nn.Module):
 class BeamSparseMoeBlock(nn.Module):
     """Grouped sigmoid ``noaux_tc`` MoE block."""
 
-    def __init__(
-        self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
@@ -86,7 +81,6 @@ class BeamSparseMoeBlock(nn.Module):
         self.gate.register_parameter("e_score_correction_bias", e_score_correction_bias)
 
         self.experts = FusedMoEFactory(
-            reduce_results=reduce_results,
             gate=self.gate,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -113,24 +107,5 @@ class BeamSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-    def defer_finalize(self, max_tokens: int, *, allow_ep: bool = False) -> None:
-        from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
-            TrtLlmNvFp4ExpertsModular,
-            TrtLlmNvFp4ExpertsMonolithic,
-        )
-
-        experts_cls = getattr(
-            self.experts.routed_experts.quant_method, "experts_cls", None
-        )
-        if experts_cls in (TrtLlmNvFp4ExpertsModular, TrtLlmNvFp4ExpertsMonolithic):
-            self.experts.moe_config.defer_moe_finalize(max_tokens, allow_ep=allow_ep)
-
-    def forward(
-        self, hidden_states: torch.Tensor
-    ) -> torch.Tensor | UnfinalizedMoEOutput:
-        if self.experts.moe_config.should_defer_moe_finalize(hidden_states.shape[0]):
-            output = self.experts._forward_impl(hidden_states, hidden_states, None)
-            assert isinstance(output, UnfinalizedMoEOutput)
-            return output
-
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.experts(hidden_states=hidden_states, router_logits=hidden_states)
