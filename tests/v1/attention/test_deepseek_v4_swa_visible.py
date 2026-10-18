@@ -1562,9 +1562,107 @@ def _assert_ds41_flashmla_bi_schedule(monkeypatch, length, compress_ratio):
             _assert_ds41_bi_decode_graph(
                 locals(), [length, *lengths[1:]], compress_ratio, expected, query_len
             )
+        if not compress_ratio:
+            _assert_ds41_dspark_draft_rows(locals(), [length, *lengths[1:]])
     finally:
         torch.accelerator.synchronize()
         reset_workspace_manager()
+
+
+def _assert_ds41_dspark_draft_rows(fixture, lengths, num_spec=5):
+    """DSpark draft rows (non-causal SWA, regular decode kernel) are batch
+    invariant: each request's rows match its solo run in any batch, order or
+    padded graph replay, so seeded probabilistic drafting cannot see the
+    batch. Draft layers are SWA-only."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
+    attention, builder, swa = fixture["attention"], fixture["builder"], fixture["swa"]
+    queries, tables, device = fixture["queries"], fixture["tables"], fixture["device"]
+    heads, dim = fixture["heads"], fixture["dim"]
+    width = get_dspark_swa_index_width(builder.window_size, num_spec)
+    capture_reqs = 4
+    capture_tokens = capture_reqs * num_spec
+    q = torch.zeros(capture_tokens, heads, dim, device=device, dtype=torch.bfloat16)
+    positions = torch.zeros(capture_tokens, dtype=torch.int64, device=device)
+    starts = torch.arange(capture_reqs + 1, dtype=torch.int32, device=device)
+    starts *= num_spec
+    seq_lens = torch.zeros(capture_reqs, dtype=torch.int32, device=device)
+    table = torch.zeros(capture_reqs, tables.shape[1], dtype=torch.int32, device=device)
+    slots = torch.full((capture_tokens,), -1, dtype=torch.int64, device=device)
+    output = torch.empty_like(q)
+
+    def load(reqs):
+        q.zero_()
+        seq_lens.zero_()
+        slots.fill_(-1)
+        for i, (request, last) in enumerate(reqs):
+            seq_lens[i] = last + 1
+            table[i] = tables[request]
+            for j in range(num_spec):
+                t, position = i * num_spec + j, last - num_spec + 1 + j
+                q[t] = queries[request][position]
+                positions[t] = position
+                slots[t] = t
+        common = CommonAttentionMetadata(
+            query_start_loc=starts,
+            query_start_loc_cpu=starts.cpu(),
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens.cpu(),
+            num_reqs=capture_reqs,
+            num_actual_tokens=capture_tokens,
+            max_query_len=num_spec,
+            max_seq_len=max(last + 1 for _, last in reqs),
+            block_table_tensor=table,
+            slot_mapping=slots,
+            causal=False,
+        )
+        metadata = builder.build(0, common)
+        assert metadata.num_decodes == capture_reqs
+        assert metadata.decode_swa_width == width != attention.window_size
+        return ForwardContext({}, {swa.prefix: metadata}, {})
+
+    def forward(context):
+        with override_forward_context(context):
+            attention.forward_mqa(q, q[:, 0], positions, output)
+
+    saved = builder.is_dspark, builder.noncausal_index_width, builder.decode_threshold
+    builder.is_dspark, builder.noncausal_index_width = True, width
+    builder.decode_threshold = num_spec
+    try:
+        cases = [(0, lengths[0] - 1), (1, 64), (2, num_spec - 1), (0, 200)]
+        cases = [(r, min(p, lengths[r] - 1)) for r, p in cases]
+        solo = {}
+        for case in cases:
+            forward(load([case]))
+            solo[case] = output[:num_spec].clone()
+
+        def check(reqs):
+            for i, case in enumerate(reqs):
+                rows = output[i * num_spec : (i + 1) * num_spec]
+                assert torch.equal(rows, solo[case])
+
+        batches = [cases, cases[::-1], cases[1:3], [cases[3], cases[0]]]
+        context = load(batches[0])
+        forward(context)
+        check(batches[0])
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            forward(context)
+        for reqs in batches:
+            context = load(reqs)
+            forward(context)
+            check(reqs)
+            output.fill_(float("nan"))
+            graph.replay()
+            check(reqs)
+    finally:
+        builder.is_dspark, builder.noncausal_index_width, builder.decode_threshold = (
+            saved
+        )
 
 
 def _assert_ds41_bi_decode_graph(fixture, lengths, compress_ratio, expected, query_len):

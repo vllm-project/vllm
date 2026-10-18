@@ -114,6 +114,7 @@ from ..common.engram import (
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .ops.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
+    hc_stream_mean,
     init_mhc_all_reduce,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
@@ -606,7 +607,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 x = tensor_model_parallel_all_reduce(x)
             previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
             if capture_previous_aux:
-                previous_aux = previous_post.mean(dim=1)
+                previous_aux = hc_stream_mean(previous_post)
             residual = self.engram(
                 previous_post,
                 engram_hashes[:, self.engram.layer_hash_index],

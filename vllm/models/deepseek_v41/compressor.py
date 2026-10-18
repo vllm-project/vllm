@@ -230,12 +230,13 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         assert self.dtype == torch.float32
         # Drafts + bonus token + the previous row, as a power of two >= 8.
         rows_per_step = get_current_vllm_config().num_speculative_tokens + 2
-        if envs.VLLM_BATCH_INVARIANT and (rows_per_step != 2 or state_dim != 1024):
-            raise NotImplementedError(
-                "DS41 BI compressor requires no speculative tokens "
-                "and 1024 state columns"
-            )
         self.block_size = max(8, 1 << (rows_per_step - 1).bit_length())
+        # Speculative rows (<= 6 drafts) keep the proven 8-row ring geometry.
+        if envs.VLLM_BATCH_INVARIANT and (self.block_size != 8 or state_dim != 1024):
+            raise NotImplementedError(
+                "DS41 BI compressor requires an 8-row ring (at most 6 "
+                "speculative tokens) and 1024 state columns"
+            )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
