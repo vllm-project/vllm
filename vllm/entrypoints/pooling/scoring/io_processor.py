@@ -21,7 +21,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyPoolingRequest,
     AnyRenderParam,
@@ -37,7 +37,7 @@ from ..typing import (
     ScoringRenderParams,
 )
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
-from .typing import ScoreData, ScoreInput, ScoringData
+from .types import ScoreData, ScoreInput, ScoringData
 from .utils import (
     compress_token_type_ids,
     compute_maxsim_score,

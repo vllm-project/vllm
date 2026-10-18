@@ -18,7 +18,7 @@ from vllm.renderers.chat_utils import (
     parse_chat_message_content_parts,
 )
 
-from .typing import (
+from .types import (
     ScoreContentPartParam,
     ScoreData,
     ScoreInput,

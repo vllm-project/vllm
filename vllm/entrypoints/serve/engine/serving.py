@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.pooling.types import AnyPoolingRequest
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.typing import AnyRequest

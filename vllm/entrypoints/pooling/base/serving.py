@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -26,8 +27,7 @@ from vllm.renderers.base import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
-from ...serve.engine.protocol import ErrorResponse
-from ..typing import AnyPoolingRequest, PoolingServeContext
+from ..types import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 from .observability import TO_S, ObservabilityMixin
 
@@ -80,15 +80,11 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
         ctx.arrival_time_ns = arrival_time_ns
 
         async with self.maybe_tracing(ctx, io_processor, raw_request):
-            await self._preprocessing(io_processor, ctx)
-            await self._engine_call(ctx)
-            return await self._postprocessing_async(io_processor, ctx)
+            await self.preprocessing(io_processor, ctx)
+            await self.engine_call(ctx)
+            return await self.postprocessing(io_processor, ctx)
 
-    @abstractmethod
-    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        raise NotImplementedError
-
-    async def _preprocessing(
+    async def preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
         async with self.maybe_start_span_async(
@@ -96,14 +92,7 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
             self.span_entrypoint_preprocessing,
             context=ctx.request_span_context,
         ):
-            requests = io_processor.get_request_factory_online(ctx)
-
-            if len(requests) == 0:
-                raise ValueError("You must pass at least one prompt")
-
-            ctx.engine_inputs = await asyncio.gather(
-                *[io_processor.render_async(request) for request in requests]
-            )
+            await self._preprocessing_async(io_processor, ctx)
 
         if self.is_tracing_request:
             ctx.preprocessing_finished = time.time_ns()
@@ -114,7 +103,7 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
                     ctx.preprocessing_finished / TO_S
                 )
 
-    async def _engine_call(self, ctx: PoolingServeContext):
+    async def engine_call(self, ctx: PoolingServeContext):
         async with self.maybe_start_span_async(
             ctx.entrypoint_tracer,
             self.span_entrypoint_engine_call,
@@ -129,22 +118,43 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
         if self.is_tracing_request:
             ctx.engine_call_finished = time.time_ns()
 
-    @torch.inference_mode()
-    def _postprocessing(
+    async def postprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        with self.maybe_start_span(
+        async with self.maybe_start_span_async(
             ctx.entrypoint_tracer,
             self.span_entrypoint_postprocessing,
             context=ctx.request_span_context,
         ):
-            io_processor.post_process_online(ctx)
-            response = self._build_response(ctx)
+            response = await self._postprocessing_async(io_processor, ctx)
 
         if self.is_tracing_request:
             ctx.postprocessing_finished = time.time_ns()
 
         return response
+
+    @abstractmethod
+    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
+        raise NotImplementedError
+
+    async def _preprocessing_async(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        requests = io_processor.get_request_factory_online(ctx)
+
+        if len(requests) == 0:
+            raise ValueError("You must pass at least one prompt")
+
+        ctx.engine_inputs = await asyncio.gather(
+            *[io_processor.render_async(request) for request in requests]
+        )
+
+    @torch.inference_mode()
+    def _postprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        io_processor.post_process_online(ctx)
+        return self._build_response(ctx)
 
     async def _init_ctx(
         self,

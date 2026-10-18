@@ -13,8 +13,8 @@ from vllm import PoolingParams
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessor
 from vllm.entrypoints.pooling.scoring.protocol import RerankRequest
-from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
+from vllm.entrypoints.pooling.scoring.types import ScoringData
+from vllm.entrypoints.pooling.types import OfflineScoringInputsContext
 from vllm.renderers import TokenizeParams
 
 pytestmark = pytest.mark.skip_global_cleanup

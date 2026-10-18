@@ -20,7 +20,7 @@ from vllm.tracing import (
 from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Span, Tracer, init_otel_trace_provider
 
 from ..base.io_processor import PoolingIOProcessor
-from ..typing import PoolingServeContext
+from ..types import PoolingServeContext
 
 TO_S = 1000_000_000
 TO_MS = 1000_000
@@ -30,10 +30,10 @@ class _ObservabilityMixin:
     vllm_config: VllmConfig
     renderer: BaseRenderer
 
-    scope_request: str = "request"
-    span_request = "request"
+    scope_request = "request"
+    span_prefill = "prefill"
 
-    scope_entrypoint: str = "entrypoint"
+    scope_entrypoint = "entrypoint"
     span_entrypoint_preprocessing = "preprocessing"
     span_entrypoint_engine_call = "engine_call"
     span_entrypoint_postprocessing = "postprocessing"
@@ -136,7 +136,7 @@ else:
                 raw_trace_headers if raw_trace_headers is not None else {}
             )
             request_span = request_tracer.start_span(
-                self.span_request, context=trace_context, start_time=ctx.arrival_time_ns
+                self.span_prefill, context=trace_context, start_time=ctx.arrival_time_ns
             )
             request_span_context = get_span_context(request_span)
             ctx.request_span_context = request_span_context

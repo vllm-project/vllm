@@ -10,7 +10,7 @@ from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing
-from ..typing import PoolingServeContext
+from ..types import PoolingServeContext
 from ..utils import (
     BytesEncodingFormat,
     JsonEncodingFormat,
@@ -53,7 +53,7 @@ class ServingEmbedding(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
 
-    async def _preprocessing(
+    async def _preprocessing_async(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
         await super()._preprocessing(io_processor, ctx)
