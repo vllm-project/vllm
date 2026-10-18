@@ -57,15 +57,23 @@ def _hold(
 def setup(monkeypatch):
     """Build a one-slot host-staging engine without its worker threads."""
     device = torch.device("cuda", 0)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     monkeypatch.setattr(engine_module, "register_nixl_memory", lambda _tensor: None)
+    monkeypatch.setattr(
+        engine_module, "deregister_nixl_memory", lambda _tensor: None, raising=False
+    )
 
     engine = object.__new__(ShardedRDTWeightTransferEngine)
     engine.device = device
     engine._proc_thread = None
+    engine._quant_thread = None
     engine._slot_read_done = []
     engine._pool_geometry = None
     engine._dest_buffers = [{}]
+    engine._name_to_plan = {}
+    engine._name_meta = {}
+    engine._live_names = set()
+    engine._cached_plan = None
 
     layer = torch.nn.Module()
     layer.weight = torch.nn.Parameter(
@@ -101,6 +109,8 @@ def setup(monkeypatch):
     engine._size_pool(config, plan)
 
     slot = engine._alloc_receive_buffer(SLICE)
+    # The whole storage is page-locked, so the scatter copies at the pinned rate.
+    assert slot.is_pinned()
     engine._dest_buffers[0][torch.uint8] = slot
     engine._router = SimpleNamespace(
         pull=lambda _owner, _keys, _seq: object(),
@@ -123,7 +133,10 @@ def setup(monkeypatch):
     layer.weight.data.zero_()
     state.pattern = (torch.arange(SLICE, dtype=torch.int32) % 251).to(torch.uint8)
     slot.copy_(state.pattern)
-    return state
+    yield state
+    # Shutdown gives the host slot back (NIXL deregistration is stubbed above,
+    # cudaHostUnregister is real) once the scatter out of it has run.
+    engine.shutdown()
 
 
 def _scatter(state, hold=True) -> float:
