@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    rejection_sample,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -306,6 +307,43 @@ def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens, expec
 
 
 ########################### Tests for Random Sampling ###################
+def test_narrow_draft_probs_can_recover_target_only_token():
+    batch_size = 32
+    draft_probs = torch.tensor(
+        [[1.0, 0.0]], dtype=torch.float32, device=DEVICE_TYPE
+    ).repeat(batch_size, 1)
+    target_logits = torch.tensor(
+        [[float("-inf"), float("-inf"), 0.0]], device=DEVICE_TYPE
+    ).expand(batch_size, -1)
+    draft_token_ids = torch.zeros(batch_size, dtype=torch.int32, device=DEVICE_TYPE)
+    cu_num_draft_tokens = torch.arange(
+        1, batch_size + 1, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bonus_token_ids = torch.zeros(
+        (batch_size, 1), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, device=DEVICE_TYPE),
+    )
+
+    output = rejection_sample(
+        draft_token_ids,
+        [1] * batch_size,
+        1,
+        cu_num_draft_tokens,
+        draft_probs,
+        target_logits,
+        bonus_token_ids,
+        sampling_metadata,
+    )
+
+    assert torch.equal(
+        output[:, 0],
+        torch.full((batch_size,), 2, dtype=torch.int32, device=DEVICE_TYPE),
+    )
+
+
 @pytest.mark.parametrize("k", [1, 3, 5])
 @pytest.mark.parametrize("vocab_size", [1000])
 @pytest.mark.parametrize("batch_size", [1, 4, 8])

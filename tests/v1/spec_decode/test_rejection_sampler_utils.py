@@ -379,7 +379,7 @@ def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
         )
 
 
-def test_watermarked_recovery_supports_smaller_draft_vocabulary():
+def test_watermarked_recovery_uses_full_target_vocabulary():
     target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device="cuda")
     draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
     inputs = _build_rejection_sample_inputs(
@@ -401,10 +401,39 @@ def test_watermarked_recovery_supports_smaller_draft_vocabulary():
         watermarking=torch.tensor([True], device="cuda"),
         watermarker=watermarker,
     )
-    expected = watermarker.sample(target_logits[:4].unsqueeze(0), contexts[:1])
+    expected = watermarker.sample(target_logits.unsqueeze(0), contexts[:1])
 
     assert num_sampled.item() == 1
     assert sampled[0, 0] == expected.token_ids[0]
+
+
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_recovery_uses_full_target_vocabulary(use_block_verification: bool):
+    num_trials = 32
+    target_logits = torch.tensor([float("-inf"), float("-inf"), 0.0], device="cuda")
+    draft_logits = torch.tensor([0.0, float("-inf")], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits[:2],
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=num_trials,
+    )
+    inputs["target_logits"] = (
+        target_logits.unsqueeze(0).expand(num_trials * 2, -1).contiguous()
+    )
+
+    sampled, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        use_block_verification=use_block_verification,
+    )
+
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+    assert torch.equal(
+        sampled[:, 0],
+        torch.full((num_trials,), 2, dtype=torch.int64, device="cuda"),
+    )
 
 
 @pytest.mark.parametrize(
