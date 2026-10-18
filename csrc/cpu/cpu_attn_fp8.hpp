@@ -32,7 +32,7 @@ inline uint8_t float_to_fp8_scalar(float v, float inv_scale) noexcept {
   constexpr int bias = mantissa_bits == 3 ? 7 : 15;
   constexpr uint32_t max_bits = mantissa_bits == 3 ? 0x43e00000u : 0x47600000u;
   constexpr uint8_t max_fp8 = mantissa_bits == 3 ? 0x7e : 0x7b;
-  constexpr uint32_t min_subnormal = (128 - bias - mantissa_bits) << 23;
+  constexpr uint32_t half_min_subnormal = (127 - bias - mantissa_bits) << 23;
   constexpr uint32_t min_normal = (128 - bias) << 23;
   v *= inv_scale;
   const uint32_t bits = std::bit_cast<uint32_t>(v);
@@ -42,14 +42,19 @@ inline uint8_t float_to_fp8_scalar(float v, float inv_scale) noexcept {
     // Preserve the existing cache writer's saturation of NaN inputs.
     return magnitude > 0x7f800000u ? max_fp8 : sign | max_fp8;
   }
-  if (magnitude < min_subnormal) return sign;
+  if (magnitude <= half_min_subnormal) return sign;
   if (magnitude < min_normal) {
     const uint32_t significand = (magnitude & 0x7fffffu) | 0x800000u;
     const uint32_t shift = 151 - bias - mantissa_bits - (magnitude >> 23);
-    return sign | static_cast<uint8_t>(significand >> shift);
+    const uint32_t rounded =
+        significand + (1u << (shift - 1)) - 1 + ((significand >> shift) & 1);
+    return sign | static_cast<uint8_t>(rounded >> shift);
   }
-  return sign | static_cast<uint8_t>((magnitude >> (23 - mantissa_bits)) -
-                                     ((127 - bias) << mantissa_bits));
+  constexpr int shift = 23 - mantissa_bits;
+  const uint32_t rounded = magnitude +
+                           ((1u << (shift - 1)) - 1 - ((127 - bias) << 23)) +
+                           ((magnitude >> shift) & 1);
+  return sign | static_cast<uint8_t>(rounded >> shift);
 }
 
 // ---------------------------------------------------------------------------
