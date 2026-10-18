@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
@@ -18,10 +17,14 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+# Split the shared region into this many shm files so workers pre-fault them
+# in parallel (page-cache inserts are serialized per file).
+_REGION_SEGMENTS = 32
 
 
 def _all_workers_barrier() -> None:
@@ -137,6 +140,12 @@ class CPUOffloadingSpec(OffloadingSpec):
             "cache_policy_module_path"
         )
 
+    @classmethod
+    @override
+    def config_info_keys(cls, extra_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the label names CPUOffloadingManager.config_info() fills."""
+        return CPUOffloadingInfo.config_info_keys()
+
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -171,20 +180,22 @@ class CPUOffloadingSpec(OffloadingSpec):
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
+            # Use the logical worker rank for each slot, and distribute the
+            # replicated region's pre-faulting work across the worker group.
+            world_size = self.config.parallel.world_size
+            worker_index = self.config.parallel.rank
+
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
-                rank=rank,
+                rank=0 if self.replicated_layout else worker_index,
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                num_segments=_REGION_SEGMENTS,
+                populate_shard=(
+                    (worker_index, world_size) if self.replicated_layout else None
+                ),
             )
         try:
             return CPUOffloadingWorker(
