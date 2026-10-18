@@ -168,7 +168,7 @@ def mark_sp_region(
                 return linear_forward(x, *args, **kwargs)
             return kernel.apply(x, *args, **kwargs)
 
-        linear.forward = forward
+        linear.forward = forward  # type: ignore[method-assign,assignment]
 
     if exit_before is not None:
         _patch_linear_forward(exit_before)
