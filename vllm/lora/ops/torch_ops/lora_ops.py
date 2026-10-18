@@ -28,11 +28,17 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
+    # A lora index of -1 marks a request without an adapter. Clamp it before
+    # indexing (a negative index silently selects the last stacked slot) and
+    # never add adapter output into those rows, matching the triton kernels.
+    active_rows = (lora_indices_tensor >= 0).unsqueeze(-1)
+    selected_loras = lora_b_weights[lora_indices_tensor.clamp_min(0)].to(
+        dtype=output_tensor.dtype
+    )
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
     inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras) * active_rows
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -44,7 +50,11 @@ def bgmv_expand(
     if add_inputs:
         output_tensor[:, :common_len] += outputs[:limit, :common_len]
     else:
-        output_tensor[:, :common_len] = outputs[:limit, :common_len]
+        output_tensor[:, :common_len] = torch.where(
+            active_rows[:limit],
+            outputs[:limit, :common_len],
+            output_tensor[:, :common_len],
+        )
 
 
 def sgmv_shrink(
@@ -71,11 +81,16 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
+    # Same -1 handling as bgmv_expand: clamp, then zero the inactive rows so
+    # the shrink buffer carries no adapter activations for no-lora requests.
+    active_rows = (lora_indices_tensor >= 0).unsqueeze(-1)
+    selected_loras = lora_b_weights[lora_indices_tensor.clamp_min(0)].to(
+        dtype=output_tensor.dtype
+    )
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
     inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras) * active_rows
 
     output_tensor[:, : outputs.shape[1]] = scaling * outputs[:]
 
@@ -116,13 +131,21 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(dtype=output_tensor.dtype)
+    # Same -1 handling as bgmv_expand.
+    active_rows = (lora_indices_tensor >= 0).unsqueeze(-1)
+    selected_loras = lora_b_weights[lora_indices_tensor.clamp_min(0)].to(
+        dtype=output_tensor.dtype
+    )
     inputs = inputs.to(dtype=output_tensor.dtype)
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras) * active_rows
 
     if add_inputs:
         output_tensor[:, slice_offset : slice_offset + slice_size] += outputs[:]
     else:
-        output_tensor[:, slice_offset : slice_offset + slice_size] = outputs[:]
+        output_tensor[:, slice_offset : slice_offset + slice_size] = torch.where(
+            active_rows,
+            outputs[:],
+            output_tensor[:, slice_offset : slice_offset + slice_size],
+        )
