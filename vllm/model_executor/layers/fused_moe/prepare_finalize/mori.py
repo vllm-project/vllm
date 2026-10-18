@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import mori
 import torch
 
@@ -10,6 +12,36 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# MoRI's intra-node dispatch/combine has a grid-wide barrier: every block
+# waits for the last to arrive, so the launch grid is what sets the dispatch
+# tail. DeepSeek-style speculative decode (num_speculative_tokens + 1 tokens
+# verified per seq) inflates the real decode token count ~7x, so the decode
+# batch here is well out of the single-token regime and wants a *wide* grid,
+# not a narrow one. Tuned on MI355X (DEP8, DSpark K6): a 128-block x 16-warp
+# decode grid is ~4% better TPOT than the handle's 80x16 default, while 192
+# blocks regresses. block_num is capped at the CU count so the barrier stays
+# resident. All grid dims are env-overridable for re-tuning per platform.
+_MORI_WIDE_LAUNCH_MIN_TOKENS = int(os.getenv("VLLM_MORI_WIDE_LAUNCH_MIN_TOKENS", "4096"))
+_MORI_DECODE_BLOCKS = int(os.getenv("VLLM_MORI_DECODE_BLOCKS", "128"))
+_MORI_DECODE_WARPS = int(os.getenv("VLLM_MORI_DECODE_WARPS", "16"))
+_MORI_PREFILL_BLOCKS = int(os.getenv("VLLM_MORI_PREFILL_BLOCKS", "128"))
+_MORI_PREFILL_WARPS = int(os.getenv("VLLM_MORI_PREFILL_WARPS", "16"))
+
+
+def _mori_launch_config(num_tokens: int) -> tuple[int, int]:
+    """Return ``(block_num, warp_per_block)`` for one dispatch or combine.
+
+    A narrow grid at decode width, the wide grid once the batch reaches
+    prefill size. ``block_num`` is capped at the CU count so the grid-wide
+    barrier can be resident. Both grids are overridable via env for tuning.
+    """
+    from vllm.utils.platform_utils import num_compute_units
+
+    compute_units = num_compute_units()
+    if num_tokens >= _MORI_WIDE_LAUNCH_MIN_TOKENS:
+        return min(_MORI_PREFILL_BLOCKS, compute_units), _MORI_PREFILL_WARPS
+    return min(_MORI_DECODE_BLOCKS, compute_units), _MORI_DECODE_WARPS
 
 
 class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -109,6 +141,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # returned below before it calls finalize(), so hold a reference to
         # the pre-dispatch tensor (ROCm/mori#475).
         self._dispatch_topk_ids = topk_ids
+        block_num, warp_per_block = _mori_launch_config(a1.shape[0])
 
         (
             dispatch_a1,
@@ -116,7 +149,14 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_scale,
             dispatch_ids,
             dispatch_recv_token_num,
-        ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+        ) = self.mori_op.dispatch(
+            a1,
+            topk_weights,
+            scale,
+            topk_ids,
+            block_num=block_num,
+            warp_per_block=warp_per_block,
+        )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None
@@ -144,9 +184,12 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "finalize() called before prepare(); mori combine() needs the "
             "routing tensor that dispatch() was given"
         )
+        block_num, warp_per_block = _mori_launch_config(num_token)
         result = self.mori_op.combine(
             fused_expert_output,
             None,
             self._dispatch_topk_ids,
+            block_num=block_num,
+            warp_per_block=warp_per_block,
         )[0]
         output.copy_(result[:num_token])

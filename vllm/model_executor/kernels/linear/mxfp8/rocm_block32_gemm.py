@@ -46,6 +46,7 @@ The packed kernel and the in-launch split-K reduction on one XCD
 adapted from the group32 GEMM in ROCm/aiter#5750.
 """
 
+import os
 from typing import NamedTuple
 
 import torch
@@ -542,25 +543,48 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
 }
 
 
+# Keep the packed kernel through small decode M, where filling the MFMA rows
+# with K panels instead of tokens beats the tiled kernel's partly-empty tiles.
+#
+# The _TUNED table below is already tuned per-shape on MI355X and switches to
+# the tiled kernel above small M; forcing packed too far up (the original 384)
+# fights that tuning and loses, because DSpark speculative decode pushes the
+# real decode M to ~128-256, where the table's tiled choice is faster. Tuned
+# on MI355X (DEP8, DSpark K6): packed wins only through M~=64 (pack32 and
+# pack128+ are no better or worse). Env-overridable; 0 fully trusts the table.
+_PACKED_DECODE_MAX_M = int(os.getenv("VLLM_PACKED_DECODE_MAX_M", "64"))
+
+
 def _default_config(M: int, N: int, K: int) -> _Config:
     """Untuned shapes: the tiers most tuned shapes settle on."""
     if M <= 8:
         return _packed(8, 16, 256, 2, 2, 3, 16, 0)
-    if M <= 32:
+    if M <= _PACKED_DECODE_MAX_M:
         return _packed(32, 32, 256, 1, 2, 3, 16, 0)
     if M <= 256:
         return _tiled(64, 64, 256, 1, True, 4, 2, 16, 0)
     return _tiled(128, 128, 128, 1, True, 4, 2, 16, 0)
 
 
+def _largest_packed(tiers: list[tuple[int, _Config]]) -> _Config | None:
+    packed = [cfg for _, cfg in tiers if cfg.packed]
+    return packed[-1] if packed else None
+
+
 def _config(M: int, N: int, K: int) -> _Config:
     tiers = _TUNED.get((N, K))
     if tiers is None:
         return _default_config(M, N, K)
+    chosen = tiers[-1][1]
     for max_m, cfg in tiers:
         if max_m >= M:
-            return cfg
-    return tiers[-1][1]
+            chosen = cfg
+            break
+    if M <= _PACKED_DECODE_MAX_M and not chosen.packed:
+        packed = _largest_packed(tiers)
+        if packed is not None:
+            return packed
+    return chosen
 
 
 _split_counters_by_stream: dict[tuple[int, int], torch.Tensor] = {}
