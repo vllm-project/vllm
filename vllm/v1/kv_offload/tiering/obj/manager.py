@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager, LookupToken
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -154,6 +154,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._load_job_tokens: dict[JobId, list[LookupToken]] = {}
 
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
@@ -300,6 +301,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+        self._load_job_tokens[job_metadata.job_id] = [
+            self._lookup_manager.lookup_token(key, job_metadata.req_context.req_id)
+            for key in job_metadata.keys
+        ]
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ
@@ -394,10 +399,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             # so today this marks all keys; the subtraction keeps it correct if
             # partial results are ever reported.
             load_keys = self._load_job_keys.pop(result.job_id, None)
+            load_tokens = self._load_job_tokens.pop(result.job_id, [])
             if load_keys is not None and not result.success:
                 successful = set(result.successful_keys or ())
-                failed = [k for k in load_keys if k not in successful]
-                self._lookup_manager.mark_miss(failed)
+                failed_tokens = [
+                    token for token in load_tokens if token.key not in successful
+                ]
+                self._lookup_manager.mark_miss(failed_tokens)
         return results
 
     def take_events(self) -> Iterable[OffloadingEvent]:

@@ -39,7 +39,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager, LookupToken
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -155,6 +155,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._load_job_tokens: dict[JobId, list[LookupToken]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
@@ -242,6 +243,10 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
+        self._load_job_tokens[job_id] = [
+            self._lookup_manager.lookup_token(key, job_metadata.req_context.req_id)
+            for key in keys
+        ]
         self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
@@ -295,6 +300,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
+            load_tokens = self._load_job_tokens.pop(job_id, [])
             num_succeeded = self._load_progress.pop(job_id, 0)
             if load_keys is not None and not success:
                 # A batched load stops at the first bad block and reports how
@@ -302,8 +308,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 # primary tier (reported via successful_keys); only this block
                 # and the ones after it are marked a miss and recomputed.
                 successful = load_keys[:num_succeeded]
-                failed = load_keys[num_succeeded:]
-                self._lookup_manager.mark_miss(failed)
+                self._lookup_manager.mark_miss(load_tokens[num_succeeded:])
                 results.append(
                     JobResult(
                         job_id=job_id,
