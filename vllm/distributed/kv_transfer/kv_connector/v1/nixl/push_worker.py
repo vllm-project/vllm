@@ -97,6 +97,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Heartbeat handshakes to a PP-sharded producer must be notif-only,
         # like the PUSH_REG path.
         self._hb_handshake_notif_only = True
+        self._is_consumer = self.kv_transfer_config.kv_role == "kv_consumer"
 
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
@@ -161,20 +162,37 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         super()._validate_remote_agent_handshake(
             nixl_agent_meta, remote_tp_size, remote_dcp_size
         )
+        self._check_conv_push_tp(remote_tp_size)
+
+    def _add_notif_only_remote_agent(
+        self, metadata: NixlAgentMetadata, remote_tp_size: int, remote_dcp_size: int = 1
+    ) -> str:
+        self._check_conv_push_tp(remote_tp_size)
+        return super()._add_notif_only_remote_agent(
+            metadata, remote_tp_size, remote_dcp_size
+        )
+
+    def _check_conv_push_tp(self, remote_tp_size: int) -> None:
         # With a larger consumer TP, each consumer rank gets one chunk of the
         # producer's page, which can't fill a segment the consumer replicates.
+        # The consumer checks too, so its request fails at handshake instead
+        # of waiting for a WRITE the producer will refuse.
         assert self.transfer_topo is not None
+        producer_tp = consumer_tp = self.transfer_topo.tp_size
+        if self._is_consumer:
+            producer_tp = remote_tp_size
+        else:
+            consumer_tp = remote_tp_size
         if (
             self._conv_decomp is not None
-            and self.transfer_topo.tp_ratio(remote_tp_size) < 0
-            and any(r > 1 for _, r in self._conv_decomp.proj_layout(remote_tp_size))
+            and consumer_tp > producer_tp
+            and any(r > 1 for _, r in self._conv_decomp.proj_layout(consumer_tp))
         ):
             raise NotImplementedError(
                 "NixlPushConnector does not support a consumer TP larger than "
                 "the producer TP when the consumer replicates Mamba conv "
                 "state (e.g. Mamba2 B/C when TP does not divide n_groups); "
-                f"got producer TP={self.transfer_topo.tp_size}, consumer "
-                f"TP={remote_tp_size}."
+                f"got producer TP={producer_tp}, consumer TP={consumer_tp}."
             )
 
     def shutdown(self) -> None:

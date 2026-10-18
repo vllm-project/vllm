@@ -5,6 +5,7 @@
 import gc
 import queue
 import threading
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2052,10 +2053,24 @@ def test_mamba2_hetero_tp_without_split_is_rejected():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "producer,base_method",
+    [
+        (True, "_validate_remote_agent_handshake"),
+        # D handshakes with P before its registration: notif-only from the
+        # PUSH_REG path, or a full handshake from the heartbeat path.
+        (False, "_validate_remote_agent_handshake"),
+        (False, "_add_notif_only_remote_agent"),
+    ],
+)
 @pytest.mark.parametrize("n_groups,rejected", [(1, True), (8, False)])
-def test_push_mamba2_to_larger_tp_with_replicated_bc_is_rejected(n_groups, rejected):
+def test_push_mamba2_to_larger_tp_with_replicated_bc_is_rejected(
+    n_groups, rejected, producer, base_method
+):
     """Push writes one chunk of the producer's page to each consumer rank,
-    which cannot fill B/C that a larger consumer TP replicates."""
+    which cannot fill B/C that a larger consumer TP replicates. Both sides
+    reject it at handshake, so the consumer's request fails instead of
+    waiting for a WRITE that never comes."""
     from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
         NixlPushConnectorWorker,
@@ -2071,19 +2086,25 @@ def test_push_mamba2_to_larger_tp_with_replicated_bc_is_rejected(n_groups, rejec
         conv_decomp = derive_mamba_conv_split(_mamba2_spec(1, n_groups), 1)
     worker = MagicMock(spec=NixlPushConnectorWorker)
     worker.transfer_topo = object.__new__(TransferTopology)
-    worker.transfer_topo.tp_size = 1
+    worker.transfer_topo.tp_size = 1 if producer else 2
+    worker._is_consumer = not producer
     worker._conv_decomp = conv_decomp
+    worker._check_conv_push_tp = partial(
+        NixlPushConnectorWorker._check_conv_push_tp, worker
+    )
+    handshake = partial(
+        getattr(NixlPushConnectorWorker, base_method),
+        worker,
+        SimpleNamespace(engine_id="remote"),
+        remote_tp_size=2 if producer else 1,
+    )
 
-    with patch.object(bw.NixlBaseConnectorWorker, "_validate_remote_agent_handshake"):
+    with patch.object(bw.NixlBaseConnectorWorker, base_method):
         if rejected:
             with pytest.raises(NotImplementedError, match="NixlPushConnector"):
-                NixlPushConnectorWorker._validate_remote_agent_handshake(
-                    worker, SimpleNamespace(engine_id="remote"), remote_tp_size=2
-                )
+                handshake()
         else:
-            NixlPushConnectorWorker._validate_remote_agent_handshake(
-                worker, SimpleNamespace(engine_id="remote"), remote_tp_size=2
-            )
+            handshake()
 
 
 @pytest.mark.cpu_test
