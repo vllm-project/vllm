@@ -21,7 +21,9 @@ class MyModelWithHead(MyModelForCausalLM):
 ```
 
 `compute_aux_readouts` returns all declared readouts concatenated in the order
-of `aux_readout_dims`.
+of `aux_readout_dims`, as one `[num_rows, sum(aux_readout_dims.values())]`
+tensor; any other shape is an error. During chunked prefill, the row of a chunk
+that does not finish the prompt is computed and discarded, like its logits.
 
 ## Request side
 
@@ -39,5 +41,7 @@ completion.aux_readouts["decision"]  # float32 tensor [len(token_ids), 3]
 - Requests without `aux_readouts` get `None`.
 - Without `--enable-aux-readouts`, requests that set `aux_readouts` are
   rejected and the model runner keeps no readout state.
-- Not supported yet: speculative decoding, pipeline parallelism, context
+- Readouts are returned with the final output only, so
+  `output_kind=RequestOutputKind.DELTA` is rejected.
+- Not supported yet: speculative decoding, tensor, pipeline and context
   parallelism, and the OpenAI-compatible HTTP responses.

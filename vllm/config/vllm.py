@@ -1324,6 +1324,10 @@ class VllmConfig:
             raise ValueError(
                 "enable_aux_readouts does not support speculative decoding"
             )
+        if self.parallel_config.tensor_parallel_size > 1:
+            raise ValueError(
+                "enable_aux_readouts does not support tensor parallelism yet"
+            )
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError(
                 "enable_aux_readouts does not support pipeline parallelism"

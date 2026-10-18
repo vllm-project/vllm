@@ -1214,6 +1214,13 @@ class SamplingParams(
                 parameter="aux_readouts",
                 value=self.aux_readouts,
             )
+        if self.output_kind == RequestOutputKind.DELTA:
+            raise VLLMValidationError(
+                "aux_readouts are returned with the final output only and do not "
+                "support output_kind=DELTA yet.",
+                parameter="output_kind",
+                value=self.output_kind.name,
+            )
         declared = model_config.aux_readout_dims
         unknown = [n for n in self.aux_readouts if n not in declared]
         if (

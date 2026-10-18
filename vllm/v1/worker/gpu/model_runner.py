@@ -349,6 +349,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.aux_readout_req_ids: set[str] | None = (
             set() if self.model_config.enable_aux_readouts else None
         )
+        self.aux_readout_width = sum(self.model_config.aux_readout_dims.values())
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
@@ -2125,14 +2126,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         asking = [
             (req_id, int(cu[i]), int(cu[i + 1]))
             for i, req_id in enumerate(input_batch.req_ids)
-            if req_id in self.aux_readout_req_ids
+            if req_id in self.aux_readout_req_ids and cu[i + 1] > cu[i]
         ]
         if not asking:
             return None
         rows = torch.cat([input_batch.logits_indices[a:b] for _, a, b in asking])
         model = cast(SupportsAuxReadout, self.model)
-        readouts = model.compute_aux_readouts(hidden_states[rows]).float()
+        readouts = model.compute_aux_readouts(hidden_states[rows])
         sizes = [b - a for _, a, b in asking]
+        expected = (sum(sizes), self.aux_readout_width)
+        if tuple(readouts.shape) != expected:
+            raise ValueError(
+                f"{type(model).__name__}.compute_aux_readouts returned shape "
+                f"{tuple(readouts.shape)}; expected {expected} "
+                "(rows, sum of aux_readout_dims)"
+            )
+        readouts = readouts.float()
         return {
             req_id: r for (req_id, _, _), r in zip(asking, torch.split(readouts, sizes))
         }

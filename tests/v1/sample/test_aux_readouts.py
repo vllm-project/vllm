@@ -76,6 +76,9 @@ def llm():
             logprobs_mode="raw_logits",
             gpu_memory_utilization=0.3,
             max_model_len=128,
+            # Small step budget so that longer prompts are prefilled in chunks.
+            max_num_batched_tokens=32,
+            max_num_seqs=8,
             seed=0,
         )
         try:
@@ -145,6 +148,24 @@ def test_readout_on_prefix_cache_hit(llm):
         )
 
 
+def test_readout_with_chunked_prefill(llm):
+    # Prefilled over several steps; the rows of the steps that do not finish the
+    # prompt are discarded with their logits.
+    prompt = "Count slowly: " + " ".join(str(i) for i in range(80))
+    params = _params(
+        max_tokens=3, aux_readouts=["decision"], logprob_token_ids=LABEL_TOKENS
+    )
+    (out,) = llm.generate([prompt], params)
+    assert len(out.prompt_token_ids) > 2 * 32
+    completion = out.outputs[0]
+    assert completion.aux_readouts["decision"].shape == (3, 3)
+    for step, scores in enumerate(completion.logprobs):
+        engine = torch.tensor([scores[t].logprob for t in LABEL_TOKENS])
+        torch.testing.assert_close(
+            completion.aux_readouts["decision"][step], engine, rtol=1e-2, atol=5e-2
+        )
+
+
 def test_abort_releases_readout_state(llm):
     engine = llm.llm_engine
     for i, prompt in enumerate(PROMPTS):
@@ -183,6 +204,8 @@ def test_feature_unused_matches_engine_without_flag(llm):
             logprobs_mode="raw_logits",
             gpu_memory_utilization=0.3,
             max_model_len=128,
+            max_num_batched_tokens=32,
+            max_num_seqs=8,
             seed=0,
         )
         try:
