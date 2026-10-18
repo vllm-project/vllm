@@ -744,7 +744,11 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
     request = CompletionRequest(
-        model=MODEL_NAME, prompt="Test prompt", max_tokens=10, stream=stream
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=stream,
+        request_id="test-req",
     )
 
     response = await serving_completion.create_completion(request)
@@ -752,9 +756,8 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
         async for _ in response:
             pass
 
-    input_request_id = request_logger.log_inputs.call_args.args[0]
     logged = [call.kwargs for call in request_logger.log_outputs.call_args_list]
-    assert {log["request_id"] for log in logged} == {input_request_id}
+    assert {log["request_id"] for log in logged} == {"cmpl-test-req"}
     if stream:
         assert [(log["outputs"], log["delta"]) for log in logged] == [
             ("Hello", True),

@@ -271,7 +271,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 for final_res in final_res_batch_checked:
                     for output in final_res.outputs:
                         self.request_logger.log_outputs(
-                            request_id=final_res.request_id,
+                            request_id=request_id,
                             outputs=output.text,
                             output_token_ids=output.token_ids,
                             finish_reason=output.finish_reason,
@@ -310,7 +310,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
         next_text_offsets = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         previous_texts = [""] * num_choices * num_prompts
-        prompt_request_ids = [request_id] * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
@@ -425,10 +424,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     if self.enable_log_outputs and self.request_logger:
                         delta_content = output.text
                         previous_texts[i] += delta_content
-                        prompt_request_ids[prompt_idx] = res.request_id
                         if delta_content and self.enable_log_deltas:
                             self.request_logger.log_outputs(
-                                request_id=res.request_id,
+                                request_id=request_id,
                                 outputs=delta_content,
                                 output_token_ids=as_list(output.token_ids),
                                 finish_reason=finish_reason,
@@ -483,9 +481,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     yield f"data: {response_json}\n\n"
 
             if self.enable_log_outputs and self.request_logger:
-                for i, full_text in enumerate(previous_texts):
+                for full_text in previous_texts:
                     self.request_logger.log_outputs(
-                        request_id=prompt_request_ids[i // num_choices],
+                        request_id=request_id,
                         outputs=full_text,
                         output_token_ids=None,
                         finish_reason="streaming_complete",
