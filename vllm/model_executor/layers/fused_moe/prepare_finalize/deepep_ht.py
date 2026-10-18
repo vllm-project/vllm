@@ -142,7 +142,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # kernel will block the CPU so we want to queue up all the compute
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
-        _dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
+        # The ROCm host sync after dispatch already orders these reads.
+        if not self.sync_dbo_comm:
+            _dbo_record_stream(tokens, token_scales, rank_topk_ids, rank_topk_weights)
 
         (
             num_tokens_per_rank,
@@ -392,7 +394,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
         previous_event = dbo_get_previous_event(self.buffer.capture)
         dbo_yield_and_switch_from_compute_to_comm()
-        _dbo_record_stream(fused_expert_output)
+        if not self.sync_dbo_comm:
+            _dbo_record_stream(fused_expert_output)
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
