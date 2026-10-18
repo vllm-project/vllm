@@ -185,10 +185,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     let (3216, 7168) ship without its DISPATCH_DSV3_SHAPE(7168, 3216).
     """
     source = (
-        Path(__file__).resolve().parents[2]
-        / "csrc"
-        / "libtorch_stable"
-        / "dsv3_fused_a_gemm.cu"
+        Path(__file__).resolve().parents[2] / "csrc" / "dsv3_fused_a_gemm.cu"
     ).read_text(encoding="utf-8")
     # Benchmark-only shapes live behind VLLM_K3_BENCH_SHAPES and are not built
     # by default, so they must not count as available.
@@ -713,8 +710,8 @@ def test_low_latency_table_capability_routing(
 def test_qwen4_exp_hopper_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
 
-    assert len(plans) == 9
-    assert sum(map(len, plans.values())) == 31
+    assert len(plans) == 7
+    assert sum(map(len, plans.values())) == 24
     assert (320, 10240) in plans
     assert (10240, 320) not in plans
     for (n, k), shape_plans in plans.items():
@@ -728,10 +725,11 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
-        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_SM103_GEMM_PLANS),
         ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
         ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
+        ((12, 0), {}),
         ((8, 0), {}),
     ],
 )
@@ -742,11 +740,16 @@ def test_qwen4_exp_gemm_capability_routing(
 ) -> None:
     monkeypatch.setattr(
         qwen4_exp_gemm.current_platform,
-        "is_device_capability",
-        lambda target: capability == target,
+        "get_device_capability",
+        lambda: capability,
     )
 
-    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+    assert (
+        qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+            qwen4_exp_gemm.current_platform.get_device_capability(), {}
+        )
+        == expected_plans
+    )
 
 
 def test_installation_is_shape_specific_and_unquantized(

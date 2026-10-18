@@ -30,11 +30,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
+from vllm.v1.hisparse.layout import get_hisparse_steady_state_concurrency
+from vllm.v1.hisparse.types import (
+    SparseKVOffloadCommand,
+    SparseKVResidencyUpdate,
+    SparseKVRowMirror,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -44,6 +50,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
+logger = init_logger(__name__)
+
 
 @dataclass
 class HiSparseConnectorMetadata(KVConnectorMetadata):
@@ -52,6 +60,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
+    residency_updates: dict[str, SparseKVResidencyUpdate]
 
 
 @dataclass
@@ -99,6 +108,19 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is None
         self.coordinator = coordinator
 
+    def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
+        if self.coordinator is None:
+            return None
+        host_pool = self.coordinator.get_host_block_pool()
+        assert host_pool is not None
+        stats = HiSparseKVConnectorStats()
+        stats.record_host_usage(
+            host_pool.get_usage(), len(self.coordinator.pending_spills)
+        )
+        if host_pool.metrics_collector is not None:
+            stats.record_host_evictions(host_pool.metrics_collector.drain_events())
+        return stats
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
@@ -126,16 +148,13 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
-        # Runs first: it plans this step's transfers and table updates.
+        # Runs first: it plans this step's transfers and residency changes.
         self.coordinator.advance_scheduled(
             (
                 request_id,
                 min(start + count, self.requests[request_id].num_tokens),
             )
             for request_id, start, count in scheduled_requests
-        )
-        scheduler_output.block_table_updates = (
-            self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
@@ -175,6 +194,9 @@ class HiSparseConnectorScheduler:
             tuple(source_block_ids),
             row_mirrors,
             self.coordinator.all_context_pages_resident(scheduled_requests),
+            self.coordinator.take_residency_updates(
+                scheduler_output.num_scheduled_tokens
+            ),
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -223,6 +245,16 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
             )
+            max_model_len = vllm_config.model_config.max_model_len
+            steady_concurrency = get_hisparse_steady_state_concurrency(
+                vllm_config, kv_cache_config
+            )
+            logger.info_once(
+                "HiSparse steady-state maximum concurrency for %s tokens per "
+                "request: %.2fx (running requests reading from host).",
+                f"{max_model_len:,}",
+                steady_concurrency,
+            )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = HiSparseConnectorWorker(
                 vllm_config, kv_cache_config
@@ -263,9 +295,11 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.reset_hot_state()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None
-        return self.connector_worker.get_kv_connector_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_kv_connector_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_kv_connector_stats()
+        return None
 
     @classmethod
     def build_kv_connector_stats(
