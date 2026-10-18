@@ -34,14 +34,25 @@ type Result<T> = std::result::Result<T, TemplateError>;
 /// one unit of fuel; when depleted, rendering aborts with an error.
 const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
 
+/// Fuel budget for each render, overridable with `VLLM_CHAT_TEMPLATE_FUEL`.
+/// `0` disables the limit.
+// TODO: separate budget for request templates once `--trust-request-chat-template` lands.
+fn template_fuel() -> Option<u64> {
+    let fuel = std::env::var("VLLM_CHAT_TEMPLATE_FUEL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_TEMPLATE_FUEL);
+    (fuel > 0).then_some(fuel)
+}
+
 /// Build a pre-configured environment with the given template string.
-fn build_environment(template: String) -> Result<Environment<'static>> {
+fn build_environment(template: String, fuel: Option<u64>) -> Result<Environment<'static>> {
     let mut env = Environment::new();
 
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
 
-    env.set_fuel(Some(DEFAULT_TEMPLATE_FUEL));
+    env.set_fuel(fuel);
 
     env.add_template_owned("chat".to_owned(), template)?;
 
@@ -159,7 +170,7 @@ impl CompiledChatTemplate {
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
             ChatTemplateContentFormatOption::OpenAi => ChatTemplateContentFormat::OpenAi,
         };
-        let env = build_environment(template)?;
+        let env = build_environment(template, template_fuel())?;
         Ok(Self {
             env,
             content_format,
@@ -170,7 +181,10 @@ impl CompiledChatTemplate {
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
         let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(TemplateError::from)
+        tmpl.render(ctx).map_err(|error| match error.kind() {
+            ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
+            _ => TemplateError::Jinja(error),
+        })
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -182,7 +196,9 @@ impl CompiledChatTemplate {
 mod tests {
     use std::fs;
 
+    use expect_test::expect;
     use tempfile::TempDir;
+    use thiserror_ext::AsReport as _;
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
     use super::*;
@@ -284,6 +300,34 @@ mod tests {
             None,
             "expected a jinja render error, got: {error:?}"
         );
+    }
+
+    /// Each turn costs a fixed number of instructions, like a chat template's message loop.
+    fn render_turns(turns: usize, fuel: Option<u64>) -> Result<String> {
+        let template =
+            "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
+        let template = CompiledChatTemplate {
+            env: build_environment(template.to_string(), fuel)?,
+            content_format: ChatTemplateContentFormat::String,
+        };
+        let mut kwargs = HashMap::new();
+        kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
+        template.apply(TemplateContext {
+            template_kwargs: Some(&kwargs),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn test_long_conversation_exceeds_default_fuel() {
+        let error = render_turns(20_000, Some(DEFAULT_TEMPLATE_FUEL)).unwrap_err();
+        expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn test_raised_or_disabled_fuel_renders_long_conversation() {
+        assert!(render_turns(20_000, Some(5_000_000)).is_ok());
+        assert!(render_turns(20_000, None).is_ok());
     }
 
     #[test]

@@ -7,6 +7,8 @@ use thiserror::Error as ThisError;
 pub(crate) enum TemplateError {
     #[error("failed to render jinja template")]
     Jinja(#[from] minijinja::Error),
+    #[error("chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override")]
+    OutOfFuel(#[source] minijinja::Error),
     #[error("failed to read chat template file")]
     ReadTemplateFile(#[source] std::io::Error),
     #[error("chat template looks like a file path but does not exist")]
