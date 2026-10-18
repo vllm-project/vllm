@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import itertools
 import time
 from collections import defaultdict, deque
@@ -1096,12 +1097,7 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
-                        if request.skip_reading_prefix_cache or (
-                            request.sampling_params is not None
-                            and request.sampling_params.prompt_logprob_token_ids
-                            is not None
-                        ):
-                            # Connectors cannot bound a load at the first scored row.
+                        if request.skip_reading_prefix_cache:
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
@@ -2782,6 +2778,16 @@ class Scheduler(SchedulerInterface):
         return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
+        params = request.sampling_params
+        if (
+            self.connector is not None
+            and params is not None
+            and params.prompt_logprob_token_ids is not None
+        ):
+            # Connector admission may truncate prompts before cache lookup.
+            request.sampling_params = copy.copy(params)
+            request.sampling_params.skip_reading_prefix_cache = True
+            request.skip_reading_prefix_cache = True
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)

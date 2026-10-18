@@ -1532,14 +1532,12 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
-    """A prefill that starts past the first scored row returns no scores.
-
-    Such a prefill (here a prefix-cache hit the caller opted back into) never
-    computes the leading rows, so emitting the buffer would return values the
-    model never produced for them.
-    """
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Cached and uncached prefills have different execution shapes.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     text = "The capital of France is Paris. " * 20
 
@@ -1547,6 +1545,7 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         "Qwen/Qwen3-0.6B",
         max_model_len=512,
         enable_prefix_caching=True,
+        block_size=16,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
         token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
@@ -1554,18 +1553,25 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=1,
-            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 1, 1)),
-            skip_reading_prefix_cache=False,
+            prompt_logprob_start=17,
+            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 18, 1)),
+            skip_reading_prefix_cache=True,
         )
 
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
 
-        # The re-send is served from the prefix cache, so its prefill starts
-        # past row 0 and the leading rows are never computed.
+        sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert second.prompt_token_id_logprobs is None
+        assert second.num_cached_tokens == 16
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 18, 3)
+        np.testing.assert_allclose(
+            second.prompt_token_id_logprobs,
+            first.prompt_token_id_logprobs,
+            rtol=1e-3,
+            atol=1e-2,
+        )
 
 
 @large_gpu_mark(min_gb=24)
