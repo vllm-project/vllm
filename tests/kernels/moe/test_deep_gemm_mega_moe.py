@@ -1441,6 +1441,7 @@ def test_deep_gemm_mega_gate_rows_ignore_batch_when_deterministic():
     """VLLM_BI_MEGA_GATE routes every batch through Mega Gate, so with
     DeepGEMM's deterministic heuristics a token's top-k ids and weights must
     not depend on how many or which tokens share its batch."""
+    from vllm import envs
     from vllm.utils.deep_gemm import _import_deep_gemm, bf16_mega_gate
 
     deep_gemm = _import_deep_gemm()
@@ -1473,4 +1474,5 @@ def test_deep_gemm_mega_gate_rows_ignore_batch_when_deterministic():
         assert torch.equal(ids, full_ids[perm])
         assert torch.equal(weights, full_weights[perm])
     finally:
-        deep_gemm.use_deterministic_algorithms(False)
+        # The import is cached, so restore the mode it set.
+        deep_gemm.use_deterministic_algorithms(envs.VLLM_BATCH_INVARIANT)

@@ -669,6 +669,10 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
     from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
 
+    # Under batch invariance a side stream means overlap at every M; that
+    # route has its own test.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
     num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
@@ -995,6 +999,7 @@ def test_bi_mega_mhc_aux_capture_keeps_route(monkeypatch):
     if not is_mega_mhc_supported(5120, 4):
         pytest.skip("DeepGEMM Mega mHC is not available")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     set_random_seed(0)
     tokens, hc_mult, hidden = 37, 4, 5120
     x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
@@ -1025,6 +1030,7 @@ def test_bi_mega_mhc_aux_capture_keeps_route(monkeypatch):
         return mhc_shifted_post_pre(*args, **kwargs, capture_aux=capture_aux)
 
     monkeypatch.setenv("VLLM_BI_MEGA_MHC", "1")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", True)
     plain, captured = run(False), run(True)
     for a, b in zip(plain[:5], captured[:5], strict=True):
         assert torch.equal(a, b)
@@ -1034,6 +1040,7 @@ def test_bi_mega_mhc_aux_capture_keeps_route(monkeypatch):
     # The TileLang route rounds differently, so an aux layer falling back to
     # it would make DSpark change the target's output.
     monkeypatch.setenv("VLLM_BI_MEGA_MHC", "0")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", False)
     assert not torch.equal(run(True)[3], plain[3])
 
 
