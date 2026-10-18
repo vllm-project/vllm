@@ -557,6 +557,79 @@ def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int)
         )
 
 
+@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize("probabilistic_draft", [False, True])
+def test_multiround_rejection_sample_is_unbiased(
+    use_block_verification: bool, probabilistic_draft: bool
+):
+    """Uncommitted positions must receive fresh noise on later verification rounds."""
+    torch.manual_seed(42)
+    num_trials, num_tokens, k = 32768, 6, 2
+    device = "cuda"
+    target_probs = torch.tensor(
+        [0.3, 0.7] if probabilistic_draft else [0.5, 0.5], device=device
+    )
+    draft_logits = torch.tensor(
+        [0.7, 0.3] if probabilistic_draft else [1.0, 0.0], device=device
+    ).log()
+    inputs = _build_rejection_sample_inputs(
+        target_probs.log(), draft_logits, k, 1.0, num_trials
+    )
+    seeds = inputs["seed"]
+    output = torch.full((num_trials, num_tokens + k), -1, device=device)
+    output[:, 0] = torch.multinomial(target_probs, num_trials, replacement=True)
+    lengths = torch.ones(num_trials, dtype=torch.int64, device=device)
+    accepted = 0
+    while (lengths < num_tokens).any():
+        active = (lengths < num_tokens).nonzero().flatten()
+        n = active.numel()
+        starts = lengths[active]
+        local_positions = torch.arange(k + 1, device=device).repeat(n)
+        positions = (starts[:, None] + torch.arange(k + 1, device=device)).flatten()
+        draft_sampled = torch.zeros((n, k + 1), dtype=torch.int64, device=device)
+        draft_sampled[:, 0] = output[active, starts - 1]
+        logits_cache = inputs["draft_logits"] if probabilistic_draft else None
+        if probabilistic_draft:
+            for step in range(k):
+                draft_sampled[:, step + 1] = gumbel_sample(
+                    draft_logits.expand(n, -1),
+                    active,
+                    inputs["temperature"],
+                    seeds,
+                    starts + step,
+                    apply_temperature=True,
+                    is_drafting=True,
+                    logits_cache=logits_cache,
+                    logits_cache_col=torch.tensor(step, device=device),
+                )
+        sampled, counts = rejection_sample(
+            target_logits=target_probs.log().expand(n * (k + 1), -1).contiguous(),
+            draft_logits=logits_cache,
+            draft_sampled=draft_sampled.flatten(),
+            cu_num_logits=torch.arange(n + 1, dtype=torch.int32, device=device)
+            * (k + 1),
+            pos=positions,
+            idx_mapping=active,
+            expanded_idx_mapping=active.repeat_interleave(k + 1),
+            expanded_local_pos=local_positions,
+            temperature=inputs["temperature"],
+            seed=seeds,
+            num_speculative_steps=k,
+            use_block_verification=use_block_verification,
+        )
+        for column in range(k + 1):
+            valid = counts > column
+            output[active[valid], starts[valid] + column] = sampled[valid, column]
+        lengths[active] += counts
+        accepted += (counts - 1).sum().item()
+
+    assert accepted > num_trials, "The test must exercise accepted draft tokens."
+    for position in range(num_tokens):
+        _assert_distribution_match(
+            output[:, position], target_probs, device, label=f"position {position}"
+        )
+
+
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 def test_greedy_rejection_sample(num_speculative_steps: int):
     """Verify that greedy (temperature=0) always outputs the target argmax
@@ -1082,6 +1155,91 @@ def test_chunked_requests_match_full_batch(has_draft_logits: bool):
     steps = torch.arange(num_speculative_steps + 1, device=device)
     valid = steps.unsqueeze(0) < num_sampled.unsqueeze(1)
     assert torch.equal(chunked_sampled[valid], sampled[valid])
+
+
+@pytest.mark.parametrize("use_block_verification", [False, True])
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+def test_adaptive_draft_lengths_match_and_bonus_oracle(
+    use_block_verification: bool, has_draft_logits: bool
+):
+    torch.manual_seed(7)
+    device = "cuda"
+    K = 3
+    num_drafts = [3, 1, 0, 2, 3, 2]
+    temperatures = [1.0, 0.0, 0.0, 0.6, 0.0, 1.0]
+    greedy_num_matches = {1: 1, 2: 0, 4: 2}
+    num_reqs = len(num_drafts)
+
+    num_logits_per_req = torch.tensor(num_drafts, device=device) + 1
+    cu_num_logits = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+    cu_num_logits[1:] = num_logits_per_req.cumsum(0)
+    num_logits = int(cu_num_logits[-1])
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    expanded_idx_mapping = idx_mapping.repeat_interleave(num_logits_per_req)
+    expanded_local_pos = (
+        torch.arange(num_logits, dtype=torch.int32, device=device)
+        - cu_num_logits[expanded_idx_mapping]
+    )
+
+    draft_logits = torch.randn(num_reqs, K, VOCAB_SIZE, device=device)
+    target_logits = torch.randn(num_logits, VOCAB_SIZE, device=device)
+    # Allocate at exactly num_logits so a lookahead past the batch is OOB.
+    draft_sampled = torch.randint(VOCAB_SIZE, (num_logits,), device=device)
+    target_argmax = target_logits.argmax(dim=-1)
+    for req_idx, num_matches in greedy_num_matches.items():
+        lo = int(cu_num_logits[req_idx])
+        for step in range(num_drafts[req_idx]):
+            token = target_argmax[lo + step]
+            if step >= num_matches:
+                token = (token + 1) % VOCAB_SIZE
+            draft_sampled[lo + step + 1] = token
+
+    inputs = dict(
+        target_logits=target_logits,
+        draft_logits=draft_logits if has_draft_logits else None,
+        draft_sampled=draft_sampled,
+        cu_num_logits=cu_num_logits,
+        pos=torch.arange(num_logits, dtype=torch.int32, device=device),
+        idx_mapping=idx_mapping,
+        expanded_idx_mapping=expanded_idx_mapping,
+        expanded_local_pos=expanded_local_pos,
+        temperature=torch.tensor(temperatures, device=device),
+        seed=torch.arange(num_reqs, dtype=torch.int64, device=device),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+    )
+    sampled, num_sampled = rejection_sample(**inputs)
+
+    for req_idx, num_matches in greedy_num_matches.items():
+        lo = int(cu_num_logits[req_idx])
+        n = num_matches + 1
+        assert int(num_sampled[req_idx]) == n, f"greedy request {req_idx}"
+        assert torch.equal(sampled[req_idx, :n], target_argmax[lo : lo + n]), (
+            f"greedy request {req_idx}"
+        )
+
+    for req_idx in range(num_reqs):
+        lo, hi = int(cu_num_logits[req_idx]), int(cu_num_logits[req_idx + 1])
+        req_inputs = dict(inputs)
+        for name in (
+            "target_logits",
+            "draft_sampled",
+            "pos",
+            "expanded_idx_mapping",
+            "expanded_local_pos",
+        ):
+            req_inputs[name] = inputs[name][lo:hi]
+        req_inputs["cu_num_logits"] = cu_num_logits[req_idx : req_idx + 2] - lo
+        req_inputs["idx_mapping"] = idx_mapping[req_idx : req_idx + 1]
+
+        req_sampled, req_num_sampled = rejection_sample(**req_inputs)
+
+        n = int(req_num_sampled[0])
+        assert n <= num_drafts[req_idx] + 1
+        assert int(num_sampled[req_idx]) == n, f"request {req_idx} mismatch"
+        assert torch.equal(sampled[req_idx, :n], req_sampled[0, :n]), (
+            f"request {req_idx} mismatch"
+        )
 
 
 def _residual_recovery_logits(
