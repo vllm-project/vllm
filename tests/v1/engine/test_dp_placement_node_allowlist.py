@@ -117,3 +117,36 @@ def test_allowlist_too_small_raises(monkeypatch):
 
     with pytest.raises(ValueError):  # not enough placement groups created
         _run(cfg, resources)
+
+
+def test_scale_up_follows_allowlist_order(monkeypatch):
+    # The master .1 is full; scale-up fills the next listed node, .3, not .2.
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.1,10.0.0.3,10.0.0.2")
+    total = _resources({"10.0.0.1": 8, "10.0.0.2": 8, "10.0.0.3": 8})
+    available = _resources({"10.0.0.1": 0, "10.0.0.2": 8, "10.0.0.3": 8})
+    cfg = _vllm_config(dp_size=8, dp_local=8, master_ip="10.0.0.1")
+    created = []
+
+    def fake_pg(name, strategy, bundles):
+        created.append({"name": name, "strategy": strategy, "bundles": bundles})
+        return object()
+
+    with (
+        patch(
+            "ray._private.state.available_resources_per_node", return_value=available
+        ),
+        patch("ray._private.state.total_resources_per_node", return_value=total),
+        patch.object(utils, "current_platform", SimpleNamespace(ray_device_key="GPU")),
+        patch("ray.util.placement_group", side_effect=fake_pg),
+    ):
+        pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(cfg, 16)
+
+    assert len(pgs) == 8
+    # Every new device bundle is pinned to .3.
+    assert all(
+        "node:10.0.0.3" in bundle
+        for pg in created
+        for bundle in pg["bundles"]
+        if "GPU" in bundle
+    )
+    assert local_ranks == list(range(8))

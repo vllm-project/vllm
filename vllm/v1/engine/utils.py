@@ -149,6 +149,39 @@ def _dp_nodes_master_first(
     return nodes
 
 
+def _order_by_allowlist(
+    nodes: list[tuple[str, dict]], dp_master_ip: str
+) -> list[tuple[str, dict]]:
+    """Restrict and order DP placement by VLLM_RAY_DP_PLACEMENT_NODE_IPS.
+
+    Keeps the listed nodes plus the master (it hosts the local ranks), the
+    master first and the rest in list order, so DP ranks, and with them EP
+    ranks, fill the nodes in that order. An empty list keeps ``nodes``.
+    """
+    order = [
+        ip.strip()
+        for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
+        if ip.strip()
+    ]
+    if not order:
+        return nodes
+    position: dict[str | None, int] = {
+        ip: i for i, ip in reversed(list(enumerate([dp_master_ip, *order])))
+    }
+    kept = sorted(
+        (node for node in nodes if _node_ip_from_resources(node[1]) in position),
+        key=lambda node: position[_node_ip_from_resources(node[1])],
+    )
+    logger.info(
+        "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
+        "from %d to %d node(s), in this order: %s",
+        len(nodes),
+        len(kept),
+        [_node_ip_from_resources(node[1]) for node in kept],
+    )
+    return kept
+
+
 def _node_ip_from_resources(node_resources: dict) -> str | None:
     """Return the node IP encoded in a Ray per-node resource dict, or None.
 
@@ -626,35 +659,11 @@ class CoreEngineActorManager:
 
         nodes = [
             node_resources
-            for _, node_resources in _dp_nodes_master_first(
-                available_resources, dp_master_ip
+            for _, node_resources in _order_by_allowlist(
+                _dp_nodes_master_first(available_resources, dp_master_ip),
+                dp_master_ip,
             )
         ]
-
-        # optionally restrict DP placement to a caller-provided node set.
-        requested_node_ips = {
-            ip.strip()
-            for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
-            if ip.strip()
-        }
-        if requested_node_ips:
-            allowed_node_ips = set(requested_node_ips)
-            # The master node must host the local ranks, so it has to be allowed.
-            if dp_master_ip not in allowed_node_ips:
-                allowed_node_ips.add(dp_master_ip)
-            filtered_nodes = [
-                node_resources
-                for node_resources in nodes
-                if _node_ip_from_resources(node_resources) in allowed_node_ips
-            ]
-            logger.info(
-                "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
-                "from %d to %d node(s): %s",
-                len(nodes),
-                len(filtered_nodes),
-                sorted(allowed_node_ips),
-            )
-            nodes = filtered_nodes
 
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
@@ -841,7 +850,9 @@ class CoreEngineActorManager:
         # Both maps are keyed by node id and only contain live nodes.
         available_resources = available_resources_per_node()
         total_resources = total_resources_per_node()
-        nodes = _dp_nodes_master_first(available_resources, dp_master_ip)
+        nodes = _order_by_allowlist(
+            _dp_nodes_master_first(available_resources, dp_master_ip), dp_master_ip
+        )
 
         placement_groups = []
         local_dp_ranks = []
@@ -878,13 +889,11 @@ class CoreEngineActorManager:
 
                 rank = old_dp_size + num_pg_created
 
-                # Create bundles with node constraint for master node
-                if node_ip == dp_master_ip:
-                    bundles = [
-                        {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                    ] * world_size + [{"CPU": 1.0}]
-                else:
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                # Pin to this node: local_rank below counts its engines, and
+                # unpinned, Ray may place the group on any node.
+                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [
+                    {"CPU": 1.0}
+                ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{rank}",
