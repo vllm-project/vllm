@@ -2170,6 +2170,8 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
+            if self.parallel_config.num_ubatches > 2 and a2a_backend != "nixl_ep":
+                raise ValueError("More than two microbatches requires nixl_ep.")
             if current_platform.is_rocm():
                 supported_backends = [
                     "deepep_low_latency",

@@ -1168,6 +1168,8 @@ class FusedMoEKernelModularImpl:
             self.fused_experts.activation_format()
             == FusedMoEActivationFormat.BatchedExperts
         ):
+            # Keep the reservation above, but give combine a contiguous view
+            # matching the runtime dispatch shape rather than the static limit.
             assert M_full <= fused_out_shape[1]
             fused_out_shape = (fused_out_shape[0], M_full, fused_out_shape[2])
 

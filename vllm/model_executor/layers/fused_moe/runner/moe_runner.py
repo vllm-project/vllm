@@ -286,8 +286,10 @@ class MoERunner(MoERunnerInterface):
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
-                enable_dbo=enable_dbo,
                 mk_can_overlap_shared_experts=can_overlap,
+                num_ubatches=max(
+                    1, get_current_vllm_config().parallel_config.num_ubatches
+                ),
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.

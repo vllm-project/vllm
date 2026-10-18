@@ -21,6 +21,7 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
+    dbo_num_ubatches,
     dbo_switch_to_comm,
     dbo_switch_to_compute,
     dbo_yield_and_switch_from_comm_to_compute,
@@ -84,6 +85,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        num_ubatches: int = 1,
     ):
         super().__init__()
 
@@ -93,7 +95,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[tuple | None] = [None, None]
+        self.handles: list[tuple | None] = [None] * num_ubatches
         self.num_dispatchers_ = num_dispatchers
         self.expert_capacity = expert_capacity
 
@@ -150,11 +152,16 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is None:
             return self.max_tokens_per_rank
+        # The MoE runner supplies EP-local sizes when sequence parallelism is
+        # active. Both sources are CPU metadata, including during graph capture.
         if dp_metadata.local_sizes is not None:
             capacity = max(dp_metadata.local_sizes)
         else:
             capacity = int(dp_metadata.num_tokens_across_dp_cpu.max())
         capacity = max(1, capacity)
+        # The NIXL TMA receive extent is capacity * num_dispatchers and must
+        # be divisible by four. This only changes undersized warmup shapes;
+        # normal aligned execution buckets (for example 64/128) are unchanged.
         alignment = 4 // gcd(self.num_dispatchers_, 4)
         capacity = (capacity + alignment - 1) // alignment * alignment
         assert capacity <= self.max_tokens_per_rank
@@ -284,8 +291,38 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
+            # DBO already provides a separate stream for the full send/recv.
             return_recv_hook=not dbo_enabled(),
         )
+        if dbo_num_ubatches() > 2:
+            # NIXL reuses two receive buffers. Save their contents in the recv
+            # hook, before the next microbatch dispatch can overwrite them.
+            copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+            def snapshot(src: torch.Tensor) -> torch.Tensor:
+                dst = torch.empty_like(src)
+                copies.append((dst, src))
+                return dst
+
+            expert_x = (
+                tuple(snapshot(x) for x in expert_x)
+                if isinstance(expert_x, tuple)
+                else snapshot(expert_x)
+            )
+            expert_num_tokens = snapshot(expert_num_tokens)
+            handle = tuple(
+                snapshot(value) if isinstance(value, torch.Tensor) else value
+                for value in handle
+            )
+            recv_hook = hook
+
+            def snapshot_recv_hook():
+                if recv_hook is not None:
+                    recv_hook()
+                for dst, src in copies:
+                    dst.copy_(src)
+
+            hook = snapshot_recv_hook
         self.handles[a2a_idx] = handle
 
         def receiver():
@@ -307,6 +344,8 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 dbo_yield_and_switch_from_comm_to_compute()
                 return receiver()
 
+            # Snapshot copies precede the comm-done event. Keep the generic
+            # MoE handoff from adding a second receive on the compute stream.
             return receive_on_comm
         return hook, receiver
 
