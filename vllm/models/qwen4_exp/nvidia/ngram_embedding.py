@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
+from vllm.utils.math_utils import round_up
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -203,7 +204,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         embedding_prefix = f"{prefix}.ngram_embedding"
         embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
@@ -243,9 +244,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         weight = self.ngram_embedding.weight
         logger.info(
-            "Initialized PLE embedding %s: quantization_method=%s, "
+            "Initialized PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             weight.dtype,
             weight.device,
