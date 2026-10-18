@@ -44,25 +44,6 @@ def block32_scaled_mm(
     return batched_block32_mm(a, a_scale, weight, weight_scale, output_dtype)
 
 
-def packed_block32_grouped_mm(
-    a: torch.Tensor,
-    packed_a_scale: torch.Tensor,
-    weight: torch.Tensor,
-    packed_weight_scale: torch.Tensor,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Consume DeepGEMM's logical INT32 UE8M0 scales without changing its codec.
-
-    Packed scales keep MN-major TMA strides and padded activation rows. Read
-    their logical UE8M0 bytes directly; masks exclude padded rows.
-    Weights stay FP8; each group uses the same K32 visible math as ordinary
-    batch-invariant MXFP8 projections.
-    """
-    return batched_block32_mm(
-        a, packed_a_scale, weight, packed_weight_scale, output_dtype, grouped=True
-    )
-
-
 class BatchInvariantMxfp8LinearKernel(Mxfp8LinearKernel):
     """Fixed-block FP8 GEMM; retain quantized weights through reload."""
 
