@@ -615,7 +615,13 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            with set_current_vllm_config(self.vllm_config):
+            with (
+                # The split limit of the measured path below, so a small
+                # allocation that outlives this run cannot pin a freed block
+                # past the empty_cache() that follows.
+                self._scoped_allocator_max_split(max_split_size_mb=20),
+                set_current_vllm_config(self.vllm_config),
+            ):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
