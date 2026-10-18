@@ -35,6 +35,7 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
+    replay_tokens: int | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -67,6 +68,7 @@ def _replay_scheduler(
                     dtype=torch.bfloat16,
                     sliding_window=WINDOW,
                     bounded_replay=True,
+                    replay_tokens=replay_tokens,
                 ),
             ),
         ],
@@ -79,7 +81,7 @@ def _replay_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     scheduler.use_v2_model_runner = True
-    assert scheduler.prefix_replay_tokens == WINDOW
+    assert scheduler.prefix_replay_tokens == (replay_tokens or WINDOW)
     return scheduler
 
 
@@ -151,6 +153,45 @@ def test_hit_replays_window_without_reallocating():
     num_window_blocks = len(second_blocks[SWA]) - num_skipped_blocks
     assert num_window_blocks == -(-NUM_PROMPT_TOKENS // BLOCK_SIZE) - num_skipped_blocks
     assert not any(b.is_null for b in second_blocks[SWA][num_skipped_blocks:])
+
+    scheduler.update_from_output(out, _step_output(out, [first, second]))
+    assert second.num_computed_tokens == NUM_PROMPT_TOKENS
+
+
+def test_exact_replay_rebuilds_more_than_a_window():
+    """Batch invariance replays several windows of the hit (every layer's
+    window reaches further back); their sliding-window blocks are fresh, and
+    the cached groups' hit blocks stay shared."""
+    replay_tokens = 80
+    scheduler = _replay_scheduler(replay_tokens=replay_tokens)
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        same_prompt=True,
+        block_size=BLOCK_SIZE,
+    )
+    _prefill(scheduler, first)
+    manager = scheduler.kv_cache_manager
+
+    scheduler.add_request(second)
+    out = scheduler.schedule()
+
+    replay_start = HIT_TOKENS - replay_tokens
+    new_req = _new_req_data(out, second)
+    assert new_req.num_computed_tokens == replay_start
+    assert new_req.replay_start == replay_start
+    assert (
+        out.num_scheduled_tokens[second.request_id] == NUM_PROMPT_TOKENS - replay_start
+    )
+    first_blocks = manager.get_blocks(first.request_id).blocks
+    second_blocks = manager.get_blocks(second.request_id).blocks
+    num_hit_blocks = HIT_TOKENS // BLOCK_SIZE
+    assert second_blocks[FULL][:num_hit_blocks] == first_blocks[FULL][:num_hit_blocks]
+    # Every replayed token has a fresh sliding-window slot.
+    num_skipped_blocks = replay_start // BLOCK_SIZE
+    assert all(b.is_null for b in second_blocks[SWA][:num_skipped_blocks])
+    assert not any(b.is_null for b in second_blocks[SWA][num_skipped_blocks:])
+    assert len(second_blocks[SWA]) == -(-NUM_PROMPT_TOKENS // BLOCK_SIZE)
 
     scheduler.update_from_output(out, _step_output(out, [first, second]))
     assert second.num_computed_tokens == NUM_PROMPT_TOKENS

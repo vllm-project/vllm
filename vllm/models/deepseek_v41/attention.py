@@ -62,6 +62,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.decoder_replay_layers import exact_replay_rows
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
@@ -576,6 +577,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "takes part in prefix caching instead."
             )
             swa_bounded_replay = False
+        # A prefix hit replays the hit's last window by default. Batch
+        # invariance replays enough tokens that every layer's window KV and
+        # the last window's outputs match the full forward.
+        replay_tokens = None
+        if swa_bounded_replay and envs.VLLM_BATCH_INVARIANT:
+            replay_tokens = exact_replay_rows(
+                self.window_size, config.num_hidden_layers
+            )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -594,6 +603,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 else None
             ),
             bounded_replay=swa_bounded_replay,
+            replay_tokens=replay_tokens,
         )
 
         # The attention layer itself was already registered with the

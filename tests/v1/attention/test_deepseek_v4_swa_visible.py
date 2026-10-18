@@ -2047,3 +2047,206 @@ def test_ds41_bi_indexer_decode_rows_match_prefill_rows(
     finally:
         torch.accelerator.synchronize()
         reset_workspace_manager()
+
+
+@pytest.mark.parametrize(
+    "length", [1, 129, 254, 255, 256, 382, 383, 509, 510, 700, 1500, 4000, 12288]
+)
+def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
+    """Bounded replay keeps enough rows to equal the full forward, bit for bit.
+
+    A stack of real BI SWA attention layers (per-row maps between them) runs a
+    prompt in full, then (a) with the layers past a cut on its trailing kept
+    rows, as one stage or in layer-wise stages that each keep fewer rows,
+    (b) after a prefix hit that replays the hit's tail at every layer, and
+    (c) both. The last window's KV at every layer and the new rows' top outputs
+    must match the full forward; the one-window replay, and stages keeping one
+    row too few, must not.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("DS41 FlashMLA requires CUDA")
+    from vllm.config import CacheConfig, set_current_vllm_config
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+    from vllm.models.deepseek_v41.decoder_replay_layers import (
+        exact_replay_rows,
+        exact_replay_stages,
+    )
+    from vllm.models.deepseek_v41.nvidia.flashmla import (
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
+        DeepseekV4FlashMLAAttention,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    assert torch.cuda.get_device_capability()[0] == 10
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(length)
+    device = torch.device("cuda")
+    window, block_size, heads, dim, record = 128, 32, 64, 512, 528
+    num_layers, cut = 6, 2
+    config, _ = _ds41_swa_bi_config([max(length, 1024)])
+    pages = (length + block_size - 1) // block_size
+    caches = []
+    with set_current_vllm_config(config):
+        for layer in range(num_layers):
+            cache = DeepseekV4SWACache(
+                head_dim=dim,
+                window_size=window,
+                dtype=torch.uint8,
+                prefix=f"swa{layer}",
+                cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
+                backend_cls=DeepseekV4FlashMLAAttention.swa_backend_cls,
+                block_size=block_size,
+                packed_bytes_per_token=record,
+                packed_page_alignment=512,
+            )
+            cache.kv_cache = torch.empty(
+                pages, block_size, record, device=device, dtype=torch.uint8
+            )
+            caches.append(cache)
+    spec = caches[0].get_kv_cache_spec(config)
+    builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
+        spec, [c.prefix for c in caches], config, device
+    )
+    attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.compress_ratio = 0
+    attention.compressed_cache_prefix = None
+    attention.window_size = window
+    attention.max_num_batched_tokens = max(length, 1024)
+    attention.topk_indices_buffer = torch.full(
+        (max(length, 1024), 512), -1, device=device, dtype=torch.int32
+    )
+    attention.scale = dim**-0.5
+    sinks = torch.randn(num_layers, heads, device=device)
+    q_weights = torch.randn(num_layers, heads, dim, device=device)
+    k_weights = torch.randn(num_layers, dim, device=device)
+    embeddings = torch.randn(length, dim, device=device).bfloat16()
+    table = torch.arange(pages, dtype=torch.int32, device=device).view(1, pages)
+    init_workspace_manager(device)
+
+    def scramble():
+        for cache in caches:
+            cache.kv_cache.random_(0, 256)
+
+    def forward(cache, layer, hidden, rows, run_from, kv_start):
+        """The rows from ``run_from`` attend, reading no window KV below
+        ``kv_start``; returns their per-row output map."""
+        num = rows.numel() - run_from
+        q = (hidden[run_from:, None].float() * q_weights[layer]).bfloat16()
+        starts = torch.tensor([0, num], dtype=torch.int32)
+        common = CommonAttentionMetadata(
+            query_start_loc=starts.to(device),
+            query_start_loc_cpu=starts,
+            seq_lens=torch.tensor([length], device=device, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([length], dtype=torch.int32),
+            num_reqs=1,
+            num_actual_tokens=num,
+            max_query_len=num,
+            max_seq_len=length,
+            block_table_tensor=table,
+            slot_mapping=rows[run_from:],
+            causal=True,
+        )
+        replay_start = torch.tensor([kv_start], device=device, dtype=torch.int32)
+        metadata = builder.build(0, common, replay_start=replay_start)
+        attention.swa_cache_layer = cache
+        attention.attn_sink = sinks[layer]
+        output = torch.empty_like(q)
+        with override_forward_context(ForwardContext({}, {cache.prefix: metadata}, {})):
+            attention.forward_mqa(q, q[:, 0], rows[run_from:], output)
+        mixed = (output[:, 0].float() + output[:, 1].float()) * 0.5
+        return torch.tanh(mixed + hidden[run_from:].float()).bfloat16()
+
+    def run(start, decoder_starts):
+        """Rows [start, length) of one request, replaying from ``start``. Layers
+        below the cut run every row; the cut writes every row's KV and, like the
+        layers past it, runs the rows from its ``decoder_starts`` entry; those
+        layers write only those rows' KV and read no window KV below them."""
+        hidden = embeddings[start:]
+        rows = torch.arange(start, length, device=device)
+        for layer, cache in enumerate(caches):
+            decoder_start = decoder_starts.get(layer, start)
+            kept_from = decoder_start - start
+            write_from = kept_from if layer > cut else 0
+            values = (hidden.float() * k_weights[layer]).bfloat16()
+            quantize_and_insert_k_cache(
+                values[write_from:],
+                cache.kv_cache.view(pages, -1),
+                rows[write_from:],
+                block_size=block_size,
+                bytes_per_token=record,
+            )
+            run_from = kept_from if layer >= cut else 0
+            kv_start = decoder_start if layer > cut else start
+            out = forward(cache, layer, hidden, rows, run_from, kv_start)
+            hidden = torch.zeros_like(hidden)
+            hidden[run_from:] = out
+        return hidden
+
+    def all_kv():
+        return [cache.kv_cache.view(-1, record)[:length].clone() for cache in caches]
+
+    def layer_rows(stages):
+        return {
+            layer: rows for first, stop, rows in stages for layer in range(first, stop)
+        }
+
+    try:
+        scramble()
+        full = run(0, {})
+        full_kv = all_kv()
+        hit = length * 3 // 5 // block_size * block_size
+        kept = exact_replay_rows(window, num_layers - cut - 1)
+        replayed = exact_replay_rows(window, num_layers)
+
+        def matches(start, decoder_rows):
+            """``decoder_rows``: rows each layer from the cut on keeps (an int
+            for all of them)."""
+            scramble()
+            if isinstance(decoder_rows, int):
+                decoder_rows = dict.fromkeys(range(cut, num_layers), decoder_rows)
+            starts = {
+                layer: max(start, length - rows) for layer, rows in decoder_rows.items()
+            }
+            decoder_start = starts[num_layers - 1]
+            out = run(start, starts)
+            # What later steps read: the last window's KV at every layer (from
+            # the hit's window when nothing trims), and the outputs of the new
+            # rows the replay layers ran.
+            if decoder_start > start:
+                lo = out_lo = max(length - window, 0)
+            else:
+                lo, out_lo = max(hit - window, 0) if start else 0, start and hit
+            return torch.equal(out[out_lo - start :], full[out_lo:]) and all(
+                torch.equal(a[lo:], b[lo:]) for a, b in zip(all_kv(), full_kv)
+            )
+
+        assert matches(0, kept)
+        start = max(hit - replayed, 0)
+        assert matches(start, length)
+        assert matches(start, kept)
+        for layers_per_stage in (1, 2):
+            stages = exact_replay_stages(window, cut, num_layers, layers_per_stage)
+            assert stages[0][2] == kept and stages[-1][2] == 2 * window - 1
+            assert matches(0, layer_rows(stages))
+            assert matches(start, layer_rows(stages))
+        # Negative controls: the one-window replay of either side, and a stage
+        # keeping one row fewer than its layers need.
+        if length > window:
+            assert not matches(0, window)
+        if hit > window:
+            assert not matches(hit - window, length)
+        short = layer_rows(exact_replay_stages(window, cut, num_layers, 1))
+        short[cut + 2] -= 1
+        if length >= short[cut + 2] + 1:
+            assert not matches(0, short)
+    finally:
+        torch.accelerator.synchronize()
+        reset_workspace_manager()

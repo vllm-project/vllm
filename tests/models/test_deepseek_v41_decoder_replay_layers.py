@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DecoderReplayLayers runs the replay layers on the forward's replay batch."""
 
+from functools import partial
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.forward_context import (
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
+    ReplayStage,
 )
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
@@ -99,6 +101,68 @@ def test_run_gathers_states():
     assert outputs[0][1:173].abs().sum() == 0
 
 
+def test_stages_run_on_shrinking_rows():
+    """A later stage runs its rows of the previous stage's outputs, with its own
+    batch positions; outputs and each stage's aux land on that stage's rows.
+    The buffers layers share move to the next stage's rows before it runs."""
+    seen = {}
+    shared = []
+
+    def run_stage(i, hidden, positions, input_ids, pre_mix, post, res, residual):
+        seen[i] = (hidden.clone(), positions.clone(), get_forward_context())
+        if i == 0:
+            return hidden + 1, pre_mix, post, res, residual, hidden * 10
+        return hidden * 2, pre_mix, hidden + 100
+
+    layers = DecoderReplayLayers(
+        WINDOW,
+        MagicMock(),
+        MagicMock(),
+        set(),
+        "swa",
+        kept_rows=200,
+        stage_rows=[200, WINDOW],
+        run_stage=run_stage,
+        stage_metadata_prefixes=[set(), set()],
+        select_shared_rows=lambda select: shared.append((len(seen), select)),
+    )
+    # The trimmed prefill keeps 200 rows, then 128; the others keep theirs.
+    rows0 = [0, *range(101, 301), *range(301, 401)]
+    rows1 = [0, *range(173, 301), *range(301, 401)]
+    select = [rows0.index(row) for row in rows1]
+    contexts = [
+        ForwardContext(no_compile_layers={}, attn_metadata=m, slot_mapping={})
+        for m in ("stage0", "stage1")
+    ]
+    layers.replay_batch = ReplayBatch(
+        torch.tensor(rows0, device=DEVICE),
+        contexts[0],
+        stages=[
+            ReplayStage(
+                torch.tensor(rows1, device=DEVICE),
+                torch.tensor(select, device=DEVICE),
+                contexts[1],
+            )
+        ],
+    )
+    states = _states(NUM_TOKENS)
+    hidden, positions = states[0], states[1]
+    with override_forward_context(_context(object())):
+        out, pre_mix, aux0, aux1 = layers(*states)
+    r0 = torch.tensor(rows0, device=DEVICE)
+    r1 = torch.tensor(rows1, device=DEVICE)
+    assert torch.equal(seen[0][0], hidden[r0]) and seen[0][2] is contexts[0]
+    assert torch.equal(seen[1][0], hidden[r1] + 1) and seen[1][2] is contexts[1]
+    assert torch.equal(seen[1][1], positions[r1])
+    assert torch.equal(out[r1], (hidden[r1] + 1) * 2)
+    assert out[1:173].abs().sum() == 0
+    assert torch.equal(pre_mix[r1], states[3][r1])
+    assert torch.equal(aux0[r0], hidden[r0] * 10) and aux0[1:101].abs().sum() == 0
+    assert torch.equal(aux1[r1], hidden[r1] + 101)
+    assert len(shared) == 1 and shared[0][0] == 1
+    assert shared[0][1].tolist() == select
+
+
 def test_no_replay_batch_runs_the_whole_batch():
     seen = {}
 
@@ -145,18 +209,7 @@ def test_piecewise_graphs_break_out_by_size():
     write_batch_kv.assert_called_once_with(*states)
 
 
-@pytest.mark.parametrize(
-    ("moe_backend", "ids_dtype"),
-    [
-        ("auto", torch.int32),
-        *((b, torch.int64) for b in sorted(NATIVE_MEGA_MOE_BACKENDS)),
-        *((b, torch.int32) for b in sorted(FLASHINFER_MOE_EP_BACKENDS)),
-    ],
-    ids=str,
-)
-def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
-    """The replay graph of the next captured size pads and runs the rows. Input ids
-    arrive as the model passes them: int32, cast to int64 for native MegaMoE only."""
+def _graph_config(monkeypatch, moe_backend="auto"):
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
     capture = torch.cuda.stream(torch.cuda.Stream())
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
@@ -169,6 +222,22 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
     cfg.model_config.dtype = torch.float32
     cfg.kernel_config.moe_backend = moe_backend
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "ids_dtype"),
+    [
+        ("auto", torch.int32),
+        *((b, torch.int64) for b in sorted(NATIVE_MEGA_MOE_BACKENDS)),
+        *((b, torch.int32) for b in sorted(FLASHINFER_MOE_EP_BACKENDS)),
+    ],
+    ids=str,
+)
+def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
+    """The replay graph of the next captured size pads and runs the rows. Input ids
+    arrive as the model passes them: int32, cast to int64 for native MegaMoE only."""
+    cfg = _graph_config(monkeypatch, moe_backend)
 
     def run_layers(hidden, positions, ids, pre, post, mix, residual):
         return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
@@ -183,7 +252,7 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     manager.capture_replay_graphs(prepare)
     states = [
         torch.randn(12, *b.shape[1:], device=DEVICE).to(b.dtype)
-        for b in manager.input_buffers
+        for b in manager.stage_input_buffers[0]
     ]
     states[2] = torch.arange(12, device=DEVICE, dtype=ids_dtype)  # input_ids
     rows = torch.tensor([11, 2, 7], device=DEVICE)
@@ -192,3 +261,58 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
         actual = manager.run(rows, states)
     for a, e in zip(actual, run_layers(*(t[rows] for t in states))):
         torch.testing.assert_close(a, e, rtol=0, atol=0)
+
+
+def test_staged_replay_graphs_match_eager(monkeypatch):
+    """One capture holds every stage's graph; each stage replays on its rows of
+    the previous stage's outputs."""
+    cfg = _graph_config(monkeypatch)
+
+    def run_stage(i, hidden, positions, ids, pre, post, mix, residual):
+        if i == 0:
+            return hidden + positions[:, None], pre, post, mix, residual
+        return residual + hidden[:, None], pre + ids[:, None]
+
+    layers = DecoderReplayLayers(
+        4,
+        MagicMock(),
+        MagicMock(),
+        set(),
+        "swa",
+        kept_rows=4,
+        stage_rows=[4, 2],
+        run_stage=run_stage,
+        stage_metadata_prefixes=[set(), set()],
+    )
+    manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+
+    def replay_batch(rows, select, num_tokens, run_graph=None):
+        return ReplayBatch(
+            torch.tensor(rows, device=DEVICE),
+            _graph_context(num_tokens),
+            run_graph and partial(run_graph, stage=0),
+            [
+                ReplayStage(
+                    torch.tensor([rows[j] for j in select], device=DEVICE),
+                    torch.tensor(select, device=DEVICE),
+                    _graph_context(num_tokens),
+                    run_graph and partial(run_graph, stage=1),
+                )
+            ],
+        )
+
+    def prepare(desc):
+        rows = list(range(desc.num_tokens))
+        layers.replay_batch = replay_batch(rows, rows[-2:], desc.num_tokens)
+
+    manager.capture_replay_graphs(prepare)
+    states = list(_states(NUM_TOKENS))
+    states[2] = torch.arange(NUM_TOKENS, device=DEVICE, dtype=torch.int32)
+    outputs = []
+    for run_graph in (None, manager.run):
+        layers.replay_batch = replay_batch([2, 7, 9], [1, 2], 4, run_graph)
+        with override_forward_context(_context(object())):
+            outputs.append(layers(*states))
+    for graph, eager in zip(*outputs, strict=True):
+        torch.testing.assert_close(graph, eager, rtol=0, atol=0)
+    assert outputs[0][0][[7, 9]].abs().sum() > 0 and outputs[0][0][2].sum() == 0

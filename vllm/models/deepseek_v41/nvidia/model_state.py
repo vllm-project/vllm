@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -15,6 +16,7 @@ from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_con
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
+    ReplayStage,
 )
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
@@ -116,12 +118,17 @@ def _gather_replay_batch_kernel(
     kept_slot_mappings_ptr,  # out: [num_groups, num_kept]
     kept_slot_mappings_stride,
     kept_kv_start_ptr,  # out: [num_reqs]
-    window,
+    kept_rows,
+    prev_dropped_before_ptr,  # [num_reqs + 1] the previous stage's, if HAS_PREV
+    select_ptr,  # out, if HAS_PREV: [num_kept] row in the previous stage's rows
     NUM_GROUPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    HAS_PREV: tl.constexpr,
 ):
     """One program per request: its kept rows are the last ones before its
-    boundary, and land at that boundary minus the rows trimmed before it."""
+    boundary, and land at that boundary minus the rows trimmed before it. A
+    later replay stage's rows also get their index among the previous stage's
+    rows, which are the request's last ones too."""
     req = tl.program_id(0)
     begin = tl.load(query_start_loc_ptr + req)
     end = tl.load(query_start_loc_ptr + req + 1)
@@ -134,7 +141,7 @@ def _gather_replay_batch_kernel(
     # A trimmed request holds no replay-layer window KV below its kept rows.
     kv_start = tl.load(replay_start_ptr + req)
     if kept_end - kept_begin < end - begin:
-        kv_start = tl.maximum(kv_start, tl.load(seq_lens_ptr + req) - window)
+        kv_start = tl.maximum(kv_start, tl.load(seq_lens_ptr + req) - kept_rows)
     tl.store(kept_kv_start_ptr + req, kv_start)
 
     first_row = end - (kept_end - kept_begin)
@@ -143,6 +150,11 @@ def _gather_replay_batch_kernel(
         mask = offs < kept_end
         row = first_row + (offs - kept_begin)
         tl.store(rows_ptr + offs, row.to(tl.int64), mask=mask)
+        if HAS_PREV:
+            # The previous stage keeps the request's rows up to its end, which
+            # sits behind the rows trimmed before that boundary.
+            prev_dropped = tl.load(prev_dropped_before_ptr + req + 1)
+            tl.store(select_ptr + offs, (row - prev_dropped).to(tl.int64), mask=mask)
         tl.store(
             kept_positions_ptr + offs,
             tl.load(positions_ptr + row, mask=mask),
@@ -154,6 +166,23 @@ def _gather_replay_batch_kernel(
                 tl.load(slot_mappings_ptr + g * slot_mappings_stride + row, mask=mask),
                 mask=mask,
             )
+
+
+class _ReplayStageBuffers:
+    """A later exact-replay stage's inputs, like the first stage's ``_kept_*``
+    buffers, plus each row's index among the previous stage's rows."""
+
+    def __init__(self, max_num_reqs: int, max_num_tokens: int, device) -> None:
+        self.dropped_before = UvaBufferPool(max_num_reqs + 1, torch.int32)
+        self.rows = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        self.select = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        self.query_start_loc = torch.zeros(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+        self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        self.slot_mappings: torch.Tensor | None = None
+        self.kv_start = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        self.attn_groups: list[list[AttentionGroup]] | None = None
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
@@ -249,6 +278,11 @@ class DeepseekV41ModelState(DefaultModelState):
             self._replay_attn_groups: (
                 tuple[list[list[AttentionGroup]], list[list[AttentionGroup]]] | None
             ) = None
+            # Exact replay in stages: the later stages' buffers.
+            self._replay_stages = [
+                _ReplayStageBuffers(self.max_num_reqs, self.max_num_tokens, device)
+                for _ in self._stage_rows()[1:]
+            ]
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -263,15 +297,27 @@ class DeepseekV41ModelState(DefaultModelState):
             and not vllm_config.model_config.enable_prompt_embeds
         ):
             threshold = compilation_config.decoder_replay_trim_threshold
-            if threshold <= layers.window:
+            if layers.kept_rows > layers.window:
+                # Exact replay trims to as many rows as the full forward needs;
+                # a smaller graph has nothing to trim.
+                threshold = max(threshold, layers.kept_rows + 1)
+            if threshold <= layers.kept_rows:
                 raise ValueError(
-                    "decoder_replay_trim_threshold must exceed the replay window "
-                    f"of {layers.window} tokens: smaller graphs have nothing to trim"
+                    "decoder_replay_trim_threshold must exceed the replay layers' "
+                    f"{layers.kept_rows} kept rows: smaller graphs have nothing to "
+                    "trim"
                 )
             self.replay_cudagraphs = DecoderReplayCudaGraphManager(
                 vllm_config, device, layers
             )
             layers.trim_threshold = threshold
+
+    def _stage_rows(self) -> list[int]:
+        """Rows each replay stage keeps per request; the first stage's are the
+        layers' ``kept_rows``."""
+        layers = self.decoder_replay_layers
+        assert layers is not None
+        return [layers.kept_rows, *getattr(layers, "stage_rows", [])[1:]]
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -342,6 +388,8 @@ class DeepseekV41ModelState(DefaultModelState):
                     dtype=torch.int64,
                     device=self.device,
                 )
+                for stage in self._replay_stages:
+                    stage.slot_mappings = torch.zeros_like(self._kept_slot_mappings)
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
@@ -437,11 +485,39 @@ class DeepseekV41ModelState(DefaultModelState):
             self._kept_slot_mappings,
             self._kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.window,
+            self.decoder_replay_layers.kept_rows,
+            self._kept_kv_start,
+            self._kept_rows,
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
+            HAS_PREV=False,
             grid=(1,),
         )
+        for stage in self._replay_stages:
+            assert stage.slot_mappings is not None
+            _gather_replay_batch_kernel.warmup(
+                input_batch.query_start_loc,
+                stage.dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
+                input_batch.seq_lens,
+                self._replay_start,
+                input_batch.positions,
+                slot_mappings,
+                slot_mappings.stride(0),
+                stage.rows,
+                stage.query_start_loc,
+                stage.positions,
+                stage.slot_mappings,
+                stage.slot_mappings.stride(0),
+                stage.kv_start,
+                self.decoder_replay_layers.kept_rows,
+                self._dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
+                stage.select,
+                NUM_GROUPS=slot_mappings.shape[0],
+                BLOCK=1024,
+                HAS_PREV=True,
+                grid=(1,),
+            )
+            break  # one compile serves every stage
 
     def _prepare_replay_batch(
         self,
@@ -470,11 +546,18 @@ class DeepseekV41ModelState(DefaultModelState):
 
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        kept_lens = np.where(
-            self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
-            query_lens,
-            np.minimum(query_lens, layers.window),
-        )
+        keeps_rows = self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]]
+        stage_rows = self._stage_rows()
+        if capture_desc is not None:
+            # A capture keeps the dummy batch's rows at every stage: its graphs
+            # are keyed by the one size.
+            stage_lens = [query_lens.copy() for _ in stage_rows]
+        else:
+            stage_lens = [
+                np.where(keeps_rows, query_lens, np.minimum(query_lens, rows))
+                for rows in stage_rows
+            ]
+        kept_lens = stage_lens[0]
         # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
         # nothing reads it and its idx_mapping hits stale slots, so keep one row.
         seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
@@ -482,73 +565,100 @@ class DeepseekV41ModelState(DefaultModelState):
             (seq_lens == query_lens).all()
         )
         if is_dummy and capture_desc is None:
-            kept_lens = np.zeros_like(kept_lens)
-            kept_lens[0] = 1
+            for lens in stage_lens:
+                lens[:] = 0
+                lens[0] = 1
         # Dummy batches (captures, an idle DP rank's) are not prefills: they
         # keep their rows unless a rank trims.
         needs_replay_batch = force_replay_batch or bool(
             (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
         )
-        num_tokens = int(kept_lens.sum())
+        stage_tokens = [int(lens.sum()) for lens in stage_lens]
         dp_tokens = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             needs_replay_batch, dp_tokens = self._agree_across_dp(
-                needs_replay_batch, num_tokens
+                needs_replay_batch, stage_tokens
             )
         if not needs_replay_batch:
             return
 
-        cudagraphs, run_graph = self.replay_cudagraphs, None
-        num_padded, cg_mode = num_tokens, CUDAGraphMode.NONE
-        if cudagraphs is not None:
-            # Every rank runs the graph that fits the largest rank's batch.
-            dp_max_tokens = num_tokens if dp_tokens is None else int(dp_tokens.max())
-            desc = capture_desc or cudagraphs.dispatch(num_reqs, dp_max_tokens, None, 0)
-            if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                num_padded, cg_mode = desc.num_tokens, desc.cg_mode
-                run_graph = cudagraphs.run
-                if dp_tokens is not None:
-                    dp_tokens.fill_(num_padded)
-        dp_metadata = None
-        if dp_tokens is not None:
-            dp_metadata = DPMetadata.make(
-                self.vllm_config.parallel_config, num_padded, dp_tokens
-            )
-        kept_batch, kept_slot_mappings = self._kept_input_batch(
-            input_batch, slot_mappings, replay_start, kept_lens, num_padded
-        )
         if self._replay_attn_groups is None:
             self._replay_attn_groups = (
-                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
+                self._copy_attn_groups(
+                    attn_groups,
+                    layers.stage_metadata_prefixes[0]
+                    if len(stage_rows) > 1
+                    else layers.metadata_prefixes,
+                ),
                 self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
             )
+            for i, stage in enumerate(self._replay_stages, start=1):
+                stage.attn_groups = self._copy_attn_groups(
+                    attn_groups, layers.stage_metadata_prefixes[i]
+                )
         replay_groups, first_swa_groups = self._replay_attn_groups
-        attn_metadata = super().prepare_attn(
-            kept_batch,
-            CUDAGraphMode.NONE,
-            block_tables,
-            kept_slot_mappings,
-            replay_groups,
-            kv_cache_config,
-            model_specific_attn_metadata=ReplayAttnMetadata(
-                self._kept_kv_start[:num_reqs]
-            ),
-        )
-        # The first replay layer wrote every row's window KV: its window starts
-        # are the batch's.
-        first_swa = layers.first_swa_prefix
-        attn_metadata[first_swa] = super().prepare_attn(
-            kept_batch,
-            CUDAGraphMode.NONE,
-            block_tables,
-            kept_slot_mappings,
-            first_swa_groups,
-            kv_cache_config,
-            model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
-        )[first_swa]
-        layers.replay_batch = ReplayBatch(
-            self._kept_rows[:num_tokens],
-            create_forward_context(
+        stages: list[ReplayStage] = []
+        prev_dropped = None
+        replay_batch: ReplayBatch | None = None
+        for i, lens in enumerate(stage_lens):
+            cudagraphs = self.replay_cudagraphs
+            num_tokens = stage_tokens[i]
+            rank_tokens = None if dp_tokens is None else dp_tokens[i].clone()
+            run_graph, num_padded, cg_mode = None, num_tokens, CUDAGraphMode.NONE
+            if cudagraphs is not None:
+                # Every rank runs the graph that fits the largest rank's batch.
+                dp_max_tokens = (
+                    num_tokens if rank_tokens is None else int(rank_tokens.max())
+                )
+                desc = capture_desc or cudagraphs.dispatch(
+                    num_reqs, dp_max_tokens, None, 0
+                )
+                if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                    num_padded, cg_mode = desc.num_tokens, desc.cg_mode
+                    run_graph = partial(cudagraphs.run, stage=i)
+                    if rank_tokens is not None:
+                        rank_tokens.fill_(num_padded)
+            dp_metadata = None
+            if rank_tokens is not None:
+                dp_metadata = DPMetadata.make(
+                    self.vllm_config.parallel_config, num_padded, rank_tokens
+                )
+            kept_batch, kept_slot_mappings, rows, select, kv_start, prev_dropped = (
+                self._kept_input_batch(
+                    input_batch,
+                    slot_mappings,
+                    replay_start,
+                    lens,
+                    num_padded,
+                    stage=i,
+                    prev_dropped=prev_dropped,
+                )
+            )
+            groups = replay_groups if i == 0 else self._replay_stages[i - 1].attn_groups
+            assert groups is not None
+            attn_metadata = super().prepare_attn(
+                kept_batch,
+                CUDAGraphMode.NONE,
+                block_tables,
+                kept_slot_mappings,
+                groups,
+                kv_cache_config,
+                model_specific_attn_metadata=ReplayAttnMetadata(kv_start[:num_reqs]),
+            )
+            if i == 0:
+                # The first replay layer wrote every row's window KV: its window
+                # starts are the batch's.
+                first_swa = layers.first_swa_prefix
+                attn_metadata[first_swa] = super().prepare_attn(
+                    kept_batch,
+                    CUDAGraphMode.NONE,
+                    block_tables,
+                    kept_slot_mappings,
+                    first_swa_groups,
+                    kv_cache_config,
+                    model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
+                )[first_swa]
+            forward_context = create_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 dp_metadata=dp_metadata,
@@ -557,9 +667,21 @@ class DeepseekV41ModelState(DefaultModelState):
                 slot_mapping=build_slot_mappings_by_layer(
                     kept_slot_mappings, kv_cache_config
                 ),
-            ),
-            run_graph,
-        )
+            )
+            if i == 0:
+                replay_batch = ReplayBatch(
+                    rows[:num_tokens], forward_context, run_graph, stages
+                )
+            else:
+                stages.append(
+                    ReplayStage(
+                        rows[:num_tokens],
+                        select[:num_tokens],
+                        forward_context,
+                        run_graph,
+                    )
+                )
+        layers.replay_batch = replay_batch
 
     def capture_inner_cudagraphs(
         self,
@@ -595,9 +717,20 @@ class DeepseekV41ModelState(DefaultModelState):
         replay_start: torch.Tensor,
         kept_lens: np.ndarray,
         num_padded: int,
-    ) -> tuple[InputBatch, torch.Tensor]:
+        stage: int = 0,
+        prev_dropped: torch.Tensor | None = None,
+    ) -> tuple[
+        InputBatch,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Build the sub-``InputBatch`` of each request's last ``kept_lens``
-        rows, and its slot mappings.
+        rows, and its slot mappings, batch rows, rows among the previous stage's
+        (``prev_dropped``: its rows trimmed before each boundary), window KV
+        starts and rows trimmed before each boundary.
 
         The kept rows follow the device boundaries minus the rows trimmed before
         them: adaptive verification resizes the decodes on the GPU alone, and
@@ -608,11 +741,25 @@ class DeepseekV41ModelState(DefaultModelState):
         num_tokens = int(kept_lens.sum())
         kept_query_start_loc_np = np.zeros(num_reqs + 1, dtype=np.int32)
         np.cumsum(kept_lens, out=kept_query_start_loc_np[1:])
-        dropped_before = self._dropped_before.copy_to_uva(
+        if stage == 0:
+            pool, rows = self._dropped_before, self._kept_rows
+            select = rows
+            query_start_loc, positions = (
+                self._kept_query_start_loc,
+                self._kept_positions,
+            )
+            all_slot_mappings, kv_start = self._kept_slot_mappings, self._kept_kv_start
+        else:
+            buffers = self._replay_stages[stage - 1]
+            pool, rows, select = buffers.dropped_before, buffers.rows, buffers.select
+            query_start_loc, positions = buffers.query_start_loc, buffers.positions
+            all_slot_mappings, kv_start = buffers.slot_mappings, buffers.kv_start
+            assert prev_dropped is not None
+        dropped_before = pool.copy_to_uva(
             input_batch.query_start_loc_np[: num_reqs + 1] - kept_query_start_loc_np
         )
-        assert self._kept_slot_mappings is not None
-        kept_slot_mappings = self._kept_slot_mappings[:, :num_padded]
+        assert all_slot_mappings is not None
+        kept_slot_mappings = all_slot_mappings[:, :num_padded]
         kept_slot_mappings[:, num_tokens:].fill_(PAD_SLOT_ID)
         _gather_replay_batch_kernel[(num_reqs,)](
             input_batch.query_start_loc,
@@ -622,15 +769,18 @@ class DeepseekV41ModelState(DefaultModelState):
             input_batch.positions,
             slot_mappings,
             slot_mappings.stride(0),
-            self._kept_rows,
-            self._kept_query_start_loc,
-            self._kept_positions,
+            rows,
+            query_start_loc,
+            positions,
             kept_slot_mappings,
             kept_slot_mappings.stride(0),
-            self._kept_kv_start,
-            self.decoder_replay_layers.window,  # type: ignore[union-attr]
+            kv_start,
+            self._stage_rows()[stage],
+            dropped_before if prev_dropped is None else prev_dropped,
+            select,
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
+            HAS_PREV=stage > 0,
         )
         # Adaptive verification may lengthen the decodes on the device, up to
         # the batch's bound.
@@ -639,28 +789,31 @@ class DeepseekV41ModelState(DefaultModelState):
             input_batch,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_padded,
-            query_start_loc=self._kept_query_start_loc[: num_reqs + 1],
+            query_start_loc=query_start_loc[: num_reqs + 1],
             query_start_loc_np=kept_query_start_loc_np,
             max_query_len=max_query_len,
-            positions=self._kept_positions[:num_padded],
+            positions=positions[:num_padded],
             fast_prefill=None,
         )
-        return kept_batch, kept_slot_mappings
+        return kept_batch, kept_slot_mappings, rows, select, kv_start, dropped_before
 
     def _agree_across_dp(
-        self, needs_replay_batch: bool, num_tokens: int
+        self, needs_replay_batch: bool, stage_tokens: list[int]
     ) -> tuple[bool, torch.Tensor | None]:
-        """Whether any rank needs a replay batch and, if so, each rank's token count."""
+        """Whether any rank needs a replay batch and, if so, each rank's token
+        count at every replay stage (one row per stage)."""
         parallel_config = self.vllm_config.parallel_config
-        agreed = torch.zeros(2, parallel_config.data_parallel_size, dtype=torch.int32)
+        agreed = torch.zeros(
+            1 + len(stage_tokens), parallel_config.data_parallel_size, dtype=torch.int32
+        )
         agreed[:, parallel_config.data_parallel_rank] = torch.tensor(
-            [needs_replay_batch, num_tokens]
+            [needs_replay_batch, *stage_tokens]
         )
         if not should_skip_dp_coordination():
             dist.all_reduce(agreed, group=get_dp_group().cpu_group)
         if not agreed[0].any():
             return False, None
-        return True, agreed[1]
+        return True, agreed[1:]
 
     def _copy_attn_groups(
         self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
