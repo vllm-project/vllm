@@ -382,7 +382,7 @@ class Step5MegaMoEExperts(nn.Module):
         return self.pool.views[self.mma_type]
 
     def _forward_impl(self, hidden_states, topk_weights, topk_ids, padding=None):
-        from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+        from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
             prepare_megamoe_inputs,
         )
 
