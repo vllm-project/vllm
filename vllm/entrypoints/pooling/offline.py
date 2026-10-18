@@ -6,7 +6,6 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.common.offline import OfflineInferenceMixin
 from vllm.inputs import DataPrompt, PromptType
 from vllm.logger import init_logger
@@ -18,6 +17,7 @@ from vllm.outputs import (
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
@@ -129,7 +129,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             io_processor, request_factory, num_requests, use_tqdm=use_tqdm
         )
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
+            ctx=OfflineOutputsContext(outputs=outputs, late_chunking=ctx.late_chunking)
         )
         return outputs
 
@@ -325,8 +325,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            chat_template: The chat template to use for the scoring. If None, we
-                use the model's default chat template.
+            chat_template: The chat template to use for scoring. If None, use
+                the chat template passed to the LLM constructor.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:

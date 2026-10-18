@@ -269,17 +269,6 @@ class DiffusionGemmaForConditionalGeneration(
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
 
-    def compute_self_conditioning(
-        self,
-        inputs_embeds: torch.Tensor,
-        probs: torch.Tensor,
-    ) -> torch.Tensor:
-        embed_weight = self.model.embed_tokens.weight
-        soft_embeds = torch.matmul(
-            probs.to(embed_weight.dtype), embed_weight
-        ) * self.model.normalizer.to(inputs_embeds.dtype)
-        return self.self_conditioning(inputs_embeds, soft_embeds)
-
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
     # ------------------------------------------------------------------ #
@@ -1415,14 +1404,17 @@ class DiffusionSampler:
         # unaffected; only the canvas exploration is constrained. Applied
         # before canvas padding so phantom positions stay uniform.
         if num_decode > 0:
-            top_k, top_p = self.sampling_states.get_top_k_top_p(
+            top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
                 decode_slots.repeat_interleave(
                     valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
                 ),
                 decode_slots_np,
+                logits.shape[-1],
             )
             if top_k is not None or top_p is not None:
-                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+                logits = apply_top_k_top_p(
+                    logits.float(), top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                )
 
         # Where each decode request's rows start in the flat logits. Tiles
         # below gather and pad a request to the tile's width.
