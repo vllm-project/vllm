@@ -14,8 +14,8 @@
 #   csrc     All-arch csrc compile into the BuildKit cache (release, serialized per stack).
 #   release  Full release image + wheels from the CI-tested layers.
 #
-# Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
-#        in docker/Dockerfile.rocm_base.
+# Stack: rocm (TheRock ROCm 10, default) | rocm_72 (apt ROCm 7.2, transition only).
+#        Force a stack rebuild: bump ARG REFRESH in the stack's base Dockerfile.
 #
 # Trust: ci-infra sets ROCM_CI_REPO.
 #   Trusted main builds: rocm/vllm-ci
@@ -47,7 +47,8 @@ fi
 
 # Stack Dockerfile — literal path used by ci-infra ci_selector (images.py).
 case $STACK in
-  rocm) SDF=docker/Dockerfile.rocm_base ;;
+  rocm)    SDF=docker/Dockerfile.rocm_base ;;
+  rocm_72) SDF=docker/Dockerfile.rocm_72_base ;;
   *) echo "Unknown stack: $STACK" >&2; exit 2 ;;
 esac
 

@@ -743,6 +743,7 @@ steps:
   # the steps here only copy those artifacts (.buildkite/scripts/rocm/publish.sh).
   # - ROCm 10.0 (TheRock, stack `rocm`) is the default: it owns the :nightly / :latest images and
   #   the root wheel index.
+  # - ROCm 7.2 (stack `rocm_72`) is kept for a transition period as rocm72 images and wheels.
   # =============================================================================
 
   - group: ":rocm: ROCm 10.0"
@@ -777,10 +778,13 @@ steps:
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
         plugins: *rocm_hub_login
 
-      # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant).
+      # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant). Waits for both stacks'
+      # wheels (upload-rocm72-wheels is in the ROCm 7.2 group), since each prefix lists every variant.
       - block: "Generate Root Index for ROCm Wheels for Release"
         key: block-generate-root-index-rocm-wheels
-        depends_on: upload-rocm100-wheels
+        depends_on:
+          - upload-rocm100-wheels
+          - upload-rocm72-wheels
 
       - label: ":package: Generate Root Index for ROCm Wheels for Release"
         key: generate-root-index-rocm-wheels
@@ -788,6 +792,35 @@ steps:
         agents: {queue: cpu_queue_release}
         env: {S3_BUCKET: vllm-wheels}
         command: VARIANT=$$(buildkite-agent meta-data get rocm-rocm-variant) bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh
+
+  - group: ":rocm: ROCm 7.2"
+    key: build-rocm72
+    depends_on: ~
+    steps:
+      - trigger: "amd-release"
+        label: ":rocm: Build, GPU-smoke or reuse ROCm 7.2 artifacts on AMD agents"
+        key: build-rocm72-amd
+        depends_on: ~
+        build: {commit: "$BUILDKITE_COMMIT", branch: "$BUILDKITE_BRANCH", env: {ROCM_STACK: rocm_72}}
+
+      - label: ":s3: Upload ROCm 7.2 wheels"
+        key: upload-rocm72-wheels
+        depends_on: build-rocm72-amd
+        agents: {queue: cpu_queue_release}
+        timeout_in_minutes: 60
+        env: {S3_BUCKET: vllm-wheels}
+        command: bash .buildkite/scripts/rocm/publish.sh rocm_72 wheels
+        plugins: *rocm_hub_login
+
+      - label: ":docker: ROCm 7.2 image -> ECR (+ nightly Docker Hub)"
+        key: build-rocm72-release-image
+        depends_on:
+          - step: block-build-release-images
+            allow_failure: true
+          - build-rocm72-amd
+        agents: {queue: small_cpu_queue_release}
+        command: bash .buildkite/scripts/rocm/publish.sh rocm_72 images
+        plugins: *rocm_hub_login
 
   - label: "Publish nightly XPU image to DockerHub"
     depends_on:
@@ -819,6 +852,7 @@ steps:
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
       - create-manifest-xpu
       - build-rocm100-release-image
+      - build-rocm72-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish
@@ -843,6 +877,7 @@ steps:
       - "cuda-13-0-ubuntu-24-04"
       - "cuda-12-9-ubuntu-24-04"
       - "rocm"
+      - "rocm72"
       - "xpu"
       - "cpu"
     plugins:
