@@ -760,6 +760,14 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
+        fault_tolerance = vllm_config.parallel_config.fault_tolerance_config
+        if fault_tolerance.enable_nan_fault_tolerance:
+            raise ValueError(
+                "NaN fault tolerance is not supported for Mamba-style models. "
+                "Use --enable-detect-nans-in-logits for NaN detection without "
+                "fault tolerance."
+            )
+
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = "align"
