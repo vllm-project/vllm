@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch.nn as nn
 
@@ -19,6 +19,9 @@ from .adapter import RotationAdapter
 from .config import RotationApplication, RotationConfig, parse_rotation_config
 from .norm import PreRotationRMSNorm
 from .registry import RotationRegistry
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -62,12 +65,14 @@ def _install_registry(model: nn.Module, config: RotationConfig) -> None:
 
 
 def prepare_rotation_transforms(
-    model: nn.Module, vllm_config: Any, model_config: Any
-) -> nn.Module:
-    """Create the target registry and upgrade configured consumers in place."""
+    model: nn.Module, vllm_config: VllmConfig, model_config: ModelConfig
+) -> None:
+    """Prepare root model consumers; nested submodel views defer to the root."""
+    if model_config.is_submodel_config:
+        return
     config = parse_rotation_config(vllm_config.model_config.hf_config)
     if config is None:
-        return model
+        return
     if hasattr(model, "_rotation_transform_state"):
         raise RuntimeError("rotation transforms were already prepared")
 
@@ -104,7 +109,6 @@ def prepare_rotation_transforms(
         owns_registry,
     )
     object.__setattr__(model, "_rotation_transform_state", state)
-    return model
 
 
 def _bind_consumers(
@@ -137,7 +141,7 @@ def bind_rotation_transforms(
             raise RuntimeError("rotation transforms were not prepared for draft model")
         unresolved &= _bind_consumers(draft_state, registry)
     elif unresolved:
-        logger.warning(
+        logger.warning_once(
             "Skipping unresolved rotation targets because no draft model is loaded: %s",
             ", ".join(sorted(unresolved)),
         )
