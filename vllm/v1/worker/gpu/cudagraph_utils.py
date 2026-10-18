@@ -768,6 +768,12 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                     is_padding=is_padding,
+                    # A uniform decode graph is replayed only when every DP rank
+                    # agreed on that uniform token count, so it always runs a
+                    # step on which every rank decodes.
+                    uniform_decode_across_dp=(
+                        desc.uniform_token_count == self.decode_query_len
+                    ),
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside

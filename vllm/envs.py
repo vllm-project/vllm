@@ -302,6 +302,8 @@ if TYPE_CHECKING:
     EVENMOE_ULTRAEP_REFRESH_MIN_TOKENS: int = 512
     EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS: bool = False
     EVENMOE_FRESH_COUNTS: bool = False
+    EVENMOE_EP_CUSTOM_ALLREDUCE: bool = False
+    EVENMOE_EPLB_SHARED_EXPERTS_OVERLAP: bool = False
     EVENMOE_DUMP_LP: str | None = None
     EVENMOE_DUMP_LP_N: int = 120
     EVENMOE_DUMP_LP_SKIP: int = 0
@@ -2132,6 +2134,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("EVENMOE_KEEP_ZERO_REDUNDANCY_COUNTS", "0") == "1"
     ),
     "EVENMOE_FRESH_COUNTS": lambda: os.getenv("EVENMOE_FRESH_COUNTS", "0") == "1",
+    # Give the EP group a custom all-reduce so the per-layer EvenMoE count
+    # collective (EVENMOE_FRESH_COUNTS) takes the one-shot NVLink kernel
+    # instead of NCCL ring LL.
+    "EVENMOE_EP_CUSTOM_ALLREDUCE": lambda: os.getenv("EVENMOE_EP_CUSTOM_ALLREDUCE", "0")
+    == "1",
+    # Keep shared-expert overlap on with EPLB for the EvenMoE policy. EvenMoE
+    # placements are static between commits, so the weight-shuffle hazard that
+    # makes EPLB disable overlap on non-safe backends does not apply.
+    "EVENMOE_EPLB_SHARED_EXPERTS_OVERLAP": lambda: os.getenv(
+        "EVENMOE_EPLB_SHARED_EXPERTS_OVERLAP", "0"
+    )
+    == "1",
     "EVENMOE_DUMP_LP": lambda: os.getenv("EVENMOE_DUMP_LP") or None,
     "EVENMOE_DUMP_LP_N": lambda: int(os.getenv("EVENMOE_DUMP_LP_N", "120")),
     "EVENMOE_DUMP_LP_SKIP": lambda: int(os.getenv("EVENMOE_DUMP_LP_SKIP", "0")),

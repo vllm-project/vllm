@@ -199,6 +199,27 @@ def test_current_stage_under_dp_ignores_this_ranks_own_decode_shape(monkeypatch)
     assert evenmoe_runtime._current_stage() == "decode"
 
 
+def test_current_stage_reads_the_reduced_flag_without_a_descriptor(monkeypatch):
+    """The V2 runner captures FULL graphs with no batch descriptor. A uniform
+    decode graph is replayed only on steps every DP rank decodes, and it has to
+    be captured with the decode routing it will replay."""
+    import vllm.distributed.eplb.evenmoe_runtime as evenmoe_runtime
+
+    class _Ctx:
+        batch_descriptor = None
+        uniform_decode_across_dp = True
+        dp_metadata = object()
+
+    monkeypatch.setattr(
+        "vllm.forward_context.is_forward_context_available", lambda: True
+    )
+    monkeypatch.setattr("vllm.forward_context.get_forward_context", lambda: _Ctx())
+    assert evenmoe_runtime._current_stage() == "decode"
+
+    _Ctx.uniform_decode_across_dp = False
+    assert evenmoe_runtime._current_stage() is None
+
+
 def test_dp_token_counts_reads_the_tensor_that_actually_exists():
     """The cross-rank token count is the input that makes every rank agree on
     whether a batch is worth refreshing for, so reading it has to actually
@@ -445,6 +466,166 @@ def test_placement_commit_refreshes_policy_state():
     )
     shares, ids = rt.resolve_routing(logical, torch.rand(NUM_TOKENS, TOPK), state, None)
     assert (shares is None) != (ids is None)
+
+
+def test_cached_local_candidates_are_rewritten_in_place_on_commit():
+    """The collapsed candidates are cached per layer, and a decode graph captured
+    after the cache was filled holds their addresses. A commit must write the
+    new placement into that storage rather than drop it, or every replay keeps
+    reading tensors built for the placement the graph was captured with."""
+    from evenmoe.adapters.vllm import collapse_candidates_to_local
+
+    rt = _runtime("static")
+    assert rt.requires_rank_dispatch_map
+    state = _layer_state(rt)
+    before = rt._snapshot(state, 0)
+    cached = (
+        before.logical_to_physical_candidates,
+        before.logical_to_physical_count,
+    )
+    old_candidates = cached[0].clone()
+
+    # Move logical expert 0's only rank-0 copy to rank 3, as a rearrangement
+    # would, and commit the new maps in place the way vLLM does.
+    rt.physical_to_logical_map[0, 0] = 7
+    rt.physical_to_logical_map[0, NUM_PHYSICAL - 1] = 0
+    new_log2phy, new_counts = compute_logical_maps(
+        rt.physical_to_logical_map, NUM_LOGICAL
+    )
+    rt._logical_to_physical_map.copy_(new_log2phy)
+    rt._logical_replica_count.copy_(new_counts)
+    rt.on_placement_committed()
+
+    after = rt._snapshot(state, 0)
+    assert after.logical_to_physical_candidates.data_ptr() == cached[0].data_ptr()
+    assert after.logical_to_physical_count.data_ptr() == cached[1].data_ptr()
+    expected_candidates, expected_counts = collapse_candidates_to_local(
+        rt._logical_to_physical_map[0][:, : rt._max_replicas],
+        rt._logical_replica_count[0],
+        ep_rank=0,
+        num_local_physical_experts=NUM_PHYSICAL // EP_SIZE,
+    )
+    assert torch.equal(after.logical_to_physical_candidates, expected_candidates)
+    assert torch.equal(after.logical_to_physical_count, expected_counts)
+    assert not torch.equal(after.logical_to_physical_candidates, old_candidates)
+
+
+def test_an_ultraep_refresh_rewrites_cached_local_candidates_in_place(monkeypatch):
+    """An UltraEP refresh commits one layer outside the rearrangement path. A
+    decode graph captured after the cache was filled holds its addresses, so the
+    refresh must rewrite the cache in place too, not drop it."""
+    from evenmoe.adapters.vllm import collapse_candidates_to_local
+
+    rt = _runtime("static")
+    state = _layer_state(rt)
+    rt._snapshot(state, 0)
+    _, cached_candidates, cached_counts = rt._collapsed_candidates[0]
+    addresses = (cached_candidates.data_ptr(), cached_counts.data_ptr())
+
+    # Stage a solved plan for layer 0 the way the lagged refresh does, and land
+    # it without moving any weight.
+    width = rt._logical_to_physical_map.shape[-1]
+    rt._ultraep_logical_to_physical = torch.full(
+        (NUM_LAYERS, NUM_LOGICAL, width), -1, dtype=torch.int64
+    )
+    rt._ultraep_replica_counts = torch.zeros(NUM_LAYERS, NUM_LOGICAL, dtype=torch.int64)
+    rt._ultraep_rank_quota_prefix = torch.zeros(NUM_LAYERS, NUM_LOGICAL, EP_SIZE)
+    live = rt.physical_to_logical_map[0].clone()
+
+    class _Event:
+        def synchronize(self):
+            pass
+
+    rt._ultraep_pending[0] = (
+        live,
+        rt._logical_to_physical_map[0].clone(),
+        rt._logical_replica_count[0].clone(),
+        torch.zeros(NUM_LOGICAL, EP_SIZE),
+        torch.stack((live, live)),
+        _Event(),
+    )
+    monkeypatch.setattr(rt, "_timed_commit", lambda *args: None)
+    rt._ultraep_apply_pending(0)
+
+    _, after_candidates, after_counts = rt._collapsed_candidates[0]
+    assert (after_candidates.data_ptr(), after_counts.data_ptr()) == addresses
+    expected_candidates, expected_counts = collapse_candidates_to_local(
+        rt._logical_to_physical_map[0][:, : rt._max_replicas],
+        rt._logical_replica_count[0],
+        ep_rank=0,
+        num_local_physical_experts=NUM_PHYSICAL // EP_SIZE,
+    )
+    assert torch.equal(after_candidates, expected_candidates)
+    assert torch.equal(after_counts, expected_counts)
+
+
+def test_the_nearest_replica_table_is_rewritten_in_place_on_commit():
+    """A decode graph captured with replica routing reads this table by address.
+    Allocating a new one on each commit freed the storage the graph was
+    captured against, so the first replay after a real rearrangement read
+    freed memory."""
+    from evenmoe.adapters.vllm import nearest_replica_table
+
+    rt = _runtime("static")
+    table = rt._default_replicas
+    assert table is not None
+    old_table = table.clone()
+
+    rt.physical_to_logical_map[0, 0] = 7
+    rt.physical_to_logical_map[0, NUM_PHYSICAL - 1] = 0
+    new_log2phy, new_counts = compute_logical_maps(
+        rt.physical_to_logical_map, NUM_LOGICAL
+    )
+    rt._logical_to_physical_map.copy_(new_log2phy)
+    rt._logical_replica_count.copy_(new_counts)
+    rt.on_placement_committed()
+
+    assert rt._default_replicas.data_ptr() == table.data_ptr()
+    expected = nearest_replica_table(
+        rt._logical_to_physical_map[0],
+        rt._logical_replica_count[0],
+        ep_rank=0,
+        num_local_physical_experts=NUM_PHYSICAL // EP_SIZE,
+        ep_size=EP_SIZE,
+    )
+    assert torch.equal(rt._default_replicas[0], expected.to(table.dtype))
+    assert not torch.equal(rt._default_replicas, old_table)
+
+
+def test_fresh_counts_do_not_wait_for_the_lagged_count(monkeypatch):
+    """The readiness flag guards the previous step's count, which fresh counts
+    never read. Waiting on it left every rank routing natively until its own
+    first real step: decode graphs captured before then never contained the
+    policy, and the first rank to serve a request issued the per-layer count
+    collective while its idle DP peers did not."""
+    from vllm.distributed import parallel_state
+    from vllm.distributed.eplb import evenmoe_runtime
+
+    class _Issued(Exception):
+        pass
+
+    class _Group:
+        def all_reduce(self, tensor):
+            raise _Issued
+
+    monkeypatch.setattr(parallel_state, "get_ep_group", lambda: _Group())
+    # The count kernel is Triton; these tensors live on the CPU.
+    monkeypatch.setattr(evenmoe_runtime, "_count_logical_into", lambda ids, out: None)
+    torch.manual_seed(0)
+    logical = torch.randint(0, NUM_LOGICAL, (NUM_TOKENS, TOPK), dtype=torch.int64)
+    weights = torch.rand(NUM_TOKENS, TOPK)
+
+    monkeypatch.setenv("EVENMOE_FRESH_COUNTS", "1")
+    rt = _runtime("lplb")
+    assert rt.consumes_global_logical_count and not rt._logical_count_ready
+    with pytest.raises(_Issued):
+        rt.resolve_routing(logical, weights, _layer_state(rt), None)
+
+    # The lagged count still waits: before the first finalize there is
+    # nothing to read, and no collective is issued.
+    monkeypatch.setenv("EVENMOE_FRESH_COUNTS", "0")
+    rt = _runtime("lplb")
+    rt.resolve_routing(logical, weights, _layer_state(rt), None)
 
 
 def test_capabilities_gate_the_work_the_framework_does():

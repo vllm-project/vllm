@@ -35,6 +35,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -113,21 +114,23 @@ def _current_stage() -> str | None:
     if not is_forward_context_available():
         return None
     ctx = get_forward_context()
+    # `uniform_decode_across_dp` is vLLM's own cross-rank reduction of exactly
+    # the predicate below (`coordinate_batch_across_dp` in the V1 runner,
+    # `DPSyncState.uniform_decode` in V2): it is True only when *every* DP rank
+    # is decoding this step. The descriptor describes this rank alone, and
+    # under DP that is not the same question -- a rank with no requests runs a
+    # dummy decode batch while its peers prefill, so reading the descriptor
+    # makes a rank answer "decode" on a step its peers are treating as
+    # prefill. Any caller gating a collective on the result would then split
+    # the EP group. Prefer the reduced answer whenever the framework supplies
+    # one; fall back to the local predicate only where there is no DP peer that
+    # could disagree. Checked before the descriptor because the V2 runner
+    # captures FULL graphs without one.
+    if getattr(ctx, "uniform_decode_across_dp", False):
+        return "decode"
     descriptor = getattr(ctx, "batch_descriptor", None)
     if descriptor is None:
         return None
-    # `uniform_decode_across_dp` is vLLM's own cross-rank reduction of exactly
-    # the predicate below (see `coordinate_batch_across_dp`): it is True only
-    # when *every* DP rank is decoding this step. The descriptor describes this
-    # rank alone, and under DP that is not the same question -- a rank with no
-    # requests runs a dummy decode batch while its peers prefill, so reading the
-    # descriptor makes a rank answer "decode" on a step its peers are treating
-    # as prefill. Any caller gating a collective on the result would then split
-    # the EP group. Prefer the reduced answer whenever the framework supplies
-    # one; fall back to the local predicate only where there is no DP peer that
-    # could disagree.
-    if getattr(ctx, "uniform_decode_across_dp", False):
-        return "decode"
     if getattr(ctx, "dp_metadata", None) is not None:
         # Under DP the reduced flag above is the only admissible answer. It is
         # False here, so at least one rank is not decoding and every rank has
@@ -178,6 +181,46 @@ def _dp_token_counts() -> torch.Tensor | None:
     if dp_metadata is None:
         return None
     return getattr(dp_metadata, "num_tokens_across_dp_cpu", None)
+
+
+@triton.jit
+def _count_logical_rows_kernel(
+    ids_ptr,
+    out_ptr,
+    n,
+    NUM_LOGICAL: tl.constexpr,
+    L_PAD: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # One program: the histogram stays in registers and the row is written
+    # whole, so the destination needs no zero-fill and no atomics.
+    acc = tl.zeros([L_PAD], dtype=tl.int32)
+    for start in range(0, n, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        ids = tl.load(ids_ptr + offs, mask=offs < n, other=-1)
+        valid = (offs < n) & (ids >= 0) & (ids < NUM_LOGICAL)
+        acc += tl.histogram(tl.where(valid, ids, 0).to(tl.int32), L_PAD, mask=valid)
+    ls = tl.arange(0, L_PAD)
+    tl.store(out_ptr + ls, acc.to(tl.float32), mask=ls < NUM_LOGICAL)
+
+
+def _count_logical_into(topk_ids: torch.Tensor, out: torch.Tensor) -> None:
+    """Write the per-logical-expert count of ``topk_ids`` into ``out`` (float32).
+
+    Same result as EvenMoE's ``count_logical_experts`` (valid ids only, -1 padding
+    ignored), as a single launch into a stable row.
+    """
+    flat = topk_ids.reshape(-1)
+    num_logical = out.numel()
+    _count_logical_rows_kernel[(1,)](
+        flat,
+        out,
+        flat.numel(),
+        NUM_LOGICAL=num_logical,
+        L_PAD=triton.next_power_of_2(num_logical),
+        BLOCK=1024,
+        num_warps=4,
+    )
 
 
 class EvenMoeRoutingRuntime:
@@ -370,6 +413,15 @@ class EvenMoeRoutingRuntime:
         # cannot be attributed to the algorithm without checking this. Read once:
         # replica_shares runs per layer per forward.
         self._fresh_counts = envs.EVENMOE_FRESH_COUNTS
+        # Per-layer `collapse_candidates_to_local` result. It depends on the
+        # placement alone, yet was rebuilt on every forward: 14 small kernels
+        # per layer inside the captured decode graph (~1.7 ms/step on DSV3
+        # EP8 bs1). Filled outside capture. A graph captured afterwards reads
+        # these tensors by address, so a committed placement rewrites them in
+        # place (`_refresh_collapsed_candidates`) instead of dropping them.
+        self._collapsed_candidates: dict[
+            int, tuple[EplbLayerState, torch.Tensor, torch.Tensor]
+        ] = {}
 
         # Diagnostic capture of the LP's inputs and output. Off unless a
         # directory is named; bounded so a long run cannot fill the disk.
@@ -654,12 +706,26 @@ class EvenMoeRoutingRuntime:
         # than deleted: it is what a future rank-dispatch-map policy would need,
         # and removing it now would be removing untested surface, not dead code.
         if self.requires_rank_dispatch_map:
-            candidates, counts = collapse_candidates_to_local(
-                candidates,
-                counts,
-                ep_rank=self.ep_rank,
-                num_local_physical_experts=(self.num_physical_experts // self.ep_size),
-            )
+            cached = self._collapsed_candidates.get(layer_id)
+            if cached is not None:
+                _, candidates, counts = cached
+            else:
+                candidates, counts = collapse_candidates_to_local(
+                    candidates,
+                    counts,
+                    ep_rank=self.ep_rank,
+                    num_local_physical_experts=(
+                        self.num_physical_experts // self.ep_size
+                    ),
+                )
+                # Only an eager build is cached: one made under capture lives
+                # in the graph pool and is recomputed by every replay anyway.
+                if not torch.cuda.is_current_stream_capturing():
+                    self._collapsed_candidates[layer_id] = (
+                        layer_state,
+                        candidates,
+                        counts,
+                    )
 
         defaults = self._default_replicas
         quota = self._ultraep_rank_quota_prefix
@@ -713,7 +779,7 @@ class EvenMoeRoutingRuntime:
 
         from evenmoe.adapters.vllm import nearest_replica_table
 
-        self._default_replicas = torch.stack(
+        defaults = torch.stack(
             [
                 nearest_replica_table(
                     self._logical_to_physical_map[layer],
@@ -731,6 +797,18 @@ class EvenMoeRoutingRuntime:
                 for layer in range(self._logical_to_physical_map.shape[0])
             ]
         )
+        # Rewrite the table in place: a CUDA graph captured against it keeps its
+        # address, and a fresh allocation on each commit leaves every replay
+        # reading the freed one.
+        current = getattr(self, "_default_replicas", None)
+        if (
+            current is not None
+            and current.shape == defaults.shape
+            and current.dtype == defaults.dtype
+        ):
+            current.copy_(defaults)
+        else:
+            self._default_replicas = defaults
 
         if not self.dispatch_fixed_by_placement:
             self._fixed_map = None
@@ -781,6 +859,7 @@ class EvenMoeRoutingRuntime:
         """
         self._logical_to_physical_map = logical_to_physical_map
         self._logical_replica_count = logical_replica_count
+        self._collapsed_candidates.clear()
         # Does this placement give any expert a second copy? If not, every
         # replica policy -- static, dynamic, dynamic_random, lplb alike -- can
         # only return the identity, and consulting one is pure cost.
@@ -849,6 +928,39 @@ class EvenMoeRoutingRuntime:
                 )
             )
 
+    def _refresh_collapsed_candidates(self, layer_ids: list[int] | None = None) -> None:
+        """Rewrite cached ``collapse_candidates_to_local`` results in place.
+
+        A CUDA graph captured after the cache was filled reads these tensors by
+        address. Dropping them on a placement change would leave every replay
+        routing by the old placement through memory the allocator may have
+        reused. vLLM commits a placement with in-place copies into the maps each
+        layer state views, so recomputing from them into the same storage lets
+        captured graphs follow the new placement. ``layer_ids`` limits the
+        rewrite to those layers; None rewrites every cached layer.
+        """
+        if not self._collapsed_candidates:
+            return
+        from evenmoe.adapters.vllm import collapse_candidates_to_local
+
+        if layer_ids is None:
+            layer_ids = list(self._collapsed_candidates)
+        for layer_id in layer_ids:
+            cached = self._collapsed_candidates.get(layer_id)
+            if cached is None:
+                continue
+            layer_state, cached_candidates, cached_counts = cached
+            assert layer_state.logical_to_physical_map is not None
+            assert layer_state.logical_replica_count is not None
+            candidates, counts = collapse_candidates_to_local(
+                layer_state.logical_to_physical_map[:, : self._max_replicas],
+                layer_state.logical_replica_count,
+                ep_rank=self.ep_rank,
+                num_local_physical_experts=self.num_physical_experts // self.ep_size,
+            )
+            cached_candidates.copy_(candidates)
+            cached_counts.copy_(counts)
+
     def on_placement_committed(
         self, changed_layer_ids: list[int] | None = None
     ) -> None:
@@ -876,6 +988,7 @@ class EvenMoeRoutingRuntime:
         # replicas exist to spread lands on one of them.
 
         self._rebuild_default_replicas()
+        self._refresh_collapsed_candidates()
 
         if not self.requires_placement_state:
             return
@@ -1103,6 +1216,7 @@ class EvenMoeRoutingRuntime:
         # weight move below makes memory match it. Only from here is it sound
         # for _snapshot to route through them.
         self._ultraep_committed_layers.add(layer_id)
+        self._refresh_collapsed_candidates([layer_id])
 
         self._timed_commit(layer_id, placement_change[0], placement_change[1])
 
@@ -1269,6 +1383,7 @@ class EvenMoeRoutingRuntime:
         self._ultraep_replica_counts[layer_id].copy_(counts)
         self._ultraep_rank_quota_prefix[layer_id].copy_(quota)
         self._ultraep_committed_layers.add(layer_id)
+        self._refresh_collapsed_candidates([layer_id])
         self._timed_commit(layer_id, old_np, new_np)
 
     def _replica_changes(self, layer_id: int, old_np: Any, new_np: Any) -> list | None:
@@ -1547,7 +1662,8 @@ class EvenMoeRoutingRuntime:
             to_routing_request,
             to_vllm_shared_expert_rank,
         )
-        from evenmoe.kernels.ops.counting import count_logical_experts
+
+        from vllm.distributed.parallel_state import get_ep_group
 
         self._last_physical_ids = None
         self._last_shared_expert_rank = None
@@ -1570,8 +1686,8 @@ class EvenMoeRoutingRuntime:
         # warm-up where the design calls for two, leaving one step of every run
         # solving against an all-zero load.
         if self._logical_count_local is not None and not torch._dynamo.is_compiling():
-            local = count_logical_experts(topk_ids, self.num_logical_experts)
-            self._logical_count_local[layer_id].copy_(local)
+            # One launch writes the row in place: no zero-fill, no copy.
+            _count_logical_into(topk_ids, self._logical_count_local[layer_id])
         # A placement with no redundancy leaves a replica policy nothing to
         # decide: every logical expert has exactly one physical copy, so the
         # only answer any of them can give is the one the framework's own
@@ -1593,7 +1709,17 @@ class EvenMoeRoutingRuntime:
         # policy on this readiness flag disabled the ones that never asked for
         # a count: their buffers are not allocated, so the flag never flips and
         # they returned None for the lifetime of the run.
-        if self.consumes_global_logical_count and not self._logical_count_ready:
+        #
+        # Fresh counts are gathered inside this forward, so they have nothing to
+        # wait for. Gating them on this flag left every rank routing natively
+        # until its own first real step: CUDA graphs captured before then never
+        # contained the policy, and the rank that served the first request issued
+        # the per-layer count collective while its idle DP peers did not.
+        if (
+            self.consumes_global_logical_count
+            and not self._logical_count_ready
+            and not self._fresh_counts
+        ):
             return None
 
         if self._ultraep_expert_weights is not None:
@@ -1603,15 +1729,21 @@ class EvenMoeRoutingRuntime:
         # slice has a fixed GPU address, so it is safe to use inside a
         # captured CUDA graph: on replay the LP solve reads whatever value
         # finalize_step_counts deposited before the graph was launched.
-        global_count = (
-            None
-            if self._fresh_counts
-            else (
+        # With fresh counts, reduce the row just written above rather than
+        # letting EvenMoE count the same TopK a second time and reduce that.
+        if self._fresh_counts:
+            global_count = (
+                get_ep_group().all_reduce(self._logical_count_local[layer_id])
+                if self._logical_count_local is not None
+                and not torch._dynamo.is_compiling()
+                else None
+            )
+        else:
+            global_count = (
                 self._logical_count_global[layer_id]
                 if self._logical_count_global is not None
                 else None
             )
-        )
 
         if self._time_l2:
             torch.accelerator.synchronize()

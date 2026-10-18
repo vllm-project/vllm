@@ -54,7 +54,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_all2all=use_all2all,
         )
         # Match the group name exactly so ETP does not enable TP-only backends.
-        if unique_name.split(":")[0] != "tp":
+        group_kind = unique_name.split(":")[0]
+        if group_kind == "ep" and envs.EVENMOE_EP_CUSTOM_ALLREDUCE:
+            # EvenMoE's per-layer count all-reduce is the only EP all-reduce on
+            # the decode path (dispatch/combine use all2all), and it is tiny.
+            from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
+
+            use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+            use_torch_symm_mem = False
+            use_flashinfer_allreduce = False
+            use_flashinfer_pcie_ipc_allreduce = False
+            use_aiter_allreduce = False
+        elif group_kind != "tp":
             # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
             use_torch_symm_mem = False

@@ -2064,6 +2064,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
+                uniform_decode_across_dp=(
+                    dp_sync_state.uniform_decode
+                    if dp_sync_state is not None
+                    else uniform_tok_count == self.decode_query_len
+                ),
             ):
                 self.kv_connector.pre_forward(scheduler_output, input_batch)
                 if ubatch_state is not None:

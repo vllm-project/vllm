@@ -193,7 +193,11 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 "resolved physical ids must match the TopK shape: "
                 f"{tuple(physical_ids.shape)} vs {tuple(topk_ids.shape)}"
             )
-            physical_ids = physical_ids.contiguous().to(torch.int32)
+            # The kernel widens what it loads to int64, so either id width is
+            # read as is; casting here was one more launch per layer.
+            physical_ids = physical_ids.contiguous()
+            if physical_ids.dtype not in (torch.int32, torch.int64):
+                physical_ids = physical_ids.to(torch.int32)
             logger.info_once(
                 "EvenMoE direct-dispatch routing active: the policy resolves "
                 "replicas itself; load recording stays in this kernel"

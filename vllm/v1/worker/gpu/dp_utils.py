@@ -40,6 +40,10 @@ class DPSyncState:
     # Whether every rank's scheduler found that none of its requests can use this
     # step's drafts, so all ranks skip drafting together.
     skip_drafts: bool = False
+    # Whether every rank runs a uniform decode. Anything that gates a collective
+    # on "is this a decode step" must read this, not its own batch: a rank with
+    # no requests runs a dummy decode batch while its peers prefill.
+    uniform_decode: bool = False
 
 
 def sync_cudagraph_and_dp_padding(
@@ -65,7 +69,7 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(8, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
@@ -73,6 +77,7 @@ def sync_cudagraph_and_dp_padding(
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
     tensor[6][dp_rank] = int(allow_skip_drafts)
+    tensor[7][dp_rank] = int(uniform_decode)
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
@@ -86,6 +91,7 @@ def sync_cudagraph_and_dp_padding(
     num_reqs_across_dp = tensor[5]
     allow_skip_drafts_across_dp = tensor[6]
     skip_drafts = bool(torch.all(allow_skip_drafts_across_dp == 1))
+    all_uniform_decode = bool(torch.all(tensor[7] == 1))
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -151,6 +157,7 @@ def sync_cudagraph_and_dp_padding(
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=int(num_reqs_across_dp.max()),
                 skip_drafts=skip_drafts,
+                uniform_decode=all_uniform_decode,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min()))
@@ -170,6 +177,7 @@ def sync_cudagraph_and_dp_padding(
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
                 skip_drafts=skip_drafts,
+                uniform_decode=all_uniform_decode,
             ),
         )
 
@@ -205,6 +213,7 @@ def sync_cudagraph_and_dp_padding(
         eager=False,
         num_reqs=int(num_reqs_across_dp.max()),
         skip_drafts=skip_drafts,
+        uniform_decode=all_uniform_decode,
     )
 
 
@@ -252,7 +261,8 @@ def dispatch_cg_and_sync_dp(
         allow_ubatching: Whether this rank's batch may be split into
             microbatches. Agreed across ranks before it takes effect.
         uniform_decode: Whether this rank's batch is a uniform decode, used
-            to pick the microbatching split.
+            to pick the microbatching split. Agreed across ranks (all must be
+            decoding) into `DPSyncState.uniform_decode`.
         allow_skip_drafts: Whether this rank allows skipping drafts, because
             none of its requests can use this step's drafts. Agreed across ranks
             (all must allow it) into `DPSyncState.skip_drafts`.
