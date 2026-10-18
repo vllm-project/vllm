@@ -12,6 +12,7 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+import regex as re
 from openai.types.responses import (
     CustomTool,
     FunctionTool,
@@ -1150,6 +1151,14 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+# JSON number grammar (RFC 8259): int() and float() also accept leading
+# zeros, underscores and a leading '+', none of which are valid JSON numbers.
+# Coercing those spellings loses information when the schema also admits a
+# string ("0017" -> 17), so only the canonical forms may coerce (#62252).
+_JSON_INTEGER_RE = re.compile(r"-?(0|[1-9][0-9]*)$")
+_JSON_NUMBER_RE = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$")
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1192,11 +1201,16 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type == "string":
             return value
         if candidate_type == "integer":
-            try:
+            # JSON integer literals only: int() also accepts leading zeros,
+            # underscores and a leading '+', which would silently rewrite a
+            # string value the schema also admits (#62252).
+            if _JSON_INTEGER_RE.fullmatch(value.strip()):
                 return int(value)
-            except (ValueError, TypeError):
-                continue
+            continue
         if candidate_type == "number":
+            # Same JSON grammar restriction as integer above.
+            if not _JSON_NUMBER_RE.fullmatch(value.strip()):
+                continue
             try:
                 val = float(value)
             except (ValueError, TypeError):

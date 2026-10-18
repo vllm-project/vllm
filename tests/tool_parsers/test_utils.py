@@ -87,6 +87,20 @@ class TestCoerceToSchemaType:
         def test_long_alias(self):
             assert coerce_to_schema_type("100", "long") == 100
 
+        def test_non_canonical_integer_spellings_stay_strings(self):
+            # Leading zeros, underscores and a leading '+' are not valid JSON
+            # numbers; coercing them with int() would silently rewrite a value
+            # the schema also admits as a string (#62252).
+            assert coerce_to_schema_type("0017", ["string", "integer"]) == "0017"
+            assert coerce_to_schema_type("1_000", ["string", "integer"]) == "1_000"
+            assert coerce_to_schema_type("+17", ["string", "integer"]) == "+17"
+
+        def test_non_canonical_integer_not_coerced_even_without_string(self):
+            assert coerce_to_schema_type("0017", "integer") == "0017"
+
+        def test_canonical_integers_still_coerce_in_mixed_schema(self):
+            assert coerce_to_schema_type("17", ["string", "integer"]) == 17
+
     class TestNumberType:
         def test_number_type(self):
             assert coerce_to_schema_type("3.14", "number") == 3.14
@@ -100,6 +114,10 @@ class TestCoerceToSchemaType:
         def test_whole_float_returns_int(self):
             assert coerce_to_schema_type("5.0", "number") == 5
             assert isinstance(coerce_to_schema_type("5.0", "number"), int)
+
+        def test_non_canonical_number_spellings_stay_strings(self):
+            assert coerce_to_schema_type("0017.5", ["string", "number"]) == "0017.5"
+            assert coerce_to_schema_type("1_000.5", ["string", "number"]) == "1_000.5"
 
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
