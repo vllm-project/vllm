@@ -440,6 +440,7 @@ class MoRIIOWriter:
         layer_cache = self.worker.kv_caches[task.layer_name]
         if remote_engine_id is None:
             remote_engine_id = task.dst_engine_id
+        self.worker._check_peer_block_size(task.layer_name, remote_moriio_meta)
         target_rank = -1 if target is None else target.tp_rank
         key = (task.layer_name, *_get_write_geometry_key(layer_cache), target_rank)
         offsets = request_info.transfer_offsets.get(key)

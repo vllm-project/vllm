@@ -265,10 +265,13 @@ class Case:
     hma_off: bool = False
     prefill_tp: int = 1
     decode_tp: int = 1
+    # Extra arguments for every server of the case.
+    server_args: tuple[str, ...] = ()
 
     @property
     def extra_args(self) -> tuple[str, ...]:
-        return ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        hma = ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        return hma + self.server_args
 
     @property
     def heterogeneous_tp(self) -> bool:
@@ -325,7 +328,17 @@ HETEROGENEOUS_TP_CASES = [
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, prefill_tp=2),
     Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, prefill_tp=2),
     Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
-    Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, prefill_tp=2),
+    # Hybrid models size attention blocks to the per-rank recurrent state, and
+    # an MLA page does not shrink with TP like KDA state does: pin one block
+    # size on both sides (TP2 alone picks 1024 tokens, TP1 1920).
+    Case(
+        "kimi_linear",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        prefill_tp=2,
+        server_args=("--block-size", "2048"),
+    ),
 ]
 
 

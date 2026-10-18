@@ -355,6 +355,9 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
         def _region_session_indices(self, layer_name):
             return [list(self.kv_caches).index(layer_name)]
 
+        def _check_peer_block_size(self, layer_name, remote_moriio_meta):
+            pass
+
         def _compute_block_transfer_offsets(
             self,
             layer_name,
@@ -423,6 +426,7 @@ def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
         kv_caches={"draft": torch.empty((8, 1, 4, 3))},
         layer_to_group={"draft": 2},
         _region_session_indices=lambda _: [5],
+        _check_peer_block_size=lambda layer_name, remote_moriio_meta: None,
         _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
     )
     writer = make_moriio_writer(worker)

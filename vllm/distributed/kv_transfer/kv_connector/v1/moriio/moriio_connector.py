@@ -2751,6 +2751,7 @@ class MoRIIOConnectorWorker:
                 name: layout.to_wire()
                 for name, layout in self.mamba_state_layouts.items()
             },
+            attention_block_sizes=self.attention_block_sizes,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
@@ -2779,7 +2780,12 @@ class MoRIIOConnectorWorker:
         """
         self.kv_head_layouts: dict[str, HeadLayout] = {}
         self.mamba_state_layouts: dict[str, MambaStateLayout] = {}
+        self.attention_block_sizes: dict[str, int] = {}
         for layer_name, kv_cache in kv_caches.items():
+            if not self._is_mamba_layer(layer_name):
+                self.attention_block_sizes[layer_name] = (
+                    self._get_layer_transfer_geometry(layer_name).block_size
+                )
             if self._is_mamba_layer(layer_name):
                 assert self._conv_decomp is not None
                 conv, ssm = kda_conv_ssm(
@@ -3635,6 +3641,21 @@ class MoRIIOConnectorWorker:
             local = [x + local_off for x in local]
             remote = [x + remote_off for x in remote]
         return local, remote, sizes
+
+    def _check_peer_block_size(
+        self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata
+    ) -> None:
+        """Blocks are copied as units, so both sides must hold as many tokens."""
+        remote = remote_moriio_meta.attention_block_sizes.get(layer_name)
+        local = self.attention_block_sizes.get(layer_name)
+        if remote is not None and local is not None and remote != local:
+            raise MoRIIOError(
+                f"Layer {layer_name} holds {local} tokens per block here and "
+                f"{remote} on the peer. Hybrid models size attention blocks to "
+                "the per-rank recurrent state, so MLA models with different "
+                "prefill and decode TP sizes get different block sizes; pass the "
+                "same --block-size to both instances"
+            )
 
     def _block_copy_matches_peer(
         self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata

@@ -143,6 +143,9 @@ class MoRIIOAgentMetadata(
     # different TP size can address head and state slices of these caches.
     kv_head_layouts: dict[str, list[int]] = {}
     mamba_state_layouts: dict[str, list[int]] = {}
+    # Tokens per block of each attention layer. Hybrid models size attention
+    # blocks to the recurrent-state page, which depends on the TP size.
+    attention_block_sizes: dict[str, int] = {}
 
 
 class RoleManager:

@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     MoRIIOAgentMetadata,
+    MoRIIOError,
     RemoteAllocInfo,
     WriteTask,
 )
@@ -268,6 +269,7 @@ def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
             name: layout.to_wire()
             for name, layout in consumer.mamba_state_layouts.items()
         },
+        attention_block_sizes=consumer.attention_block_sizes,
     )
     # The handshake carries the metadata as msgpack.
     metadata = msgspec.msgpack.decode(
@@ -438,3 +440,39 @@ def test_write_lands_every_shard_byte_exact(
                 received,
             )
             assert torch.equal(received, expected), (layer.name, consumer.tp_rank)
+
+
+def test_write_refuses_peer_with_different_block_size(monkeypatch):
+    """Hybrid MLA models get TP-dependent attention block sizes; copying blocks
+    between them would misplace tokens, so the write must refuse."""
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["mla"]
+    state = _global_state(layers, heads)
+    consumers = [_build_rank("mla", 0, 1, KVCacheLayout.LBNHC, True, state, False)]
+    consumers[0].wrapper = _consumer_wrapper()
+    for layer in layers:
+        consumers[0].worker.attention_block_sizes[layer.name] = 2 * BLOCK_SIZE
+    producer = _build_rank("mla", 0, 2, KVCacheLayout.LBNHC, True, state, True)
+    _connect(producer, consumers, "decode")
+    info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]])
+    producer.wrapper.done_remote_allocate_req_dict["t"] = info
+    writer = make_moriio_writer(producer.worker)
+    with pytest.raises(MoRIIOError, match="same --block-size"):
+        writer._execute_write_task(
+            WriteTask(
+                request_id="req",
+                transfer_id="t",
+                dst_engine_id="decode",
+                local_block_ids=[PREFILL_BLOCKS["full"]],
+                remote_block_ids_hint=None,
+                layer_name=layers[0].name,
+                event=SimpleNamespace(synchronize=lambda: None),
+                remote_notify_port=NOTIFY_PORT,
+                remote_ip="decode",
+                remote_tp_size=1,
+                tp_mapping=producer.worker._write_tp_mapping(1),
+            )
+        )
