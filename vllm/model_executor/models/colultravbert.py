@@ -536,8 +536,6 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
                 prefix=maybe_prefix(prefix, "text_model"),
             )
 
-        # The projection loads from the package's Sentence Transformers
-        # `1_Dense` module.
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler = pooler_for_token_embed(pooler_config)
@@ -585,8 +583,6 @@ class ColUltraVBertForRetrieval(nn.Module, SupportsMultiModal, SupportsLateInter
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        # The pooler loads its projector from `1_Dense` when it is built, so
-        # the root checkpoint carries none of its parameters.
         projector = getattr(self.pooler.head, "projector", None)
         if isinstance(projector, nn.Module):
             loaded |= {
