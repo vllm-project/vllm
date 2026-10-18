@@ -693,6 +693,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_output = await context.call_tool()
             context.append_tool_output(tool_output)
 
+            # Stop once the client-declared builtin tool call budget is spent.
+            if (
+                context.request is not None
+                and context.request.max_tool_calls is not None
+                and sub_request + 1 >= context.request.max_tool_calls
+            ):
+                break
+
             # TODO: uncomment this and enable tool output streaming
             # yield context
 

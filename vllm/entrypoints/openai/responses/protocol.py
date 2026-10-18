@@ -240,7 +240,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     instructions: str | None = None
     max_output_tokens: int | None = None
-    max_tool_calls: int | None = None
+    max_tool_calls: int | None = Field(default=None, ge=0)
     metadata: Metadata | None = None
     model: str | None = None
     logit_bias: dict[str, float] | None = None
