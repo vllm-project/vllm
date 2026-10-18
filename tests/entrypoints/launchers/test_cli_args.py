@@ -98,6 +98,41 @@ def test_logging_config_cli_args(serve_parser):
     assert config.pylogging_config_file == "/tmp/flat.json"
 
 
+@pytest.mark.parametrize("source", ["dotted", "json", "yaml"])
+def test_request_body_log_level_overrides_env(
+    serve_parser, monkeypatch, tmp_path, source
+):
+    monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", "DEBUG")
+    if source == "dotted":
+        cli_args = ["--logging-config.request_body_log_level", "INFO"]
+    elif source == "json":
+        cli_args = ["--logging-config", '{"request_body_log_level":"INFO"}']
+    else:
+        config_file = tmp_path / "logging.yaml"
+        config_file.write_text("logging-config:\n  request_body_log_level: INFO\n")
+        cli_args = ["--config", str(config_file)]
+
+    args = serve_parser.parse_args(cli_args)
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.request_body_log_level == "INFO"
+
+
+@pytest.mark.parametrize("body_level", ["WARN", "FATAL", "INVALID"])
+@pytest.mark.parametrize("flat_flag", ["--log-level", "--log-config-file"])
+def test_request_body_env_survives_legacy_logging_overrides(
+    serve_parser, monkeypatch, body_level, flat_flag
+):
+    monkeypatch.setenv("VLLM_REQUEST_BODY_LOG_LEVEL", body_level)
+    if flat_flag == "--log-config-file":
+        with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
+            args = serve_parser.parse_args([flat_flag, "/tmp/logging.json"])
+    else:
+        args = serve_parser.parse_args([flat_flag, "INFO"])
+
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.request_body_log_level == body_level
+
+
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
