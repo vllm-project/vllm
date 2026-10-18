@@ -21,6 +21,10 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
+    dbo_switch_to_comm,
+    dbo_switch_to_compute,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm,
 )
 
 logger = init_logger(__name__)
@@ -224,7 +228,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
-    ) -> tuple[Callable, mk.ReceiverType]:
+    ) -> tuple[Callable, mk.ReceiverType] | mk.ReceiverType:
         if defer_input_quant:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not support defer_input_quant=True. "
@@ -269,6 +273,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         runtime_dispatch_capacity = self._get_runtime_dispatch_capacity()
         assert a1.size(0) <= runtime_dispatch_capacity
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
+        dbo_yield_and_switch_from_compute_to_comm()
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.dispatch(
             a1,
             dispatch_topk_ids,
@@ -279,20 +284,31 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
-            return_recv_hook=True,
+            return_recv_hook=not dbo_enabled(),
         )
         self.handles[a2a_idx] = handle
 
-        return (
-            hook,
-            lambda: self._receiver(
+        def receiver():
+            return self._receiver(
                 expert_x,
                 expert_num_tokens,
                 quant_config.a1_scale,
                 a1.dtype,
                 quant_config,
-            ),
-        )
+            )
+
+        if dbo_enabled():
+            dbo_switch_to_compute()
+
+            def receive_on_comm():
+                dbo_switch_to_comm()
+                if hook is not None:
+                    hook()
+                dbo_yield_and_switch_from_comm_to_compute()
+                return receiver()
+
+            return receive_on_comm
+        return hook, receiver
 
     def _receiver(
         self,
@@ -326,7 +342,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"{self.__class__.__name__} does not support defer_input_quant=True. "
                 "Please select an MoE kernel that accepts quantized inputs."
             )
-        hook, receiver = self.prepare_async(
+        result = self.prepare_async(
             a1,
             topk_weights,
             topk_ids,
@@ -335,8 +351,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             apply_router_weight_on_input,
             quant_config,
         )
-        hook()
-        return receiver()
+        if isinstance(result, tuple):
+            hook, receiver = result
+            hook()
+            return receiver()
+        return result()
 
     def _finalize(
         self,
@@ -347,13 +366,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate), (
             "Weight application and reduction happens in the combine kernel."
         )
 
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled() or do_async
+        do_recv_hook = do_async and not dbo_enabled()
         handle = self.handles[a2a_idx]
         assert handle is not None
 
@@ -365,6 +384,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        dbo_yield_and_switch_from_compute_to_comm()
         _, _, recv_hook = self.buffer.combine(
             fused_expert_output,
             combine_topk_ids,
@@ -376,6 +396,14 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
+        if dbo_enabled():
+            dbo_switch_to_compute()
+
+            def receive_on_comm():
+                dbo_switch_to_comm()
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            return receive_on_comm
         return recv_hook, lambda: None
 
     def finalize_async(
@@ -386,7 +414,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         return self._finalize(
             output,
             fused_expert_output,
