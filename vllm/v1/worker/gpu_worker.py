@@ -1729,7 +1729,9 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                self._abort_weight_update_session()
+                # Without a rollback the session stays open for a retry.
+                if self.weight_transfer_engine.rolls_back_failed_updates:
+                    self._abort_weight_update_session()
                 raise
             self._end_weight_update(refresh=True)
 

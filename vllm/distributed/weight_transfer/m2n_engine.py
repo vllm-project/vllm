@@ -218,6 +218,8 @@ class M2NWeightTransferEngine(
     local shards without materializing a full tensor.
     """
 
+    rolls_back_failed_updates = True
+
     init_info_cls = M2NWeightTransferInitInfo
     update_info_cls = M2NWeightTransferUpdateInfo
     # The destination plan is resolved against the model this engine was built
