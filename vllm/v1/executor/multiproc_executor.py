@@ -491,7 +491,7 @@ class MultiprocExecutor(Executor):
                             kv_connector_outputs.append(kv_output)
 
                 if kv_connector_outputs and kv_output_aggregator is not None:
-                    kv_output_aggregator.ft_merge_kv_connector_output_on_failed(
+                    kv_output_aggregator.ft_defer_kv_connector_outputs(
                         kv_connector_outputs
                     )
 

@@ -3,10 +3,20 @@
 
 import pytest
 
-from vllm.distributed.kv_events import BlockStored, KVEventAggregator
+from vllm.distributed.kv_events import (
+    BlockStored,
+    KVCacheEvent,
+    KVConnectorKVEvents,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+    LMCacheKVEvents,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
+    MooncakeStoreKVEvents,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -21,22 +31,34 @@ class DummyWorkerMeta(KVConnectorWorkerMetadata):
         return DummyWorkerMeta(self.tags | other.tags)
 
 
-def make_events(*token_ids: int) -> KVEventAggregator:
-    events = KVEventAggregator(num_workers=1)
-    events.add_events(
-        [
-            BlockStored(
-                block_hashes=[b"\xab" * 32],
-                parent_block_hash=None,
-                token_ids=list(token_ids),
-                block_size=4,
-                lora_id=None,
-                medium="GPU",
-                lora_name=None,
-            )
-        ]
+def _block_stored(*token_ids: int) -> BlockStored:
+    return BlockStored(
+        block_hashes=[b"\xab" * 32],
+        parent_block_hash=None,
+        token_ids=list(token_ids),
+        block_size=4,
+        lora_id=None,
+        medium="CPU",
+        lora_name=None,
     )
+
+
+def make_lmcache_events(*token_ids: int) -> LMCacheKVEvents:
+    events = LMCacheKVEvents(num_workers=1)
+    events.add_events([_block_stored(*token_ids)])
     return events
+
+
+def make_mooncake_events(*token_ids: int) -> MooncakeStoreKVEvents:
+    events = MooncakeStoreKVEvents(num_workers=1)
+    events.add_events([_block_stored(*token_ids)])
+    return events
+
+
+def lmcache_published(events: LMCacheKVEvents) -> list[KVCacheEvent]:
+    """Mirror LMCacheConnectorV1.take_events: aggregate, then collect."""
+    events.aggregate()
+    return events.get_all_events()
 
 
 class DummyModelRunnerOutput(ModelRunnerOutput):
@@ -48,7 +70,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         failed_recving: set[str] | None = None,
         expected_finished_count: int = 0,
         kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
-        kv_cache_events: KVEventAggregator | None = None,
+        kv_cache_events: KVConnectorKVEvents | None = None,
     ):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
@@ -166,8 +188,8 @@ def test_aggregate_workers_output_with_expected_finished_count():
     assert aggregator._send_remaining_count["req1"] == 2
 
 
-def test_merge_preserves_get_and_clear_fields():
-    """Merge must preserve get-and-clear fields and surface them later."""
+def test_replay_preserves_get_and_clear_fields():
+    """Salvaged outputs must be replayed and their fields surfaced later."""
     aggregator = KVOutputAggregator(expected_finished_count=4)
 
     # Failed step: worker 0's output is salvaged, worker 1 is lost.
@@ -177,17 +199,16 @@ def test_merge_preserves_get_and_clear_fields():
         failed_recving={"req3"},
         invalid_block_ids={7},
         kv_connector_worker_meta=DummyWorkerMeta({"salvaged"}),
-        kv_cache_events=make_events(1, 2, 3, 4),
+        kv_cache_events=make_lmcache_events(1, 2, 3, 4),
         expected_finished_count=2,
     )
-    aggregator.ft_merge_kv_connector_output_on_failed([salvaged, None])
-    assert aggregator._expected_finished_count == 2
+    aggregator.ft_defer_kv_connector_outputs([salvaged, None])
 
     # Recovered step: both workers succeed.
     output0 = DummyModelRunnerOutput(
         finished_recving={"req3"},
         kv_connector_worker_meta=DummyWorkerMeta({"recovered"}),
-        kv_cache_events=make_events(9, 10, 11, 12),
+        kv_cache_events=make_lmcache_events(9, 10, 11, 12),
     )
     output1 = DummyModelRunnerOutput(
         finished_sending={"req1"},
@@ -196,31 +217,33 @@ def test_merge_preserves_get_and_clear_fields():
     aggregated = aggregator.aggregate([output0, output1])
     kv = aggregated.kv_connector_output
 
+    assert kv.expected_finished_count == 2
     assert kv.finished_sending == {"req1"}
     assert kv.finished_recving == {"req2", "req3"}
     assert kv.failed_recving == {"req3"}
     assert kv.invalid_block_ids == {7}
     assert kv.kv_connector_worker_meta.tags == {"salvaged", "recovered"}
     assert kv.kv_cache_events is not None
+    # Salvaged events are dropped at salvage time; only the live worker's
+    # events survive.
     all_token_ids = sorted(
         tuple(e.token_ids) for e in kv.kv_cache_events.get_all_events()
     )
-    assert all_token_ids == [(1, 2, 3, 4), (9, 10, 11, 12)]
+    assert all_token_ids == [(9, 10, 11, 12)]
 
 
-def test_merge_seeds_pending_finished_recving():
-    """Pending finished_recving must be seeded before the failed_recving
-    intersection, or the request waits on WAITING_FOR_REMOTE_KVS forever."""
+def test_replay_completes_finished_recving_votes():
+    """Salvaged recv votes must complete via replay, or the request waits
+    on WAITING_FOR_REMOTE_KVS forever."""
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: req1's recv votes completed (2/2), flagged as failed.
-    aggregator.ft_merge_kv_connector_output_on_failed(
+    aggregator.ft_defer_kv_connector_outputs(
         [
             KVConnectorOutput(finished_recving={"req1"}),
             KVConnectorOutput(finished_recving={"req1"}, failed_recving={"req1"}),
         ]
     )
-    assert aggregator._pending_finished_recving == {"req1"}
 
     # Recovered step: nobody reports req1 anymore.
     aggregated = aggregator.aggregate(
@@ -231,23 +254,107 @@ def test_merge_seeds_pending_finished_recving():
     assert kv.failed_recving == {"req1"}
 
 
-def test_merge_kv_cache_events_do_not_raise_quorum():
-    """Pending events are extra votes only; quorum stays at current workers."""
+def test_salvaged_kv_cache_events_do_not_raise_quorum():
+    """Salvaged events are extra votes only; quorum stays at live workers."""
     aggregator = KVOutputAggregator(expected_finished_count=2)
 
     # Failed step: only worker 0 reported event E0.
-    aggregator.ft_merge_kv_connector_output_on_failed(
-        [KVConnectorOutput(kv_cache_events=make_events(1, 2, 3, 4)), None]
+    aggregator.ft_defer_kv_connector_outputs(
+        [KVConnectorOutput(kv_cache_events=make_lmcache_events(1, 2, 3, 4)), None]
     )
 
     # Recovered step: both workers report event E1.
-    output0 = DummyModelRunnerOutput(kv_cache_events=make_events(5, 6, 7, 8))
-    output1 = DummyModelRunnerOutput(kv_cache_events=make_events(5, 6, 7, 8))
+    output0 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
+    output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
     aggregated = aggregator.aggregate([output0, output1])
 
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert events.get_number_of_workers() == 2
-    common = events.get_common_events()
-    assert len(common) == 1
-    assert common[0].token_ids == [5, 6, 7, 8]
+    # Mirror the LMCache consumer: the live workers' event survives; the
+    # salvaged E0 vote was dropped and never enters the quorum.
+    assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
+
+
+def test_salvaged_votes_dropped_live_votes_unaffected_lmcache_exact_quorum():
+    """Failed rank's event votes arrive at the next step (LMCache).
+
+    The salvaged vote is dropped, so the surviving worker's vote for the
+    same block is published normally under LMCache's exact-match quorum
+    (count == num_workers): a dropped salvaged vote can never overshoot
+    the threshold and take a legitimate live event down with it.
+    """
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    # Failed step: worker 0's vote for block E is salvaged.
+    aggregator.ft_defer_kv_connector_outputs(
+        [KVConnectorOutput(kv_cache_events=make_lmcache_events(1, 2, 3, 4)), None]
+    )
+
+    # Recovered step: the surviving worker reports the same block E while
+    # the other live worker stays quiet.
+    output0 = DummyModelRunnerOutput()
+    output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(1, 2, 3, 4))
+    aggregated = aggregator.aggregate([output0, output1])
+
+    events = aggregated.kv_connector_output.kv_cache_events
+    assert events is not None
+    # Only the live vote is present; it meets the exact-match quorum (1 of
+    # 1 worker) and is published.
+    assert len(events.get_all_events()) == 1
+    assert [e.token_ids for e in lmcache_published(events)] == [[1, 2, 3, 4]]
+
+
+def test_salvaged_votes_dropped_live_votes_unaffected_mooncake_quorum():
+    """Failed rank's event votes arrive at the next step (MooncakeStore).
+
+    The salvaged vote is dropped; the surviving worker's vote is published
+    on its own under MooncakeStore's >= quorum.
+    """
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    # Failed step: worker 0's vote for block E is salvaged.
+    aggregator.ft_defer_kv_connector_outputs(
+        [KVConnectorOutput(kv_cache_events=make_mooncake_events(1, 2, 3, 4)), None]
+    )
+
+    # Recovered step: the surviving worker reports the same block E.
+    output0 = DummyModelRunnerOutput()
+    output1 = DummyModelRunnerOutput(kv_cache_events=make_mooncake_events(1, 2, 3, 4))
+    aggregated = aggregator.aggregate([output0, output1])
+
+    events = aggregated.kv_connector_output.kv_cache_events
+    assert events is not None
+    # Mirror the MooncakeStore consumer (take_events -> pop_common_events).
+    published = events.pop_common_events()
+    assert [e.token_ids for e in published] == [[1, 2, 3, 4]]
+
+
+def test_salvaged_event_votes_are_one_shot():
+    """Salvaged event votes are dropped at salvage time and never leak.
+
+    They cannot surface at a later step's quorum, even if the replay step
+    itself is quiet.
+    """
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    # Failed step: worker 0's vote for block E0 is salvaged.
+    aggregator.ft_defer_kv_connector_outputs(
+        [KVConnectorOutput(kv_cache_events=make_lmcache_events(1, 2, 3, 4)), None]
+    )
+
+    # Recovered step is quiet: no live events, salvaged votes discarded.
+    aggregated = aggregator.aggregate(
+        [DummyModelRunnerOutput(), DummyModelRunnerOutput()]
+    )
+    assert aggregated.kv_connector_output.kv_cache_events is None
+
+    # A later step reports a different event: the salvaged votes must not
+    # leak into this step's quorum.
+    output0 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
+    output1 = DummyModelRunnerOutput(kv_cache_events=make_lmcache_events(5, 6, 7, 8))
+    aggregated = aggregator.aggregate([output0, output1])
+
+    events = aggregated.kv_connector_output.kv_cache_events
+    assert events is not None
+    assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]

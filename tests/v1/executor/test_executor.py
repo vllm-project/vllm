@@ -271,12 +271,20 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
         future.result()
 
     if enable_ft:
-        # req1's recv votes are complete; surfaced at the next aggregate().
-        assert aggregator._pending_finished_recving == {"req1"}
-        assert aggregator._pending_invalid_block_ids == {7}
+        # Outputs from the failed and the surviving worker are salvaged and
+        # stashed for replay; the votes complete at the next aggregate().
+        assert len(aggregator._salvaged_outputs) == 2
+        aggregated = aggregator.aggregate(
+            [
+                ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+                ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+            ]
+        )
+        kv = aggregated.kv_connector_output
+        assert kv.finished_recving == {"req1"}
+        assert kv.invalid_block_ids == {7}
     else:
-        assert aggregator._recv_remaining_count == {}
-        assert aggregator._pending_invalid_block_ids == set()
+        assert aggregator._salvaged_outputs == []
 
 
 @pytest.mark.parametrize("non_block", [False, True])
