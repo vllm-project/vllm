@@ -112,6 +112,18 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
             # rather than during Python's extension-module finalization.
             torch.accelerator.synchronize()
             MoeAlltoAll._WORKSPACE_CACHE.clear()
+        if has_flashinfer_nvlink_two_sided():
+            from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
+            torch.accelerator.synchronize()
+            torch.distributed.barrier()
+            # Release cached tensor views before their memory owners while
+            # the DLPack deleters are still alive.
+            MnnvlMoe.moe_workspace_tensor = None
+            MnnvlMoe.moe_prepare_workspace_tensor = None
+            MnnvlMoe.moe_workspace = None
+            MnnvlMoe.moe_prepare_workspace = None
+            MnnvlMoe.moe_mapping = None
     except Exception:
         err_queue.put(f"[Rank {rank}]\n{traceback.format_exc()}")
         # Don't re-raise: the parent reads errors from err_queue.
