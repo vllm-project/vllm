@@ -150,12 +150,15 @@ GDN_BUILD_TEST_CASES = {
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
+    additional_config: dict | None = None,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    if additional_config is not None:
+        vllm_config.additional_config = additional_config
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -506,3 +509,58 @@ def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
     # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
     # tokens of the third prefill, whose states start at index 3.
     assert rows == [0, 1, 0, 5]
+
+
+@pytest.mark.parametrize(
+    ("query_lens", "max_query_len_setting", "expected"),
+    [
+        pytest.param([1, 28], None, True, id="short-prefill-default-limit"),
+        pytest.param([1, 32], 32, True, id="at-limit"),
+        pytest.param([1, 33], 32, False, id="above-limit"),
+        pytest.param([1, 28], 0, False, id="disabled"),
+        pytest.param([1, 1], None, False, id="decode-only"),
+    ],
+)
+def test_recurrent_prefill_selection(
+    query_lens: list[int], max_query_len_setting: int | None, expected: bool
+):
+    """Short prefills join the decodes in the recurrent kernel; the decision
+    reads only host lengths and never applies to decode-only batches."""
+    additional_config = (
+        None
+        if max_query_len_setting is None
+        else {"gdn_recurrent_prefill_max_query_len": max_query_len_setting}
+    )
+    builder = _create_gdn_builder(additional_config=additional_config)
+    is_prefilling = [False, query_lens[1] > 1]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, query_lens[1]], query_lens=query_lens),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool))
+    meta = builder.build(0, common)
+
+    assert meta.use_recurrent_prefill is expected
+    if expected:
+        # The recurrent launch reads the per-sequence initial-state mask.
+        assert meta.has_initial_state is not None
+        assert meta.has_initial_state.tolist() == [True, False]
+
+
+def test_recurrent_prefill_selection_with_spec_decode():
+    """With spec decodes, the reclassified one-token non-spec rows are short
+    prefills, so they also take the recurrent kernel."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=[65, 20], query_lens=[1, 3])
+    meta = _build(builder, batch, num_decode_draft_tokens=[-1, 2])
+
+    assert meta.num_prefills == 1
+    assert meta.num_spec_decodes == 1
+    assert meta.use_recurrent_prefill is True
+
+
+def test_recurrent_prefill_rejects_negative_limit():
+    with pytest.raises(ValueError, match="gdn_recurrent_prefill_max_query_len"):
+        _create_gdn_builder(
+            additional_config={"gdn_recurrent_prefill_max_query_len": -1}
+        )

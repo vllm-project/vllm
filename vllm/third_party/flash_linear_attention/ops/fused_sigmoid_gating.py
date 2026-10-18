@@ -18,6 +18,7 @@ from vllm.triton_utils import tl, triton
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "USE_INITIAL_STATE_MASK": lambda args: args["has_initial_state"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -37,6 +38,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     cu_seqlens,
     ssm_state_indices,
     num_accepted_tokens,
+    has_initial_state,
     scale,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
@@ -53,10 +55,12 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
+    STORE_STATE_PER_TOKEN: tl.constexpr,  # 2-D indices: one state slot per token
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    USE_INITIAL_STATE_MASK: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -117,7 +121,12 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         else:
             p_h0 = h0 + bos * HV * V * K
         p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
-        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        mask_h0 = mask_h
+        if USE_INITIAL_STATE_MASK:
+            # A new sequence starts from a zero state; its slot may hold
+            # a stale state of an earlier request.
+            mask_h0 = mask_h0 & (tl.load(has_initial_state + i_n) != 0)
+        b_h += tl.load(p_h0, mask=mask_h0, other=0).to(tl.float32)
 
     for i_t in range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
@@ -154,7 +163,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # keep the states for multi-query tokens
-        if INPLACE_FINAL_STATE:
+        if INPLACE_FINAL_STATE and STORE_STATE_PER_TOKEN:
             # Load state index and check for invalid entries
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
@@ -164,7 +173,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                 p_ht = ht + final_state_idx * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
-        else:
+        elif not INPLACE_FINAL_STATE:
             p_ht = ht + (bos + i_t) * stride_final_state_token
             p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
@@ -176,6 +185,16 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_v += HV * V
         p_b += HV
         p_a += HV
+
+    if INPLACE_FINAL_STATE and not STORE_STATE_PER_TOKEN:
+        # 1-D indices: one slot per sequence, written once after its last token.
+        final_state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(
+            tl.int64
+        )
+        if final_state_idx > 0:
+            p_ht = ht + final_state_idx * stride_final_state_token
+            p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -196,11 +215,22 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    has_initial_state: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    With ``inplace_final_state=True``, ``ssm_state_indices`` selects where the
+    state is stored. A 2-D ``[N, num_slots]`` tensor (speculative decoding)
+    stores the state of token ``t`` of sequence ``n`` in slot ``[n, t]``. A 1-D
+    ``[N]`` tensor stores only the state after the last token of sequence
+    ``n``, so sequences of any length (prefill chunks) are supported.
+
+    ``has_initial_state`` (``[N]`` bool, optional) makes sequence ``n`` start
+    from a zero state when ``has_initial_state[n]`` is False, instead of from
+    the state in its slot.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -255,6 +285,7 @@ def fused_sigmoid_gating_delta_rule_update(
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
+        has_initial_state=has_initial_state,
         scale=scale,
         N=N,
         T=T,
@@ -270,6 +301,8 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
+        STORE_STATE_PER_TOKEN=ssm_state_indices is not None
+        and ssm_state_indices.ndim == 2,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
         num_warps=num_warps,

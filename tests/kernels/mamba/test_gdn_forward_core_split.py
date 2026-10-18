@@ -22,6 +22,11 @@ Both paths are exercised through the REAL ``_forward_core``:
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
+With ``recurrent_prefill``, ``meta_split`` is also marked
+``use_recurrent_prefill``: the decodes and the prefills then run in one
+``fused_sigmoid_gating_delta_rule_update`` launch, which must match the same
+chunk-only reference.
+
 The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
 must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
 portable check of the split wiring).
@@ -153,11 +158,13 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
 @pytest.mark.parametrize("fresh_prefill", [False, True])
+@pytest.mark.parametrize("recurrent_prefill", [False, True])
 def test_forward_core_split_matches_unified(
     state_dtype: torch.dtype,
     num_decodes: int,
     prefill_lens: list[int],
     fresh_prefill: bool,
+    recurrent_prefill: bool,
 ) -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -228,6 +235,9 @@ def test_forward_core_split_matches_unified(
         prefill_state_indices=meta_split.non_spec_state_indices_tensor,
         prefill_has_initial_state=meta_split.has_initial_state,
     )
+    assert not meta_split.use_recurrent_prefill
+    if recurrent_prefill:
+        meta_split = dataclasses.replace(meta_split, use_recurrent_prefill=True)
 
     # Size the state pools from the indices the builder actually produced.
     assert meta_split.non_spec_state_indices_tensor is not None

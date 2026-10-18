@@ -95,6 +95,10 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
+    # True when every non-spec sequence (decodes and prefills) runs through
+    # one recurrent-kernel launch instead of the chunked prefill pipeline.
+    # Only set for batches with prefills, so FULL decode graphs never see it.
+    use_recurrent_prefill: bool = False
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
     has_initial_state: torch.Tensor | None = None
@@ -152,6 +156,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
+            _resolve_recurrent_prefill_max_query_len,
         )
 
         self.gdn_prefill_backend: Literal[
@@ -166,6 +171,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
             and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
+        )
+        # Measured against the FLA (Triton) chunk pipeline only; the other
+        # prefill backends keep their chunk path. The recurrent kernel also
+        # exports no prefill checkpoints.
+        self.recurrent_prefill_max_query_len = (
+            _resolve_recurrent_prefill_max_query_len(vllm_config)
+            if self.gdn_prefill_backend == "triton"
+            and not self.plan_flashinfer_checkpoints
+            else 0
         )
 
         if self.speculative_config:
@@ -508,6 +522,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             else:
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
+        use_recurrent_prefill = num_prefills > 0 and self._fits_recurrent_prefill(
+            non_spec_query_start_loc_cpu
+        )
+
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         prefill_query_start_loc: torch.Tensor | None = None
@@ -678,6 +696,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
+            use_recurrent_prefill=use_recurrent_prefill,
             checkpoint=checkpoint,
             flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
             has_initial_state=has_initial_state,
@@ -702,6 +721,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
+
+    def _fits_recurrent_prefill(
+        self, non_spec_query_start_loc_cpu: torch.Tensor | None
+    ) -> bool:
+        """Whether the longest non-spec query is short enough for the recurrent
+        kernel. The kernel walks each sequence token by token, so its run time
+        grows with the longest sequence, while the chunked pipeline has a fixed
+        cost per layer. Reads only host tensors: no device sync."""
+        if self.recurrent_prefill_max_query_len == 0:
+            return False
+        assert non_spec_query_start_loc_cpu is not None
+        max_query_len = int(non_spec_query_start_loc_cpu.diff().max())
+        return max_query_len <= self.recurrent_prefill_max_query_len
 
     def _stage_spec_decode(
         self,
