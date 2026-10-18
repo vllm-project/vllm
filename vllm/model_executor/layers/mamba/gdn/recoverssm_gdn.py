@@ -404,9 +404,9 @@ def _commit_gdn_state_kernel(
         mask=mask_state,
         other=0.0,
     ).to(tl.float32)
-    # Forward over the accepted tokens with the verify step's own update, so the committed
-    # state is the per-token state bit for bit (the decay and corr stored are the floats
-    # the verify kernel used).
+    # Forward over the accepted tokens with the verify step's own update, so the
+    # committed state is the per-token state bit for bit (the decay and corr stored
+    # are the floats the verify kernel used).
     h = s0
     for t in range(n):
         rec = rec_base + t * stride_replay_pos
