@@ -44,8 +44,9 @@ _all_reduce_mhc: "AllReduceMHC | None" = None
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     """Check kernel requirements and safety of sharing the coefficient stream."""
-    if envs.VLLM_BATCH_INVARIANT:
-        # FULL-graph-only route; BI keeps every M on the TileLang mHC.
+    if envs.VLLM_BATCH_INVARIANT and not envs.VLLM_BI_MHC_OVERLAP:
+        # BI keeps every M on one fused mHC unless the split kernels are opted
+        # in for every M.
         return False
     config = vllm_config.model_config.hf_config
     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
@@ -279,7 +280,7 @@ def mhc_shifted_post_pre(
             assert isinstance(x, torch.Tensor)
             residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
         aux = (
-            residual.mean(dim=1)
+            hc_stream_mean(residual)
             if capture_aux
             else residual.new_empty(0, residual.shape[-1])
         )
@@ -321,7 +322,8 @@ def mhc_shifted_post_pre(
             norm_weight,
             norm_eps,
         )
-        return *outputs, x.new_empty(0, x.shape[1])
+        aux = hc_stream_mean(outputs[0]) if capture_aux else x.new_empty(0, x.shape[1])
+        return *outputs, aux
 
     return mhc_fused_post_pre_delayed_tilelang(
         x,

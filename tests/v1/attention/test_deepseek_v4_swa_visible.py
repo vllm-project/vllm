@@ -1261,6 +1261,7 @@ def test_ds41_swa_bi_declaration_stays_scoped(monkeypatch, major, supported):
 @pytest.mark.parametrize("major,supported", [(9, False), (10, True), (12, False)])
 def test_ds41_cr2_indexer_bi_declaration_stays_scoped(monkeypatch, major, supported):
     """The CR2 proof must not grant BI to DS4, mega attention or sparse indexer."""
+    from vllm import envs
     from vllm.models.deepseek_v41.sparse_mla import (
         DeepseekV4FlashMLABackend,
         FlashMLAMegaAttnBackend,
@@ -1284,6 +1285,8 @@ def test_ds41_cr2_indexer_bi_declaration_stays_scoped(monkeypatch, major, suppor
     assert DeepseekV41IndexerBackend.supports_batch_invariance() == supported
     assert not DeepseekV4IndexerBackend.supports_batch_invariance()
     assert not FlashMLAMegaAttnBackend.supports_batch_invariance()
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_ATTN", True)
+    assert FlashMLAMegaAttnBackend.supports_batch_invariance() == supported
     assert not DeepseekV41SparseIndexerBackend.supports_batch_invariance()
 
 

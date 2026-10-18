@@ -202,6 +202,34 @@ def make_deepseek_v4_expert_params_mapping(
     ]
 
 
+# Per gate weight shape and routing inputs, the largest M whose Mega Gate
+# kernels are compiled.
+_MEGA_GATE_WARMED_M: dict[tuple, int] = {}
+
+
+def _compile_mega_gate_configs(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    top_k: int,
+    gate_kwargs: dict[str, typing.Any],
+    per_token: dict[str, typing.Any],
+) -> None:
+    """Batch invariance routes every M through bf16_mega_gate, whose tile
+    config follows M and JIT-compiles on first use (~2 s, a serving stall);
+    run every smaller M once when the gate first sees a larger batch."""
+    key = (weight.shape, *(v is None for v in per_token.values()))
+    done = _MEGA_GATE_WARMED_M.get(key, 0)
+    num_tokens = hidden_states.shape[0]
+    if num_tokens <= done or torch.cuda.is_current_stream_capturing():
+        return
+    _MEGA_GATE_WARMED_M[key] = num_tokens
+    for m in range(done + 1, num_tokens):
+        sliced: dict[str, typing.Any] = {
+            k: None if v is None else v[:m] for k, v in per_token.items()
+        }
+        bf16_mega_gate(hidden_states[:m], weight, top_k, **gate_kwargs, **sliced)
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -254,6 +282,18 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently supports sqrtsoftplus routing only."
             )
+        if (
+            self.use_native_mega_moe
+            and envs.VLLM_BATCH_INVARIANT
+            and envs.VLLM_BI_MEGA_GATE
+        ):
+            # Mega Gate is row invariant only with DeepGEMM's deterministic
+            # (fixed split) heuristics, a process-wide setting.
+            from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+                _deterministic_deep_gemm,
+            )
+
+            _deterministic_deep_gemm()
         if self.use_native_mega_moe and not self.renormalize:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE requires normalized top-k probabilities."
@@ -466,7 +506,11 @@ class DeepseekV4MoE(nn.Module):
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         # Batch invariance needs one router path for every batch size.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if envs.VLLM_BATCH_INVARIANT or hidden_states.shape[0] <= gate_threshold:
+        if envs.VLLM_BATCH_INVARIANT:
+            use_gate_linear = not envs.VLLM_BI_MEGA_GATE
+        else:
+            use_gate_linear = hidden_states.shape[0] <= gate_threshold
+        if use_gate_linear:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -502,10 +546,7 @@ class DeepseekV4MoE(nn.Module):
                 ]
                 fix_routing_mask = mega_gate_metadata.hash_token_mask
 
-            topk_weights, topk_ids = bf16_mega_gate(
-                hidden_states,
-                self.gate.weight,
-                self.n_activated_experts,
+            gate_kwargs: dict[str, typing.Any] = dict(
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
                 ep_rank=self.ep_rank,
@@ -513,9 +554,26 @@ class DeepseekV4MoE(nn.Module):
                 if self.gate.e_score_correction_bias is not None
                 else None,
                 image_bias=bias_vl.data if bias_vl is not None else None,
+            )
+            per_token: dict[str, typing.Any] = dict(
                 image_token_mask=mega_gate_metadata.image_token_mask,
                 fix_routing_mask=fix_routing_mask,
                 unmapped_topk_idx=unmapped_topk_idx,
+            )
+            if envs.VLLM_BATCH_INVARIANT:
+                _compile_mega_gate_configs(
+                    hidden_states,
+                    self.gate.weight,
+                    self.n_activated_experts,
+                    gate_kwargs,
+                    per_token,
+                )
+            topk_weights, topk_ids = bf16_mega_gate(
+                hidden_states,
+                self.gate.weight,
+                self.n_activated_experts,
+                **gate_kwargs,
+                **per_token,
             )
         final_hidden_states = self.experts(
             hidden_states, topk_weights, topk_ids, self.shared_experts

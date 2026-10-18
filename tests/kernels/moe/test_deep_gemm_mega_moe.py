@@ -1395,3 +1395,43 @@ def test_deep_gemm_mega_moe_rows_ignore_batch(
     torch.testing.assert_close(
         experts(x[rev], weights[rev], ids[rev], None), full[rev], rtol=0, atol=0
     )
+
+
+@requires_sm100
+def test_deep_gemm_mega_gate_rows_ignore_batch_when_deterministic():
+    """VLLM_BI_MEGA_GATE routes every batch through Mega Gate, so with
+    DeepGEMM's deterministic heuristics a token's top-k ids and weights must
+    not depend on how many or which tokens share its batch."""
+    from vllm.utils.deep_gemm import _import_deep_gemm, bf16_mega_gate
+
+    deep_gemm = _import_deep_gemm()
+    torch.manual_seed(0)
+    experts, hidden, tokens = 384, 5120, 4096
+    x = torch.randn(tokens, hidden, device="cuda").bfloat16()
+    weight = (torch.randn(experts, hidden, device="cuda") * hidden**-0.5).bfloat16()
+    bias = torch.randn(experts, device="cuda") * 0.1
+
+    def gate(a):
+        return bf16_mega_gate(
+            a,
+            weight,
+            6,
+            scoring_func="sqrtsoftplus",
+            routed_scaling_factor=1.5,
+            ep_rank=0,
+            bias=bias,
+        )
+
+    deep_gemm.use_deterministic_algorithms(True)
+    try:
+        full_weights, full_ids = gate(x)
+        for rows in (slice(0, 1), slice(0, 6), slice(7, 136), slice(-999, None)):
+            weights, ids = gate(x[rows].contiguous())
+            assert torch.equal(ids, full_ids[rows])
+            assert torch.equal(weights, full_weights[rows])
+        perm = torch.randperm(tokens, device="cuda")
+        weights, ids = gate(x[perm].contiguous())
+        assert torch.equal(ids, full_ids[perm])
+        assert torch.equal(weights, full_weights[perm])
+    finally:
+        deep_gemm.use_deterministic_algorithms(False)
