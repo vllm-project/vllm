@@ -997,7 +997,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # cannot skip a hit, while a full scan costs O(max_num_blocks) lookups
         # even when little is cached; low cache hit rate is the common case for
         # sliding window groups.
-        stride = sliding_window_contiguous_blocks
+        # A window of one token needs no contiguous blocks. Clamp to keep the
+        # probe loop advancing while still allowing a single cached block.
+        stride = max(sliding_window_contiguous_blocks, 1)
         # Only right edges aligned to `alignment_tokens` are valid, so retries
         # move by the alignment period in blocks (1 when none applies).
         align_period = alignment_tokens // math.gcd(alignment_tokens, block_size)

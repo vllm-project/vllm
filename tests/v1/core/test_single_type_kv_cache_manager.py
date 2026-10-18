@@ -716,6 +716,47 @@ def test_sliding_window_cache_hit_matches_brute_force(drop_eagle_block):
             assert computed_blocks[i].block_id == i + 10
 
 
+@pytest.mark.parametrize("cached_block", [None, 4])
+def test_sliding_window_single_token_window(cached_block):
+    """A one-token window needs no contiguous blocks; the probe loop must
+    terminate and reuse a single cached block."""
+    block_size = 2
+    num_blocks = 8
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=1,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    block_hashes = [BlockHash(str(i).encode()) for i in range(num_blocks)]
+    if cached_block is not None:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[cached_block], 0),
+            block_pool.blocks[10],
+        )
+
+    computed_blocks, hit_length = manager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=num_blocks * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+
+    expected_blocks = 0 if cached_block is None else cached_block + 1
+    assert hit_length == expected_blocks * block_size
+    assert len(computed_blocks[0]) == expected_blocks
+    if cached_block is not None:
+        assert computed_blocks[0][cached_block] is block_pool.blocks[10]
+
+
 def test_sliding_window_cache_hit_with_finer_hash_alignment():
     """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
     hash_block_size = 2
