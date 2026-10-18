@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     BatchDescriptor,
@@ -608,7 +609,9 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         groups,
     )
     assert state._replay[0] == 0
-    assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
+    # Batch invariance gathers with the CUDA op, which needs no warmup.
+    gather_warmups = 0 if envs.VLLM_BATCH_INVARIANT else 1
+    assert calls == {"pad_warmup": 0, "gather_warmup": gather_warmups, "pad_launch": 0}
     assert state._replay_start[:1].tolist() == [16]
 
 

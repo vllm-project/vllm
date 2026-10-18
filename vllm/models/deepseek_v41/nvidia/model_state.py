@@ -104,8 +104,7 @@ def _pad_replayed_slots_kernel(
             )
 
 
-# Stages keep different row counts; one compile serves all of them.
-@triton.jit(do_not_specialize=["kept_rows"])
+@triton.jit
 def _gather_replay_batch_kernel(
     query_start_loc_ptr,  # [num_reqs + 1]
     dropped_before_ptr,  # [num_reqs + 1] rows trimmed before each boundary
@@ -120,17 +119,12 @@ def _gather_replay_batch_kernel(
     kept_slot_mappings_ptr,  # out: [num_groups, num_kept]
     kept_slot_mappings_stride,
     kept_kv_start_ptr,  # out: [num_reqs]
-    kept_rows,
-    prev_dropped_before_ptr,  # [num_reqs + 1] the previous stage's, if HAS_PREV
-    select_ptr,  # out, if HAS_PREV: [num_kept] row in the previous stage's rows
+    window,
     NUM_GROUPS: tl.constexpr,
     BLOCK: tl.constexpr,
-    HAS_PREV: tl.constexpr,
 ):
     """One program per request: its kept rows are the last ones before its
-    boundary, and land at that boundary minus the rows trimmed before it. A
-    later replay stage's rows also get their index among the previous stage's
-    rows, which are the request's last ones too."""
+    boundary, and land at that boundary minus the rows trimmed before it."""
     req = tl.program_id(0)
     begin = tl.load(query_start_loc_ptr + req)
     end = tl.load(query_start_loc_ptr + req + 1)
@@ -143,7 +137,7 @@ def _gather_replay_batch_kernel(
     # A trimmed request holds no replay-layer window KV below its kept rows.
     kv_start = tl.load(replay_start_ptr + req)
     if kept_end - kept_begin < end - begin:
-        kv_start = tl.maximum(kv_start, tl.load(seq_lens_ptr + req) - kept_rows)
+        kv_start = tl.maximum(kv_start, tl.load(seq_lens_ptr + req) - window)
     tl.store(kept_kv_start_ptr + req, kv_start)
 
     first_row = end - (kept_end - kept_begin)
@@ -152,11 +146,6 @@ def _gather_replay_batch_kernel(
         mask = offs < kept_end
         row = first_row + (offs - kept_begin)
         tl.store(rows_ptr + offs, row.to(tl.int64), mask=mask)
-        if HAS_PREV:
-            # The previous stage keeps the request's rows up to its end, which
-            # sits behind the rows trimmed before that boundary.
-            prev_dropped = tl.load(prev_dropped_before_ptr + req + 1)
-            tl.store(select_ptr + offs, (row - prev_dropped).to(tl.int64), mask=mask)
         tl.store(
             kept_positions_ptr + offs,
             tl.load(positions_ptr + row, mask=mask),
@@ -475,6 +464,8 @@ class DeepseekV41ModelState(DefaultModelState):
             )
         if self.decoder_replay_layers is None:
             return
+        if self._bi_replay_gather():
+            return  # the batch-invariant CUDA gather needs no warmup
         assert self._kept_slot_mappings is not None
         _gather_replay_batch_kernel.warmup(
             input_batch.query_start_loc,
@@ -490,39 +481,22 @@ class DeepseekV41ModelState(DefaultModelState):
             self._kept_slot_mappings,
             self._kept_slot_mappings.stride(0),
             self._kept_kv_start,
-            self.decoder_replay_layers.kept_rows,
-            self._kept_kv_start,
-            self._kept_rows,
+            self.decoder_replay_layers.window,
             NUM_GROUPS=slot_mappings.shape[0],
             BLOCK=1024,
-            HAS_PREV=False,
             grid=(1,),
         )
-        for stage in self._replay_stages:
-            assert stage.slot_mappings is not None
-            _gather_replay_batch_kernel.warmup(
-                input_batch.query_start_loc,
-                stage.dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
-                input_batch.seq_lens,
-                self._replay_start,
-                input_batch.positions,
-                slot_mappings,
-                slot_mappings.stride(0),
-                stage.rows,
-                stage.query_start_loc,
-                stage.positions,
-                stage.slot_mappings,
-                stage.slot_mappings.stride(0),
-                stage.kv_start,
-                self.decoder_replay_layers.kept_rows,
-                self._dropped_before.copy_to_uva(np.zeros(1, dtype=np.int32)),
-                stage.select,
-                NUM_GROUPS=slot_mappings.shape[0],
-                BLOCK=1024,
-                HAS_PREV=True,
-                grid=(1,),
-            )
-            break  # one compile serves every stage
+
+    def _bi_replay_gather(self) -> bool:
+        """Exact replay (more kept rows than the window, or stages) is batch
+        invariance's, so its gather runs the batch-invariant CUDA op."""
+        layers = self.decoder_replay_layers
+        assert layers is not None
+        return (
+            envs.VLLM_BATCH_INVARIANT
+            or layers.kept_rows != layers.window
+            or len(layers.stage_rows) > 1
+        )
 
     def _prepare_replay_batch(
         self,
@@ -774,27 +748,47 @@ class DeepseekV41ModelState(DefaultModelState):
         kept_slot_mappings[:, num_tokens:].fill_(PAD_SLOT_ID)
         layers = self.decoder_replay_layers
         assert layers is not None
-        _gather_replay_batch_kernel[(num_reqs,)](
-            input_batch.query_start_loc,
-            dropped_before,
-            input_batch.seq_lens,
-            replay_start,
-            input_batch.positions,
-            slot_mappings,
-            slot_mappings.stride(0),
-            rows,
-            query_start_loc,
-            positions,
-            kept_slot_mappings,
-            kept_slot_mappings.stride(0),
-            kv_start,
-            layers.stage_rows[stage],
-            dropped_before if prev_dropped is None else prev_dropped,
-            select,
-            NUM_GROUPS=slot_mappings.shape[0],
-            BLOCK=1024,
-            HAS_PREV=stage > 0,
-        )
+        if self._bi_replay_gather():
+            from vllm.model_executor.kernels.batch_invariant import (
+                gather_replay_batch,
+            )
+
+            gather_replay_batch(
+                input_batch.query_start_loc,
+                dropped_before,
+                input_batch.seq_lens,
+                replay_start,
+                input_batch.positions,
+                slot_mappings,
+                num_reqs,
+                layers.stage_rows[stage],
+                rows,
+                query_start_loc,
+                positions,
+                kept_slot_mappings,
+                kv_start,
+                prev_dropped_before=prev_dropped,
+                select=None if prev_dropped is None else select,
+            )
+        else:
+            _gather_replay_batch_kernel[(num_reqs,)](
+                input_batch.query_start_loc,
+                dropped_before,
+                input_batch.seq_lens,
+                replay_start,
+                input_batch.positions,
+                slot_mappings,
+                slot_mappings.stride(0),
+                rows,
+                query_start_loc,
+                positions,
+                kept_slot_mappings,
+                kept_slot_mappings.stride(0),
+                kv_start,
+                layers.window,
+                NUM_GROUPS=slot_mappings.shape[0],
+                BLOCK=1024,
+            )
         # Adaptive verification may lengthen the decodes on the device, up to
         # the batch's bound.
         max_query_len = max(int(kept_lens.max()), input_batch.max_query_len or 0)
