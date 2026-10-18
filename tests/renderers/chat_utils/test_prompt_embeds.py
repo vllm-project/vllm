@@ -105,6 +105,7 @@ def _make_mock_model_config(*, enable_prompt_embeds: bool = True) -> mock.MagicM
     # `safe_load_prompt_embeds` pins each tensor to the model's hidden_size
     # and dtype, so the mock must return concrete values.
     mc.get_hidden_size.return_value = _MOCK_HIDDEN_SIZE
+    mc.hf_text_config = object()
     mc.dtype = _MOCK_DTYPE
     return mc
 
