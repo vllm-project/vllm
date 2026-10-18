@@ -401,6 +401,65 @@ def test_sorted_batches_never_put_context_on_the_prefill_side():
                 )
 
 
+def test_sort_key_reads_state_slots_not_batch_positions():
+    """The context term must index the state array by slot, not batch position.
+
+    The splitter clamps the prefill boundary, so its outcome is the same under
+    any ordering and the sweep above cannot tell the two lookups apart. Assert
+    the ordering itself instead: among the requests that consult the term, one
+    without context may never precede one that has context.
+    """
+    # One hand-built batch first, so a regression reads as three requests
+    # rather than a seed. Three of the five slots are owned; the free ones
+    # still hold a stale count, which is what a positional read picks up.
+    #   batch position 0, "fresh",   slot 2,   0 computed tokens
+    #   batch position 1, "resumed", slot 0, 300 computed tokens
+    #   batch position 2, "chunked", slot 4,  64 computed tokens
+    num_computed = np.array([300, 11, 0, 11, 64], dtype=np.int32)
+    req_id_to_index = {"fresh": 2, "resumed": 0, "chunked": 4}
+    num_tokens_per_req = {"fresh": 5, "resumed": 5, "chunked": 5}
+    # By position the three would read 300, 11 and 0 rather than 0, 300 and 64,
+    # putting the only context-less request at the front.
+    assert sort_batch_req_ids(
+        num_tokens_per_req, {}, 8, num_computed, req_id_to_index
+    ) == ["resumed", "chunked", "fresh"]
+
+    rng = np.random.default_rng(1704)
+    for decode_query_len in (2, 4, 8):
+        for _ in range(250):
+            req_ids = [f"r{i}" for i in range(int(rng.integers(2, 9)))]
+            slots = rng.permutation(len(req_ids) + 3)[: len(req_ids)]
+            req_id_to_index = {r: int(s) for r, s in zip(req_ids, slots)}
+            num_tokens_per_req = {r: int(rng.integers(2, 64)) for r in req_ids}
+            # Free slots hold stale counts, so a positional read finds context
+            # that belongs to no request in this batch.
+            num_computed = np.full(len(req_ids) + 3, 11, dtype=np.int32)
+            for r in req_ids:
+                num_computed[req_id_to_index[r]] = int(
+                    rng.choice([0, rng.integers(1, 100_000)])
+                )
+            order = sort_batch_req_ids(
+                num_tokens_per_req,
+                {},
+                decode_query_len,
+                num_computed,
+                req_id_to_index,
+            )
+
+            context_less = [r for r in order if not num_computed[req_id_to_index[r]]]
+            with_context = [r for r in order if num_computed[req_id_to_index[r]]]
+            if not context_less or not with_context:
+                continue
+            boundary = order.index(context_less[0])
+            stray = [r for r in with_context if order.index(r) > boundary]
+            assert not stray, (
+                f"{stray} have computed context but sort behind the "
+                f"context-less {context_less[0]}: order={order} "
+                f"slots={[req_id_to_index[r] for r in order]} "
+                f"computed={[int(num_computed[req_id_to_index[r]]) for r in order]}"
+            )
+
+
 def test_uniform_decode_uses_state_index_not_batch_position():
     """The gather must read each request's own state, not its batch slot.
 
