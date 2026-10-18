@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
+
 import cv2
 import numpy as np
 import numpy.typing as npt
@@ -77,8 +79,6 @@ def create_long_gop_video(
     The marker lets a test recover which frame the decoder actually returned,
     independent of any metadata label.
     """
-    import io
-
     import av
 
     buf = io.BytesIO()
@@ -115,8 +115,6 @@ def create_live_webm_video(
     unknown and no Duration or Cues elements are written, so decoder backends
     cannot learn the frame count from the header.
     """
-    import io
-
     import av
 
     buf = io.BytesIO()
@@ -143,8 +141,6 @@ def create_raw_h264_video(
     height: int = 64,
 ) -> bytes:
     """Encode a raw H.264 Annex B elementary stream (no container metadata)."""
-    import io
-
     import av
 
     buf = io.BytesIO()
@@ -178,8 +174,6 @@ def create_edit_list_trimmed_video(
     trailing frames are presentable — the shape produced by lossless trims
     (e.g. ``ffmpeg -ss ... -c copy``). Returns (video_bytes, visible_frames).
     """
-    import io
-
     import av
 
     src = create_long_gop_video(num_frames=num_frames, fps=fps)
