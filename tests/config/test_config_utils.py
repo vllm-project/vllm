@@ -5,10 +5,14 @@ from dataclasses import dataclass
 from enum import Enum
 
 import pytest
+import torch
+from pydantic import ConfigDict
 
 from vllm.config.cache import CacheConfig
+from vllm.config.lora import LoRAConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import (
+    config,
     get_attr_docs,
     get_hash_factors,
     hash_factors,
@@ -293,6 +297,56 @@ def test_scheduler_config_hash_includes_max_num_seqs():
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(prefix_cache_retention_interval=64).compute_hash() == base_hash
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_lora_rank": 32},
+        {"max_loras": 2},
+        {"fully_sharded_loras": True},
+        {"lora_dtype": torch.bfloat16},
+        {"target_modules": ["q_proj"]},
+        {"enable_tower_connector_lora": True},
+        {"enable_mixed_moe_lora_format": True},
+        {"enable_moe_shared_loras": True},
+        {"max_lora_cls_labels": 3},
+    ],
+)
+def test_lora_config_hash_tracks_graph_fields(overrides):
+    assert LoRAConfig(**overrides).compute_hash() != LoRAConfig().compute_hash()
+
+
+def test_lora_config_hash_ignores_non_graph_fields():
+    changed = LoRAConfig(
+        max_cpu_loras=4,
+        default_mm_loras={"audio": "/tmp/lora"},
+        specialize_active_lora=True,
+    )
+    assert changed.compute_hash() == LoRAConfig().compute_hash()
+
+
+@pytest.mark.parametrize(
+    ("a", "b"), [(["q_proj", "k_proj"], ["k_proj", "q_proj"]), ([], None)]
+)
+def test_lora_config_hash_ignores_target_modules_order(a, b):
+    assert (
+        LoRAConfig(target_modules=a).compute_hash()
+        == LoRAConfig(target_modules=b).compute_hash()
+    )
+
+
+@pytest.mark.parametrize("base", [LoRAConfig])
+def test_config_hash_includes_new_fields_by_default(base):
+    """A field added to a migrated config must enter the hash without
+    anyone listing it."""
+
+    @config(config=ConfigDict(arbitrary_types_allowed=True))
+    class Extended(base):  # type: ignore[valid-type,misc]
+        probe_field: int = 0
+        """Stands in for a field added after the migration."""
+
+    assert Extended().compute_hash() != Extended(probe_field=1).compute_hash()
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):
