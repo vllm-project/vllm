@@ -12,7 +12,6 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
@@ -43,9 +42,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.metadata import (
+    MooncakeConnectorMetadata,
+    PullReqMeta,
+    ReqId,
+    SendBlockMeta,
+    TransferId,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.protocol import (
+    MooncakeXferMetadata,
+    MooncakeXferResponse,
+    MooncakeXferResponseStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
@@ -101,9 +112,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-
-ReqId = str  # Internal scheduler request ID
-TransferId = str  # KV transfer coordination ID (shared by P/D)
 
 # Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
 # KV group on a single allocation. group_index=-1 flattens every group's block
@@ -611,115 +619,6 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
-class MooncakeXferMetadata(
-    msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-):
-    remote_hostname: str
-    remote_port: int
-    remote_tp_size: int
-    remote_tp_rank: int
-    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
-    kv_caches_base_addr: list[int]
-    block_lens: list[int]
-    kv_block_lens: list[int]
-    registered_layer_names: list[str] = msgspec.field(default_factory=list)
-    registered_layer_indices: list[int] = msgspec.field(default_factory=list)
-    registered_group_indices: list[int] = msgspec.field(default_factory=list)
-    # Parallel to registered regions. Each entry is the groups that share
-    # that region. Empty means the peer did not send the field.
-    registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
-    # Byte offset of each registered view from its block row. -1 means the
-    # peer did not send the field, so the run must not be promoted.
-    registered_row_offsets: list[int] = msgspec.field(default_factory=list)
-    remote_pp_size: int = 1
-    # Random per register_kv_caches, so ids never repeat across restarts.
-    # 0 means the peer sends the layout on every pull.
-    layout_id: int = 0
-
-
-class MooncakeXferResponseStatus(IntEnum):
-    # Transfer finished
-    FINISH = 0
-    # Continue to receive
-    CONTINUE = 1
-    # Something wrong, see err_msg
-    ERROR = 2
-    # P does not hold the layout for this layout_id; resend it.
-    # Only sent for pulls with a nonzero layout_id and no layout.
-    LAYOUT_MISS = 3
-
-
-class MooncakeXferResponse(
-    msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-):
-    status: MooncakeXferResponseStatus
-    ok_reqs: list[ReqId] | None = None
-    err_reqs: list[ReqId] | None = None
-    err_msg: str | None = None
-    # The pull's layout_id once P holds that layout. D omits the layout only
-    # after seeing it, so a P that predates this field always gets it.
-    layout_id: int = 0
-
-
-@dataclass
-class PullReqMeta:
-    d_req_id: ReqId
-    transfer_id: TransferId
-    local_block_ids: list[list[int]]
-    remote_engine_id: EngineId
-    remote_bootstrap_addr: str
-    # Set expire time to avoid infinitely sending requests.
-    expire_time: float = float("inf")
-    # Designed for one D pairing to multiple P
-    pull_tasks_count: int = 0
-    # A failure is sticky; still settle later peer results before releasing
-    # destination blocks to prevent write-after-free from delayed peer writes.
-    failed: bool = False
-
-
-@dataclass
-class SendBlockMeta:
-    p_req_id: ReqId
-    transfer_id: TransferId
-    local_block_ids: list[list[int]]
-    ready: asyncio.Event
-    expire_time: float = float("inf")
-    need_send: int = 0
-    sent: int = 0
-    sending: int = 0
-
-
-class MooncakeConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
-        # Use (engine_id, dp_rank) to group reqs with same dp.
-        # See comments in MooncakeBootstrapServer.
-        self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
-        self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
-        self.reqs_not_processed: set[TransferId] = set()
-
-    def add_new_req(
-        self,
-        request_id: ReqId,
-        local_block_ids: list[list[int]],
-        kv_transfer_params: dict[str, Any],
-        load_remote_cache: bool = True,
-    ):
-        transfer_id = kv_transfer_params["transfer_id"]
-        if load_remote_cache:
-            remote_engine_id = kv_transfer_params["remote_engine_id"]
-            self.reqs_to_recv[remote_engine_id][request_id] = PullReqMeta(
-                d_req_id=request_id,
-                local_block_ids=local_block_ids,
-                remote_engine_id=remote_engine_id,
-                remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
-                transfer_id=transfer_id,
-            )
-        else:
-            self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
-
-
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
@@ -965,7 +864,7 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
-        self._reqs_not_processed: set[TransferId] = set()
+        self._transfers_not_processed: set[TransferId] = set()
 
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
@@ -1162,8 +1061,8 @@ class MooncakeConnectorScheduler:
                     load_remote_cache=False,
                 )
             self._reqs_need_send.clear()
-            meta.reqs_not_processed = self._reqs_not_processed
-            self._reqs_not_processed = set()
+            meta.transfers_not_processed = self._transfers_not_processed
+            self._transfers_not_processed = set()
 
         return meta
 
@@ -1206,7 +1105,7 @@ class MooncakeConnectorScheduler:
         if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
-            self._reqs_not_processed.add(params["transfer_id"])
+            self._transfers_not_processed.add(params["transfer_id"])
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -2710,7 +2609,7 @@ class MooncakeConnectorWorker:
                         local_block_ids=[],
                         ready=asyncio.Event(),
                     )
-        for transfer_id in metadata.reqs_not_processed:
+        for transfer_id in metadata.transfers_not_processed:
             send_meta = self.reqs_need_send.pop(transfer_id)
             if send_meta:
                 assert not send_meta.ready.is_set()
@@ -2722,7 +2621,7 @@ class MooncakeConnectorWorker:
             )
 
         if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
+            metadata.reqs_to_send or metadata.transfers_not_processed
         ):
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
