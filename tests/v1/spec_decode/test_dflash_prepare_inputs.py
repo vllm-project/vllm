@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -26,7 +26,13 @@ def _run_prepare(
     cp_size: int = 1,
     cp_interleave: int = 1,
     draft_dcp_size: int | None = None,
+    extra_kv_groups: tuple[tuple[list[int], int], ...] = (),
+    draft_group_ids: tuple[int, ...] = (0,),
 ):
+    """Run the prepare of ``propose`` for one request. KV-cache group 0 has
+    ``block_table_values`` and block size 4; ``extra_kv_groups`` adds groups of
+    (block table, block size), and draft group ``i`` uses KV-cache group
+    ``draft_group_ids[i]``."""
     device = torch.device("cuda")
     max_num_reqs = 4
     max_num_tokens = 16
@@ -50,14 +56,15 @@ def _run_prepare(
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
         idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
     )
-    query_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+    kv_groups = [(block_table_values, 4), *extra_kv_groups]
+    query_slot_mappings = torch.full(
+        (len(kv_groups), max_num_tokens), -2, dtype=torch.int64, device=device
     )
     context_positions = torch.full(
         (max_num_tokens,), -1, dtype=torch.int64, device=device
     )
-    context_slot_mapping = torch.full(
-        (max_num_tokens,), -2, dtype=torch.int64, device=device
+    context_slot_mappings = torch.full(
+        (len(draft_group_ids), max_num_tokens), -2, dtype=torch.int64, device=device
     )
     sample_indices = torch.full(
         (max_num_reqs * num_speculative_steps,),
@@ -77,7 +84,10 @@ def _run_prepare(
     input_seeds = torch.tensor([0, 0, 17, 0], dtype=torch.int64, device=device)
     last_sampled = torch.tensor([0, 0, 99, 0], dtype=torch.int64, device=device)
     next_prefill_tokens = torch.zeros_like(last_sampled)
-    block_table = torch.tensor([block_table_values], dtype=torch.int32, device=device)
+    block_tables = [
+        torch.tensor([values], dtype=torch.int32, device=device)
+        for values, _ in kv_groups
+    ]
 
     class InputsPrepared(Exception):
         pass
@@ -85,7 +95,7 @@ def _run_prepare(
     draft = SimpleNamespace(
         input_buffers=input_buffers,
         context_positions=context_positions,
-        _context_slot_mappings=context_slot_mapping.unsqueeze(0),
+        _context_slot_mappings=context_slot_mappings,
         sample_indices=sample_indices,
         sample_pos=sample_pos,
         sample_idx_mapping=sample_idx_mapping,
@@ -97,13 +107,27 @@ def _run_prepare(
         dp_size=1,
         dp_rank=0,
         pcp_manager=None,
-        draft_kv_cache_group_id=0,
-        draft_kv_cache_group_ids=[0],
+        draft_kv_cache_group_id=draft_group_ids[0],
+        draft_kv_cache_group_ids=list(draft_group_ids),
+        _draft_group_ids=torch.tensor(
+            draft_group_ids, dtype=torch.int32, device=device
+        ),
         _layer_group_idx=None,
         block_tables=SimpleNamespace(
-            slot_mappings=query_slot_mapping.unsqueeze(0),
-            input_block_tables=[block_table],
-            block_sizes=[4],
+            slot_mappings=query_slot_mappings,
+            input_block_table_ptrs=torch.tensor(
+                [table.data_ptr() for table in block_tables],
+                dtype=torch.uint64,
+                device=device,
+            ),
+            block_table_strides=torch.tensor(
+                [table.stride(0) for table in block_tables],
+                dtype=torch.int64,
+                device=device,
+            ),
+            block_sizes_tensor=torch.tensor(
+                [size for _, size in kv_groups], dtype=torch.int32, device=device
+            ),
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
@@ -116,6 +140,11 @@ def _run_prepare(
         max_num_tokens=max_num_tokens,
         max_model_len=128,
         sample_from_anchor=True,
+        inputs_prepared=False,
+        context_side_stream=None,
+    )
+    draft.prepare_draft_inputs = MethodType(
+        DFlashSpeculator.prepare_draft_inputs, draft
     )
     with (
         patch(
@@ -141,9 +170,11 @@ def _run_prepare(
     torch.accelerator.synchronize()
     return SimpleNamespace(
         input_buffers=input_buffers,
-        query_slot_mapping=query_slot_mapping.cpu(),
+        query_slot_mapping=query_slot_mappings[0].cpu(),
+        query_slot_mappings=query_slot_mappings.cpu(),
         context_positions=context_positions.cpu(),
-        context_slot_mapping=context_slot_mapping.cpu(),
+        context_slot_mapping=context_slot_mappings[0].cpu(),
+        context_slot_mappings=context_slot_mappings.cpu(),
         sample_indices=sample_indices.cpu(),
         sample_pos=sample_pos.cpu(),
         sample_idx_mapping=sample_idx_mapping.cpu(),
@@ -218,3 +249,42 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+def test_prepare_dflash_inputs_writes_each_draft_group():
+    # Three draft groups over KV-cache groups 2, 0 and 1, with their own block
+    # tables and block sizes, in one launch: each writes the slot mappings of
+    # its own table, and the shared outputs are those of a single group.
+    tables = {
+        0: ([0, 0, 7, 8, 9, 10, 11, 12], 4),
+        1: ([0, 5, 6], 8),
+        2: ([3, 4, 1, 2, 13, 14, 15, 16], 2),
+    }
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=tables[0][0],
+        extra_kv_groups=(tables[1], tables[2]),
+        draft_group_ids=(2, 0, 1),
+    )
+    for draft_group, kv_group in enumerate((2, 0, 1)):
+        values, size = tables[kv_group]
+        single = _run_prepare(
+            target_positions=[10, 11, 12, 13],
+            block_table_values=values,
+            extra_kv_groups=((values, size),),
+            draft_group_ids=(1,),
+        )
+        assert torch.equal(
+            out.query_slot_mappings[kv_group], single.query_slot_mappings[1]
+        ), kv_group
+        assert torch.equal(
+            out.context_slot_mappings[draft_group], single.context_slot_mappings[0]
+        ), draft_group
+        for name in ("context_positions", "sample_indices", "sample_pos"):
+            assert torch.equal(getattr(out, name), getattr(single, name)), name
+        for name in ("input_ids", "positions", "is_padding", "query_start_loc"):
+            assert torch.equal(
+                getattr(out.input_buffers, name), getattr(single.input_buffers, name)
+            ), name
+    # Block sizes 2, 4 and 8 put query position 12 in different slots.
+    assert out.query_slot_mappings[:, 0].tolist() == [32, 44, 30]
