@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -241,6 +242,85 @@ async def test_render_responses_carries_reasoning_parser_kwargs():
     assert response.reasoning_parser_kwargs is not None
     kwargs = response.reasoning_parser_kwargs.chat_template_kwargs
     assert kwargs["enable_thinking"] is False
+
+
+def _messages_request(thinking: dict | None) -> AnthropicMessagesRequest:
+    return AnthropicMessagesRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hi"}],
+        max_tokens=2048,
+        thinking=thinking,
+    )
+
+
+def _render_messages_serving(render_prompt) -> tuple[ServingRender, list]:
+    """A render server whose chat renderer records each request it renders."""
+    serving = _build_serving_render()
+    serving._merge_inline_system = False
+    serving._extract_prompt_components = lambda engine_input: SimpleNamespace(
+        token_ids=engine_input["prompt_token_ids"], text=None
+    )
+
+    rendered: list[ChatCompletionRequest] = []
+
+    async def render_chat(request, **kwargs):
+        rendered.append(request)
+        return [], [{"prompt_token_ids": render_prompt(request.reasoning_effort)}]
+
+    serving.online_renderer.render_chat = AsyncMock(side_effect=render_chat)
+    return serving, rendered
+
+
+def _none_as_max(effort):
+    """GLM-5.3 renders efforts other than low/high as max."""
+    return [1, {"low": 0, "high": 1}.get(effort, 2)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_messages_uses_the_resolved_disabled_thinking_effort():
+    serving, rendered = _render_messages_serving(_none_as_max)
+    serving._disabled_thinking_effort = "low"
+
+    response = await serving.render_messages_request(
+        _messages_request({"type": "disabled"})
+    )
+
+    assert not isinstance(response, ErrorResponse)
+    assert rendered[-1].reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_messages_probes_disabled_thinking_effort_like_the_server():
+    serving, rendered = _render_messages_serving(_none_as_max)
+    serving._disabled_thinking_effort = None
+
+    response = await serving.render_messages_request(
+        _messages_request({"type": "disabled"})
+    )
+
+    assert not isinstance(response, ErrorResponse)
+    assert rendered[-1].reasoning_effort == "low"
+    assert serving._disabled_thinking_effort == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "thinking",
+    [None, {"type": "enabled", "budget_tokens": 1024}],
+    ids=["absent", "enabled"],
+)
+async def test_render_messages_does_not_probe_unless_thinking_is_disabled(thinking):
+    serving, rendered = _render_messages_serving(_none_as_max)
+    serving._disabled_thinking_effort = None
+
+    response = await serving.render_messages_request(_messages_request(thinking))
+
+    assert not isinstance(response, ErrorResponse)
+    assert len(rendered) == 1
+    assert rendered[0].reasoning_effort is None
 
 
 @pytest.fixture(scope="module")

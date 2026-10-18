@@ -105,7 +105,7 @@ async def init_render_app_state(
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
-    init_render_state(state, request_logger)
+    init_render_state(state, request_logger, args.anthropic_disabled_thinking_effort)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

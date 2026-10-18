@@ -4,8 +4,14 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
-from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+    AnthropicMessagesRequest,
+)
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicDisabledThinkingMixin,
+    AnthropicServingMessages,
+)
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -60,7 +66,7 @@ def _hoist_transfer_params(
     return kv, ec
 
 
-class ServingRender(BaseServing):
+class ServingRender(AnthropicDisabledThinkingMixin, BaseServing):
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
@@ -68,6 +74,7 @@ class ServingRender(BaseServing):
         *,
         request_logger: RequestLogger | None = None,
         tool_server: "ToolServer | None" = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
     ) -> None:
         super().__init__(
             models=models,
@@ -81,6 +88,7 @@ class ServingRender(BaseServing):
         self._merge_inline_system = (
             AnthropicServingMessages._should_merge_inline_system(online_renderer)
         )
+        self._init_disabled_thinking_effort(disabled_thinking_effort)
 
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
         self._placeholder_metadata_parser_failed = False
@@ -197,7 +205,9 @@ class ServingRender(BaseServing):
         render_chat_request so the rendered tokens match the server exactly.
         """
         chat_req = AnthropicServingMessages.to_chat_completion_request(
-            request, merge_inline_system=self._merge_inline_system
+            request,
+            merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=await self._disabled_thinking_effort_for(request),
         )
         chat_req.mm_payload = request.mm_payload
         return await self.render_chat_request(chat_req, raw_request)
