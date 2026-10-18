@@ -6,8 +6,6 @@
 dist
 vllm/*.so
 vllm/vllm-rs
-# Model recipes are rendered by vllm-project/recipes, never part of the image.
-/recipes
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
