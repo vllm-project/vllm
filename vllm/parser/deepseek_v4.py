@@ -116,6 +116,9 @@ def _dsml_parse_args(
 
     open_match = None
     pm = partial_param_re.search(raw_args, last_end)
+    # A repeated name must not replace the value already closed for it.
+    if pm and pm.group(1) in params:
+        pm = None
     if pm:
         name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
         # The trailing parameter is unclosed, so a suffix that can only be the

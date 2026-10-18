@@ -164,6 +164,16 @@ def test_python_argument_conversion_drops_partial_close_marker(cut, partial):
     assert json.loads(converter(raw, partial)) == {"city": "Paris"}
 
 
+@pytest.mark.parametrize("partial", [True, False])
+def test_python_argument_conversion_ignores_unclosed_repeated_name(partial):
+    converter = deepseek_v41_config().arg_converter
+    raw = (
+        '<｜DSML｜ parameter name="city" string="true">Paris</｜DSML｜ parameter>'
+        '<｜DSML｜ parameter name="city" string="true">Lyon'
+    )
+    assert json.loads(converter(raw, partial)) == {"city": "Paris"}
+
+
 @pytest.mark.parametrize("chunk_size", [1, 7, 10000])
 @pytest.mark.parametrize(
     ("text", "expected_name", "expected_args"),
