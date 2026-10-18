@@ -1596,6 +1596,57 @@ def test_pull_completion_requires_local_blocks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "exception"])
+async def test_peer_failure_only_settles_its_pending_requests(terminal):
+    """Partial and duplicate replies must not release another peer's targets."""
+    with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, _):
+        metas = {
+            f"d-req-{i}": PullReqMeta(
+                d_req_id=f"d-req-{i}",
+                transfer_id=f"xfer-{i}",
+                local_block_ids=[[i]],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=2,
+            )
+            for i in range(1, 4)
+        }
+        requests = list(metas.values())
+        partial = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            ok_reqs=["d-req-1"],
+            err_reqs=["d-req-2"],
+            err_msg="one request failed",
+        )
+        end = (
+            RuntimeError("connection lost")
+            if terminal == "exception"
+            else worker._encoder.encode(
+                MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg="peer finished",
+                )
+            )
+        )
+        sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
+        sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
+        await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
+        assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
+        assert [meta.failed for meta in requests] == [False, True, True]
+        assert worker.finished_recving_reqs == set()
+        assert worker.get_block_ids_with_load_errors() == {2, 3}
+        worker.process_pulling_result(
+            MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH, ok_reqs=list(metas)
+            ),
+            metas,
+        )
+        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert all(meta.pull_tasks_count == 0 for meta in requests)
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
 
