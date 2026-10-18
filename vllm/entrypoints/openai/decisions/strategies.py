@@ -6,16 +6,18 @@ Only models in READ_STRATEGIES are currently supported.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
+import os
 import random
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, cast
 
 import numpy as np
 from PIL import Image
@@ -25,7 +27,13 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
+from vllm.inputs import (
+    EngineInput,
+    MultiModalInput,
+    TextPrompt,
+    TokensPrompt,
+    tokens_input,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.media import (
@@ -55,6 +63,10 @@ from .question_types import (
 _M = TypeVar("_M")
 
 logger = init_logger(__name__)
+
+_BIG_DECISIONS_IN_ENGINE = 2
+#: Characters before the splice point tokenized again with each question.
+_SPLICE_HEAD_CHARS = 64
 
 
 @dataclass
@@ -127,6 +139,27 @@ class ReadStrategy(ABC):
 
     def __init__(self, context: ReadContext):
         self.context = context
+        self._big_decision_gate = asyncio.Semaphore(_BIG_DECISIONS_IN_ENGINE)
+
+    def _turn(
+        self, prompts: list[list[int]]
+    ) -> contextlib.AbstractAsyncContextManager[Any]:
+        """The gate a decision waits at so big decisions take turns."""
+        vllm_config = self.context.engine_client.vllm_config
+        scheduler_config = vllm_config.scheduler_config
+        # The priority policy orders requests in the engine instead.
+        if len(prompts) < 2 or scheduler_config.policy == "priority":
+            return contextlib.nullcontext()
+        # With the prefix cache the engine computes the shared start once.
+        shared = (
+            len(os.path.commonprefix(prompts))
+            if vllm_config.cache_config.enable_prefix_caching
+            else 0
+        )
+        num_tokens = shared + sum(len(p) - shared for p in prompts)
+        if num_tokens > scheduler_config.max_num_batched_tokens:
+            return self._big_decision_gate
+        return contextlib.nullcontext()
 
     @cached_property
     def _connector(self) -> MediaConnector:
@@ -218,6 +251,23 @@ def cap_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
     return image.resize(size, Image.Resampling.BICUBIC)
 
 
+def _splice_point(texts: list[str]) -> int | None:
+    """Where the texts split into the start they share and their own ends."""
+    # Split after the last blank line all texts share.
+    cut = os.path.commonprefix(texts).rfind("\n\n") + 2
+    # Whitespace after the cut can join a run longer than the head window.
+    if cut < 2 or any(t[cut : cut + 1].isspace() for t in texts):
+        return None
+    return cut
+
+
+def _messages(content: Any, instructions: str | None) -> list[Any]:
+    messages = [{"role": "user", "content": content}]
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+    return messages
+
+
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the state, then the
     question with its labeled options, and the logprobs of the label tokens as
@@ -306,7 +356,7 @@ class NextTokenStrategy(ReadStrategy):
 
     async def _render(
         self, read_request: ReadPromptRequest, messages: list[dict[str, Any]]
-    ) -> tuple[EngineInput, list[int]]:
+    ) -> EngineInput:
         ctx = self.context
         _, (engine_input,) = await ctx.online_renderer.preprocess_chat(
             read_request,
@@ -318,10 +368,59 @@ class NextTokenStrategy(ReadStrategy):
             # sender cache believing the engine has the images.
             skip_mm_cache=True,
         )
-        prompt_ids = extract_prompt_components(
-            ctx.engine_client.model_config, engine_input
-        ).token_ids
-        return engine_input, list(prompt_ids or [])
+        return engine_input
+
+    async def _render_spliced(
+        self,
+        read_request: ReadPromptRequest,
+        contents: list[str],
+        instructions: str | None,
+    ) -> list[EngineInput] | None:
+        """Every prompt with the shared start tokenized once, or None to fall back."""
+        ctx = self.context
+        online_renderer = ctx.online_renderer
+        renderer = online_renderer.renderer
+        chat_params = online_renderer.build_chat_params(
+            read_request,
+            ctx.chat_template,
+            ctx.chat_template_content_format,
+            ctx.default_chat_template_kwargs,
+        )
+        arrival_time = time.time()
+        texts = []
+        for content in contents:
+            _, prompt = await renderer.render_messages_async(
+                _messages(content, instructions), chat_params
+            )
+            if not isinstance(text := prompt.get("prompt"), str):
+                return None
+            texts.append(text)
+        if (cut := _splice_point(texts)) is None:
+            return None
+        # Tokens of the head must not change when a question follows it.
+        head = texts[0][max(0, cut - _SPLICE_HEAD_CHARS) : cut]
+        tokenized = await renderer.tokenize_prompts_async(
+            [
+                TextPrompt(prompt=t)
+                for t in (texts[0][:cut], head, *(head + text[cut:] for text in texts))
+            ],
+            read_request.build_tok_params(online_renderer.model_config),
+        )
+        prefix_ids, head_ids, *windows = (
+            cast(TokensPrompt, p)["prompt_token_ids"] for p in tokenized
+        )
+        if any(w[: len(head_ids)] != head_ids for w in windows):
+            return None
+        engine_inputs = await online_renderer.preprocess_cmpl(
+            read_request,
+            [
+                TokensPrompt(prompt=t, prompt_token_ids=prefix_ids + w[len(head_ids) :])
+                for t, w in zip(texts, windows)
+            ],
+        )
+        for engine_input in engine_inputs:
+            engine_input["arrival_time"] = arrival_time
+        return engine_inputs
 
     async def read(
         self,
@@ -341,35 +440,52 @@ class NextTokenStrategy(ReadStrategy):
         read_request = self._read_request(chat_template_kwargs, cache_salt)
         image_parts = await self._image_parts((media or {}).get("image", ()))
 
-        slots, engine_inputs, params = [], [], []
-        for q in questions:
-            content: Any = self._content(state, q)
-            if image_parts:
-                content = [*image_parts, {"type": "text", "text": content}]
-            messages = [{"role": "user", "content": content}]
-            if instructions:
-                messages.insert(0, {"role": "system", "content": instructions})
-            engine_input, prompt_ids = await self._render(read_request, messages)
+        contents = [self._content(state, q) for q in questions]
+        rendered = None
+        if len(contents) > 1 and not image_parts:
+            rendered = await self._render_spliced(read_request, contents, instructions)
+        if rendered is None:
+            rendered = []
+            for text in contents:
+                content: Any = text
+                if image_parts:
+                    content = [*image_parts, {"type": "text", "text": text}]
+                messages = _messages(content, instructions)
+                rendered.append(await self._render(read_request, messages))
+
+        slots, prompts, engine_inputs, params = [], [], [], []
+        for q, engine_input in zip(questions, rendered):
+            prompt_ids = list(
+                extract_prompt_components(
+                    ctx.engine_client.model_config, engine_input
+                ).token_ids
+                or []
+            )
             if prompt_ids[len(prompt_ids) - len(self.tail) :] != self.tail:
                 raise StructuredDecisionError(
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
+            prompts.append(prompt_ids)
             slots.append(self._label_groups(q))
             engine_inputs.append(self._read_input(engine_input, prompt_ids))
             params.append(
                 self._sampling_params([i for ids in slots[-1] for i in ids], prompt_ids)
             )
 
-        label_reads = await next_token_label_reads(
-            ctx.engine_client,
-            engine_inputs,
-            params,
-            request_id,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            priority=priority,
-        )
+        # Decisions over one engine step take turns so short ones need not wait.
+        turn = self._turn(prompts)
+        del prompts  # Do not hold the id copies while waiting at the gate.
+        async with turn:
+            label_reads = await next_token_label_reads(
+                ctx.engine_client,
+                engine_inputs,
+                params,
+                request_id,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            )
 
         reads = []
         for groups, label_read in zip(slots, label_reads):
@@ -1015,6 +1131,18 @@ class D3Strategy(ReadStrategy):
     def _tokens(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
 
+    def _tokens_spliced(self, texts: list[str]) -> list[list[int]]:
+        """Each text's tokens, with the start all texts share tokenized once."""
+        if len(texts) > 1 and (cut := _splice_point(texts)) is not None:
+            # Tokens of the head must not change when a question follows it.
+            head = texts[0][max(0, cut - _SPLICE_HEAD_CHARS) : cut]
+            head_ids = self._tokens(head)
+            windows = [self._tokens(head + t[cut:]) for t in texts]
+            if all(w[: len(head_ids)] == head_ids for w in windows):
+                prefix_ids = self._tokens(texts[0][:cut])
+                return [prefix_ids + w[len(head_ids) :] for w in windows]
+        return [self._tokens(t) for t in texts]
+
     async def _render_media(
         self, prefix: str, media: Mapping[str, Sequence[str]], cache_salt: str | None
     ) -> MultiModalInput:
@@ -1101,12 +1229,12 @@ class D3Strategy(ReadStrategy):
                     "the questions' prompts do not share their media"
                 )
             media_input = await self._render_media(prefix, media or {}, cache_salt)
-            for p in prompts:
-                ids = media_input["prompt_token_ids"] + self._tokens(p[split:])
+            for text_ids in self._tokens_spliced([p[split:] for p in prompts]):
+                ids = media_input["prompt_token_ids"] + text_ids
                 engine_inputs.append({**media_input, "prompt_token_ids": ids})
                 prompt_ids.append(ids)
         else:
-            prompt_ids = [self._tokens(p) for p in prompts]
+            prompt_ids = self._tokens_spliced(prompts)
             engine_inputs = [
                 tokens_input(ids, cache_salt=cache_salt) for ids in prompt_ids
             ]
@@ -1136,9 +1264,10 @@ class D3Strategy(ReadStrategy):
                 )
             return result.outputs.data.tolist()
 
-        logits = await asyncio.gather(
-            *(read_one(n, inputs) for n, inputs in enumerate(engine_inputs))
-        )
+        async with self._turn(prompt_ids):
+            logits = await asyncio.gather(
+                *(read_one(n, inputs) for n, inputs in enumerate(engine_inputs))
+            )
 
         reads = []
         for q, ids, code_logits in zip(questions, prompt_ids, logits):
