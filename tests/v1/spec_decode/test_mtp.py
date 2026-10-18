@@ -139,6 +139,12 @@ def test_glm_mtp_layer_recycles_post_final_norm_hidden(
     assert torch.allclose(recycle_hidden, expected_post, atol=1e-5)
     # And it is NOT the pre-norm hidden (the old, buggy recycle value).
     assert not torch.allclose(recycle_hidden, pre_norm)
+    # Logits-equivalence: the fused add+norm equals the previous eager
+    # `shared_head(residual + hidden)` path, so the draft-logits input is
+    # preserved (compute_logits now consumes this post-norm hidden directly).
+    # Any runtime difference is floating-point from fusing the add into the norm.
+    eager_post = final_norm(pre_norm.clone())
+    assert torch.allclose(expected_post, eager_post, atol=1e-5)
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
