@@ -22,10 +22,13 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
-    SupportsAsyncInit,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorRequestHandler,
+    get_request_handler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -178,6 +181,9 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config,
                 role=KVConnectorRole.SCHEDULER,
                 kv_cache_config=self.kv_cache_config,
+            )
+            self.connector_handler: KVConnectorRequestHandler = get_request_handler(
+                self.connector
             )
             if self.log_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
@@ -358,7 +364,7 @@ class Scheduler(SchedulerInterface):
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
-            if self.connector.requires_allocation_tracking():
+            if self.connector_handler.requires_allocation_tracking():
                 self.kv_cache_manager.block_pool.enable_allocation_tracking()
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
@@ -595,7 +601,7 @@ class Scheduler(SchedulerInterface):
         if (
             connector is not None
             and connector.supports_divergent_local_hybrid_hits
-            and connector.request_handler.is_eligible(request.request_id)
+            and self.connector_handler.is_eligible(request.request_id)
         ):
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
@@ -1031,7 +1037,7 @@ class Scheduler(SchedulerInterface):
                     # Get externally-cached tokens if using a KVConnector.
                     if (
                         self.connector is not None
-                        and self.connector.request_handler.is_eligible(request_id)
+                        and self.connector_handler.is_eligible(request_id)
                     ):
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
@@ -1350,9 +1356,8 @@ class Scheduler(SchedulerInterface):
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
-                if (
-                    self.connector is not None
-                    and self.connector.request_handler.is_eligible(request_id)
+                if self.connector is not None and self.connector_handler.is_eligible(
+                    request_id
                 ):
                     self.connector.update_state_after_alloc(
                         request,
@@ -1652,8 +1657,8 @@ class Scheduler(SchedulerInterface):
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        metadata = connector.request_handler.build_connector_meta(scheduler_output)
-        if not connector.requires_allocation_tracking():
+        metadata = self.connector_handler.build_connector_meta(scheduler_output)
+        if not self.connector_handler.requires_allocation_tracking():
             self.kv_cache_manager.block_pool.disable_allocation_tracking()
         return metadata
 
@@ -2745,12 +2750,12 @@ class Scheduler(SchedulerInterface):
                     self.num_spec_tokens
                 )
             if self.connector is not None:
-                self.connector.request_handler.on_new_request(request)
+                self.connector_handler.on_new_request(request)
                 kv_transfer_params = request.kv_transfer_params
                 if (
                     kv_transfer_params
                     and kv_transfer_params.get("do_remote_prefill")
-                    and self.connector.request_handler.is_eligible(request.request_id)
+                    and self.connector_handler.is_eligible(request.request_id)
                 ):
                     # Count P/D requests on arrival: connector matching is
                     # skipped while all run slots are taken.
@@ -3122,7 +3127,7 @@ class Scheduler(SchedulerInterface):
         Returns optional kv transfer parameters to be included with the
         request outputs.
         """
-        if self.connector is None or not self.connector.request_handler.is_eligible(
+        if self.connector is None or not self.connector_handler.is_eligible(
             request.request_id
         ):
             return False, None
@@ -3330,10 +3335,9 @@ class Scheduler(SchedulerInterface):
             schedule the request during the next step.
         """
         if self.connector is not None:
-            if isinstance(self.connector, SupportsAsyncInit):
-                self.connector.update_connector_init_status(
-                    kv_connector_output.kv_connector_init_status
-                )
+            self.connector_handler.update_connector_init_status(
+                kv_connector_output.kv_connector_init_status
+            )
             self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.

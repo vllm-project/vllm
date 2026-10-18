@@ -44,7 +44,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -165,42 +164,6 @@ class NoOpKVConnectorMetadata(KVConnectorMetadata):
     """Mark a step that must skip connector transfer hooks."""
 
 
-class KVConnectorRequestHandler:
-    """Own lifetime exclusions for scheduler-side request hooks.
-
-    Requests admitted before readiness stay excluded through completion.
-    Callers must check is_eligible() before invoking per-request hooks.
-    """
-
-    def __init__(self, connector: "KVConnectorBase_V1") -> None:
-        self._connector = connector
-        self._excluded_request_ids: set[str] = set()
-
-    def is_eligible(self, request_id: str) -> bool:
-        return request_id not in self._excluded_request_ids
-
-    def has_excluded_requests(self) -> bool:
-        return bool(self._excluded_request_ids)
-
-    def on_new_request(self, request: "Request") -> None:
-        if self._connector.is_connector_ready():
-            self._connector.on_new_request(request)
-        else:
-            self._excluded_request_ids.add(request.request_id)
-
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
-        if self._connector.is_connector_ready():
-            metadata = self._connector.build_connector_meta(
-                scheduler_output.without_requests(self._excluded_request_ids)
-            )
-        else:
-            metadata = NoOpKVConnectorMetadata()
-        self._excluded_request_ids.difference_update(scheduler_output.finished_req_ids)
-        return metadata
-
-
 class ConnectorInitState(enum.Enum):
     """Worker initialization state."""
 
@@ -299,19 +262,6 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
-
-    @cached_property
-    def request_handler(self) -> KVConnectorRequestHandler:
-        """Scheduler-side request exclusions for asynchronous initialization."""
-        return KVConnectorRequestHandler(self)
-
-    def is_connector_ready(self) -> bool:
-        """Whether this connector can accept new requests."""
-        return True
-
-    def requires_allocation_tracking(self) -> bool:
-        """Whether excluded requests can hide block reuse."""
-        return self.request_handler.has_excluded_requests()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -890,8 +840,9 @@ class KVConnectorBase_V1(ABC):
 class SupportsAsyncInit(KVConnectorBase_V1):
     """Connectors that can initialize asynchronously with Model Runner V2.
 
-    Subclasses KVConnectorBase_V1 because readiness overrides base behavior.
-    Inheriting only declares the capability; enable_async_init() opts in.
+    Inherit this instead of KVConnectorBase_V1. Inheriting only declares the
+    capability; enable_async_init() opts in. Callers reach these hooks through
+    get_request_handler(), so other connectors carry no readiness API.
     """
 
     # Synchronous until enable_async_init(). Class-level so connectors need no
@@ -947,10 +898,8 @@ class SupportsAsyncInit(KVConnectorBase_V1):
         return self._connector_ready
 
     def requires_allocation_tracking(self) -> bool:
-        """Whether initialization or excluded requests can hide block reuse."""
-        return (
-            self._async_init_enabled and not self.is_connector_ready()
-        ) or super().requires_allocation_tracking()
+        """Whether initialization can hide block reuse."""
+        return not self.is_connector_ready()
 
     def build_connector_init_status(self) -> KVConnectorInitStatus | None:
         """Report initialization until this step has real connector metadata."""
@@ -985,3 +934,97 @@ class SupportsAsyncInit(KVConnectorBase_V1):
                 "Asynchronous connector initialization completed on all workers"
             )
             self._connector_ready = True
+
+
+class KVConnectorRequestHandler:
+    """Resolved once per connector by get_request_handler().
+
+    Connectors without SupportsAsyncInit accept every request, so this handler
+    forwards to them directly and reports no initialization status.
+    """
+
+    def __init__(self, connector: KVConnectorBase_V1) -> None:
+        self._connector = connector
+
+    def is_connector_ready(self) -> bool:
+        return True
+
+    def is_eligible(self, request_id: str) -> bool:
+        return True
+
+    def requires_allocation_tracking(self) -> bool:
+        return False
+
+    def on_new_request(self, request: "Request") -> None:
+        self._connector.on_new_request(request)
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        return self._connector.build_connector_meta(scheduler_output)
+
+    def build_connector_init_status(self) -> KVConnectorInitStatus | None:
+        return None
+
+    def update_connector_init_status(
+        self, status: KVConnectorInitStatus | None
+    ) -> None:
+        pass
+
+
+class AsyncInitRequestHandler(KVConnectorRequestHandler):
+    """Own lifetime exclusions for an asynchronously initialized connector.
+
+    Requests admitted before readiness stay excluded through completion.
+    Callers must check is_eligible() before invoking per-request hooks.
+    """
+
+    _connector: SupportsAsyncInit
+
+    def __init__(self, connector: SupportsAsyncInit) -> None:
+        super().__init__(connector)
+        self._excluded_request_ids: set[str] = set()
+
+    def is_connector_ready(self) -> bool:
+        return self._connector.is_connector_ready()
+
+    def is_eligible(self, request_id: str) -> bool:
+        return request_id not in self._excluded_request_ids
+
+    def requires_allocation_tracking(self) -> bool:
+        return (
+            bool(self._excluded_request_ids)
+            or self._connector.requires_allocation_tracking()
+        )
+
+    def on_new_request(self, request: "Request") -> None:
+        if self._connector.is_connector_ready():
+            self._connector.on_new_request(request)
+        else:
+            self._excluded_request_ids.add(request.request_id)
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        if self._connector.is_connector_ready():
+            metadata = self._connector.build_connector_meta(
+                scheduler_output.without_requests(self._excluded_request_ids)
+            )
+        else:
+            metadata = NoOpKVConnectorMetadata()
+        self._excluded_request_ids.difference_update(scheduler_output.finished_req_ids)
+        return metadata
+
+    def build_connector_init_status(self) -> KVConnectorInitStatus | None:
+        return self._connector.build_connector_init_status()
+
+    def update_connector_init_status(
+        self, status: KVConnectorInitStatus | None
+    ) -> None:
+        self._connector.update_connector_init_status(status)
+
+
+def get_request_handler(connector: KVConnectorBase_V1) -> KVConnectorRequestHandler:
+    if isinstance(connector, SupportsAsyncInit):
+        return AsyncInitRequestHandler(connector)
+    return KVConnectorRequestHandler(connector)

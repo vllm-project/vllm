@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     NoOpKVConnectorMetadata,
     SupportsAsyncInit,
     SupportsHMA,
+    get_request_handler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -211,6 +212,7 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+        self._handlers = [get_request_handler(c) for c in self._connectors]
 
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
@@ -239,12 +241,10 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         raise NotImplementedError
 
     def is_connector_ready(self) -> bool:
-        return any(c.is_connector_ready() for c in self._connectors)
+        return any(h.is_connector_ready() for h in self._handlers)
 
     def requires_allocation_tracking(self) -> bool:
-        return super().requires_allocation_tracking() or any(
-            c.requires_allocation_tracking() for c in self._connectors
-        )
+        return any(h.requires_allocation_tracking() for h in self._handlers)
 
     @property
     def sub_connectors(self) -> list[KVConnectorBase_V1]:
@@ -487,12 +487,7 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
 
     def build_connector_init_status(self) -> KVConnectorInitStatus | None:
-        statuses = tuple(
-            c.build_connector_init_status()
-            if isinstance(c, SupportsAsyncInit)
-            else None
-            for c in self._connectors
-        )
+        statuses = tuple(h.build_connector_init_status() for h in self._handlers)
         if not any(status is not None for status in statuses):
             return None
         return MultiKVConnectorInitStatus(statuses=statuses)
@@ -516,8 +511,8 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         to_return = (0, False)
-        for i, c in enumerate(self._connectors):
-            if not c.request_handler.is_eligible(request.request_id):
+        for i, (c, h) in enumerate(zip(self._connectors, self._handlers)):
+            if not h.is_eligible(request.request_id):
                 continue
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
@@ -549,8 +544,8 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        for i, c in enumerate(self._connectors):
-            if not c.request_handler.is_eligible(request.request_id):
+        for i, (c, h) in enumerate(zip(self._connectors, self._handlers)):
+            if not h.is_eligible(request.request_id):
                 continue
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
@@ -560,16 +555,15 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
                 c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
-        for c in self._connectors:
-            c.request_handler.on_new_request(request)
+        for h in self._handlers:
+            h.on_new_request(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:
         metadata = MultiKVConnectorMetadata(
             metadata=tuple(
-                c.request_handler.build_connector_meta(scheduler_output)
-                for c in self._connectors
+                h.build_connector_meta(scheduler_output) for h in self._handlers
             )
         )
         if self._extra_async_saves:
@@ -604,9 +598,8 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
         if status is None:
             return
         assert isinstance(status, MultiKVConnectorInitStatus)
-        for connector, child_status in zip(self._connectors, status.statuses):
-            if isinstance(connector, SupportsAsyncInit):
-                connector.update_connector_init_status(child_status)
+        for h, child_status in zip(self._handlers, status.statuses):
+            h.update_connector_init_status(child_status)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata from sub-connectors.
@@ -642,8 +635,8 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
-        for c in self._connectors:
-            if not c.request_handler.is_eligible(request.request_id):
+        for c, h in zip(self._connectors, self._handlers):
+            if not h.is_eligible(request.request_id):
                 continue
             async_save, txfer_params = per_connector_fn(c)
             if async_save:
@@ -684,8 +677,8 @@ class MultiConnector(SupportsAsyncInit, SupportsHMA):
     ) -> bool:
         accepted = [
             c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
-            for c in self._connectors
-            if c.request_handler.is_eligible(request.request_id)
+            for c, h in zip(self._connectors, self._handlers)
+            if h.is_eligible(request.request_id)
         ]
         return any(accepted)
 

@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer import (
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     NoOpKVConnectorMetadata,
-    SupportsAsyncInit,
+    get_request_handler,
 )
 from vllm.forward_context import (
     get_forward_context,
@@ -69,6 +69,7 @@ class ActiveKVConnector(KVConnector):
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
+        self.kv_connector_handler = get_request_handler(self.kv_connector)
         # Register kv caches with KV Connector if applicable.
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
@@ -149,10 +150,9 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
-        if isinstance(self.kv_connector, SupportsAsyncInit):
-            output.kv_connector_init_status = (
-                self.kv_connector.build_connector_init_status()
-            )
+        output.kv_connector_init_status = (
+            self.kv_connector_handler.build_connector_init_status()
+        )
         if not self.kv_connector.has_connector_metadata():
             output.kv_connector_worker_meta = (
                 self.kv_connector.build_connector_worker_meta()
