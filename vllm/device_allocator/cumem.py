@@ -35,13 +35,19 @@ logger = init_logger(__name__)
 cumem_available = False
 libcudart: Any = None
 try:
+    import vllm.cumem_allocator as _cumem_ext
     from vllm.cumem_allocator import (
         init_module,
         python_create_and_map,
-        python_set_single_allocation,
         python_unmap_and_release,
     )
     from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    # Missing from an extension built before it was added (e.g.
+    # VLLM_USE_PRECOMPILED with an older wheel).
+    python_set_single_allocation = getattr(
+        _cumem_ext, "python_set_single_allocation", None
+    )
 
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()
@@ -53,6 +59,21 @@ except ModuleNotFoundError:
     python_set_single_allocation = None
     python_unmap_and_release = None
     lib_name = None
+
+
+def _set_single_allocation(enabled: bool) -> bool:
+    """Back new allocations by one physical allocation each (ROCm); returns
+    the previous setting."""
+    if python_set_single_allocation is None:
+        if enabled:
+            # A chunked KV cache cannot be freed on sleep once registered for
+            # RDMA, so do not fall back to it.
+            raise RuntimeError(
+                "The cumem_allocator extension predates single allocations; "
+                "rebuild vLLM's extensions to register the KV cache for RDMA."
+            )
+        return False
+    return python_set_single_allocation(enabled)
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -393,6 +414,8 @@ class CuMemAllocator:
         # is handed, so a bare "expandable_segments:False" would also drop
         # max_split_size_mb, garbage_collection_threshold and
         # roundup_power2_divisions for the rest of the process.
+        # First: it may refuse, and nothing has changed yet.
+        prev_single = _set_single_allocation(single_allocation)
         prev_conf = current_alloc_conf()
         expandable_was_enabled = conf_flag_enabled(prev_conf, EXPANDABLE_SEGMENTS)
         if expandable_was_enabled:
@@ -400,7 +423,6 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        prev_single = python_set_single_allocation(single_allocation)
         try:
             if tag != old_tag:
                 # Older pools of this tag are never reused, so trim them.
@@ -429,7 +451,7 @@ class CuMemAllocator:
                 # TODO: ask for help from PyTorch team to expose this method.
                 self._trim(data[0])
         finally:
-            python_set_single_allocation(prev_single)
+            _set_single_allocation(prev_single)
             self.current_tag = old_tag
             if expandable_was_enabled:
                 set_alloc_conf(prev_conf)

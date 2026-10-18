@@ -103,6 +103,10 @@ class RemoteAllocInfo:
     completion_remote_ip: str | None = None
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
+    # When the consumer's allocation arrived, and for how long after it writes
+    # may start (None: no limit); see MoRIIOWriter._write_window_closed.
+    allocated_at: float = field(default_factory=time.monotonic)
+    write_deadline: float | None = None
     transfer_offsets: dict[
         TransferOffsetsKey,
         tuple[list[int], list[int], list[int]],
@@ -193,6 +197,43 @@ class MoRIIOError(Exception):
 
 class HandshakeError(MoRIIOError):
     """Exception raised when handshake fails."""
+
+    pass
+
+
+def get_recv_abort_timeout(extra_config: dict[str, Any]) -> float:
+    legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+    if legacy_recv_abort_timeout is not None:
+        logger.warning_once(
+            "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+            "deprecated. Set 'recv_abort_timeout' inside "
+            "kv_transfer_config.kv_connector_extra_config instead."
+        )
+    return _positive_finite_timeout(
+        "kv_connector_extra_config.recv_abort_timeout",
+        extra_config.get(
+            "recv_abort_timeout",
+            legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
+        ),
+    )
+
+
+def write_failure_grace(transfer_timeout: float) -> float:
+    """How long a WRITE consumer waits past recv_abort_timeout before freeing
+    a load's blocks. The producer posts no write after recv_abort_timeout and
+    then waits up to transfer_timeout for its posted writes, twice when a
+    write fails, so the writes it started have landed by then."""
+    return max(MoRIIOConstants.WRITE_FAILURE_GRACE, 2 * transfer_timeout)
+
+
+class HandshakeTimeoutError(HandshakeError):
+    """Raised when a peer does not answer a handshake in time."""
+
+    pass
+
+
+class PeerUnavailableError(MoRIIOError):
+    """Raised when a peer's KV cache cannot be reached, e.g. it is asleep."""
 
     pass
 
@@ -311,7 +352,11 @@ class MoRIIOConfig:
         # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
         #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
-        #                     completion never arrived is aborted (sec).
+        #                     completion never arrived is aborted (sec). In
+        #                     WRITE mode with sleep mode on the consumer, the
+        #                     producer starts no write later than this after
+        #                     the consumer allocated, and the consumer fails
+        #                     the load write_failure_grace() later.
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -353,20 +398,7 @@ class MoRIIOConfig:
             "kv_connector_extra_config.defer_timeout",
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
         )
-        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
-        if legacy_recv_abort_timeout is not None:
-            logger.warning_once(
-                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
-                "deprecated. Set 'recv_abort_timeout' inside "
-                "kv_transfer_config.kv_connector_extra_config instead."
-            )
-        recv_abort_timeout = _positive_finite_timeout(
-            "kv_connector_extra_config.recv_abort_timeout",
-            extra_config.get(
-                "recv_abort_timeout",
-                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
-            ),
-        )
+        recv_abort_timeout = get_recv_abort_timeout(extra_config)
 
         return cls(
             local_ip=resolve_host_ip(extra_config),
@@ -430,6 +462,9 @@ class MoRIIOConstants:
     # is aborted, so the decode worker does not hang on it forever.
     # Overridable via kv_connector_extra_config["recv_abort_timeout"].
     DEFAULT_RECV_ABORT_TIMEOUT = 120.0
+    # Minimum extra time (seconds) a WRITE consumer waits past
+    # recv_abort_timeout before freeing the blocks; see write_failure_grace.
+    WRITE_FAILURE_GRACE = 60.0
 
 
 # The router embeds both zmq_addresses in the request_id:

@@ -377,6 +377,7 @@ def test_aborted_read_without_local_blocks_only_releases_remote_blocks():
     worker.mode = MoRIIOMode.READ
     worker.world_size = 8
     worker.moriio_wrapper = FakeWrapper()
+    worker._transfer_post_lock = threading.Lock()
 
     worker._read_blocks(
         local_block_ids=[],
