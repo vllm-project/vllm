@@ -1,0 +1,170 @@
+meta:
+  title: "Ling-3.1-flash"
+  slug: "ling-3-1-flash"
+  provider: "inclusionAI"
+  description: "Ling-3.1-flash MoE model with block-FP8 weights, tool calling, and reasoning support"
+  date_added: 2026-10-14
+  date_updated: 2026-10-15
+  tasks:
+    - text
+  performance_headline: "Block-FP8 weights with BF16 compute and TP8 + EP8 deployment"
+  related_recipes:
+    - inclusionAI/Ling-3.0-flash
+  hardware:
+    mi355x: verified
+
+model:
+  model_id: "inclusionAI/Ling-3.1-flash"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  docker_image:
+    nvidia: "vllm/vllm-openai:nightly"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "560B"
+  active_parameters: "25B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+    - "--gpu-memory-utilization"
+    - "0.9"
+    - "--enable-chunked-prefill"
+    - "--compilation-config"
+    - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+    - "--enable-prefix-caching"
+
+features:
+  tool_calling:
+    description: "Enable Ling 3 automatic tool calling"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "ling3"
+  reasoning:
+    description: "Split Ling 3 thinking traces into reasoning"
+    args:
+      - "--reasoning-parser"
+      - "ling3"
+  spec_decoding:
+    description: "Speculative decoding with the checkpoint's native MTP head and three speculative tokens"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":3}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    # Estimated weight footprint plus runtime allowance; KV capacity varies.
+    vram_minimum_gb: 689
+    tp: 8
+    description: "Block-FP8 (E4M3) weights, 128x128 block scaling, with BF16 compute."
+
+compatible_strategies:
+  - single_node_tep
+
+default_strategy: single_node_tep
+
+hardware_overrides:
+  amd:
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+guide: |
+  ## Overview
+
+  `inclusionAI/Ling-3.1-flash` uses the `BailingMoeV3ForCausalLM`
+  architecture with a hybrid MLA/KDA attention stack, 72 layers, 512 routed
+  experts (8 active per token), and one shared expert. The checkpoint uses
+  serialized block-FP8 E4M3 weights with 128x128 block scaling and dynamic
+  activation quantization. Non-quantized modules use BF16.
+
+  ## Prerequisites
+
+  - **vLLM:** nightly build (`vllm/vllm-openai-rocm:nightly` on AMD)
+  - **Deployment:** a single node with 8 GPUs, using TP8 + EP8
+  - **Precision:** serialized block FP8 weights with BF16 compute
+  - **Context length:** 262,144 tokens
+  - **Memory:** approximately 689 GB aggregate VRAM as a loading estimate;
+    allow additional capacity for KV cache and the intended workload
+
+  ## Launching the Server
+
+  ```bash
+  vllm serve inclusionAI/Ling-3.1-flash \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --enable-chunked-prefill \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser ling3 \
+    --reasoning-parser ling3
+  ```
+
+  ### AMD MI355X
+
+  Use the ROCm nightly image `vllm/vllm-openai-rocm:nightly`,
+  enable AITER and launch using the command:
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve inclusionAI/Ling-3.1-flash \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --gpu-memory-utilization 0.9 \
+    --enable-chunked-prefill \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser ling3 \
+    --reasoning-parser ling3
+  ```
+
+  Each GPU has about 168 GiB of KV cache available.
+
+  ## Speculative Decoding (MTP)
+
+  The checkpoint ships a native MTP head. Enable it with three speculative
+  tokens:
+
+  ```bash
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  ```
+
+  On MI355X this gave a mean acceptance length of 3.0 (per-position acceptance
+  0.96 / 0.67 / 0.38) on short reasoning prompts.
+
+  ## Thinking Mode
+
+  Thinking is selected per request through the chat template rather than by a
+  server flag:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="inclusionAI/Ling-3.1-flash",
+      messages=[{"role": "user", "content": "Solve the problem step by step."}],
+      temperature=0.0,
+      max_tokens=16384,
+      extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+  )
+  msg = response.choices[0].message
+  print(msg.reasoning)
+  print(msg.content)
+  ```
+
+  `--reasoning-parser ling3` separates thinking traces from the final answer.
+  Keep the prompt and requested output within the configured context limit.
+
+  ## References
+
+  - [Ling-3.1-flash on Hugging Face](https://huggingface.co/inclusionAI/Ling-3.1-flash)
+  - [vLLM nightly installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/#install-the-latest-code)
