@@ -95,10 +95,11 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -s -v tests/quantization/test_blackwell_moe.py || true'
-- label: ':nvidia: (H200 MIG 35GB) Quantized Models'
+- label: ':nvidia: (H200 MIG 35GB) Quantized Models %N'
   key: quantized-models-test
   device: intel_gpu
   timeout_in_minutes: 65
+  parallelism: 3
   optional: true
   working_dir: .
   no_plugin: true
@@ -109,7 +110,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/quantization
@@ -120,4 +121,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/quantization || true'
+    pytest -v -s models/quantization --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
