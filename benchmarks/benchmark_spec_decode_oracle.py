@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Measure the speculative decoding speedup ceiling with an oracle drafter.
+"""Benchmark speculative decoding with a reference-replay oracle.
 
-The oracle drafter replays the target model's own greedy output as the draft,
-so almost every draft token is accepted and drafting itself costs nothing.
-The speedup it achieves is therefore the ceiling that any real drafter could
-reach with the current verification path. Running a real drafter (ngram,
-EAGLE3) through the same script shows how much of that ceiling it captures.
+The oracle replays saved target-model outputs as draft tokens. Comparing it
+with ngram and EAGLE3 provides a performance reference for the tested setup.
+Replay has nonzero CPU overhead, and proposals may be rejected, so the result
+is not a theoretical upper bound.
 
 Typical use (one configuration per process; see benchmarks/README.md):
 
@@ -14,19 +13,18 @@ Typical use (one configuration per process; see benchmarks/README.md):
     python benchmarks/benchmark_spec_decode_oracle.py --model Qwen/Qwen3-8B \
         --mode baseline --prompts prompts.json --max-num-seqs 32 \
         --no-async-scheduling --write-ref ref.json --out base.json
-    # 2. oracle ceiling at k=4
+    # 2. reference-replay oracle at k=4
     python benchmarks/benchmark_spec_decode_oracle.py --model Qwen/Qwen3-8B \
         --mode oracle --k 4 --prompts prompts.json --max-num-seqs 32 \
         --ref ref.json --out oracle_k4.json
     # 3. a real drafter for comparison
     python benchmarks/benchmark_spec_decode_oracle.py --model Qwen/Qwen3-8B \
         --mode eagle3 --k 3 --draft-model RedHatAI/Qwen3-8B-speculator.eagle3 \
-        --prompts prompts.json --max-num-seqs 32 --ref ref.json --out e3.json
+        --prompts prompts.json --max-num-seqs 32 --no-async-scheduling \
+        --ref ref.json --out e3.json
 
-Read the oracle numbers against a baseline run with ``--no-async-scheduling``:
-vLLM disables async scheduling for CPU-side drafters (``custom_class``,
-``ngram``), and that alone is worth 15-25% on an H100, so comparing against
-the default baseline would understate the ceiling.
+Use ``--no-async-scheduling`` on the baseline and EAGLE3 to match the scheduling
+mode used by CPU-side drafters (``custom_class``, ``ngram``).
 
 ``--prompts`` is a JSON list of user-turn strings; the chat template is
 applied with thinking disabled for Qwen3 models.
@@ -52,17 +50,15 @@ class OracleProposer:
     The reference file (``ORACLE_REF_FILE``) is a JSON list of
     ``{"prompt_token_ids": [...], "output_token_ids": [...]}`` written by a
     ``--mode baseline`` run. Requests are identified by the bytes of their
-    first ``L`` prompt tokens, where ``L`` is the shortest prompt length, so
-    a lookup costs one hash per request per step.
+    first ``L`` prompt tokens, where ``L`` is the shortest prompt length.
 
-    While the generation matches the reference the next ``k`` reference
-    tokens are proposed. Under bf16 a greedy generation can drift off the
-    reference once its batch neighbours change; by default the proposer then
-    re-aligns on the last ``ORACLE_RESYNC_NGRAM`` (3) generated tokens inside
-    the reference and keeps drafting. ``ORACLE_STRICT=1`` disables the
-    re-alignment so a drifted request stops receiving drafts, which is a
-    more conservative ceiling. Path counters are written to
-    ``ORACLE_STATS_DIR/oracle_stats_<pid>.json`` every 100 calls.
+    While generation matches the reference, up to ``k`` reference tokens
+    are proposed. If the output diverges, the proposer attempts to realign
+    using the last ``ORACLE_RESYNC_NGRAM`` (3) generated tokens in the reference.
+    ``ORACLE_STRICT=1`` disables realignment, so divergent requests receive
+    no drafts. Cumulative proposer statistics are written to
+    ``ORACLE_STATS_DIR/oracle_stats_<pid>.json`` every 100 calls. These snapshots
+    include warm-up, may omit the final calls, and can be absent for short runs.
     """
 
     def __init__(self, vllm_config):
@@ -139,7 +135,7 @@ class OracleProposer:
         token_ids_cpu: np.ndarray,
         slot_mappings=None,
     ) -> list[list[int]]:
-        """Return the next ``k`` reference tokens for every active request."""
+        """Propose up to ``k`` reference tokens for eligible requests."""
         t0 = time.perf_counter()
         c = self.counters
         c["calls"] += 1
@@ -323,7 +319,7 @@ def main() -> None:
         speculative_config=spec,
         disable_log_stats=False,
         seed=0,
-        # None keeps vLLM's default (on, unless the drafter forces it off).
+        # None lets vLLM choose the scheduling mode for this configuration.
         async_scheduling=False if args.no_async_scheduling else None,
     )
     init_s = time.time() - t_init
@@ -374,13 +370,14 @@ def main() -> None:
         lat = sorted(per_request_latency)
         result["req_latency_mean_s"] = round(sum(lat) / len(lat), 3)
         result["req_latency_p50_s"] = round(lat[len(lat) // 2], 3)
+        # Generation wall time per output token, including prefill.
         result["tpot_ms"] = round(1000 * wall / max(1, n_out), 2)
 
     drafts = metrics.get("vllm:spec_decode_num_drafts", 0)
     draft_tokens = metrics.get("vllm:spec_decode_num_draft_tokens", 0)
     accepted = metrics.get("vllm:spec_decode_num_accepted_tokens", 0)
     if drafts:
-        # tokens produced per step, including the bonus token
+        # Mean accepted draft tokens per draft event, plus the bonus token.
         result["mean_acceptance_len"] = round(1 + accepted / drafts, 3)
         result["draft_acceptance_rate"] = round(accepted / max(1, draft_tokens), 4)
 
