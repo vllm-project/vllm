@@ -53,11 +53,17 @@ not_gfx1100 = pytest.mark.skipif(
     reason="This test verifies non-gfx1100 builds — skip on gfx1100",
 )
 
-RDNA3_OPS = ["gptq_gemm_rdna3", "gptq_gemm_rdna3_wmma", "moe_gptq_gemm_rdna3"]
+RDNA3_OPS = [
+    "gptq_gemm_rdna3",
+    "gptq_gemm_rdna3_wmma",
+    "moe_gptq_gemm_rdna3",
+    "moe_w4a8_decode_rdna3",
+]
 RDNA3_CU_FILES = [
     "q_gemm_rdna3.cu",
     "q_gemm_rdna3_wmma.cu",
     "moe_q_gemm_rdna3.cu",
+    "moe_w4a8_decode_rdna3.cu",
 ]
 
 
@@ -376,6 +382,14 @@ class TestMoEDispatchMocked:
         with patch("vllm.platforms.rocm.on_gfx1100", return_value=False):
             assert rdna3_moe_kernel_available() is False
 
+    def test_w4a8_kernel_unavailable_when_mocked_non_gfx11(self):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
+            rdna3_w4a8_moe_kernel_available,
+        )
+
+        with patch("vllm.platforms.rocm.on_gfx11", return_value=False):
+            assert rdna3_w4a8_moe_kernel_available() is False
+
     @pytest.mark.parametrize(
         "weight_key",
         [kInt8Static, kInt4StaticAsym, kInt4Static32Asym, None],
@@ -507,3 +521,25 @@ class TestWNA16OracleWiring:
         assert backends.index(WNA16MoEBackend.RDNA3) < backends.index(
             WNA16MoEBackend.TRITON
         )
+
+    def test_w4a8_backend_maps_to_w4a8_experts(self):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
+            Rdna3W4A8Experts,
+        )
+        from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+            WNA16MoEBackend,
+            backend_to_kernel_cls,
+            map_wna16_backend,
+        )
+
+        assert backend_to_kernel_cls(WNA16MoEBackend.RDNA3_W4A8) == [Rdna3W4A8Experts]
+        assert map_wna16_backend("rdna3_w4a8") == WNA16MoEBackend.RDNA3_W4A8
+
+    def test_w4a8_backend_is_opt_in(self):
+        """W4A8 changes activation numerics, so auto selection never picks it."""
+        from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+            WNA16MoEBackend,
+            _get_priority_backends,
+        )
+
+        assert WNA16MoEBackend.RDNA3_W4A8 not in _get_priority_backends()

@@ -41,6 +41,14 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+void moe_w4a8_decode_rdna3(at::Tensor& out, const at::Tensor& x,
+                           const at::Tensor& topk_ids,
+                           const at::Tensor& topk_weights,
+                           const at::Tensor& w13, const at::Tensor& w13_scale,
+                           const std::optional<at::Tensor>& w13_zp,
+                           const at::Tensor& w2, const at::Tensor& w2_scale,
+                           const std::optional<at::Tensor>& w2_zp);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

@@ -63,6 +63,7 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    RDNA3_W4A8 = "RDNA3_W4A8"
 
 
 def backend_to_kernel_cls(
@@ -119,6 +120,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3WNA16Experts]
+    elif backend == WNA16MoEBackend.RDNA3_W4A8:
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
+            Rdna3W4A8Experts,
+        )
+
+        return [Rdna3W4A8Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -191,7 +198,8 @@ def _backend_incompatibility_reason(
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
 
-    if backend == WNA16MoEBackend.TRITON:
+    # RDNA3_W4A8 falls back to the Triton kernels and shares their layout.
+    if backend in (WNA16MoEBackend.TRITON, WNA16MoEBackend.RDNA3_W4A8):
         if may_have_bias:
             return "expert bias is not supported"
         if isinstance(quant_config, AutoAWQConfig):
@@ -244,6 +252,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
+        "rdna3_w4a8": WNA16MoEBackend.RDNA3_W4A8,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -431,6 +440,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna3_w4a8_moe import (
+        Rdna3W4A8Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -452,6 +464,7 @@ def make_wna16_moe_kernel(
         ZentorchExpertsInt4,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
+        Rdna3W4A8Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -1750,7 +1763,7 @@ def convert_to_wna16_moe_kernel_format(
             w13_qzeros,
             w2_qzeros,
         )
-    elif backend == WNA16MoEBackend.TRITON:
+    elif backend in (WNA16MoEBackend.TRITON, WNA16MoEBackend.RDNA3_W4A8):
         # All inputs arrive in canonical N-first format; view as uint8.
         w13_uint8 = w13.contiguous().view(torch.uint8)
         w2_uint8 = w2.contiguous().view(torch.uint8)
