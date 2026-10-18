@@ -103,10 +103,11 @@ For DeepSeek V4.1, each token's KV cache is 528 Bytes, structured as:
 -   **Last 16 bytes:** Scale factors, containing 16 `ue8m0` values, one per 32
     consecutive `float8_e4m3` values (i.e. MXFP8).
 
-The V4 and V4.1 records are not laid out token-by-token within a page: a page
-holds all its data rows first and all its scale rows after, so a page is
-`block_size * bytes_per_token` bytes rounded up to the decode kernel's TMA
-stride (576 B for V4, 512 B for V4.1).
+The V4 record is not laid out token-by-token within a page: a page holds all
+its data rows first and all its scale rows after, so a page is
+`block_size * bytes_per_token` bytes rounded up to the decode kernel's 576 B
+TMA stride. The V4.1 records are interleaved: each token's scales directly
+follow its own data, and the decode kernel's TMA stride is the record width.
 
 In the "nvfp4_ds_mla" format (SM100 only, DeepSeek V3.2 geometry), each
 token's KV cache is 352 Bytes, structured as:
@@ -118,7 +119,7 @@ token's KV cache is 352 Bytes, structured as:
     elements, stored permuted (an 8x4 -> 4x8 transpose: the scale for element
     block `s` lives at byte `8 * (s & 3) + (s >> 2)`) so that the 8 scales one
     FlashMLA dequant thread needs are contiguous. See the layout comment in
-    `csrc/libtorch_stable/cache_kernels.cu`.
+    `csrc/cache_kernels.cu`.
 
 """
 
@@ -334,14 +335,14 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
     fp8_use_mixed_batch: bool = False
 
 
-def get_prefill_workspace_size(max_model_len: int):
-    # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    # Memory usage: 5 * max_model_len * 576 * 2 bytes
-    #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
+def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+    # Memory usage: factor * max_model_len * 576 * 2 bytes
+    #   Example: DeepSeek-V3.2 with max_model_len=163840 and the default factor ->
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
+    factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
+    assert factor is not None
+    return vllm_config.model_config.max_model_len * factor
 
 
 class FlashMLASparseMetadataBuilder(
@@ -446,12 +447,6 @@ class FlashMLASparseMetadataBuilder(
         )
 
         if parallel_config.decode_context_parallel_size > 1:
-            if parallel_config.dcp_comm_backend != "ag_rs":
-                raise NotImplementedError(
-                    "DCP for FlashMLA sparse is only validated with the "
-                    "default 'ag_rs' DCP comm backend; got "
-                    f"'{parallel_config.dcp_comm_backend}'"
-                )
             if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
                 raise NotImplementedError(
                     "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
@@ -562,9 +557,7 @@ class FlashMLASparseMetadataBuilder(
 
             prefill_seq_lens_cpu = seq_lens_cpu[num_decodes:]
             # Chunk prefill requests to fit within workspace size
-            max_prefill_buffer_size = get_prefill_workspace_size(
-                self.vllm_config.model_config.max_model_len
-            )
+            max_prefill_buffer_size = get_prefill_workspace_size(self.vllm_config)
             # Workspace rows per entry, and the prefill rows each entry covers.
             workspace_rows = prefill_seq_lens_cpu
             row_bounds = np.arange(num_prefills + 1)
@@ -804,9 +797,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             # Reserve workspace during initialization
             assert vllm_config is not None and vllm_config.model_config is not None
-            prefill_workspace_size = get_prefill_workspace_size(
-                vllm_config.model_config.max_model_len
-            )
+            prefill_workspace_size = get_prefill_workspace_size(vllm_config)
             parallel_config = vllm_config.parallel_config
             self.pcp_dcp_kv_gather = (
                 parallel_config.prefill_context_parallel_size > 1
@@ -862,6 +853,21 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if cache is not None:
             assert isinstance(index_group, HiSparseMLAIndexGroup)
             num_decode_tokens = attn_metadata.num_decode_tokens
+            if num_decode_tokens < q.shape[0] and cache.all_context_pages_resident:
+                physical_topk, lengths = index_group.convert_logical_to_physical_topk(
+                    self.index_group_index,
+                    topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=True,
+                )
+                return self._bf16_flash_mla_kernel(
+                    q,
+                    index_group.physical_kv_cache(self.index_group_index),
+                    physical_topk,
+                    lengths,
+                    actual_num_heads,
+                )
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
                     index_group.convert_logical_to_physical_topk(
@@ -1272,7 +1278,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
         lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         # The head-padding slice above can leave `out` non-contiguous, and the
-        # merge feeds it to reduce_scatter.
+        # DCP combines (reduce_scatter, direct A2A) need packed heads.
         return out.contiguous(), lse
 
     def _fp8_flash_mla_kernel(

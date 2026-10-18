@@ -24,11 +24,13 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
+    MMPayload,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
     ToolCall,
     TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -38,6 +40,7 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.outputs import WeightVersionSpan
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -127,6 +130,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    # Contiguous weight version spans over output-token indexes.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -166,6 +171,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -428,6 +435,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_weight_versions: bool = Field(
+        default=False,
+        description=(
+            "If true, each choice includes weight_versions: the weight-version "
+            "label that sampled each half-open range of its output tokens. "
+            "When streaming, only the last chunk of each choice includes it. "
+            "Beam search does not return it."
+        ),
+    )
     routed_experts_prompt_start: int = Field(
         default=0,
         ge=0,
@@ -458,15 +474,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    return_mm_kwargs: bool = Field(
-        default=True,
+    mm_payload: MMPayload = Field(
+        default="tensors",
         description=(
-            "If false, the render response's `features` set `kwargs_data` "
-            "and `mm_metadata` to null, for callers that need only the token "
-            "layout and item hashes, such as cache-aware routers. Do not send "
-            "such a response to `/inference/v1/generate`, which reads a null "
-            "`kwargs_data` as every item being cached. Only supported on the "
-            "render endpoints; ignored on regular generation endpoints."
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
         ),
     )
 
@@ -525,6 +551,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
 
     @model_validator(mode="before")
     @classmethod
@@ -679,6 +710,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return BeamSearchParams(
             beam_width=n,
+            allowed_token_ids=self.allowed_token_ids,
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
