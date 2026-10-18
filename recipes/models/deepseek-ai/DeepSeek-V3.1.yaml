@@ -1,0 +1,196 @@
+meta:
+  title: "DeepSeek-V3.1"
+  slug: "deepseek-v3.1"
+  provider: "DeepSeek"
+  description: "DeepSeek-V3.1 is a hybrid MoE model that supports dynamic switching between thinking and non-thinking modes, with tool calling and function execution."
+  date_added: 2025-08-21
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "Hybrid thinking / non-thinking MoE with native FP8 and tool calling"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-V3"
+    - "deepseek-ai/DeepSeek-V3.2-Exp"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V3.1"
+  min_vllm_version: "0.12.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "671B"
+  active_parameters: "37B"
+  context_length: 163840
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+    - "--enable-expert-parallel"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable DeepSeek-V3.1 tool calling with the deepseek_v31 tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "deepseek_v31"
+      - "--chat-template"
+      - "examples/tool_chat_template_deepseekv31.jinja"
+  reasoning:
+    description: "Dynamic thinking mode via chat_template_kwargs={'thinking': true|false}. No separate parser flag is required; the chat template emits <think>...</think> content."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 805
+    description: "Native FP8 weights on 8xH200 (or H20) with 141GB per GPU"
+  nvfp4:
+    model_id: "nvidia/DeepSeek-V3.1-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 403
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-V3.1 is a hybrid MoE model that supports both thinking and non-thinking modes.
+  You can dynamically switch between the two modes from the client by passing
+  `extra_body={"chat_template_kwargs": {"thinking": True|False}}`.
+
+  ## Prerequisites
+
+  - **Hardware**: 8x H200/H20 (CUDA) or 8x MI300X / MI325X / MI355X (ROCm)
+  - **vLLM**: Current stable release
+
+  ### CUDA
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### ROCm (MI300X, MI325X, MI355X)
+  Requires Python 3.12, ROCm 7.2.1, and glibc >= 2.35.
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Launching DeepSeek-V3.1
+
+  ### 8xH200 / 8xH20 (CUDA)
+
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3.1 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 8 \
+    --served-model-name ds31
+  ```
+
+  ### 8xMI300X / MI325X / MI355X (ROCm)
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_MOE=1
+
+  vllm serve deepseek-ai/DeepSeek-V3.1 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel
+  ```
+
+  ### Function calling
+
+  vLLM supports user-defined tool calling for DeepSeek-V3.1. Add these flags when launching
+  the server. The example chat template ships in the official container and can also be
+  downloaded from the vLLM repo:
+  [`tool_chat_template_deepseekv31.jinja`](https://github.com/vllm-project/vllm/blob/main/examples/tool_chat_template_deepseekv31.jinja).
+
+  ```bash
+  vllm serve ... \
+    --enable-auto-tool-choice \
+    --tool-call-parser deepseek_v31 \
+    --chat-template examples/tool_chat_template_deepseekv31.jinja
+  ```
+
+  ## Client Usage
+
+  ### OpenAI Python SDK
+
+  Control thinking mode via `extra_body={"chat_template_kwargs": {"thinking": False}}`
+  (or `True` to enable thinking).
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  model = client.models.list().data[0].id
+
+  messages = [
+      {"role": "system", "content": "You are a helpful assistant"},
+      {"role": "user", "content": "Who are you?"},
+      {"role": "assistant", "content": "<think>Hmm</think>I am DeepSeek"},
+      {"role": "user", "content": "9.11 and 9.8, which is greater?"},
+  ]
+  response = client.chat.completions.create(
+      model=model,
+      messages=messages,
+      extra_body={"chat_template_kwargs": {"thinking": False}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  When `thinking=True`, output includes a `</think>` segment delimiting chain-of-thought;
+  when `thinking=False`, the model produces a direct answer without the thinking segment.
+
+  ### curl
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+          "model": "ds31",
+          "messages": [
+              {"role": "user", "content": "9.11 and 9.8, which is greater?"}
+          ],
+          "chat_template_kwargs": {"thinking": true}
+      }'
+  ```
+
+  ## References
+
+  - [DeepSeek-V3.1 on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.1)
+  - [vLLM tool chat template for DeepSeek-V3.1](https://github.com/vllm-project/vllm/blob/main/examples/tool_chat_template_deepseekv31.jinja)
