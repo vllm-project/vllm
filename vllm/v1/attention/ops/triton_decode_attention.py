@@ -34,11 +34,23 @@ import torch
 from packaging import version
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+
+if HAS_TRITON:
+    from triton.runtime.errors import OutOfResources
+else:  # pragma: no cover - placeholder so the except clause below type-checks
+
+    class OutOfResources(Exception):
+        pass
+
 
 is_hip_ = current_platform.is_rocm()
 
 logger = logging.getLogger(__name__)
+
+# (config key) -> num_stages that compiles on this device. See
+# _decode_grouped_att_m_fwd.
+_NUM_STAGES_CACHE: dict[tuple, int] = {}
 
 # Only print the following warnings when triton version < 3.2.0.
 # The issue won't affect performance or accuracy.
@@ -530,45 +542,86 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    _fwd_grouped_kernel_stage1[grid](
-        q,
-        k_buffer,
-        v_buffer,
-        sm_scale,
-        Req_to_tokens,
-        B_Seqlen,
-        att_out,
-        Req_to_tokens.stride(0),
-        q.stride(0),
-        q.stride(1),
-        _page_stride(k_buffer, page_size),
-        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
-        k_scale,
-        v_scale,
-        kv_group_num=kv_group_num,
-        q_head_num=head_num,
-        BLOCK_DMODEL=BLOCK_DMODEL,
-        BLOCK_DPE=BLOCK_DPE,
-        BLOCK_DV=BLOCK_DV,
-        BLOCK_N=BLOCK,
-        BLOCK_H=BLOCK_H,
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
-        PAGE_SIZE=page_size,
-        logit_cap=logit_cap,
-        num_warps=4,
-        num_stages=num_stages,
-        Lk=Lk,
-        Lv=Lv,
-        IS_MLA=is_mla,
-        **extra_kargs,
+    def launch(stages: int) -> None:
+        _fwd_grouped_kernel_stage1[grid](
+            q,
+            k_buffer,
+            v_buffer,
+            sm_scale,
+            Req_to_tokens,
+            B_Seqlen,
+            att_out,
+            Req_to_tokens.stride(0),
+            q.stride(0),
+            q.stride(1),
+            _page_stride(k_buffer, page_size),
+            k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+            k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+            _page_stride(v_buffer, page_size),
+            v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+            v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+            att_out.stride(0),
+            att_out.stride(1),
+            att_out.stride(2),
+            k_scale,
+            v_scale,
+            kv_group_num=kv_group_num,
+            q_head_num=head_num,
+            BLOCK_DMODEL=BLOCK_DMODEL,
+            BLOCK_DPE=BLOCK_DPE,
+            BLOCK_DV=BLOCK_DV,
+            BLOCK_N=BLOCK,
+            BLOCK_H=BLOCK_H,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            PAGE_SIZE=page_size,
+            logit_cap=logit_cap,
+            num_warps=4,
+            num_stages=stages,
+            Lk=Lk,
+            Lv=Lv,
+            IS_MLA=is_mla,
+            **extra_kargs,
+        )
+
+    # The shared memory the compiled kernel needs depends on the tile shape
+    # and on the KV-cache dtype (an fp8 cache is upcast in shared memory), so
+    # a shape-only rule cannot know when two stages fit. Consumer GPUs
+    # (sm_86, sm_89, sm_120) only allow 101376 bytes per block, and the MLA
+    # tile (BLOCK_DMODEL=512, BLOCK_DPE=64) with an fp8 cache needs 102400
+    # with two stages. Triton raises OutOfResources after compiling and
+    # before launching, so falling back to one stage is safe here, including
+    # during CUDA graph capture. The decision is cached per configuration.
+    stage_key = (
+        is_mla,
+        Lk,
+        Lv,
+        BLOCK_DMODEL,
+        BLOCK_DPE,
+        BLOCK_DV,
+        BLOCK,
+        BLOCK_H,
+        k_buffer.dtype,
+        v_buffer.dtype,
+        q.dtype,
+        q.device.index,
     )
+    stages = _NUM_STAGES_CACHE.get(stage_key, num_stages)
+    try:
+        launch(stages)
+    except OutOfResources:
+        if stages <= 1:
+            raise
+        logger.warning(
+            "Triton decode attention: %d pipeline stages exceed the shared "
+            "memory of this GPU for Lk=%d, Lv=%d, kv dtype %s; using 1 stage.",
+            stages,
+            Lk,
+            Lv,
+            k_buffer.dtype,
+        )
+        stages = 1
+        launch(stages)
+    _NUM_STAGES_CACHE[stage_key] = stages
 
 
 @triton.jit
