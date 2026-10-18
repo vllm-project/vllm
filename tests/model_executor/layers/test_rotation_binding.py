@@ -5,10 +5,12 @@
 """Binding behavior for checkpoint-backed Final Norm rotations."""
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotation.composite_hadamard import (
     CompositeHadamardRotation,
@@ -24,7 +26,10 @@ pytestmark = pytest.mark.usefixtures("default_vllm_config")
 
 
 def _prepared_model(
-    targets: list[str], *, draft_dtype: torch.dtype | None = None
+    targets: list[str],
+    *,
+    draft_dtype: torch.dtype | None = None,
+    model: torch.nn.Module | None = None,
 ) -> torch.nn.Module:
     config = SimpleNamespace(
         rotation_config={
@@ -45,22 +50,51 @@ def _prepared_model(
             ],
         }
     )
-    model_config = SimpleNamespace(hf_config=config, dtype=torch.bfloat16)
+    model_config = SimpleNamespace(
+        hf_config=config, dtype=torch.bfloat16, is_submodel_config=False
+    )
     speculative_config = (
         SimpleNamespace(draft_model_config=SimpleNamespace(dtype=draft_dtype))
         if draft_dtype is not None
         else None
     )
-    vllm_config = SimpleNamespace(
-        model_config=model_config, speculative_config=speculative_config
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=model_config, speculative_config=speculative_config
+        ),
     )
-    model = torch.nn.Module()
-    model.add_module("norm", RMSNorm(16))
-    prepare_rotation_transforms(model, vllm_config, model_config)
+    if model is None:
+        model = torch.nn.Module()
+        model.add_module("norm", RMSNorm(16))
+    prepare_rotation_transforms(model, vllm_config, vllm_config.model_config)
     with torch.no_grad():
         model.rotations["final"].sign.fill_(1)
         model.rotations["final"].hk.fill_(1)
     return model
+
+
+def test_submodel_preparation_defers_to_outer_model():
+    inner = torch.nn.Module()
+    inner.add_module("norm", RMSNorm(16))
+    original_weight = inner.norm.weight
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(model_config=SimpleNamespace(is_submodel_config=True)),
+    )
+    prepare_rotation_transforms(inner, config, config.model_config)
+    assert type(inner.norm) is RMSNorm
+    assert not hasattr(inner, "rotations")
+
+    outer = torch.nn.Module()
+    outer.add_module("language_model", inner)
+    _prepared_model(["language_model.norm"], model=outer)
+    bind_rotation_transforms(outer)
+    assert inner.norm.rotation is outer.rotations["final"]
+    assert (
+        dict(outer.named_parameters())["language_model.norm.weight"] is original_weight
+    )
+    assert not hasattr(inner, "rotations")
 
 
 @pytest.mark.parametrize("draft_dtype", [None, torch.bfloat16, torch.float16])
@@ -89,6 +123,7 @@ def test_prepare_registers_mtp_warmup_before_draft_loading(monkeypatch, draft_dt
     assert set(compiled) == {kernel.CompileKey(1, 16, True, dtype) for dtype in dtypes}
 
 
+@pytest.mark.usefixtures("disable_log_dedup")
 def test_main_norm_binds_without_optional_mtp_model(caplog_vllm):
     """The main norm binds and missing draft targets are visible in the log."""
     model = _prepared_model(["norm", "model.layers.45.shared_head.norm"])
@@ -98,6 +133,7 @@ def test_main_norm_binds_without_optional_mtp_model(caplog_vllm):
     assert "model.layers.45.shared_head.norm" in caplog_vllm.text
 
 
+@pytest.mark.usefixtures("disable_log_dedup")
 def test_mtp_only_target_warns_without_draft_and_is_checked_with_draft(caplog_vllm):
     """MTP-only targets can be skipped until a draft model is loaded."""
     target = "model.layers.45.shared_head.norm"
