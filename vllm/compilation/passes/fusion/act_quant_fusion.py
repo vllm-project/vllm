@@ -125,7 +125,8 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
 class AiterSiluMulFp8StaticQuantPattern(SiluMulFp8StaticQuantPattern):
     """SiluMul+Fp8StaticQuant where the quant is AITER's per-tensor op, which
-    also returns its (unchanged) scale."""
+    also returns its (unchanged) scale. The replacement is native so Inductor
+    fuses it into one kernel, which is faster than silu_and_mul_quant."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -144,13 +145,13 @@ class AiterSiluMulFp8StaticQuantPattern(SiluMulFp8StaticQuantPattern):
 
     @property
     def replacement(self):
-        fused = super().replacement
-
         def _replacement(
             input: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            return fused(input, scale), scale
+            result = self.silu_and_mul_matcher.forward_native(input)
+            result_quant, _ = self.quant_matcher.quant_fp8.forward_native(result, scale)
+            return result_quant, scale
 
         return _replacement
 

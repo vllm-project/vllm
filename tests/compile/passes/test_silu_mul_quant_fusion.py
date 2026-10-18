@@ -92,13 +92,24 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
             if rocm_aiter_ops.is_linear_fp8_enabled()
             else QUANT_OPS[kFp8StaticTensorSym]
         )
+        if self.aiter_quant:
+            ops = [SILU_MUL_OP] if self.enable_silu_mul_custom_op else []
+            return [*ops, quant_op]
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
             quant_op if self.enable_quant_fp8_custom_op else torch.ops.aten.reciprocal,
         ]
 
     def ops_in_model_after(self):
+        if self.aiter_quant:
+            return [torch.ops.aten.reciprocal]
         return [FUSED_OPS[kFp8StaticTensorSym]]
+
+    @property
+    def aiter_quant(self):
+        return (
+            rocm_aiter_ops.is_linear_fp8_enabled() and self.enable_quant_fp8_custom_op
+        )
 
 
 class TestSiluMulNvfp4QuantModel(torch.nn.Module):
@@ -348,7 +359,9 @@ def test_fusion_silu_and_mul_quant(
 
         # Check that it gives the same answer
         if isinstance(model, TestSiluMulFp8QuantModel):
-            atol, rtol = 1e-3, 1e-3
+            # Inductor skips the reference's bf16 rounding of silu*mul, so an
+            # FP8 code can shift by one.
+            atol = rtol = 5e-2 if model.aiter_quant else 1e-3
         elif isinstance(model, TestSiluMulNvfp4QuantModel):
             atol, rtol = 1e-1, 1e-1
         elif isinstance(model, TestSiluMulGroupFp8QuantModel):
