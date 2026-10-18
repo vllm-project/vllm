@@ -73,9 +73,11 @@ This complicates the process as we cannot use the out-of-the-box
 | ROCm 6.3 | [https://download.pytorch.org/whl/rocm6.3](https://download.pytorch.org/whl/rocm6.3) |
 | XPU | [https://download.pytorch.org/whl/xpu](https://download.pytorch.org/whl/xpu) |
 
-- Update the below files to match the CUDA version from step 1. This makes sure that the release vLLM wheel is tested on CI.
+- Update the files below to match the CUDA version from step 1. This ensures that
+  CI builds the release vLLM wheel with that CUDA version and points the default
+  variant alias to it.
     - `.buildkite/release-pipeline.yaml`
-    - `.buildkite/scripts/upload-wheels.sh`
+    - `.buildkite/scripts/generate-and-upload-nightly-index.sh`
 
 ## Manually running vLLM builds on BuildKiteCI
 
