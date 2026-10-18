@@ -69,6 +69,8 @@ class StructuredOutputManager:
         )
 
         self._grammar_bitmask: torch.Tensor | None = None
+        self._backend_bitmasks: dict[str, torch.Tensor] = {}
+        self._model_vocab_size = vllm_config.model_config.get_vocab_size()
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
@@ -174,8 +176,7 @@ class StructuredOutputManager:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
 
             self._backends[backend] = selected_backend
-            # The first backend allocates the shared token bitmask, not grammars
-            # for requests resolved to another backend by auto validation.
+            # Keep the first compiler alias for existing lifecycle callers.
             if self.backend is None:
                 self.backend = selected_backend
 
@@ -220,7 +221,9 @@ class StructuredOutputManager:
 
     def _fill_bitmasks(
         self,
-        batch: Iterable[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]],
+        batch: Iterable[
+            tuple[StructuredOutputGrammar, str, int, bool, tuple[int, ...]]
+        ],
     ) -> None:
         """Fill one bitmask row per entry.
 
@@ -228,9 +231,20 @@ class StructuredOutputManager:
         `masked_ids`, the implicit reasoning ends masked while reasoning.
         """
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask, masked_ids in batch:
+        for grammar, backend_name, index, apply_bitmask, masked_ids in batch:
             if apply_bitmask and not grammar.is_terminated():
-                grammar.fill_bitmask(self._grammar_bitmask, index)
+                native_bitmask = self._backend_bitmasks[backend_name]
+                grammar.fill_bitmask(native_bitmask, index)
+                model_row = self._grammar_bitmask[index]
+                if native_bitmask is not self._grammar_bitmask:
+                    # Native libraries require their exact vocabulary width;
+                    # transport only the intersection with model logits.
+                    model_row.zero_()
+                    width = min(model_row.shape[0], native_bitmask.shape[1])
+                    model_row[:width].copy_(native_bitmask[index, :width])
+                remainder = self._model_vocab_size % 32
+                if remainder:
+                    model_row[-1] &= (1 << remainder) - 1
             else:
                 # Note that for thinking support, we will need to
                 # reset the relevant part of the bitmask for consequent
@@ -242,7 +256,8 @@ class StructuredOutputManager:
                         row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
+        self,
+        batch: list[tuple[StructuredOutputGrammar, str, int, bool, tuple[int, ...]]],
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
 
@@ -266,7 +281,8 @@ class StructuredOutputManager:
                 masked = tuple(
                     token_id
                     for token_id in sorted(reasoner.implicit_reasoning_end_token_ids)
-                    if not grammar.validate_tokens([token_id])
+                    if 0 <= token_id < self._model_vocab_size
+                    and not grammar.validate_tokens([token_id])
                 )
             structured_req.masked_reasoning_end_ids = masked
         return structured_req.masked_reasoning_end_ids
@@ -384,15 +400,42 @@ class StructuredOutputManager:
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
-            assert self.backend is not None
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
 
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
-            self._grammar_bitmask = self.backend.allocate_token_bitmask(
-                max_batch_size * (1 + max_num_spec_tokens)
+            self._grammar_bitmask = torch.full(
+                (
+                    max_batch_size * (1 + max_num_spec_tokens),
+                    (self._model_vocab_size + 31) // 32,
+                ),
+                -1,
+                dtype=torch.int32,
             )
+
+        # Allocate native work buffers before launching parallel row fills.
+        # Equal-width backends can fill the model buffer directly.
+        backend_names = {}
+        for req_id in structured_output_request_ids:
+            request = requests[req_id]
+            assert request.sampling_params is not None
+            assert request.sampling_params.structured_outputs is not None
+            name = request.sampling_params.structured_outputs._backend
+            assert name is not None
+            backend_names[req_id] = name
+            if name not in self._backend_bitmasks:
+                native_bitmask = self._backends[name].allocate_token_bitmask(
+                    self._grammar_bitmask.shape[0]
+                )
+                assert native_bitmask.dtype == torch.int32 and native_bitmask.is_cpu
+                assert native_bitmask.ndim == 2
+                assert native_bitmask.shape[0] == self._grammar_bitmask.shape[0]
+                self._backend_bitmasks[name] = (
+                    self._grammar_bitmask
+                    if native_bitmask.shape == self._grammar_bitmask.shape
+                    else native_bitmask
+                )
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
@@ -423,7 +466,15 @@ class StructuredOutputManager:
                 masked_ids = (
                     () if apply_bitmask else self._masked_reasoning_ends(request)
                 )
-                batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
+                batch.append(
+                    (
+                        grammar,
+                        backend_names[req_id],
+                        cumulative_index,
+                        apply_bitmask,
+                        masked_ids,
+                    )
+                )
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -470,7 +521,15 @@ class StructuredOutputManager:
                     reasoning = not seen_padding and i < constraint_start
                     row_masked = masked_ids if reasoning else ()
                     self._fill_bitmasks(
-                        ((grammar, cumulative_index, apply_bitmask, row_masked),)
+                        (
+                            (
+                                grammar,
+                                backend_names[req_id],
+                                cumulative_index,
+                                apply_bitmask,
+                                row_masked,
+                            ),
+                        )
                     )
                     if token == -1:
                         seen_padding = True
@@ -501,7 +560,15 @@ class StructuredOutputManager:
                         bonus_reasoning = not seen_padding and not bonus_apply
                         bonus_masked = masked_ids if bonus_reasoning else ()
                         self._fill_bitmasks(
-                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
+                            (
+                                (
+                                    grammar,
+                                    backend_names[req_id],
+                                    cumulative_index,
+                                    bonus_apply,
+                                    bonus_masked,
+                                ),
+                            )
                         )
                     cumulative_index += 1
 
@@ -551,4 +618,6 @@ class StructuredOutputManager:
         for backend in self._backends.values():
             backend.destroy()
         self._backends.clear()
+        self._backend_bitmasks.clear()
+        self._grammar_bitmask = None
         self.backend = None
