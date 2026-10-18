@@ -31,7 +31,9 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
+    deep_select_topk,
     get_indexer_topk,
+    is_deep_select_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -690,6 +692,7 @@ def sparse_attn_indexer(
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
+            use_deep_select = False
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
@@ -724,17 +727,22 @@ def sparse_attn_indexer(
                         q_slice_cast, q_scale_slice, weights[row_start:row_end]
                     )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
-                    logits = as_fp32_logits(
-                        fp8_fp4_mqa_logits(
-                            (q_slice_cast, q_scale_slice),
-                            (k_quant_cast, k_scale_cast),
-                            chunk_weights,
-                            cu_seqlen_ks,
-                            cu_seqlen_ke,
-                            chunk.max_seqlen_k,
-                        ),
-                        row_ends,
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        chunk_weights,
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        chunk.max_seqlen_k,
                     )
+                    # DeepSelect ranks the bf16 logits in place of the fp32 copy.
+                    use_deep_select = (
+                        topk_backend == "deep_select"
+                        and dcp_world_size == 1
+                        and is_deep_select_supported(logits, topk_tokens)
+                    )
+                    if not use_deep_select:
+                        logits = as_fp32_logits(logits, row_ends)
                 num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
@@ -760,16 +768,23 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+                if use_deep_select:
+                    deep_select_topk(
+                        logits, topk_tokens, end=row_ends, output_idx=topk_indices
+                    )
+                else:
+                    ops.top_k_per_row_prefill(
+                        logits,
+                        torch.zeros_like(row_ends)
+                        if row_starts is None
+                        else row_starts,
+                        row_ends,
+                        topk_indices,
+                        num_rows,
+                        logits.stride(0),
+                        logits.stride(1),
+                        topk_tokens,
+                    )
 
             if deinterleave_idx is None:
                 # Under the PCP path the top-k already ran over the whole
