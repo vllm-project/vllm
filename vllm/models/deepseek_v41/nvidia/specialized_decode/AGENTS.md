@@ -25,8 +25,16 @@ startup on every TP rank with the missing requirements:
 - No LoRA, KV transfer or batch invariance.
 - DeepGEMM and NVLink multicast for the fused all-reduce + mHC.
 
-Each rank's eligibility is combined with a MIN all-reduce over the TP group,
-so ranks always agree.
+This check runs once, at startup. The configuration is the same on every
+rank, but the last requirement is probed per rank: the custom all-reduce sets
+up its NVLink multicast buffers on each rank and catches a failure there, so
+one rank can be without them while the others have them. The ranks' results
+are therefore combined with a MIN all-reduce over the TP group: if any rank
+misses a requirement, every rank raises, rather than some ranks running the
+specialized decode and others the stock one, which issue different
+collectives and would hang. Which forward steps use the executor depends
+only on the batch, which every TP rank receives identically, so that needs no
+collective.
 
 Four features run only on flashinfer-python 0.7.1 (`FLASHINFER_VERSION`, the
 version `requirements/cuda.txt` pins). Three use FlashInfer internals:
