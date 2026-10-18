@@ -139,6 +139,7 @@ def test_from_lora_tensors(qwen3_lora_files, device):
         assert lora.lora_a.shape[0] == 8
 
 
+@pytest.mark.parametrize("is_pooling_model", [False, True])
 @pytest.mark.parametrize(
     "lm_prefix,module_name,text_name",
     [
@@ -156,12 +157,12 @@ def test_from_lora_tensors(qwen3_lora_files, device):
     ],
 )
 def test_text_only_lora_binds_to_multimodal_language_model(
-    lm_prefix, module_name, text_name
+    lm_prefix, module_name, text_name, is_pooling_model
 ):
     """An adapter trained on the text-only *ForCausalLM must apply to the
     language model of a multimodal wrapper instead of silently doing nothing."""
     manager = LoRAModelManager.__new__(LoRAModelManager)
-    manager.is_pooling_model = False
+    manager.is_pooling_model = is_pooling_model
     manager.supports_mm = True
     manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
 
