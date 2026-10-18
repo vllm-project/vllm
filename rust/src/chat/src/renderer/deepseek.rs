@@ -112,12 +112,10 @@ pub(super) fn render_request_with_media_order(
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
-    let last_user_like_message_index = request
-        .messages
-        .iter()
-        .enumerate()
-        .rfind(|(index, message)| is_user_like_entry(message, *index, dialect))
-        .map(|(index, _)| index);
+    // Visit each user-content block once, at its first entry.
+    let last_user_like_message_index = (0..request.messages.len())
+        .filter(|&index| !is_following_user_content(request.messages.as_slice(), index))
+        .rfind(|&index| starts_user_turn(request.messages.as_slice(), index, index, dialect));
     let last_user_render_index = find_last_user_render_index(
         request.messages.as_slice(),
         synthetic_tool_system,
@@ -379,13 +377,36 @@ fn find_last_user_render_index(
             continue;
         }
 
-        if is_user_like_entry(message, render_index as usize, dialect) {
+        if starts_user_turn(messages, message_index, render_index as usize, dialect) {
             last_user_index = render_index;
         }
         render_index += 1;
     }
 
     last_user_index
+}
+
+/// Return whether one entry starts a new user turn for reasoning retention.
+///
+/// V4.1 treats a user-content block holding only tool results as part of the
+/// current turn, so reasoning from earlier tool calls in that turn is kept.
+fn starts_user_turn(
+    messages: &[ChatMessage],
+    message_index: usize,
+    entry_index: usize,
+    dialect: DsDialect,
+) -> bool {
+    let message = &messages[message_index];
+    if !is_user_like_entry(message, entry_index, dialect) {
+        return false;
+    }
+    if dialect != DsDialect::V41 || !is_user_content_entry(message) {
+        return true;
+    }
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    messages[block_start..block_end]
+        .iter()
+        .any(|message| matches!(message, ChatMessage::User { .. }))
 }
 
 /// Return whether this message is already covered by a previous user-content
