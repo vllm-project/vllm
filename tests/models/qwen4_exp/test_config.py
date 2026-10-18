@@ -216,6 +216,7 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
     model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
+    model_state.disk_offload_modules = []
 
     input_batch = SimpleNamespace(
         num_reqs=2,
