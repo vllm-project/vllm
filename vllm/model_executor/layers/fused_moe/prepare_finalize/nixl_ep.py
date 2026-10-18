@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from math import gcd
 
 import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -137,6 +139,23 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def max_num_tokens_per_rank(self) -> int | None:
         return self.max_tokens_per_rank
 
+    def _get_runtime_dispatch_capacity(self) -> int:
+        """Use the synchronized execution slice, retaining the reservation limit."""
+        if not is_forward_context_available():
+            return self.max_tokens_per_rank
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return self.max_tokens_per_rank
+        if dp_metadata.local_sizes is not None:
+            capacity = max(dp_metadata.local_sizes)
+        else:
+            capacity = int(dp_metadata.num_tokens_across_dp_cpu.max())
+        capacity = max(1, capacity)
+        alignment = 4 // gcd(self.num_dispatchers_, 4)
+        capacity = (capacity + alignment - 1) // alignment * alignment
+        assert capacity <= self.max_tokens_per_rank
+        return capacity
+
     def topk_indices_dtype(self) -> torch.dtype | None:
         return NIXL_EP_TOPK_INDICES_DTYPE
 
@@ -247,11 +266,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        runtime_dispatch_capacity = self._get_runtime_dispatch_capacity()
+        assert a1.size(0) <= runtime_dispatch_capacity
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.dispatch(
             a1,
             dispatch_topk_ids,
-            self.max_tokens_per_rank,
+            runtime_dispatch_capacity,
             self.expert_capacity,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
