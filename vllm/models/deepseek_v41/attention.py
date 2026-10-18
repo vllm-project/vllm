@@ -98,6 +98,18 @@ def _replace_layer_index(prefix: str, layer_id: int) -> str:
     return new_prefix
 
 
+def v41_swa_block_stride_alignment(
+    swa_bytes_per_token: int, compressed_bytes_per_token: int
+) -> int:
+    """Block stride alignment of the packed V4.1 SWA + compressed KV block.
+
+    FlashMLA reads the interleaved V4.1 records as rows of the whole cache, so
+    a block holds whole rows of both; the CuTe DSL K gather also assumes a
+    32 B-divisible block stride.
+    """
+    return math.lcm(swa_bytes_per_token, compressed_bytes_per_token, 32)
+
+
 def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
     """Per-token byte width of the paged indexer K cache row."""
     if use_fp4_kv:
@@ -573,10 +585,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             block_size=32,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
-            # FlashMLA reads the interleaved V4.1 records as rows of the whole
-            # cache, so the packed block has to hold whole rows of both.
             packed_block_stride_alignment=(
-                math.lcm(self.swa_bytes_per_token, self.compressed_bytes_per_token)
+                v41_swa_block_stride_alignment(
+                    self.swa_bytes_per_token, self.compressed_bytes_per_token
+                )
                 if self.kv_mxfp8
                 else None
             ),

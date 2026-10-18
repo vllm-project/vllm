@@ -2136,3 +2136,55 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_cr2_sources", "expected_block_stride"),
+    [
+        # 6-layer proxy (kv sources at CR2 and CR1): 126976 B of pages rounds
+        # to 127248 B with a 528 B alignment, which the CuTe DSL gather rejects.
+        (1, 127776),
+        # Full DeepSeek-V4.1-Flash (3 CR2 kv sources + 1 CR1): unchanged.
+        (3, 212256),
+    ],
+)
+def test_deepseek_v41_packed_block_stride_fits_cutedsl_gather(
+    num_cr2_sources, expected_block_stride
+):
+    from vllm.models.deepseek_v41.attention import v41_swa_block_stride_alignment
+
+    def page(block_size, nbytes):
+        return MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=nbytes // block_size,
+            dtype=torch.uint8,
+        )
+
+    swa = SlidingWindowMLASpec(
+        block_size=32,
+        num_kv_heads=1,
+        max_tp_shards=1,
+        head_size=528,
+        dtype=torch.uint8,
+        sliding_window=128,
+        block_stride_alignment=v41_swa_block_stride_alignment(528, 528),
+    )
+    compressed = {}
+    for i in range(num_cr2_sources):
+        compressed[f"cr2.{i}.attn"] = page(128, 33792)
+        compressed[f"cr2.{i}.indexer"] = page(128, 8704)
+    compressed["cr1.attn"] = page(128, 67584)
+    compressed["cr1.indexer"] = page(128, 16896)
+    compressed_spec = UniformTypeKVCacheSpecs.from_specs(compressed)
+    assert compressed_spec is not None
+    groups = [
+        KVCacheGroupSpec(["swa"], swa),
+        KVCacheGroupSpec(list(compressed), compressed_spec),
+    ]
+
+    block_stride = kv_cache_planning._get_kv_cache_bytes_per_block(
+        groups, KVCacheLayout.BLHNC
+    )
+    assert block_stride == expected_block_stride
+    assert block_stride % 32 == 0

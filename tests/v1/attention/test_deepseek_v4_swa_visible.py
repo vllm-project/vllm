@@ -450,6 +450,92 @@ def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     assert indices.cpu().tolist() == rows
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="FlashMLA SM100 sparse prefill",
+)
+def test_v41_combine_clears_stale_tail_for_sparse_prefill():
+    """A reused combine workspace cannot change FlashMLA sparse prefill bits.
+
+    The kernel reads every slot of the last 64-slot block and masks the ones
+    past ``topk_length`` on only one half of its split QK^T, so a stale slot
+    left by another batch layout that points at a non-finite workspace row
+    changes the output (negative control below). MegaMoE leaves such rows in
+    the shared workspace; combine must rewrite every slot past the length.
+    """
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+    from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    window, topk, ratio, heads, dim = 128, 512, 2, 64, 512
+    width = (topk + window + 127) // 128 * 128
+    seq_lens = [300, 1000]
+    n = max(size // ratio for size in seq_lens)
+    m = n + max(seq_lens)
+    starts = torch.tensor([0, *seq_lens], dtype=torch.int32).cumsum(0).int()
+    tokens = int(starts[-1])
+    # Non-gathered rows hold non-finite leftovers, like the workspace after
+    # MegaMoE; request 0's compressed slab ends at 150 < n.
+    kv = torch.full((len(seq_lens), m, dim), float("nan"), device=device).bfloat16()
+    topk_indices = torch.full((tokens, topk), -1, dtype=torch.int32, device=device)
+    for request, size in enumerate(seq_lens):
+        kv[request, : size // ratio] = torch.randn(size // ratio, dim, device=device)
+        kv[request, n : n + size] = torch.randn(size, dim, device=device)
+        for pos in range(size):
+            visible = (pos + 1) // ratio
+            picked = torch.randperm(visible, device=device)[:topk].sort().values
+            topk_indices[int(starts[request]) + pos, : picked.numel()] = picked
+    q = torch.randn(tokens, heads, dim, device=device).bfloat16()
+    sink = torch.randn(heads, device=device)
+    lengths = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+
+    def combine(workspace):
+        lens = torch.empty(tokens, dtype=torch.int32, device=device)
+        return combine_v41(
+            topk_indices,
+            starts.to(device),
+            lengths,
+            lengths,
+            window,
+            ratio,
+            topk,
+            m,
+            n,
+            out=(workspace, lens),
+        )
+
+    def attend(indices, lens):
+        out = torch.empty_like(q)
+        flash_mla_sparse_fwd(
+            q=q,
+            kv=kv.view(-1, 1, dim),
+            indices=indices.unsqueeze(1),
+            sm_scale=dim**-0.5,
+            attn_sink=sink,
+            topk_length=lens,
+            out=out,
+        )
+        return out
+
+    fresh = torch.full((tokens, width), -1, dtype=torch.int32, device=device)
+    indices, lens = combine(fresh)
+    expected = attend(indices, lens)
+    assert torch.isfinite(expected).all()
+
+    # Every slot of a stale workspace points at request 0's padding row 150.
+    stale = torch.full_like(fresh, seq_lens[0] // ratio)
+    reused, reused_lens = combine(stale)
+    assert torch.equal(reused, indices) and torch.equal(reused_lens, lens)
+    assert torch.equal(attend(reused, reused_lens), expected)
+
+    slot = torch.arange(width, device=device)[None, :]
+    leaky = torch.where(slot < lens[:, None], indices, seq_lens[0] // ratio)
+    assert not torch.equal(attend(leaky, lens), expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):

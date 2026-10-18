@@ -521,7 +521,37 @@ class DeepseekV4DecoderLayer(nn.Module):
         # for the first layer), the FFN uses this layer's attention pre-mix.
         if residual is None:
             assert isinstance(x, torch.Tensor)
-            if x.dim() == 2:
+            if self.engram is not None and engram_hashes is not None:
+                # An Engram layer that opens the local stack (model entry or a
+                # later PP stage) still injects before its pre, as the
+                # reference does for every Engram layer. The injected copies
+                # differ, so the summed broadcast projection does not apply;
+                # pre_mix=None selects copy 0 at model entry.
+                residual = (
+                    x
+                    if x.dim() == 3
+                    else x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                )
+                residual = self.engram(
+                    residual,
+                    engram_hashes[:, self.engram.layer_hash_index],
+                    engram_mask,
+                )
+                post_mix, res_mix, x, attn_pre = mhc_pre(
+                    residual,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                )
+            elif x.dim() == 2:
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
@@ -845,9 +875,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (decoder_replay_layers.py).
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
-        cut = max(config.kv_source_layer_ids)
+        cut = max(config.kv_source_layer_ids, default=None)
         if (
-            cut < self.end_layer - 1
+            cut is not None
+            and cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
@@ -1263,6 +1294,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "the pipeline stage holding the last KV source layer must also "
                 "hold every layer after it"
             )
+        elif self.layers[cut].attn.compress_ratio > 1:
+            reason = "the last KV source also writes compressed KV"
         elif (
             self.use_sequence_parallel
             or parallel_config.prefill_context_parallel_size > 1

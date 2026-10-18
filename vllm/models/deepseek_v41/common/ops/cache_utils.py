@@ -909,8 +909,11 @@ def _compute_global_topk_indices_and_lens_kernel(
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
 # flashmla/csrc/sm100/prefill/sparse/fwd/head{64,128}/phase1.cuh). B_TOPK is
 # 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
-# The extra slots stay as -1 sentinels and `combined_lens` caps the valid
-# range via `topk_length`, so padding is a no-op at kernel level.
+# The kernel still loads every slot of the last 64-slot block and masks the
+# ones past `topk_length` on only one half of its split QK^T, so a stale slot
+# pointing at a non-finite row leaks into the output. The combine kernel
+# therefore writes -1 to every slot past `combined_lens`, also in a reused
+# workspace.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
@@ -1124,6 +1127,17 @@ class CombineTopkSwaIndicesKernel(
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
+            for tail_start in tl.static_range(
+                0,
+                (TOP_K + WINDOW_SIZE + 127) // 128 * 128,
+                128,
+            ):
+                tail = tail_start + tl.arange(0, 128)
+                tl.store(
+                    combined_indices_ptr + token_idx * combined_indices_stride + tail,
+                    -1,
+                    mask=tail >= combined_len,
+                )
 
     def dispatch(  # type: ignore[override]
         self,
