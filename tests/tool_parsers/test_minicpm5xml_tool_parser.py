@@ -813,3 +813,44 @@ class TestParameterWhitespace:
         assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
             "city": city
         }
+
+    @pytest.mark.parametrize(
+        "note", ["ok", "Tom & Co"], ids=["well_formed", "regex_fallback"]
+    )
+    def test_padded_non_string_value_keeps_type(
+        self, parser: ToolParser, note: str
+    ) -> None:
+        """Whitespace is only data for strings; a padded Python literal for a
+        non-string param must still parse to its type."""
+        request = make_request(
+            [
+                _tool(
+                    "set_flag",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string"},
+                            "enabled": {"type": "boolean"},
+                        },
+                    },
+                )
+            ]
+        )
+        chunks = [
+            '<function name="set_flag">',
+            f'<param name="note">{note}</param>'
+            '<param name="enabled">\n  True\n</param>',
+            "</function>\n",
+        ]
+
+        out = parser.extract_tool_calls("".join(chunks), request)
+        reconstructor = run_tool_extraction_streaming(
+            MiniCPM5XMLToolParser(MagicMock()),
+            chunks,
+            request,
+            assert_one_tool_per_delta=False,
+        )
+
+        expected = {"note": note, "enabled": True}
+        assert json.loads(out.tool_calls[0].function.arguments) == expected
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == expected

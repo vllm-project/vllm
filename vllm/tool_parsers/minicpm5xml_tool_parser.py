@@ -154,8 +154,8 @@ def _coerce_argument_value(
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         )
     if isinstance(value, str):
-        parsed_val, _ = _parse_arguments(value)
-        return parsed_val
+        parsed_val, ok = _parse_arguments(value.strip())
+        return parsed_val if ok else value
     return value
 
 
