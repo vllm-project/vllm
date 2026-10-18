@@ -1407,3 +1407,42 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+def _use_sm80(monkeypatch: pytest.MonkeyPatch, is_sm80: bool) -> None:
+    """Make the QSA launch-config selection see sm_80 (A100) or a GB300."""
+    monkeypatch.setattr(
+        qsa_indexer_ops.current_platform,
+        "is_device_capability",
+        lambda capability, device_id=0: is_sm80 and capability == 80,
+    )
+    monkeypatch.setattr(qsa_indexer_ops, "num_compute_units", lambda: 108)
+    monkeypatch.setattr(qsa_ops, "_is_sm80", lambda: is_sm80)
+    monkeypatch.setattr(qsa_ops, "_is_sm90", lambda: False)
+    monkeypatch.setattr(qsa_ops, "_is_sm120", lambda: False)
+
+
+@pytest.mark.parametrize(
+    ("is_sm80", "cache_dtype", "query_rows", "expected"),
+    [
+        # A100 BF16 (TILE_R, BLOCK_N, K_TILES, STAGES, num_warps): BLOCK_N 128
+        # gives 128 CTAs at 512 rows and 512 CTAs at 2048 rows.
+        (True, torch.bfloat16, 512, (32, 32, 2, 1, 4)),
+        (True, torch.bfloat16, 2048, (32, 128, 2, 2, 4)),
+        # Unmeasured on A100: the FP8 indexer cache keeps the GB300 config.
+        (True, torch.float8_e4m3fn, 512, (32, 64, 16, 2, 8)),
+        (False, torch.bfloat16, 512, (64, 64, 16, 2, 4)),
+        (False, torch.bfloat16, 2048, (64, 64, 16, 2, 4)),
+        (False, torch.float8_e4m3fn, 2048, (32, 64, 16, 2, 8)),
+    ],
+)
+def test_qsa_prefill_scoring_launch_config(
+    monkeypatch: pytest.MonkeyPatch,
+    is_sm80: bool,
+    cache_dtype: torch.dtype,
+    query_rows: int,
+    expected: tuple[int, ...],
+) -> None:
+    _use_sm80(monkeypatch, is_sm80)
+    config = qsa_indexer_ops._prefill_launch_config(1, query_rows, 2048, cache_dtype)
+    assert tuple(config.values()) == expected
