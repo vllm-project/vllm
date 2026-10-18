@@ -446,8 +446,8 @@ def benchmark_shape(
         "floor_us": floor,
         "unfused_us": times["unfused"],
         "fused_us": times["fused"],
-        "latency_change": (times["fused"] - times["unfused"]) / times["unfused"],
-        "floor_gap": (times["fused"] - floor) / floor,
+        "fused_vs_unfused": (times["fused"] - times["unfused"]) / times["unfused"],
+        "fused_vs_floor": (times["fused"] - floor) / floor,
         "baseline_us": times["baseline"],
         "unfused_vs_baseline": (
             (times["unfused"] - times["baseline"]) / times["baseline"]
@@ -462,7 +462,7 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
     print(f"### {proj} SP kernels (bf16, fused={kernel})")
     print(
         "| M | N | K | GEMM (us) | collective (us) | floor (us) | "
-        "unfused (us) | fused (us) | vs unfused | vs floor | "
+        "unfused (us) | fused (us) | fused vs unfused | fused vs floor | "
         "baseline (us) | unfused vs baseline | fused vs baseline |"
     )
     print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -471,7 +471,7 @@ def print_results(results: list[dict[str, float | int | str]]) -> None:
             f"| {r['M']} | {r['N']} | {r['K']} | {r['gemm_us']:.1f} | "
             f"{r['collective_us']:.1f} | {r['floor_us']:.1f} | "
             f"{r['unfused_us']:.1f} | {r['fused_us']:.1f} | "
-            f"{r['latency_change']:+.1%} | {r['floor_gap']:+.1%} | "
+            f"{r['fused_vs_unfused']:+.1%} | {r['fused_vs_floor']:+.1%} | "
             f"{r['baseline_us']:.1f} | {r['unfused_vs_baseline']:+.1%} | "
             f"{r['fused_vs_baseline']:+.1%} |"
         )
