@@ -142,19 +142,18 @@ def launch_conv_gdn_norm(
     on device), sequence ``i`` is rows ``cu_seqlens[i]:cu_seqlens[i + 1]``,
     at most ``indices.shape[1]``; other rows are left untouched.
     """
-    tokens = mixed.shape[0]
-    if n_seq < 1:
-        raise ValueError(f"n_seq={n_seq} must be positive")
-    if cu_seqlens is None:
-        if tokens % n_seq != 0:
-            raise ValueError(f"tokens={tokens} is not divisible by n_seq={n_seq}")
-        seq_tokens = tokens // n_seq
-    else:
-        if cu_seqlens.shape[0] < n_seq + 1:
-            raise ValueError(f"cu_seqlens {tuple(cu_seqlens.shape)} for n_seq={n_seq}")
-        seq_tokens = indices.shape[1]
-    if seq_tokens not in (1, 2, 3, 4):
-        raise ValueError(f"T must be 1..4, got {seq_tokens}")
+    tokens, dim = mixed.shape
+    seq_tokens = tokens // n_seq if cu_seqlens is None else indices.shape[1]
+    _, num_v_heads, head_v, head_k = ssm_state.shape
+    qk_dim = dim - num_v_heads * head_v
+    num_k_heads = max(qk_dim // (2 * head_k), 1)
+    if cu_seqlens is None and tokens != n_seq * seq_tokens:
+        raise ValueError(f"tokens={tokens} is not divisible by n_seq={n_seq}")
+    if not 1 <= seq_tokens <= 4 or conv_state.shape[-1] < seq_tokens + 2:
+        raise ValueError(
+            f"T={seq_tokens} must be 1..4 with conv state length >= T + 2, "
+            f"got {conv_state.shape[-1]}"
+        )
     if indices.shape[0] < n_seq or indices.shape[1] < seq_tokens:
         raise ValueError(
             f"indices {tuple(indices.shape)} for n_seq={n_seq} T={seq_tokens}"
@@ -165,21 +164,15 @@ def launch_conv_gdn_norm(
         raise ValueError(f"mixed dtype {mixed.dtype}, expected bf16 or fp16")
     if weight.shape[1] != _CONV_WIDTH:
         raise ValueError(f"conv width {weight.shape[1]}, expected {_CONV_WIDTH}")
-    if mixed.stride(-1) != 1 or a.stride(-1) != 1 or b.stride(-1) != 1:
-        raise ValueError("mixed, a, and b need unit stride along the last dim")
-    _, num_v_heads, head_v, head_k = ssm_state.shape
-    dim = mixed.shape[1]
-    qk_dim = dim - num_v_heads * head_v
-    if qk_dim <= 0 or qk_dim % (2 * head_k) != 0:
+    if qk_dim != 2 * num_k_heads * head_k or num_v_heads % num_k_heads != 0:
         raise ValueError(
             f"mixed width {dim} does not split into q, k, v for "
             f"HV={num_v_heads} V={head_v} K={head_k}"
         )
-    num_k_heads = qk_dim // (2 * head_k)
-    if num_v_heads % num_k_heads != 0:
-        raise ValueError(f"HV={num_v_heads} is not a multiple of H={num_k_heads}")
-    if z.stride(-1) != 1 or z.shape != (tokens, num_v_heads, head_v):
-        raise ValueError("z must be [tokens, HV, V] with unit stride along V")
+    if z.shape != (tokens, num_v_heads, head_v) or any(
+        t.stride(-1) != 1 for t in (mixed, a, b, z)
+    ):
+        raise ValueError("z must be [tokens, HV, V]; mixed, a, b, z need unit stride")
     is_varlen = cu_seqlens is not None
     bv = min(_BV, triton.next_power_of_2(head_v))
     _mtp_conv_gdn[(triton.cdiv(head_v, bv), num_v_heads, n_seq)](

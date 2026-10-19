@@ -1106,15 +1106,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             reasons.append(f"norm activation={self.norm.activation}")
         if self.norm.group_size is not None or not self.norm.norm_before_gate:
             reasons.append("norm must be full-row and norm-before-gate")
-        if self.conv1d.weight.size(-1) != 4:
-            reasons.append(
-                f"conv width={self.conv1d.weight.size(-1)}, supported value is 4"
-            )
-        if self.num_v_heads % self.num_k_heads != 0:
-            reasons.append(
-                f"num_v_heads={self.num_v_heads} is not a multiple of "
-                f"num_k_heads={self.num_k_heads}"
-            )
         return reasons
 
     def _try_rocm_qwen_mtp_gdn(
@@ -1141,50 +1132,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return False
 
-        reasons = list(self._rocm_qwen_mtp_layer_reasons)
+        if self._rocm_qwen_mtp_layer_reasons:
+            raise ValueError(
+                "VLLM_ROCM_QWEN_MTP_GDN cannot run this layer: "
+                + "; ".join(self._rocm_qwen_mtp_layer_reasons)
+            )
         n_seq = attn_metadata.num_spec_decodes
         indices = attn_metadata.spec_state_indices_tensor
         accepted = attn_metadata.num_accepted_tokens
         uniform = attn_metadata.uniform_spec_sequence_length
         cu_seqlens = attn_metadata.spec_query_start_loc
-        if n_seq < 1:
-            reasons.append(f"num_spec_decodes={n_seq}")
-        if uniform is None and cu_seqlens is None:
-            reasons.append("ragged batch without spec_query_start_loc")
-        max_len = uniform
-        if max_len is None and indices is not None:
-            max_len = indices.size(1)
-        if max_len is None or not 1 <= max_len <= 4:
-            reasons.append(f"max tokens per sequence={max_len}, must be 1..4")
-        if mixed_qkv.dtype not in (torch.bfloat16, torch.float16):
-            reasons.append(f"dtype={mixed_qkv.dtype}, expected bf16 or fp16")
-        if indices is None or accepted is None:
-            reasons.append("spec state indices and num_accepted_tokens are required")
-        elif max_len is not None and (
-            indices.size(0) < n_seq
-            or indices.size(1) < max_len
-            or accepted.shape[0] < n_seq
-        ):
-            reasons.append(
-                f"indices {tuple(indices.shape)} accepted {tuple(accepted.shape)} "
-                f"for {n_seq} sequences of up to {max_len} tokens"
-            )
-        if reasons:
-            raise ValueError(
-                "VLLM_ROCM_QWEN_MTP_GDN cannot run this MTP step: " + "; ".join(reasons)
-            )
-
-        assert indices is not None and accepted is not None and max_len is not None
+        assert indices is not None and accepted is not None and cu_seqlens is not None
+        max_len = uniform or indices.size(1)
         conv_state = (
             self.kv_cache[0]
             if is_conv_state_dim_first()
             else self.kv_cache[0].transpose(-1, -2)
         )
-        if conv_state.shape[-1] < max_len + 2:
-            raise ValueError(
-                f"conv state length {conv_state.shape[-1]} is shorter than "
-                f"{max_len + 2}"
-            )
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
