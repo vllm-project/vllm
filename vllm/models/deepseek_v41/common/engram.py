@@ -37,6 +37,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 import ctypes
 import mmap
 import os
+import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
@@ -906,6 +907,8 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
 
 def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+    if sys.platform != "linux":
+        return None
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
         mapping.madvise(mmap.MADV_HUGEPAGE)
