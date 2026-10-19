@@ -461,8 +461,9 @@ def bo_ld_f32(ptr, i):
 
 @traced
 def load_route(c):
-    """ROUTE -> LDS (ids, weights); the union U: slot_of[e], expert_of[slot],
-    kof[slot][t] (the token's top-k index, -1 if not picked); returns |U|."""
+    """ROUTE -> LDS (ids, weights); the union U: ``slot_of[e]``,
+    ``expert_of[slot]``, ``kof[slot][t]`` (the token's top-k index, -1 if not
+    picked); returns |U|."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
     n = s * 2 * TOPK

@@ -61,7 +61,7 @@ _STREAM = fx.Stream(None)
 
 
 def ar_half_pairs(s):
-    """One parity's AR region: [src rank][token][column pair]."""
+    """One parity's AR region: ``[src rank][token][column pair]``."""
     return TP * s * HIDDEN // 2
 
 
