@@ -251,6 +251,7 @@ class _FlashInferMoeEpApi:
             from flashinfer.moe_ep import (
                 BootstrapConfig,
                 DeepGemmMegaMoeConfig,
+                FinalizeMode,
                 FleetParams,
                 MegaConfig,
                 MoEEpMegaLayer,
@@ -261,11 +262,12 @@ class _FlashInferMoeEpApi:
         except ImportError as err:
             raise RuntimeError(
                 "FlashInfer MoE-EP requires the public API shipped with "
-                "FlashInfer 0.7.0 or newer"
+                "FlashInfer 0.7.3 or newer"
             ) from err
 
         self.BootstrapConfig = BootstrapConfig
         self.DeepGemmMegaMoeConfig = DeepGemmMegaMoeConfig
+        self.FinalizeMode = FinalizeMode
         self.FleetParams = FleetParams
         self.MegaConfig = MegaConfig
         self.MoEEpMegaLayer = MoEEpMegaLayer
@@ -281,7 +283,7 @@ def _load_flashinfer_moe_ep_api() -> _FlashInferMoeEpApi:
 def supports_flashinfer_moe_ep_deferred_finalize() -> bool:
     api = _load_flashinfer_moe_ep_api()
     return hasattr(api.MoEEpMegaLayer, "forward_unfinalized") and (
-        "do_finalize" in api.Nvfp4CutedslMegaMoeConfig.__dataclass_fields__
+        "finalize_mode" in api.Nvfp4CutedslMegaMoeConfig.__dataclass_fields__
     )
 
 
@@ -346,14 +348,18 @@ class FlashInferMoeEp:
                 top_k=moe.experts_per_token,
                 gate_up_clamp=moe.swiglu_limit,
                 fast_math=True,
-                apply_topk_in_fc1=apply_topk_in_fc1,
+                apply_routing_weights_before_fc2=apply_topk_in_fc1,
                 combine_dtype="bf16",
                 input_norm_const=epilogue.input_norm_const,
                 fc1_alpha=None,
                 fc2_alpha=None,
                 fc1_norm_const=None,
                 knobs=None,
-                **({"do_finalize": False} if self._defer_finalize else {}),
+                finalize_mode=(
+                    api.FinalizeMode.NONE
+                    if self._defer_finalize
+                    else api.FinalizeMode.AUTO
+                ),
             )
         else:
             megakernel = api.DeepGemmMegaMoeConfig(
