@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
+    _RECONNECT_MAX_BACKOFF_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -44,6 +45,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     StoreResult,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,6 +127,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._reconnect_backoff = {}
+    mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
     mgr._reaped_stores = {}
@@ -723,6 +727,8 @@ class _FakeSession:
         self.alive = alive
         self.connected = connected
         self.ready = True
+        self.death_reason = "control connection lost"
+        self.data_plane_fault: str | None = None
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []
@@ -2305,3 +2311,118 @@ class TestIdleSessionEviction:
 
         mgr._reap_idle_sessions()
         assert "old:1" in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Reconnect backoff after a data-plane fault
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectBackoff:
+    """A peer whose session ended on a data-plane fault reconnects at once the
+    first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, mgr: P2PSecondaryTierManager, fault: str | None) -> None:
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._data = FakeData()  # type: ignore[assignment]
+        session = _FakeSession(peer_id=self.PEER, alive=False, connected=True)
+        session.data_plane_fault = fault
+        mgr._sessions[self.PEER] = session  # type: ignore[assignment]
+        mgr._reap_dead_sessions()
+
+    def test_backoff_doubles_up_to_max(self):
+        mgr = _make_manager()
+        waits = []
+        for _ in range(9):
+            self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+            waits.append(mgr._reconnect_backoff[self.PEER][0])
+        assert waits == [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+        assert waits[-1] == _RECONNECT_MAX_BACKOFF_S
+
+    def test_first_fault_reconnects_at_once(self):
+        mgr = _make_manager()
+        self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+        assert mgr._reconnect_wait(self.PEER) <= 0
+
+    def test_control_plane_death_does_not_back_off(self):
+        mgr = _make_manager()
+        for _ in range(3):
+            self._reap(mgr, None)
+        assert self.PEER not in mgr._reconnect_backoff
+
+    def test_healthy_peer_resets_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        assert backoff == 1.0
+        # The previous wait then expired more than the max ago (no fault
+        # since; no successful transfer is required).
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        assert mgr._reconnect_backoff[self.PEER][0] == 0.0
+
+    def test_peer_down_log_counts_faults_across_backoff_reset(self, monkeypatch):
+        warnings: list[str] = []
+
+        def record_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(manager_module.logger, "warning", record_warning)
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        # Let the backoff expire: the count must keep growing regardless.
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        self._reap(mgr, None)
+
+        assert mgr._data_plane_faults[self.PEER] == 3
+        assert warnings[0].endswith("; data-plane fault #1")
+        assert warnings[1].endswith("; data-plane fault #2; reconnect backoff 1s")
+        assert warnings[2].endswith("; data-plane fault #3")
+        # A control-plane death neither counts nor reports a fault.
+        assert "data-plane fault" not in warnings[3]
+
+    def test_outbound_connect_is_skipped_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() during reconnect backoff")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+    def test_inbound_is_told_to_disconnect_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions

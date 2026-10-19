@@ -74,6 +74,7 @@ logger = init_logger(__name__)
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
+        "BeamForCausalLM",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
@@ -98,6 +99,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -749,9 +752,11 @@ class VllmConfig:
         if draft_config is None:
             return False
         return bool(
-            {"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
-                draft_config.architectures or []
-            )
+            {
+                "DFlash2DraftModel",
+                "DFlash2BeamDraftModel",
+                "LiLiCorrDraftModel",
+            }.intersection(draft_config.architectures or [])
         )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
@@ -3089,6 +3094,12 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 

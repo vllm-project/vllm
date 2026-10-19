@@ -77,6 +77,7 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     runner = SimpleNamespace(
         adaptive_verification=manager,
         rejection_sampler=rejection_sampler,
+        speculative_config=SimpleNamespace(),
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
@@ -94,3 +95,27 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculative):
+    """PP receivers need a matching sender for every speculative warmup round."""
+    rounds = []
+    monkeypatch.setattr(
+        warmup,
+        "_warmup_kernels",
+        lambda runner, execute, sample, greedy=False: rounds.append(greedy),
+    )
+    for is_last_pp_rank in (False, True):
+        rounds.clear()
+        runner = SimpleNamespace(
+            adaptive_verification=None,
+            speculative_config=SimpleNamespace() if speculative else None,
+            rejection_sampler=(
+                SimpleNamespace(enable_adaptive_verification=False)
+                if is_last_pp_rank and speculative
+                else None
+            ),
+        )
+        warmup.warmup_kernels(runner, _fail, _fail)
+        assert rounds == ([False, True] if speculative else [False])

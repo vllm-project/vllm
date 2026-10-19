@@ -43,6 +43,7 @@ SILENT_GROUPS = [
     "tests/entrypoints/speech_to_text",
     "tests/entrypoints/tool_parsers",
     "tests/entrypoints/unit_tests",
+    "tests/entrypoints/common",
     "tests/kernels/attention",
     "tests/kernels/core",
     "tests/kernels/helion",

@@ -58,6 +58,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _MAX_CONSECUTIVE_DISPATCH_ERRORS,
+    _PEER_FAULT_DRAIN_S,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,8 @@ class FakeDataTransport:
         self._poll_failed: list[int] = []
         self._cancel_still_inflight: set[int] = set()
         self._cancel_calls: list[tuple[list[int], str]] = []
+        # peer_id → cause, reported by scoped poll() like NixlTransport.
+        self._peer_faults: dict[str, str] = {}
 
     @property
     def base_addr(self) -> int:
@@ -161,6 +164,7 @@ class FakeDataTransport:
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
+        self._peer_faults.pop(peer_id, None)
 
     def write_blocks(self, peer_id, local_idxs, remote_idxs) -> int | None:
         if peer_id not in self._remote_peers:
@@ -173,7 +177,11 @@ class FakeDataTransport:
     def poll(self, peer_id=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
-        result = PollResult(done=list(self._poll_done), failed=list(self._poll_failed))
+        result = PollResult(
+            done=list(self._poll_done),
+            failed=list(self._poll_failed),
+            peer_fault=self._peer_faults.get(peer_id) if peer_id else None,
+        )
         self._poll_done.clear()
         self._poll_failed.clear()
         return result
@@ -892,6 +900,7 @@ class TestLookupFlow:
         lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
         session.poll()
         assert not session.alive
+        assert session.death_reason == "lookup response timed out"
         assert session.close().failed_req_ids == ["req-1"]
 
     def test_lookup_progress_keeps_overlapping_batches_alive(self, lookup_clock):
@@ -2164,7 +2173,7 @@ class TestServerFlows:
     @staticmethod
     def _submit_unconfirmed_transfer(session, conn, transport) -> int:
         """Start one transfer for job 1 whose wait-cancel never confirms."""
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2608,18 +2617,22 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
-    def test_write_blocks_failure_finalizes_with_failure(self, monkeypatch):
-        """write_blocks returning None must not leave the request hanging.
-
-        The matched blocks are gone from req.demanded but no inflight
-        will satisfy them, so remaining > 0 forever. Setting finishing
-        and calling _finalize_outbound(success=False) immediately (no
-        other inflight) tells the peer + emits StoreResult(success=False)
-        without waiting on _STORE_TIMEOUT_S or _LOAD_TIMEOUT_S.
-        """
+    @pytest.mark.parametrize(
+        "store_first,finish_before_fetch",
+        [(False, False), (True, False), (True, True)],
+        ids=["fetch-first", "store-first", "finish-before-fetch"],
+    )
+    def test_write_blocks_failure_finalizes_with_failure(
+        self, store_first, finish_before_fetch
+    ):
+        """Submission failure finalizes once in either store/fetch ordering."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        # Decoder demands b"k1".
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        if store_first:
+            session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
+            if finish_before_fetch:
+                session.finish_request("req-1")
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2629,21 +2642,22 @@ class TestFinishRequestServerSide:
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
-        session.poll()
-        # Force write_blocks to fail on the next call.
-        monkeypatch.setattr(transport, "write_blocks", lambda *a, **kw: None)
-
-        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
+        stores = session.poll().stores
+        if not store_first:
+            session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=42)
+        stores.extend(session.poll().stores)
 
         # Outbound was finalized immediately (no other inflight).
         assert _srv_outbound(session, "req-1") is None
+        assert session._dispatch_error_count == 0
+        assert stores == [StoreResult(job_id=42, success=False)]
+        assert session.poll().stores == []
         # Peer notified with success=False.
-        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(done) == 1
+        msg = done[0]
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        # Local store job surfaces on the next poll.
-        stores = session.poll().stores
-        assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
 
     def test_partial_match_completes_in_two_rounds(self):
@@ -3523,3 +3537,98 @@ class TestHandshakeDeadline:
         ]
         session.poll()
         assert session._last_activity_at >= before
+
+
+# ---------------------------------------------------------------------------
+# Data-plane peer fault → connection death
+# ---------------------------------------------------------------------------
+
+
+def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.ROUND_SEQ: 0,
+            FetchMsg.KV_REQUEST_ID: kv_request_id,
+            FetchMsg.KEYS: keys,
+            FetchMsg.BLOCK_INDEXES: idxs,
+        }
+    )
+
+
+class TestPeerFaultEscalation:
+    """A transport peer fault ends the session through the normal reap
+    path (see "Failure model" in data/base.py): no new WRITE is submitted,
+    inflight ones drain, then DisconnectMsg and a dead connection."""
+
+    def test_fault_with_nothing_inflight_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        transport._peer_faults["peer:8000"] = "NIXL_ERR_REMOTE_DISCONNECT"
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason == "data plane: NIXL_ERR_REMOTE_DISCONNECT"
+        assert session.data_plane_fault == "NIXL_ERR_REMOTE_DISCONNECT"
+
+    def test_fault_waits_for_inflight_then_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+
+        transport._peer_faults["peer:8000"] = "3 consecutive transfer failures"
+        session.poll()
+        assert session.alive
+
+        # A new round while draining is failed fast, without a WRITE.
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        stores = session.poll().stores
+        assert len(transport._transfers) == 1
+        assert StoreResult(job_id=2, success=False) in stores
+        assert any(
+            m[TYPE_KEY] == TransferDoneMsg.TYPE
+            and m[TransferDoneMsg.KV_REQUEST_ID] == "req-2"
+            and m[TransferDoneMsg.SUCCESS] is False
+            for m in conn._sent
+        )
+        assert session.alive
+
+        # The last inflight WRITE drains; only now does the session go.
+        transport._poll_done.append(tid)
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason.startswith("data plane: 3 consecutive")
+
+    def test_fault_disconnects_after_drain_deadline(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        transport._peer_faults["peer:8000"] = "stuck"
+        session.poll()
+        assert session.alive
+        session._peer_fault_at = time.monotonic() - _PEER_FAULT_DRAIN_S - 1.0
+        session.poll()
+        assert not session.alive
+
+    def test_death_reasons(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        assert session.death_reason == "control connection lost"
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        session.poll()
+        assert session.death_reason == "peer disconnected"
+
+    def test_first_death_reason_wins(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        transport._peer_faults["peer:8000"] = "late"
+        session.poll()
+        assert session.death_reason == "peer disconnected"
