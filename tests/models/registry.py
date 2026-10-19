@@ -1432,6 +1432,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # ``dummy_hf_overrides``) to avoid OOM during init.
         hf_overrides={"text_config": {"num_hidden_layers": 4, "moe_num_experts": 8}},
     ),
+    "TeleOCRForConditionalGeneration": _HfExamplesInfo(
+        "XingChen-AGI/TeleOCR",
+        hf_overrides={"architectures": ["TeleOCRForConditionalGeneration"]},
+        max_model_len=4096,
+    ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
