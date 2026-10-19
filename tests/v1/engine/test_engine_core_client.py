@@ -221,6 +221,7 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
         use_v2_model_runner=True,
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
@@ -287,10 +288,13 @@ def test_dplb_in_flight_request_stays_on_same_engine():
     assert client.engine_inflight[engine] == 1
 
 
-def test_dplb_burst_round_robins_despite_snapshot_rebinds():
+@pytest.mark.parametrize("context_load", [False, True])
+def test_dplb_burst_round_robins_despite_snapshot_rebinds(monkeypatch, context_load):
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
     the exact in-flight floor must keep a burst spreading round-robin."""
     client = _make_dplb_client(num_engines=4)
+    monkeypatch.setenv("VLLM_DP_CONTEXT_LOAD_BALANCING", str(int(context_load)))
+    client.vllm_config.cache_config.enable_prefix_caching = False
 
     for _ in range(4):
         client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
@@ -300,6 +304,33 @@ def test_dplb_burst_round_robins_despite_snapshot_rebinds():
         client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
 
     assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
+
+
+@pytest.mark.parametrize(
+    "prefix_caching,counts,inflight,expected",
+    [
+        (False, [[0, 5, 0.5], [0, 6, 0.1]], [0, 0], 1),
+        (True, [[0, 5, 0.5], [0, 6, 0.1]], [0, 0], 0),
+        # A burst already sent to the lighter engine must not be forgotten.
+        (False, [[0, 5, 0.5], [0, 6, 0.1]], [0, 36], 0),
+        (False, [[0, 0, 0.0], [0, 6, 0.3]], [0, 0], 0),
+        (False, [[0, 0, 0.0], [0, 6, 0.3]], [8, 0], 1),
+        (False, [[0, 5, 0.0], [0, 6, 0.0]], [0, 0], 0),
+    ],
+)
+def test_dplb_context_load_preserves_affinity_and_inflight_floor(
+    monkeypatch, prefix_caching, counts, inflight, expected
+):
+    monkeypatch.setenv("VLLM_DP_CONTEXT_LOAD_BALANCING", "1")
+    client = _make_dplb_client(num_engines=2)
+    client.vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    client.lb_engines = counts
+    for engine, count in zip(client.core_engines, inflight):
+        client.engine_inflight[engine] = count
+    request = make_request(SamplingParams(max_tokens=1))
+    engine = client.get_core_engine_for_request(request)
+    assert engine == client.core_engines[expected]
+    assert client.get_core_engine_for_request(request) == engine
 
 
 @pytest.mark.asyncio

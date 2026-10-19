@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     NO_COLOR: bool = False
     FORCE_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
+    VLLM_DP_CONTEXT_LOAD_BALANCING: bool = False
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
@@ -706,6 +707,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         )
     ),
     # ================== Runtime Env Vars ==================
+    # Estimate uncached DP decode load using live KV occupancy per request.
+    "VLLM_DP_CONTEXT_LOAD_BALANCING": lambda: bool(
+        int(os.getenv("VLLM_DP_CONTEXT_LOAD_BALANCING", "0"))
+    ),
     # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT": lambda: os.path.expanduser(

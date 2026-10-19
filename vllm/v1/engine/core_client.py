@@ -1753,6 +1753,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         ) is None:
             current_counts = self.lb_engines
+            use_context_load = (
+                envs.VLLM_DP_CONTEXT_LOAD_BALANCING
+                and not self.vllm_config.cache_config.enable_prefix_caching
+            )
+            if use_context_load:
+                logger.info_once("Using live-context DP load balancing.")
+                # Empty engines use the observed mean cost until stats arrive.
+                mean_context_cost = (
+                    sum(kv for _, _, kv in current_counts)
+                    / max(sum(running for _, running, _ in current_counts), 1)
+                ) or 1.0
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score: float = sys.maxsize
@@ -1779,6 +1790,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+                if use_context_load:
+                    context_cost = (
+                        kv_cache_usage / running
+                        if running and kv_cache_usage
+                        else mean_context_cost
+                    )
+                    score *= context_cost
                 if score < min_score:
                     min_score = score
                     eng_index = idx
