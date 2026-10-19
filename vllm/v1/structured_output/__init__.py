@@ -375,6 +375,8 @@ class StructuredOutputManager:
 
         # Covers both speculative decoding and diffusion LLMs (canvas_length).
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        is_diffusion = self.vllm_config.model_config.is_diffusion
+        mask_stride = max_num_spec_tokens + (0 if is_diffusion else 1)
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -390,7 +392,7 @@ class StructuredOutputManager:
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
+        # Each request owns a fixed-width block of `mask_stride` rows.
         cumulative_index = 0
 
         # Optimized parallel filling of bitmasks for
@@ -430,7 +432,8 @@ class StructuredOutputManager:
                 promise.result()
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
-            for req_id in structured_output_request_ids:
+            for grammar_idx, req_id in enumerate(structured_output_request_ids):
+                cumulative_index = grammar_idx * mask_stride
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
@@ -484,7 +487,7 @@ class StructuredOutputManager:
 
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
-                if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                if not (is_diffusion and req_tokens):
                     if failed_index is not None:
                         bitmask[cumulative_index].copy_(bitmask[failed_index])
                     else:
@@ -502,8 +505,9 @@ class StructuredOutputManager:
                     grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < bitmask_tensor.shape[0]:
-            bitmask_tensor = bitmask_tensor[:cumulative_index]
+        num_masks = len(structured_output_request_ids) * mask_stride
+        if num_masks < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:num_masks]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization

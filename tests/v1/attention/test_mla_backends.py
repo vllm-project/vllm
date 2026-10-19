@@ -226,6 +226,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         attn_backend=flashmla_module.FlashMLABackend,
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        topk_buffer_width=None,
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,

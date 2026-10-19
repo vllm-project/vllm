@@ -47,6 +47,7 @@ def _serving() -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
     serving.enable_prompt_tokens_details = False
     serving.enable_force_include_usage = False
+    serving.enable_log_outputs = False
     serving.enable_per_request_metrics = False
     serving.system_fingerprint = None
     serving.return_tokens_as_token_ids = False

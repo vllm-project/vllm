@@ -763,6 +763,115 @@ def test_aiter_decode_topk_matches_per_row_under_mtp() -> None:
         assert torch.all(aiter_row[num_valid:] == -1)
 
 
+def _assert_leading_topk(indices: torch.Tensor, row_ends: torch.Tensor) -> None:
+    """The sparse-MLA index remap reads only the first min(len, k) slots of a
+    row, so those must hold distinct in-range indices and the rest must be -1."""
+    ends = row_ends.reshape(-1, 1)
+    slots = torch.arange(indices.shape[1], device=indices.device)[None, :]
+    leading = slots < ends.clamp(0, indices.shape[1])
+    assert torch.all(torch.where(leading, (indices >= 0) & (indices < ends), True))
+    assert torch.all(indices[~leading] == -1)
+    ordered = indices.sort(1).values
+    assert not ((ordered[:, 1:] == ordered[:, :-1]) & (ordered[:, 1:] >= 0)).any()
+
+
+def _distinct_logits(rows: int, num_columns: int) -> torch.Tensor:
+    # Distinct values per row: the selected set is unique, so it must match.
+    return torch.rand(rows, num_columns, device="cuda").argsort(dim=1).float()
+
+
+@pytest.mark.parametrize("num_columns", [16_384, 133_120, 1_048_576])
+@pytest.mark.parametrize("next_n", [1, 2])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_dsa_decode_topk_matches_per_row(num_columns: int, next_n: int) -> None:
+    """DeepSeek-V3.2 / GLM-5 decode (uncompressed, k=2048): AITER must select
+    the in-tree kernel's indices, in the leading slots of each row."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    top_k = 2048
+    if not rocm_aiter_ops.is_indexer_top_k_enabled():
+        pytest.skip("AITER top-k is unavailable")
+
+    lengths = torch.tensor(
+        [0, 1, 2047, 2048, 2049, 5000, num_columns - 3, num_columns],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    offsets = torch.arange(next_n, dtype=torch.int32, device="cuda")
+    row_ends = (lengths[:, None] - next_n + 1 + offsets).clamp_min(0)
+    seq_lens = row_ends if next_n > 1 else row_ends.flatten()
+    rows = row_ends.numel()
+
+    set_random_seed(0)
+    logits = _distinct_logits(rows, num_columns)
+    columns = torch.arange(num_columns, device="cuda")
+    logits.masked_fill_(columns[None, :] >= row_ends.reshape(-1, 1), 1e20)
+
+    native = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        native,
+        rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    aiter = torch.full_like(native, -777)
+    rocm_aiter_ops.indexer_top_k_decode(logits, 1, seq_lens.reshape(-1), aiter, top_k)
+
+    for indices in (native, aiter):
+        _assert_leading_topk(indices, row_ends)
+    assert torch.equal(native.sort(1).values, aiter.sort(1).values)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_dsa_prefill_topk_matches_per_row() -> None:
+    """DeepSeek-V3.2 / GLM-5 prefill (k=2048): two sequences packed in one
+    chunk; AITER's localized indices must match the in-tree kernel's."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _launch_aiter_top_k_per_row_prefill,
+    )
+
+    top_k = 2048
+    if not rocm_aiter_ops.is_indexer_top_k_enabled():
+        pytest.skip("AITER top-k is unavailable")
+
+    positions = [(0, p) for p in (0, 1, 2046, 2047, 2048, 4999)]
+    positions += [(5000, p) for p in (0, 2500, 2999)]
+    row_starts = torch.tensor(
+        [s for s, _ in positions], dtype=torch.int32, device="cuda"
+    )
+    row_ends = torch.tensor(
+        [s + p + 1 for s, p in positions], dtype=torch.int32, device="cuda"
+    )
+    rows, num_columns = len(positions), 8000
+
+    set_random_seed(0)
+    logits = _distinct_logits(rows, num_columns)
+    native = torch.full((rows, top_k), -777, dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        native,
+        rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+    aiter = torch.full_like(native, -777)
+    _launch_aiter_top_k_per_row_prefill(logits, row_starts, row_ends, aiter, top_k)
+
+    for indices in (native, aiter):
+        _assert_leading_topk(indices, row_ends - row_starts)
+    assert torch.equal(native.sort(1).values, aiter.sort(1).values)
+
+
 def _enable_aiter_topk(monkeypatch, enabled: bool = True) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -811,6 +920,50 @@ def test_aiter_c4a_topk_kernel_selection(monkeypatch) -> None:
 
     _enable_aiter_topk(monkeypatch, enabled=False)
     assert is_supported(is_prefill=True, compress_ratio=4, num_rows=1) is False
+
+
+def test_aiter_dsa_topk_kernel_selection(monkeypatch) -> None:
+    """The uncompressed DSA indexer takes AITER for k=2048 on every decode
+    shape, including FULL-graph decode bounded only by max_model_len, and on
+    prefill chunks whose rows reach 32K tokens."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _enable_aiter_topk(monkeypatch)
+    is_supported = rocm_aiter_ops.is_indexer_top_k_supported
+
+    for kwargs in (
+        dict(is_prefill=True, num_rows=16_384, max_valid_seq_len=32_768),
+        dict(is_prefill=False, num_rows=1, max_valid_seq_len=1_048_576),
+        dict(is_prefill=False, num_rows=256, max_valid_seq_len=4096),
+    ):
+        assert is_supported(compress_ratio=1, topk_tokens=2048, **kwargs) is True
+        assert is_supported(compress_ratio=1, topk_tokens=1024, **kwargs) is False
+        assert is_supported(compress_ratio=1, **kwargs) is False
+
+    # Short prefill chunks stay on the in-tree kernel.
+    for max_valid_seq_len in (None, 32_767):
+        assert (
+            is_supported(
+                is_prefill=True,
+                compress_ratio=1,
+                num_rows=1,
+                max_valid_seq_len=max_valid_seq_len,
+                topk_tokens=2048,
+            )
+            is False
+        )
+
+    _enable_aiter_topk(monkeypatch, enabled=False)
+    assert (
+        is_supported(
+            is_prefill=False,
+            compress_ratio=1,
+            num_rows=1,
+            max_valid_seq_len=1_048_576,
+            topk_tokens=2048,
+        )
+        is False
+    )
 
 
 def test_dsv4_native_top_k_window() -> None:
@@ -1516,6 +1669,47 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
     expected = logits[target_row, :long_seq_len].topk(top_k).indices
     assert set(indices[target_row].cpu().tolist()) == set(expected.cpu().tolist())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("extra", [1, 2, 3, 4])
+@pytest.mark.parametrize("num_finite", [0, 100])
+@pytest.mark.parametrize("fill", [float("-inf"), -1e30])
+@torch.inference_mode()
+def test_persistent_topk_masked_row_tail(
+    top_k: int, extra: int, num_finite: int, fill: float
+) -> None:
+    """Rows with fewer than k scores above the -inf bin put the 2048-bin
+    threshold in the -inf bin. The float4 tail lanes past a row whose length
+    is not a multiple of 4 must not be selected."""
+    set_random_seed(0)
+    num_rows = 4
+    seq_len = top_k + extra
+    stride = seq_len + 8
+    # Finite padding past each row; it must never be read or selected.
+    logits = torch.zeros(num_rows, stride, dtype=torch.float32, device="cuda")
+    logits[:, :seq_len] = fill
+    finite_cols = torch.stack(
+        [torch.randperm(seq_len, device="cuda")[:num_finite] for _ in range(num_rows)]
+    )
+    if num_finite:
+        logits.scatter_(
+            1, finite_cols, torch.randn(num_rows, num_finite, device="cuda")
+        )
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
+    _run_topk_backend("persistent_topk", logits, lengths, indices, top_k, stride)
+    torch.accelerator.synchronize()
+
+    for row in range(num_rows):
+        selected = indices[row].cpu().tolist()
+        assert all(0 <= i < seq_len for i in selected), (
+            f"row {row}: indices outside [0, {seq_len}): "
+            f"{sorted(i for i in selected if not 0 <= i < seq_len)}"
+        )
+        assert len(set(selected)) == top_k
+        assert set(finite_cols[row].cpu().tolist()) <= set(selected)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

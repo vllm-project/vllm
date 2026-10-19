@@ -31,6 +31,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -137,6 +138,46 @@ def test_from_lora_tensors(qwen3_lora_files, device):
             f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         )
         assert lora.lora_a.shape[0] == 8
+
+
+@pytest.mark.parametrize("is_pooling_model", [False, True])
+@pytest.mark.parametrize(
+    "lm_prefix,module_name,text_name",
+    [
+        (
+            "language_model",
+            "language_model.model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+        ("language_model", "language_model.lm_head", "lm_head"),
+        (
+            "model.text_model",
+            "model.text_model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+    ],
+)
+def test_text_only_lora_binds_to_multimodal_language_model(
+    lm_prefix, module_name, text_name, is_pooling_model
+):
+    """An adapter trained on the text-only *ForCausalLM must apply to the
+    language model of a multimodal wrapper instead of silently doing nothing."""
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.is_pooling_model = is_pooling_model
+    manager.supports_mm = True
+    manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
+
+    def weights(name):
+        return LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
+
+    text_lora = weights(text_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is text_lora
+    assert manager._get_lora_layer_weights(adapter, "visual.blocks.0.proj") is None
+
+    exact_lora = weights(module_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora, module_name: exact_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is exact_lora
 
 
 def create_lora(
