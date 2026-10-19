@@ -121,6 +121,7 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
 
 class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
+    time_to_first_content_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None

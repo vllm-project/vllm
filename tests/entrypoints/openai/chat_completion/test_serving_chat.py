@@ -876,10 +876,13 @@ async def test_streaming_errors_preserve_envelope(
 
 def test_build_per_request_timing_metrics_valid_timestamps():
     metrics = build_per_request_timing_metrics(
-        _PER_REQUEST_STATS, num_generation_tokens=10
+        _PER_REQUEST_STATS,
+        num_generation_tokens=10,
+        first_content_token_ts=2.5,
     )
 
     assert metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert metrics.time_to_first_content_token_ms == pytest.approx(1000.0)
     assert metrics.generation_time_ms == pytest.approx(1000.0)
     assert metrics.queue_time_ms == pytest.approx(500.0)
     assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
@@ -928,6 +931,67 @@ async def test_chat_per_request_metrics_follow_server_flag():
     assert not isinstance(enabled_response, ErrorResponse)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_chat_content_ttft_uses_first_content_delta():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    serving.parser_cls = MagicMock()
+
+    response_parser = MagicMock()
+    response_parser.parse.return_value = ("thinking", "answer", [])
+    response_parser.count_reasoning_tokens.return_value = 1
+    content_timing_parser = MagicMock()
+    content_timing_parser.parse_delta.side_effect = [
+        DeltaMessage(reasoning="thinking"),
+        DeltaMessage(content="answer"),
+    ]
+
+    reasoning_output = _make_metrics_request_output(
+        RequestStateStats(
+            queued_ts=1.0,
+            scheduled_ts=1.5,
+            first_token_ts=2.0,
+            last_token_ts=2.0,
+            num_generation_tokens=1,
+        ),
+        token_ids=(100,),
+    )
+    reasoning_output.outputs[0].text = "thinking"
+    reasoning_output.outputs[0].finish_reason = None
+    reasoning_output.finished = False
+
+    content_output = _make_metrics_request_output(
+        RequestStateStats(
+            queued_ts=1.0,
+            scheduled_ts=1.5,
+            first_token_ts=2.0,
+            last_token_ts=3.0,
+            num_generation_tokens=2,
+        ),
+        token_ids=(101,),
+    )
+    content_output.outputs[0].text = "answer"
+
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+        ),
+        _stream_request_outputs(reasoning_output, content_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=response_parser,
+        content_timing_parser=content_timing_parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.usage.completion_tokens == 2
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_content_token_ms == pytest.approx(1500.0)
 
 
 @pytest.mark.asyncio
