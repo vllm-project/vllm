@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv31_tool_parser import (
     DeepSeekV31ToolParser,
@@ -61,15 +62,36 @@ def test_extract_tool_calls_with_multiple_tools(parser):
     assert result.content == "some prefix text some suffix text"
 
 
-def test_extract_tool_calls_keeps_text_after_tool_calls(parser):
+@pytest.mark.parametrize("streaming", [False, True])
+def test_preserves_text_after_tool_call(
+    parser,
+    streaming: bool,
+) -> None:
+    """PR 59589 regression test"""
+
+    # Note(arpera):
+    # This is basically copypaste of the same test
+    # test_preserves_text_after_tool_call for DSv3 parser
+    # The only difference is that DSv3.1 parser does NOT
+    # use function<｜tool▁sep｜> substring due to different
+    # markup formats.
     model_output = (
+        "let me check the weather."
         "<｜tool▁calls▁begin｜>"
-        '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x":1}<｜tool▁call▁end｜>'
+        '<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>'
+        '{"city":"Paris"}'
+        "<｜tool▁call▁end｜>"
         "<｜tool▁calls▁end｜>"
         "It is 30 degrees."
     )
-    result = parser.extract_tool_calls(model_output, None)
-    assert result.tools_called
-    assert result.tool_calls[0].function.name == "foo"
-    assert result.tool_calls[0].function.arguments == '{"x":1}'
-    assert result.content == "It is 30 degrees."
+
+    content, tool_calls = run_tool_extraction(
+        parser,
+        model_output,
+        streaming=streaming,
+    )
+
+    assert content == "let me check the weather.It is 30 degrees."
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "get_weather"
+    assert tool_calls[0].function.arguments == '{"city":"Paris"}'
