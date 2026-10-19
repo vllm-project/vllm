@@ -10,8 +10,9 @@ attention).
     reduce  (192): the ranks' pairs in rank order, f32 -> bf16; + residual
             in f32 -> residual out (bf16), the f32 sum, its sum of squares
     norm    (S): Gemma RMSNorm of the f32 sum -> X (bf16)
-    router  (128 experts): FP32 weight x f32(X) -> logits
-    route   (S): sigmoid, + bias for selection, top-4, renormalized x 2.0
+    router  (8 x 16 experts x 16 K parts): FP32 weight x f32(X), f32 MFMA
+    route   (S): the parts summed in order, sigmoid, + bias for selection,
+            top-4, renormalized x 2.0
     table   (every CTA): the union of picked experts in LDS, slot 0 the shared
             expert (expert 128) over all S rows
     up      (48 x slots): 16 gate + 16 up rows of a slot's expert, A16W4 MFMA,
@@ -29,7 +30,7 @@ import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, Int64, T
+from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_DEV,
@@ -75,6 +76,9 @@ LOG2E = 1.4426950408889634
 MAX_TOKENS = 16
 
 COLS = 32  # columns of a push / reduce / final task
+ROUTER_PARTS = 16
+ROUTER_K = HIDDEN // ROUTER_PARTS
+ROUTER_TASKS = EXPERTS // 16 * ROUTER_PARTS
 SEAM_TASKS = HIDDEN // COLS  # 192
 UP_TILES = INTER // 16  # 48 gate/up tile pairs an expert
 DOWN_TASKS = HIDDEN // 16  # 384
@@ -86,7 +90,7 @@ assert UP_WAVE_STEPS * WAVES == K1_STEPS and UP_WAVE_STEPS % 2 == 0
 # CTA bases of the stages placed by count
 NORM0 = SEAM_TASKS
 ROUTER0 = NORM0 + MAX_TOKENS
-SHARED0 = (ROUTER0 + EXPERTS) % BLOCKS
+SHARED0 = (ROUTER0 + ROUTER_TASKS) % BLOCKS
 ROUTED0 = SHARED0 + UP_TILES
 
 ERROR_BYTES = 256  # the error word's line, ahead of the two parity halves
@@ -131,7 +135,7 @@ def scratch_layout(s: int) -> dict[str, tuple[int, int]]:
         [
             ("ssq", s * SEAM_TASKS),
             ("xrdy", s),
-            ("logit", s * EXPERTS),
+            ("logit", s * EXPERTS * ROUTER_PARTS),
             ("route", s * 2 * TOPK),
             ("upf", slots(s) * UP_TILES),
         ],
@@ -329,40 +333,73 @@ def await_x(c, tokens_n):
 
 
 # ---------------------------------------------------------------- router
+def mfma_f32(a, b, acc):
+    from flydsl.expr.rocdl import _blgp_attr
+
+    return fx.Vector(
+        rocdl.mfma_f32_16x16x4f32(
+            T.vec(4, T.f32),
+            as_ir_value(a),
+            as_ir_value(b),
+            as_ir_value(acc),
+            0,
+            0,
+            _blgp_attr(0),
+        ).result
+    )
+
+
 @traced
-def stage_router(c, e):
-    """Expert e's logits of every token: f32 weight row x f32(X), the CTA's
-    partials summed per wave then in wave order -> LOGIT."""
-    s, tid, a = c["S"], c["tid"], c["args"]
+def stage_router(c, task):
+    """Experts 16 tile .. over K part ``part`` (384 columns, 48 a wave) for
+    every token: FP32 weight x f32(X) on f32 MFMAs, the waves summed in order
+    -> LOGIT[token][expert][part]. A lane's float4 of weights and four bf16 of
+    X feed four MFMAs (K slot = its lane group), the same K order on both."""
+    s, tid, lane, wave, red, a = (
+        c["S"],
+        c["tid"],
+        c["lane"],
+        c["wave"],
+        c["red"],
+        c["args"],
+    )
+    tile, part = task // ROUTER_PARTS, task % ROUTER_PARTS
+    k0 = part * ROUTER_K + wave * (ROUTER_K // WAVES) + (lane // 16) * 4
+    chunks = ROUTER_K // WAVES // 16
+    e = tile * 16 + lane % 16
     wv = [
         fx.Vector(
             bo.buffer_load(
-                rsrc(a["router_w"]),
-                e * HIDDEN + j * 4 * THREADS + tid * 4,
-                vec_width=4,
-                dtype=T.f32,
+                rsrc(a["router_w"]), e * HIDDEN + k0 + 16 * ch, vec_width=4, dtype=T.f32
             )
         )
-        for j in range(HIDDEN // (4 * THREADS))
+        for ch in range(chunks)
     ]
     await_x(c, s)
-    xs = [
-        [
-            ld_dev(c["xn"].value, (t * HIDDEN + j * 4 * THREADS + tid * 4) // 2, 2)
-            for j in range(HIDDEN // (4 * THREADS))
-        ]
-        for t in range(s)
+    tok = fx.min(lane % 16, s - 1)
+    xv = [
+        ld_dev(c["xn"].value, (tok * HIDDEN + k0 + 16 * ch) // 2, 2)
+        for ch in range(chunks)
     ]
-    for t in range_constexpr(s):
-        acc = fx.Float32(0.0)
-        for j in range_constexpr(len(wv)):
-            for h in range_constexpr(2):
-                lo, hi = bf2_f32(fx.Int32(xs[t][j][h]))
-                acc = acc + wv[j][2 * h] * lo
-                acc = acc + wv[j][2 * h + 1] * hi
-        tot = block_sum(c, acc, t % 2)
-        if tid == 0:
-            c["mb"].put(c["logit"], t * EXPERTS + e, tot)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for ch in range_constexpr(chunks):
+        for h in range_constexpr(2):
+            lo, hi = bf2_f32(fx.Int32(xv[ch][h]))
+            acc = mfma_f32(wv[ch][2 * h], lo, acc)
+            acc = mfma_f32(wv[ch][2 * h + 1], hi, acc)
+    fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
+    gpu.barrier()
+    if tid < 16 * s:
+        r = tid % 16
+        t = tid // 16
+        at = (16 * (r // 4) + t) * 4 + r % 4
+        tot = fx.Float32(0.0)
+        for w in range_constexpr(WAVES):
+            tot = tot + fx.ptr_load(red + (w * 64 * 4 + at))
+        c["mb"].put(
+            c["logit"], (t * EXPERTS + tile * 16 + r) * ROUTER_PARTS + part, tot
+        )
+    gpu.barrier()
 
 
 # ---------------------------------------------------------------- route
@@ -372,15 +409,33 @@ def _sigmoid(x):
 
 @traced
 def stage_route(c, t):
-    """Token t on wave 0: two experts a lane, top-4 of sigmoid + bias (ties to
-    the lower expert), weights the selected sigmoids / their sum x 2.0."""
-    lane, wave, a = c["lane"], c["wave"], c["args"]
+    """Token t: a thread sums 4 of an expert's 16 logit parts, wave 0 the 4
+    sums in order (two experts a lane); top-4 of sigmoid + bias (ties to the
+    lower expert), weights the selected sigmoids x (2.0 / their sum)."""
+    tid, lane, wave, red, a = c["tid"], c["lane"], c["wave"], c["red"], c["args"]
+    quarter = ROUTER_PARTS // 4
+    e = tid % EXPERTS
+    q = tid // EXPERTS
+    got = c["mb"].poll(
+        [
+            (c["logit"], (t * EXPERTS + e) * ROUTER_PARTS + q * quarter + p, 2)
+            for p in range(0, quarter, 2)
+        ],
+        site=SITE_ROUTE,
+    )
+    part = fx.Float32(0.0)
+    for p in range_constexpr(quarter):
+        part = part + got[p // 2][p % 2].bitcast(fx.Float32)
+    fx.ptr_store(part, red + tid)
+    gpu.barrier()
     if wave == 0:
-        got = c["mb"].poll(
-            [(c["logit"], t * EXPERTS + lane + 64 * i, 1) for i in range(2)],
-            site=SITE_ROUTE,
-        )
-        sc = [_sigmoid(got[i][0].bitcast(fx.Float32)) for i in range(2)]
+        logits = []
+        for i in range_constexpr(2):
+            tot = fx.Float32(0.0)
+            for qq in range_constexpr(4):
+                tot = tot + fx.ptr_load(red + (qq * EXPERTS + lane + 64 * i))
+            logits.append(tot)
+        sc = [_sigmoid(logits[i]) for i in range(2)]
         bias = [
             fx.Float32(
                 bo.buffer_load(rsrc(a["bias"]), lane + 64 * i, vec_width=1, dtype=T.f32)
@@ -668,8 +723,8 @@ def run_ffn(c, bid):
     for t in range(first_task(bid, NORM0), s, BLOCKS):
         stage_norm(c, t)
     stamp(c, 3)
-    for e in range(first_task(bid, ROUTER0), EXPERTS, BLOCKS):
-        stage_router(c, e)
+    for task in range(first_task(bid, ROUTER0), ROUTER_TASKS, BLOCKS):
+        stage_router(c, task)
     stamp(c, 4)
     for t in range(first_task(bid, NORM0), s, BLOCKS):
         stage_route(c, t)

@@ -130,7 +130,11 @@ def _run(weights, s, experts=ffn.Experts.ALL, seed=1):
     torch.accelerator.synchronize()
     assert peer[: 4 * ffn.ERROR_WORDS].view(torch.int32)[0].item() == 0
     x = runner.region(s, "xn")[: s * H * 2].view(torch.bfloat16).view(s, H)
-    logits = _pairs(runner.region(s, "logit"), s * ffn.EXPERTS).view(torch.float32)
+    parts = _pairs(runner.region(s, "logit"), s * ffn.EXPERTS * ffn.ROUTER_PARTS)
+    parts = parts.view(torch.float32).view(s * ffn.EXPERTS, ffn.ROUTER_PARTS)
+    logits = parts[:, 0].clone()
+    for p in range(1, ffn.ROUTER_PARTS):
+        logits += parts[:, p]
     route = _pairs(runner.region(s, "route"), s * 2 * ffn.TOPK).view(s, 2 * ffn.TOPK)
     return SimpleNamespace(
         part=part,
