@@ -190,10 +190,13 @@ def _make_mla_kv_cache_config(
     head_size: int = 512,
     dtype: torch.dtype = torch.float32,
     num_blocks: int = 4,
+    cache_dtype_str: str | None = None,
 ) -> KVCacheConfig:
     if layer_names is None:
         layer_names = ["layer0", "layer1"]
     spec = _mla_spec(head_size=head_size, dtype=dtype)
+    if cache_dtype_str is not None:
+        spec = replace(spec, cache_dtype_str=cache_dtype_str)
     layer_stride = spec.page_size_bytes * num_blocks
     kv_cache_tensors = [
         KVCacheTensor(
@@ -1076,24 +1079,24 @@ def test_model_dtype_identity_uses_normalized_spec_dtype():
     """#56894: sparse MLA workers rewrite cache_dtype (fp8 -> fp8_ds_mla) in the
     worker process; the namespace identity must come from the spec, which
     carries the normalized value under both uni and mp executors."""
-    spec = replace(_mla_spec(), cache_dtype_str="fp8_ds_mla")
-    num_blocks = 4
-    layer_stride = spec.page_size_bytes * num_blocks
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=layer_stride * 2,
-                layers=["layer0", "layer1"],
-                layer_stride=layer_stride,
-                block_stride=spec.page_size_bytes,
-            )
-        ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
-    )
+    kv_cache_config = _make_mla_kv_cache_config(cache_dtype_str="fp8_ds_mla")
     config = _make_vllm_config()
     config.cache_config.cache_dtype = "fp8"
     assert build_offloading_config(config, kv_cache_config).model.dtype == "fp8_ds_mla"
+
+
+@pytest.mark.parametrize(
+    ("model_dtype", "expected"),
+    [(torch.float16, "float16"), (torch.bfloat16, "bfloat16")],
+)
+def test_model_dtype_identity_resolves_auto_spec_dtype(model_dtype, expected):
+    """A spec carrying the literal "auto" must not become the identity: FP16
+    and BF16 deployments would otherwise share one namespace."""
+    kv_cache_config = _make_mla_kv_cache_config(cache_dtype_str="auto")
+    config = _make_vllm_config()
+    config.cache_config.cache_dtype = "auto"
+    config.model_config.dtype = model_dtype
+    assert build_offloading_config(config, kv_cache_config).model.dtype == expected
 
 
 def test_model_dtype_identity_keeps_knob_without_spec_dtype_str():

@@ -250,20 +250,23 @@ def build_offloading_config(
     # the executor choice. The KV cache specs travel from the workers and carry
     # the normalized string in both modes; derive the identity from them when
     # they agree, and keep the config knob otherwise.
+    resolved_cache_dtype = (
+        vllm_config.model_config.dtype
+        if vllm_config.cache_config.cache_dtype == "auto"
+        else vllm_config.cache_config.cache_dtype
+    )
+    # Normalize to the string shape the namespace identity uses, so a spec
+    # carrying the literal "auto" and a spec carrying the resolved spelling
+    # collapse into one identity instead of splitting on the keyword.
+    resolved_dtype_str = str(resolved_cache_dtype).removeprefix("torch.")
     spec_cache_dtypes = {
-        cache_dtype_str
+        resolved_dtype_str if cache_dtype_str == "auto" else cache_dtype_str
         for group in kv_cache_config.kv_cache_groups
         for spec in iter_layer_specs(group.kv_cache_spec)
         if (cache_dtype_str := getattr(spec, "cache_dtype_str", None))
     }
     cache_dtype = (
-        spec_cache_dtypes.pop()
-        if len(spec_cache_dtypes) == 1
-        else (
-            vllm_config.model_config.dtype
-            if vllm_config.cache_config.cache_dtype == "auto"
-            else vllm_config.cache_config.cache_dtype
-        )
+        spec_cache_dtypes.pop() if len(spec_cache_dtypes) == 1 else resolved_dtype_str
     )
 
     return OffloadingConfig(
