@@ -9,3 +9,5 @@ server_args: >-
   --moe-backend humming
   --linear-backend humming
   --dtype bfloat16
+env:
+  VLLM_HUMMING_MOE_GEMM_TYPE: "grouped_contiguous"
