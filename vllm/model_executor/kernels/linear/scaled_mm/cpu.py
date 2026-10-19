@@ -215,8 +215,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x_shape = x.shape
+        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
         w_q, w_s, _, _, _ = self._get_layer_params(layer)
-        return torch.ops._C.int8_scaled_mm_with_quant(
+        out = torch.ops._C.int8_scaled_mm_with_quant(
             x,
             w_q,
             w_s,
@@ -224,6 +226,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             x.dtype,
             True,
         )
+        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+        return out
 
 
 class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

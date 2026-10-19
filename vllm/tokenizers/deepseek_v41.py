@@ -31,7 +31,9 @@ def _normalize_messages(
     # vLLM additions to the reference: Responses API part types, image_pil,
     # and ValueError (400) instead of the reference's asserts.
     result = [dict(message) for message in copy.deepcopy(messages)]
+    image_idx = 0
     for message in result:
+        image_indices = message["_image_indices"] = []
         role = message.get("role")
         if role not in ("system", "developer", "user", "assistant", "tool"):
             raise ValueError(f"Invalid role: {role}")
@@ -50,6 +52,8 @@ def _normalize_messages(
                     parts.append(block.get("text", ""))
                 elif part_type in ("image_url", "input_image", "image_pil"):
                     parts.append(IMAGE_PLACEHOLDER)
+                    image_indices.append(image_idx)
+                    image_idx += 1
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "
@@ -69,6 +73,7 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             self,
             messages: list[ChatCompletionMessageParam],
             tools: list[dict[str, Any]] | None = None,
+            image_order: list[int] | None = None,
             **kwargs,
         ) -> str | list[int]:
             # The generic renderer's conversation has already flattened text
@@ -104,6 +109,7 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 thinking_mode="thinking" if thinking else "chat",
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=effort,
+                image_order=image_order,
             )
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {

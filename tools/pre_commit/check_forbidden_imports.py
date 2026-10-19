@@ -59,6 +59,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/shm_tensor_arena.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
+            "examples/rl/rlhf_http_ipc_no_vllm.py",
             "vllm/model_executor/model_loader/weight_cache/protocol.py",
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
