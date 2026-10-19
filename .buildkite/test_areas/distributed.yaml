@@ -334,8 +334,6 @@ steps:
   - pytest -v -s distributed/test_engram_dp_shard.py
   mirror:
     amd:
-      # Keep the AMD mirror on per-PR runs; only the L4 step is nightly-only.
-      optional: false
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
       automatic_shard: true
@@ -679,8 +677,6 @@ steps:
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
   mirror:
     amd:
-      # Keep the AMD mirror on per-PR runs; only the L4 step is nightly-only.
-      optional: false
       label: ":amd: (MI250) Pipeline + Context Parallelism"
       dind: false
       device: mi250_4
