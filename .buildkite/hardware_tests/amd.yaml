@@ -4,7 +4,7 @@ group: Hardware - AMD Build
 # (test-template-amd.j2) renders these same steps and sets ROCM_CI_REPO (trusted rocm/vllm-ci, else rocm/vllm-ci-pr).
 # Base groups are per stack/repo/PR/branch: main CI shares them with .buildkite/rocm-release.yaml.
 steps:
-  - label: "AMD: :docker: ensure ROCm stack + runtime"
+  - label: ":docker: Ensure ROCm stack + runtime"
     key: refresh-rocm-base-amd
     depends_on: []
     device: amd_cpu
@@ -21,7 +21,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 1
 
-  - label: "AMD: :docker: build test image"
+  - label: ":docker: Build ROCm test image"
     key: image-build-amd
     depends_on:
       - refresh-rocm-base-amd
