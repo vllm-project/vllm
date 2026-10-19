@@ -25,8 +25,9 @@ BLOCKS = 256
 
 
 class _StubRunner:
-    def __init__(self, world, rank, group, device):
+    def __init__(self, world, rank, group, device, **routing):
         self.world = world
+        self.routing = routing
         self.built: list = []
         self.epoch = torch.zeros(1, dtype=torch.int32)
 
@@ -564,6 +565,172 @@ def test_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
         [("launch", 3)],
         [("layer", 4, False)],
         [("launch", 5)],
+    ]
+
+
+DRAFT_LAYERS = 2
+DRAFT_EXPERTS = 128
+DRAFT_TOPK = 3
+DRAFT_TOKENS = 5
+
+
+class _DraftModel(torch.nn.Module):
+    """The DSpark draft head's backbone: its own layers, routing and stream."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config.model_config.hf_config
+        self.vllm_config = config
+        self.layers = torch.nn.ModuleList(
+            _Layer(
+                LAYERS + i,
+                attn=dict(compress_ratio=0),
+                ffn=dict(
+                    n_routed_experts=DRAFT_EXPERTS, n_activated_experts=DRAFT_TOPK
+                ),
+            )
+            for i in range(DRAFT_LAYERS)
+        )
+        self.hc_mult = 4
+
+    def prologue(self, input_ids, positions, inputs_embeds):
+        return inputs_embeds, input_ids, positions.shape[0]
+
+    def epilogue(self, hidden, *rest):
+        return hidden
+
+
+def make_draft_config(**overrides) -> Any:
+    config = make_config(**overrides)
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=DRAFT_TOKENS, method="dspark"
+    )
+    hf = config.model_config.hf_config
+    hf.sliding_window = sd.SWA_WIDTH
+    hf.dspark_n_routed_experts = DRAFT_EXPERTS
+    hf.dspark_num_experts_per_tok = DRAFT_TOPK
+    return config
+
+
+def _build_draft(monkeypatch, config=None, model=None):
+    _gpu(monkeypatch)
+    config = config or make_draft_config()
+    model = model if model is not None else _DraftModel(config)
+    sfc = config.compilation_config.static_forward_context
+    for layer in model.layers:
+        layer.attn.swa_cache_layer.kv_cache = make_cache()
+        sfc[layer.attn.swa_cache_layer.prefix] = layer.attn.swa_cache_layer
+    spec = select_decode_spec(config, sd.DRAFT_DECODE_SPEC)
+    return SpecializedDecode(model, config, spec), model
+
+
+def _draft_metadata(model, **overrides) -> dict:
+    width = sd.draft_swa_width(model.vllm_config)
+    fields = dict(
+        decode_swa_width=width,
+        decode_swa_indices=torch.zeros(8, 1, width, dtype=torch.int32),
+    )
+    return {
+        layer.attn.swa_cache_layer.prefix: _swa(**(fields | overrides))
+        for layer in model.layers
+    }
+
+
+def test_draft_rows_span_the_window_and_the_drafts():
+    """The draft's SWA rows are a block's non-causal window, the causal window
+    plus the drafts, padded; not a decode token's."""
+    config = make_draft_config()
+    width = sd.draft_swa_width(config)
+    assert width >= sd.SWA_WIDTH + DRAFT_TOKENS
+    assert width != sd.SWA_WIDTH
+
+
+def test_draft_layers_take_the_drafts_own_routing_and_rows(monkeypatch):
+    """Every draft layer takes a launch, from a runner built for the draft's
+    128 experts, top-3 and non-causal rows, not the backbone's."""
+    decode, model = _build_draft(monkeypatch)
+    kernel = decode.kernel
+    assert set(kernel.plans) == {layer.attn.layer_id for layer in model.layers}
+    assert kernel.runner.routing == dict(
+        experts=DRAFT_EXPERTS,
+        topk=DRAFT_TOPK,
+        ug_groups=sd.DRAFT_UG_GROUPS,
+        swa_width=sd.draft_swa_width(model.vllm_config),
+    )
+    # The draft reads no compressed keys, so it binds only its SWA caches.
+    assert kernel.cache_layers == tuple(
+        sorted(layer.attn.swa_cache_layer.prefix for layer in model.layers)
+    )
+    decode.bind_caches()
+
+
+def test_draft_layer_with_compressed_keys_keeps_vllm_path(monkeypatch):
+    """The draft has no FFN-only launch: a layer the kernels cannot take whole
+    runs as vLLM's."""
+    config = make_draft_config()
+    model = _DraftModel(config)
+    for layer in model.layers:
+        layer.attn.compressor = object()
+    decode, _ = _build_draft(monkeypatch, config=config, model=model)
+    assert not decode.kernel.plans
+
+
+def test_draft_first_layer_takes_the_broadcast_embedding(monkeypatch):
+    """The draft's first layer is handed the embedding already broadcast to the
+    hc copies, so the launch takes it as the residual and the first copy as the
+    stream."""
+    decode, model = _build_draft(monkeypatch)
+    positions = torch.zeros(1, dtype=torch.long)
+    embeds = torch.zeros(1, 4, HIDDEN)
+    with forward(decode.vllm_config, CUDAGraphMode.FULL, _draft_metadata(model)):
+        out = decode.kernel.launch_whole(
+            _plan(decode, LAYERS), embeds, positions, None, None, None, None
+        )
+    assert out[0] == "whole" and not out[2]["fold"]
+    assert out[1][1].shape == (1, HIDDEN)
+    assert out[1][2].shape == (1, 4, HIDDEN)
+
+
+def test_draft_and_target_take_only_their_own_rows(monkeypatch):
+    """Each refuses the other's SWA width, so a draft step cannot run on the
+    backbone's kernels or the other way round."""
+    draft, draft_model = _build_draft(monkeypatch)
+    target, target_model = _build(monkeypatch)
+
+    def skip(decode, metadata):
+        with forward(decode.vllm_config, CUDAGraphMode.FULL, metadata):
+            return decode.spec.skip_step(decode.vllm_config, decode.kernel, 1)
+
+    assert skip(draft, _draft_metadata(draft_model)) is None
+    assert skip(target, _metadata(target_model)) is None
+    assert "SWA width" in skip(
+        draft, _draft_metadata(draft_model, decode_swa_width=sd.SWA_WIDTH)
+    )
+    assert "SWA width" in skip(
+        target,
+        _metadata(
+            target_model, decode_swa_width=sd.draft_swa_width(draft_model.vllm_config)
+        ),
+    )
+
+
+def test_draft_run_takes_every_layer_the_way_its_launch_allows(monkeypatch):
+    decode, model = _build_draft(monkeypatch)
+
+    def launch_whole(plan, *args, **kwargs):
+        layer_id = plan.layer.attn.layer_id
+        model.layers[layer_id - LAYERS].taken.append(("launch", layer_id))
+        return None if layer_id == LAYERS else _stream()
+
+    decode.kernel.launch_whole = launch_whole
+
+    step = Step(width=1, kernel_width=1, positions=torch.zeros(1, dtype=torch.long))
+    out = decode.kernel.run(step, None, torch.zeros(1, 4, HIDDEN))
+
+    assert out.shape == (1, HIDDEN)
+    assert [layer.taken for layer in model.layers] == [
+        [("launch", LAYERS), ("layer", LAYERS, False)],
+        [("launch", LAYERS + 1)],
     ]
 
 

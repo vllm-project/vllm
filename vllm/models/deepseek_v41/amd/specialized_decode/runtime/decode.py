@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1's decode kernel: one launch a layer over the stock backbone."""
+"""DeepSeek-V4.1's decode kernels: one launch a layer over the stock backbone,
+and the same over the DSpark draft head's layers."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,7 +14,16 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.common.specialized_decode.spec import Step
 
-from ..spec import MAX_ROWS, RECORD
+from ..spec import (
+    DRAFT_UG_GROUPS,
+    EXPERTS,
+    MAX_ROWS,
+    RECORD,
+    SWA_WIDTH,
+    TOPK,
+    draft_routing,
+    draft_swa_width,
+)
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -80,8 +90,26 @@ class LayerPlan:
     folds: tuple[bool, ...] = ()
 
 
-class DSV41Kernel:
-    def __init__(self, vllm_config, model, widths: tuple[int, ...]):
+class LayerLaunches:
+    """The launches of one stack of DSv4.1 decoder layers: the backbone's, or
+    the DSpark draft's, which has its own routing, SWA rows and runner.
+
+    A subclass owns the layer loop in ``run``; everything the launches need is
+    settled here, at load.
+    """
+
+    draft = False
+
+    def __init__(
+        self,
+        vllm_config,
+        model,
+        widths: tuple[int, ...],
+        experts: int,
+        topk: int,
+        ug_groups: int,
+        swa_width: int,
+    ):
         from vllm.models.common.specialized_decode.guards import tp_group
         from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
             MAX_TOKENS,
@@ -92,7 +120,17 @@ class DSV41Kernel:
         rank, world, cpu_group = tp_group()
         device = next(model.parameters()).device
         self.model = model
-        self.runner = DSV41MonoLayer(world, rank, cpu_group, device)
+        self.experts, self.topk, self.swa_width = experts, topk, swa_width
+        self.runner = DSV41MonoLayer(
+            world,
+            rank,
+            cpu_group,
+            device,
+            experts=experts,
+            topk=topk,
+            ug_groups=ug_groups,
+            swa_width=swa_width,
+        )
         self.embed_layer = getattr(model, "start_layer", 0)
         # A decode step is never trimmed, so ``run`` owns every layer, the ones
         # past the replay cut included.
@@ -105,7 +143,7 @@ class DSV41Kernel:
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         for idx in range(self.embed_layer, self.layer_end):
             layer = model.layers[idx]
-            plan = self._plan_layer(layer, tp_size)
+            plan = self._plan_layer(layer, tp_size, first=idx == self.embed_layer)
             if plan is None:
                 continue
             self.plans[layer.attn.layer_id] = plan
@@ -119,10 +157,10 @@ class DSV41Kernel:
                     keys.append(key)
         self.cache_layers = tuple(sorted(set(self.swa_keys) | set(self.comp_keys)))
 
-    def _plan_layer(self, layer, tp_size: int) -> LayerPlan | None:
+    def _plan_layer(self, layer, tp_size: int, first: bool) -> LayerPlan | None:
         """Info needed to run the specialized decode kernel for this layer."""
         attn = layer.attn
-        why = _skip_layer(layer)
+        why = _skip_layer(layer, self.experts, self.topk)
         if why is not None:
             logger.info_once(
                 "DSv4.1 specialized decode: layer %d on vLLM's path (%s)",
@@ -131,7 +169,15 @@ class DSV41Kernel:
             )
             return None
         why = _ffn_only(layer)
-        weights = _weights(layer, why is not None, tp_size)
+        if why is None and self.draft and (attn.compress_ratio or attn.indexer):
+            why = "compressed keys"
+        if why is not None and self.draft:
+            # The draft has no FFN launch: its layers run whole or not at all.
+            logger.info_once(
+                "DSv4.1 specialized decode: the draft layers on vLLM's path (%s)", why
+            )
+            return None
+        weights = _weights(layer, why is not None, tp_size, self.experts)
         if why is not None:
             logger.info_once(
                 "DSv4.1 specialized decode: the FFN launch for layers with %s", why
@@ -140,10 +186,10 @@ class DSV41Kernel:
             # reduces it on the steps that keep vLLM's path.
             attn.wo_b.reduce_results = False
             return LayerPlan(layer, weights, ffn_only=True)
-        comp_key = attn.compressed_cache_prefix
+        comp_key = attn.compressed_cache_prefix if attn.compress_ratio else None
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
-        settled = attn.layer_id == self.embed_layer or layer.engram is not None
+        settled = first or layer.engram is not None
         return LayerPlan(
             layer,
             weights,
@@ -193,14 +239,19 @@ class DSV41Kernel:
         layer, runner = plan.layer, self.runner
         attn = layer.attn
         first = residual is None
-        if first and x.dim() != 2:
+        # The draft's first layer takes the embedding already broadcast to the
+        # hc copies ([rows, hc, dim]), the backbone's the 2-D embedding.
+        if first and x.dim() != (3 if self.draft else 2):
             return None
         tensors = (x,) if first else (x, residual, post_mix, res_mix, pre_mix)
         if not all(t is not None and t.is_contiguous() for t in tensors):
             return None
         fold = True
         if first:
-            residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
+            if self.draft:
+                residual, x = x, x[:, 0].contiguous()
+            else:
+                residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
             pre_mix = runner.first_pre_mix(x.shape[0])
             post_mix = res_mix = pre_mix  # unread without the fold
             fold = False
@@ -255,6 +306,21 @@ class DSV41Kernel:
         if not all(t.is_contiguous() for t in tensors):
             return None
         return self.runner.ffn(plan.weights, *tensors)
+
+
+class DSV41Kernel(LayerLaunches):
+    """The backbone's decode: 384 experts, top-6, causal SWA windows."""
+
+    def __init__(self, vllm_config, model, widths: tuple[int, ...]):
+        super().__init__(
+            vllm_config,
+            model,
+            widths,
+            experts=EXPERTS,
+            topk=TOPK,
+            ug_groups=2,
+            swa_width=SWA_WIDTH,
+        )
 
     def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
         model, positions = self.model, step.positions
@@ -336,6 +402,48 @@ class DSV41Kernel:
         )
 
 
+class DSV41DraftKernel(LayerLaunches):
+    """The DSpark draft's decode: the draft's own routing and non-causal SWA
+    rows, over the draft head's layers."""
+
+    draft = True
+
+    def __init__(self, vllm_config, model, widths: tuple[int, ...]):
+        experts, topk = draft_routing(vllm_config)
+        super().__init__(
+            vllm_config,
+            model,
+            widths,
+            experts=experts,
+            topk=topk,
+            ug_groups=DRAFT_UG_GROUPS,
+            swa_width=draft_swa_width(vllm_config),
+        )
+
+    def run(self, step: Step, input_ids, inputs_embeds, **kwargs) -> Any:
+        model, positions = self.model, step.positions
+        hidden, input_ids, full_num_tokens = model.prologue(
+            input_ids, positions, inputs_embeds
+        )
+        residual = post_mix = res_mix = pre_mix = None
+        for idx in range(self.embed_layer, self.layer_end):
+            layer = model.layers[idx]
+            plan = self.plans.get(layer.attn.layer_id)
+            out = None
+            if plan is not None:
+                out = self.launch_whole(
+                    plan, hidden, positions, residual, post_mix, res_mix, pre_mix
+                )
+            if out is None:
+                out = layer(
+                    hidden, positions, input_ids, pre_mix, post_mix, res_mix, residual
+                )
+            hidden, residual, post_mix, res_mix, pre_mix = out
+        return model.epilogue(
+            hidden, residual, post_mix, res_mix, pre_mix, full_num_tokens
+        )
+
+
 def _ffn_only(layer) -> str | None:
     """Why this layer's attention seam and attention stay on vLLM's path, which
     leaves it the FFN launch, or None when it runs whole."""
@@ -355,7 +463,7 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_layer(layer) -> str | None:
+def _skip_layer(layer, experts: int, topk: int) -> str | None:
     """Why this layer keeps vLLM's path for every step, or None when it takes a
     launch (whole or FFN only: ``_plan_layer`` picks which)."""
     ffn = layer.ffn
@@ -366,18 +474,20 @@ def _skip_layer(layer) -> str | None:
     if (
         ffn.shared_experts is None
         or ffn.gate.tid2eid is not None
-        or ffn.n_routed_experts != 384
-        or ffn.n_activated_experts != 6
+        or ffn.n_routed_experts != experts
+        or ffn.n_activated_experts != topk
         or ffn.routed_scaling_factor != 1.5
         or ffn.swiglu_limit != 10.0
         or ffn.scoring_func != "sqrtsoftplus"
         or not ffn.renormalize
     ):
-        return "MoE routing outside the kernels' (384 / 6, sqrtsoftplus, x1.5)"
+        return (
+            f"MoE routing outside the kernels' ({experts} / {topk}, sqrtsoftplus, x1.5)"
+        )
     return None
 
 
-def _weights(layer, ffn_only: bool, world: int):
+def _weights(layer, ffn_only: bool, world: int, experts: int):
     from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
         MonoLayerWeights,
     )
@@ -405,7 +515,7 @@ def _weights(layer, ffn_only: bool, world: int):
         sw2=sh.down_proj.weight,
         sw2_s=_scale_bytes(sh.down_proj.weight_scale),
     )
-    weights.check(world)
+    weights.check(world, experts)
     return weights
 
 
