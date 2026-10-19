@@ -35,7 +35,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import FinishReason
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    sliding_window_transfer_blocks,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
@@ -404,8 +408,8 @@ class KVChecksumScheduler:
 
         Leading null blocks (out of a sliding window) are left out, as is a
         group with a null block after a non-null one. Sliding-window groups
-        keep only their last ``cdiv(window, block_size) + 1`` blocks, the
-        blocks the NIXL and Mooncake connectors transfer.
+        keep only the blocks P/D connectors transfer
+        (``sliding_window_transfer_blocks``).
 
         A Mamba group's state is not per token: its block is the request's
         running-state slot, the one connectors transfer, at position 0.
@@ -431,8 +435,7 @@ class KVChecksumScheduler:
             if run is None:
                 continue
             start, block_ids = run
-            if isinstance(spec, SlidingWindowSpec):
-                keep = cdiv(spec.sliding_window, block_size) + 1
+            if keep := sliding_window_transfer_blocks(spec):
                 start += max(0, len(block_ids) - keep)
                 block_ids = block_ids[-keep:]
             groups[group_id] = (start, block_ids)

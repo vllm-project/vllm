@@ -1483,6 +1483,16 @@ class KVCacheGroupSpec:
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
 
 
+def sliding_window_transfer_blocks(spec: KVCacheSpec) -> int:
+    """The trailing blocks of a group a P/D KV transfer keeps: one more than
+    a sliding window spans, as the window need not align with blocks, or 0 to
+    keep all of them."""
+    if isinstance(spec, SlidingWindowSpec):
+        assert spec.sliding_window > 0
+        return cdiv(spec.sliding_window, spec.block_size) + 1
+    return 0
+
+
 @dataclass
 class KVCacheConfig:
     """The KV cache configuration of a model."""
