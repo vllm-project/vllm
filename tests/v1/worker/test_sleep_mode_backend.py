@@ -73,6 +73,7 @@ def test_graph_discard_preserves_workspaces_and_avoids_driver_pressure(
         "ep_dp",
         "qwen3_5_mm",
         "full_decode_only",
+        "encoder_graph",
         "pcp",
         "eplb",
         "compile",
@@ -104,6 +105,7 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
     config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     config.compilation_config.mode = CompilationMode.NONE
     config.compilation_config.compile_sizes = None
+    config.compilation_config.cudagraph_mm_encoder = False
     config.lora_config = config.speculative_config = None
     config.kv_transfer_config = config.weight_transfer_config = None
     config.offload_config.uva.cpu_offload_gb = 0
@@ -141,6 +143,8 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
         )
     elif unsupported == "full_decode_only":
         config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    elif unsupported == "encoder_graph":
+        config.compilation_config.cudagraph_mm_encoder = True
     elif unsupported == "ep_dp":
         pc.tensor_parallel_size = 2
         pc.data_parallel_size = 2
@@ -180,11 +184,14 @@ def test_graph_sleep_rejects_unsupported_resource_owners(monkeypatch, unsupporte
 
 @pytest.mark.parametrize("poisoned", [False, True])
 def test_graph_recapture_oom_requires_a_healthy_device(monkeypatch, poisoned):
+    from types import SimpleNamespace
+
     import torch
 
     from vllm.v1.worker.gpu_worker import Worker
 
     worker = object.__new__(Worker)
+    worker.parallel_config = SimpleNamespace(world_size=1)
     worker.model_runner = MagicMock()
     worker.model_runner.capture_one_sleep_graph.side_effect = torch.OutOfMemoryError()
     worker.synchronize_device = MagicMock()
@@ -339,3 +346,66 @@ class DummyBackend(SleepModeBackend):
     @classmethod
     def supports_durable_storage(cls) -> bool:
         return True
+
+
+def test_graph_recapture_distributed_oom_does_not_attempt_local_recovery():
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.v1.worker.gpu_worker import Worker
+
+    worker = object.__new__(Worker)
+    worker.parallel_config = SimpleNamespace(world_size=2)
+    worker.model_runner = MagicMock()
+    worker.model_runner.capture_one_sleep_graph.side_effect = torch.OutOfMemoryError()
+    worker.synchronize_device = MagicMock()
+    with pytest.raises(torch.OutOfMemoryError):
+        worker.recapture_sleep_graph()
+    worker.synchronize_device.assert_not_called()
+    worker.model_runner.cudagraph_manager.discard_full_graphs.assert_not_called()
+
+
+def test_graph_discard_waits_for_peer_unregistration_before_cache_cleanup(monkeypatch):
+    from vllm.v1.worker import gpu_worker
+
+    worker = object.__new__(gpu_worker.Worker)
+    worker.model_runner = MagicMock()
+    calls = []
+    worker.model_runner.cudagraph_manager.discard_full_graphs.side_effect = (
+        lambda: calls.append("graphs")
+    )
+    group = MagicMock()
+    group.device_communicator.ca_comm.disabled = False
+    group.device_communicator.ca_comm.reset_graph_buffers.side_effect = (
+        lambda: calls.append("unregister")
+    )
+    group.barrier.side_effect = lambda: calls.append("peers_unregistered")
+    monkeypatch.setattr(gpu_worker, "model_parallel_is_initialized", lambda: True)
+    for name in ("get_tp_group", "get_pp_group", "get_dp_group"):
+        monkeypatch.setattr(gpu_worker, name, lambda: group)
+    monkeypatch.setattr(gpu_worker.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(
+        gpu_worker.torch.accelerator, "empty_cache", lambda: calls.append("empty_cache")
+    )
+    worker.discard_sleep_graphs()
+    assert calls == ["graphs", "unregister", "peers_unregistered", "gc", "empty_cache"]
+
+
+@pytest.mark.parametrize("discard", [False, True])
+def test_graph_discard_takes_precedence_over_cumem_graph_pool(monkeypatch, discard):
+    from types import SimpleNamespace
+
+    from vllm.config import CUDAGraphMode, VllmConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", discard)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    config = VllmConfig.__new__(VllmConfig)
+    config.model_config = SimpleNamespace(
+        sleep_mode_offload_cudagraph=True,
+        enable_sleep_mode=True,
+        sleep_mode_backend="cumem",
+    )
+    config.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    assert config.use_cumem_cudagraph_pool is (not discard)

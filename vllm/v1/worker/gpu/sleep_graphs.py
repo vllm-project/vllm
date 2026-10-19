@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 # Architectures covered by the graph-discard sleep tests. Anything else must
 # be opted in through VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS and is not
-# covered by CI validation.
+# covered by local validation.
 VALIDATED_MODELS = {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}
 
 
@@ -55,6 +55,7 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
         or cc.cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY)
         or cc.mode != CompilationMode.NONE
         or cc.compile_sizes
+        or cc.cudagraph_mm_encoder
         or config.lora_config is not None
         or config.speculative_config is not None
         or config.kv_transfer_config is not None
@@ -71,7 +72,7 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
             "Context parallelism, EPLB and expert parallelism combined with "
             "data parallelism are rejected; tensor, data and pipeline "
             "parallelism and expert parallelism are otherwise supported. "
-            "Additional offloaders, adapters, "
+            "Encoder graphs, additional offloaders, adapters, "
             "transfers and checkpointing are not supported. Unlisted "
             "architectures can be opted in through "
             "VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS at your own risk."
@@ -81,7 +82,7 @@ def validate_graph_sleep(config: "VllmConfig") -> None:
         logger.warning_once(
             "Graph-discard sleep allows %s via "
             "VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS. These architectures are "
-            "not covered by CI validation; correctness and memory behavior "
+            "not covered by local validation; correctness and memory behavior "
             "are not guaranteed.",
             ", ".join(sorted(untested)),
         )

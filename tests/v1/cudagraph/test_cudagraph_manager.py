@@ -39,6 +39,7 @@ def test_partial_full_capture_never_dispatches_an_uncaptured_graph():
     ready = BatchExecutionDescriptor(CUDAGraphMode.FULL, 4, 4, 1)
     pending = BatchExecutionDescriptor(CUDAGraphMode.FULL, 8, 8, 1)
     manager._graphs_captured = True
+    manager._sleep_partial = True
     manager._lora_dispatch_map = {}
     manager._candidates = {(3, 0): [ready], (6, 0): [pending]}
     manager.graphs = {ready: MagicMock()}

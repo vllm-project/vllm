@@ -16,6 +16,25 @@ from ....utils import create_new_process_for_each_test
 DEVICE_TYPE = current_platform.device_type
 
 
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_free_while_asleep_reports_no_driver_errors(offload, capfd):
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag="weights"):
+        tensor = torch.ones(1024 * 1024, dtype=torch.uint8, device=DEVICE_TYPE)
+    allocator.sleep(offload_tags=("weights",) if offload else ())
+    assert allocator.pointer_to_data
+    assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+    capfd.readouterr()
+    del tensor
+    gc.collect()
+    allocator.release_pools()
+    assert not allocator.pointer_to_data
+    captured = capfd.readouterr()
+    assert "CUDA Error:" not in captured.err
+
+
 def mapped_usage(allocator) -> int:
     """Bytes the allocator still has mapped on the device.
 

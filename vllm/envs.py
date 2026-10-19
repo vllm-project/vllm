@@ -621,7 +621,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_SLEEP_DISCARD_GRAPHS", "0"))
     ),
     # Comma-separated architecture names that extend the validated model
-    # allowlist of graph-discard sleep. Entries are NOT covered by CI
+    # allowlist of graph-discard sleep. Entries are NOT covered by local
     # validation; enabling them is at the user's own risk.
     "VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS": lambda: {
         name.strip()

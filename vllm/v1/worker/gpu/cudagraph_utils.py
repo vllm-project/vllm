@@ -3,8 +3,8 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -160,6 +161,7 @@ class CudaGraphManager:
     ):
         self.vllm_config = vllm_config
         self.device = device
+        self._sleep_capture_stream: torch.cuda.Stream | None = None
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
@@ -425,6 +427,31 @@ class CudaGraphManager:
             return self.ubatch_runner.capture_stream
         return current_stream()
 
+    @contextmanager
+    def _capture_graph(
+        self,
+        graph: torch.cuda.CUDAGraph,
+        pool: tuple[int, int],
+        stream: torch.cuda.Stream,
+    ) -> Iterator[None]:
+        if not self._sleep_partial:
+            with torch.cuda.graph(graph, pool, stream=stream):
+                yield
+            return
+        # torch.cuda.graph also empties the host allocator cache. During idle
+        # recapture that evicts the weight-backup buffers just freed by wake,
+        # forcing every subsequent sleep to allocate and pin them again.
+        # Use the public low-level capture API without flushing host memory.
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        with torch.cuda.stream(stream):
+            graph.capture_begin(pool=pool)
+            try:
+                yield
+            finally:
+                graph.capture_end()
+
     @torch.inference_mode()
     def capture(
         self,
@@ -442,7 +469,14 @@ class CudaGraphManager:
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
-        with graph_capture(device=self.device), ExitStack() as stack:
+        # Incremental recapture must reuse its warmup stream. Creating one per
+        # descriptor retains a separate cuBLAS workspace for every stream.
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and self._sleep_capture_stream is None:
+            self._sleep_capture_stream = torch.cuda.Stream(device=self.device)
+        with (
+            graph_capture(device=self.device, stream=self._sleep_capture_stream),
+            ExitStack() as stack,
+        ):
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
@@ -500,7 +534,7 @@ class CudaGraphManager:
                             free_before = torch.accelerator.get_memory_info()[0]
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
-                            torch.cuda.graph(
+                            self._capture_graph(
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):

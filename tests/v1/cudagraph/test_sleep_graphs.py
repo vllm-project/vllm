@@ -14,11 +14,44 @@ from vllm import LLM, SamplingParams
 
 
 def _graph_snapshot(worker):
+    import weakref
+
     import torch
 
     manager = worker.model_runner.cudagraph_manager
     if not hasattr(worker, "_test_graph_replays"):
         worker._test_graph_replays = 0
+        worker._test_graph_objects = weakref.WeakSet()
+        worker._test_recapture_streams = set()
+        capture_one = worker.model_runner.capture_one_sleep_graph
+        forward = worker.model_runner.model.forward
+        worker._test_recapturing = False
+        worker._test_host_cache_flushes = 0
+        empty_host_cache = torch._C._host_emptyCache
+
+        def observe_host_cache_flush():
+            if worker._test_recapturing:
+                worker._test_host_cache_flushes += 1
+            return empty_host_cache()
+
+        torch._C._host_emptyCache = observe_host_cache_flush
+
+        def observe_forward(*args, **kwargs):
+            if worker._test_recapturing:
+                worker._test_recapture_streams.add(
+                    torch.cuda.current_stream().cuda_stream
+                )
+            return forward(*args, **kwargs)
+
+        def observe_capture():
+            worker._test_recapturing = True
+            try:
+                return capture_one()
+            finally:
+                worker._test_recapturing = False
+
+        worker.model_runner.model.forward = observe_forward
+        worker.model_runner.capture_one_sleep_graph = observe_capture
         original = manager.run_fullgraph
 
         def replay(desc):
@@ -26,6 +59,21 @@ def _graph_snapshot(worker):
             return original(desc)
 
         manager.run_fullgraph = replay
+        from vllm.distributed.parallel_state import get_tp_group
+
+        communicator = get_tp_group().device_communicator
+        custom_ar = getattr(communicator, "ca_comm", None)
+        worker._test_custom_ar_calls = 0
+        if custom_ar is not None and not custom_ar.disabled:
+            original_ar = custom_ar.custom_all_reduce
+
+            def all_reduce(input_):
+                result = original_ar(input_)
+                if result is not None:
+                    worker._test_custom_ar_calls += 1
+                return result
+
+            custom_ar.custom_all_reduce = all_reduce
         # Observe graph release before the backend changes weight/KV mappings
         # or creates CPU backups. Those operations can change driver residency.
         backend = worker.sleep_mode_backend
@@ -37,10 +85,19 @@ def _graph_snapshot(worker):
             return suspend(level)
 
         backend.suspend = observe_suspend
+    # Clearing graph handles alone does not prove that the Python/C++ graph
+    # objects, including their generator registrations, have been destroyed.
+    worker._test_graph_objects.update(manager.graphs.values())
     return {
         "pid": os.getpid(),
         "graphs": len(manager.graphs),
+        "graph_objects": len(worker._test_graph_objects),
+        "uses_cumem_graph_pool": worker.vllm_config.use_cumem_cudagraph_pool,
         "replays": worker._test_graph_replays,
+        "custom_ar_calls": worker._test_custom_ar_calls,
+        "recapture_streams": sorted(worker._test_recapture_streams),
+        "host_cache_flushes": worker._test_host_cache_flushes,
+        "injected_oom": getattr(worker, "_test_injected_oom", False),
         "free_bytes": torch.accelerator.get_memory_info()[0],
         "before_suspend_free_bytes": worker._test_before_suspend_free,
     }
@@ -51,6 +108,12 @@ def _run_discard_recapture_rounds(
     tensor_parallel_size: int,
     distributed_executor_backend: str,
     model: str | None = None,
+    require_custom_allreduce: bool = False,
+    workload_batch_size: int | None = None,
+    graph_mode: str = "FULL",
+    recoverable_oom: bool = False,
+    shutdown_state: str | None = None,
+    terminal_capture_failure: bool = False,
     **llm_kwargs,
 ):
     """Exercise real graphs, partial wake and outputs through the public API."""
@@ -63,9 +126,9 @@ def _run_discard_recapture_rounds(
     llm = LLM(
         model=model,
         dtype=os.environ.get("SLEEP_GRAPH_TEST_DTYPE", "bfloat16"),
-        max_model_len=256,
+        max_model_len=512 if workload_batch_size is not None else 256,
         max_num_seqs=8,
-        max_num_batched_tokens=256,
+        max_num_batched_tokens=512 if workload_batch_size is not None else 256,
         gpu_memory_utilization=0.8,
         enable_sleep_mode=True,
         enable_prefix_caching=False,
@@ -75,7 +138,7 @@ def _run_discard_recapture_rounds(
         **llm_kwargs,
         compilation_config={
             "mode": 0,
-            "cudagraph_mode": "FULL",
+            "cudagraph_mode": graph_mode,
             "cudagraph_capture_sizes": [1, 2, 4, 8],
         },
     )
@@ -86,9 +149,21 @@ def _run_discard_recapture_rounds(
         "The first three positive integers are",
     ]
     params = SamplingParams(temperature=0, max_tokens=16, seed=42)
+    if workload_batch_size is not None:
+        prompts = [
+            "Read the following notes. "
+            + "A city has parks, schools, and libraries. " * (i * 3)
+            + "Describe a useful improvement to the city in detail."
+            for i in range(workload_batch_size)
+        ]
+        params = SamplingParams(temperature=0, max_tokens=96, ignore_eos=True, seed=42)
 
     def generate():
-        return [o.outputs[0].token_ids for o in llm.generate(prompts, params)]
+        tokens = [o.outputs[0].token_ids for o in llm.generate(prompts, params)]
+        if workload_batch_size is not None:
+            assert len(tokens) == workload_batch_size
+            assert all(len(output) == 96 for output in tokens)
+        return tokens
 
     def snapshot():
         # One result per rank; TP ranks must never diverge on graph state.
@@ -98,6 +173,7 @@ def _run_discard_recapture_rounds(
         reference = generate()
         initial = snapshot()
         assert all(rank["graphs"] > 0 for rank in initial) and all(reference)
+        assert all(not rank["uses_cumem_graph_pool"] for rank in initial)
         rounds = int(os.environ.get("SLEEP_GRAPH_TEST_ROUNDS", "2"))
         for iteration in range(rounds):
             before = snapshot()
@@ -106,10 +182,15 @@ def _run_discard_recapture_rounds(
             sleep_s = time.perf_counter() - started
             asleep = snapshot()
             assert all(rank["graphs"] == 0 for rank in asleep)
+            assert all(rank["graph_objects"] == 0 for rank in asleep)
             assert all(
                 rank["free_bytes"] > prev["free_bytes"]
                 for rank, prev in zip(asleep, before, strict=True)
             )
+            if shutdown_state is not None:
+                if shutdown_state != "asleep":
+                    llm.wake_up(tags=[shutdown_state])
+                return [rank["pid"] for rank in asleep]
             llm.sleep(level=1)
             tags = ["weights", "kv_cache"]
             if iteration % 2:
@@ -121,6 +202,10 @@ def _run_discard_recapture_rounds(
             final_tag_wake_s = time.perf_counter() - started
             awake = snapshot()
             assert all(rank["graphs"] == 0 for rank in awake)
+            if recoverable_oom and iteration == 0:
+                llm.collective_rpc(_arm_recoverable_capture_oom)
+            if terminal_capture_failure:
+                llm.collective_rpc(_arm_terminal_capture_failure)
             started = time.perf_counter()
             assert generate() == reference
             eager_s = time.perf_counter() - started
@@ -130,6 +215,20 @@ def _run_discard_recapture_rounds(
                 for rank, prev in zip(first, awake, strict=True)
             )
             deadline = time.monotonic() + 120
+            if recoverable_oom and iteration == 0:
+                while not all(rank["injected_oom"] for rank in first):
+                    assert time.monotonic() < deadline, "OOM was not injected"
+                    time.sleep(0.05)
+                    first = snapshot()
+                assert all(rank["graphs"] == 0 for rank in first)
+                assert generate() == reference
+                recovered = snapshot()
+                assert all(rank["graphs"] == 0 for rank in recovered)
+                assert all(
+                    rank["replays"] == prev["replays"]
+                    for rank, prev in zip(recovered, first, strict=True)
+                )
+                continue
             while any(
                 rank["graphs"] < prev["graphs"]
                 for rank, prev in zip(first, initial, strict=True)
@@ -143,6 +242,10 @@ def _run_discard_recapture_rounds(
             assert generate() == reference
             graph_s = time.perf_counter() - started
             final = snapshot()
+            assert all(len(rank["recapture_streams"]) == 1 for rank in final)
+            assert all(rank["host_cache_flushes"] == 0 for rank in final)
+            if require_custom_allreduce:
+                assert all(rank["custom_ar_calls"] > 0 for rank in final)
             assert all(
                 rank["replays"] > prev["replays"]
                 for rank, prev in zip(final, first, strict=True)
@@ -176,14 +279,69 @@ def _run_discard_recapture_rounds(
         llm.llm_engine.engine_core.shutdown()
 
 
-def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch):
-    _run_discard_recapture_rounds(monkeypatch, 1, "uni")
+@multi_gpu_test(num_gpus=1)
+@pytest.mark.parametrize("graph_mode", ["FULL", "FULL_DECODE_ONLY"])
+def test_graph_discard_sleep_recaptures_after_first_request(monkeypatch, graph_mode):
+    _run_discard_recapture_rounds(monkeypatch, 1, "uni", graph_mode=graph_mode)
+
+
+def _arm_recoverable_capture_oom(worker):
+    import torch
+
+    model = worker.model_runner.model
+    forward = model.forward
+
+    def fail_once(*args, **kwargs):
+        if (
+            torch.cuda.is_current_stream_capturing()
+            and worker.model_runner.cudagraph_manager.graphs
+        ):
+            model.forward = forward
+            worker._test_injected_oom = True
+            raise torch.OutOfMemoryError("injected recoverable capture failure")
+        return forward(*args, **kwargs)
+
+    model.forward = fail_once
+
+
+@multi_gpu_test(num_gpus=1)
+def test_graph_discard_sleep_recovers_after_single_worker_oom(monkeypatch):
+    monkeypatch.setenv("SLEEP_GRAPH_TEST_ROUNDS", "2")
+    _run_discard_recapture_rounds(monkeypatch, 1, "uni", recoverable_oom=True)
+
+
+def _arm_terminal_capture_failure(worker):
+    def fail_capture():
+        # Keep capture in progress while the client sends its next graph-state
+        # RPC. That RPC must fail when the engine dies, not wait indefinitely.
+        time.sleep(0.5)
+        raise RuntimeError("injected terminal capture failure")
+
+    worker.model_runner.capture_one_sleep_graph = fail_capture
+
+
+@multi_gpu_test(num_gpus=1)
+@pytest.mark.timeout(180)
+def test_graph_capture_failure_releases_pending_sync_rpc(monkeypatch):
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    with pytest.raises(EngineDeadError):
+        _run_discard_recapture_rounds(
+            monkeypatch, 1, "uni", terminal_capture_failure=True
+        )
 
 
 @multi_gpu_test(num_gpus=2)
-def test_graph_discard_sleep_tensor_parallel(monkeypatch):
+@pytest.mark.parametrize("custom_allreduce", [False, True])
+def test_graph_discard_sleep_tensor_parallel(monkeypatch, custom_allreduce):
     """TP2: graphs embed cross-rank collectives; discard/recapture must hold."""
-    _run_discard_recapture_rounds(monkeypatch, 2, "mp")
+    if custom_allreduce:
+        monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0")
+        monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0")
+        monkeypatch.setenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0")
+    _run_discard_recapture_rounds(
+        monkeypatch, 2, "mp", require_custom_allreduce=custom_allreduce
+    )
 
 
 @multi_gpu_test(num_gpus=2)
@@ -202,6 +360,37 @@ def test_graph_discard_sleep_data_parallel(monkeypatch):
 def test_graph_discard_sleep_pipeline_parallel(monkeypatch):
     """PP2: per-stage graphs embed no cross-stage collectives; lockstep holds."""
     _run_discard_recapture_rounds(monkeypatch, 1, "mp", pipeline_parallel_size=2)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("tp,pp", [(4, 1), (2, 2)])
+def test_graph_discard_sleep_four_gpus(monkeypatch, tp, pp):
+    _run_discard_recapture_rounds(monkeypatch, tp, "mp", pipeline_parallel_size=pp)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("batch_size", [1, 2, 8])
+def test_graph_discard_sleep_long_mixed_inputs(monkeypatch, batch_size):
+    _run_discard_recapture_rounds(monkeypatch, 2, "mp", workload_batch_size=batch_size)
+
+
+@multi_gpu_test(num_gpus=1)
+def test_graph_discard_sleep_with_cumem_graph_pool(monkeypatch):
+    _run_discard_recapture_rounds(
+        monkeypatch, 1, "uni", sleep_mode_offload_cudagraph=True
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("tp,state", [(1, "asleep"), (2, "asleep"), (2, "weights")])
+def test_graph_discard_shutdown_while_asleep(monkeypatch, capfd, tp, state):
+    pids = _run_discard_recapture_rounds(
+        monkeypatch, tp, "uni" if tp == 1 else "mp", shutdown_state=state
+    )
+    _assert_sleep_graph_workers_stopped(pids)
+    captured = capfd.readouterr()
+    assert "CUDA Error:" not in captured.err
+    assert "Fatal Python error:" not in captured.err
 
 
 @multi_gpu_test(num_gpus=2)
@@ -342,3 +531,136 @@ async def _run_dp_discard_recapture_rounds(monkeypatch) -> None:
             )
     finally:
         engine.shutdown()
+
+
+def _arm_recapture_failure(worker, phase):
+    import torch
+
+    from vllm.distributed.parallel_state import get_tp_group
+
+    if get_tp_group().rank_in_group != 1:
+        return
+    if phase in ("sleep", "wake"):
+
+        def fail_transition(*args, **kwargs):
+            raise RuntimeError("injected sleep graph transition failure")
+
+        if phase == "sleep":
+            worker.model_runner.cudagraph_manager.discard_full_graphs = fail_transition
+        else:
+            worker.sleep_mode_backend.resume = fail_transition
+        return
+    runner = worker.model_runner
+    capture = runner.capture_one_sleep_graph
+
+    def recapture():
+        if phase == "prepare":
+            raise torch.OutOfMemoryError("injected recapture preparation failure")
+        forward = runner.model.forward
+
+        def fail_forward(*args, **kwargs):
+            capturing = torch.cuda.is_current_stream_capturing()
+            if capturing == (phase == "capture"):
+                raise torch.OutOfMemoryError("injected recapture forward failure")
+            return forward(*args, **kwargs)
+
+        runner.model.forward = fail_forward
+        return capture()
+
+    runner.capture_one_sleep_graph = recapture
+
+
+def _worker_pid(worker):
+    return os.getpid()
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("phase", ["prepare", "warmup", "capture", "sleep", "wake"])
+@pytest.mark.timeout(180)
+def test_graph_recapture_failure_terminates_all_workers(monkeypatch, phase):
+    """A rank-local OOM must reach the client and release blocked peers."""
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    monkeypatch.setenv("VLLM_SLEEP_DISCARD_GRAPHS", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    rpc_timeout = int(os.environ.get("SLEEP_GRAPH_TEST_RPC_TIMEOUT_SECONDS", "5"))
+    failure_budget = rpc_timeout + 30
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", str(rpc_timeout))
+    llm = LLM(
+        model=os.environ.get("SLEEP_GRAPH_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        tensor_parallel_size=2,
+        distributed_executor_backend="mp",
+        # NCCL exposes a peer blocked inside a real collective after rank 1 fails.
+        disable_custom_all_reduce=True,
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=8,
+        gpu_memory_utilization=float(
+            os.environ.get("SLEEP_GRAPH_TEST_GPU_MEMORY_UTILIZATION", "0.25")
+        ),
+        enable_sleep_mode=True,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        compilation_config={
+            "mode": 0,
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [1, 2, 4, 8],
+        },
+    )
+    pids = []
+    try:
+        params = SamplingParams(temperature=0, max_tokens=8)
+        llm.generate("The capital of France is", params)
+        pids = llm.collective_rpc(_worker_pid)
+        if phase == "wake":
+            llm.sleep()
+        if phase in ("sleep", "wake"):
+            llm.collective_rpc(_arm_recapture_failure, args=(phase,))
+            with pytest.raises(Exception) as failure:
+                (llm.sleep if phase == "sleep" else llm.wake_up)()
+            assert (
+                isinstance(failure.value, EngineDeadError)
+                or ("injected sleep graph transition failure" in str(failure.value))
+                or (
+                    # A peer may be blocked before the failing rank's reply is read.
+                    "RPC call to " in str(failure.value)
+                    and "timed out" in str(failure.value)
+                )
+            )
+        else:
+            llm.sleep()
+            llm.wake_up()
+            llm.collective_rpc(_arm_recapture_failure, args=(phase,))
+        started = time.monotonic()
+        with pytest.raises(EngineDeadError):
+            # Idle capture follows the first eager request. Repeated requests
+            # allow either ordering between completion delivery and capture.
+            while time.monotonic() - started < failure_budget:
+                llm.generate("The opposite of hot is", params)
+                time.sleep(0.1)
+        assert time.monotonic() - started < failure_budget
+        # Check before explicit client cleanup, which otherwise hides workers
+        # left behind by the engine's failure path.
+        _assert_sleep_graph_workers_stopped(pids)
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+
+
+def _assert_sleep_graph_workers_stopped(pids):
+    from pathlib import Path
+
+    deadline = time.monotonic() + 5
+    while True:
+        alive = []
+        for pid in pids:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().split(") ")[1][0]
+            except FileNotFoundError:
+                continue
+            if state != "Z":
+                alive.append(pid)
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    assert not alive, f"Workers survived engine failure: {alive}"

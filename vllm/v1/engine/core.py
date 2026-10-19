@@ -1025,6 +1025,7 @@ class EngineCore:
             except Exception as exc:
                 if envs.VLLM_SLEEP_DISCARD_GRAPHS:
                     self._sleep_graph_error = f"Graph-discard sleep failed: {exc}"
+                    model_executor.shutdown()
                 raise
             finally:
                 self._sleep_graph_transition = False
@@ -1074,6 +1075,7 @@ class EngineCore:
             except Exception as exc:
                 if envs.VLLM_SLEEP_DISCARD_GRAPHS:
                     self._sleep_graph_error = f"Graph-discard wake failed: {exc}"
+                    self.model_executor.shutdown()
                 raise
 
         # Partial wakes intentionally keep the remaining allocations asleep.
@@ -1128,20 +1130,20 @@ class EngineCore:
             return False
         try:
             results: list[tuple[bool, int]] = self.model_executor.collective_rpc(
-                "recapture_sleep_graph"
+                "recapture_sleep_graph", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
             )
             if any(failed for failed, _ in results):
-                # A rank ran out of memory and discarded its graphs. Converge
-                # every rank to eager inside this same idle boundary, before
-                # any request can be dispatched onto asymmetric graphs —
-                # the collectives embedded in FULL graphs deadlock if only
-                # some ranks replay them. Recapture is re-armed on the next
-                # full wake.
+                # A single-worker allocation failure can recover to eager.
+                # Multi-worker failures raise instead: peers may already be
+                # blocked inside a collective and cannot safely recover here.
                 logger.warning(
                     "Sleep graph recapture failed on at least one rank; "
                     "discarding graphs on all ranks and staying eager"
                 )
-                self.model_executor.collective_rpc("discard_sleep_graphs")
+                self.model_executor.collective_rpc(
+                    "discard_sleep_graphs",
+                    timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+                )
                 self._sleep_graph_pending = False
             else:
                 self._sleep_graph_pending = any(count > 0 for _, count in results)
@@ -1149,6 +1151,10 @@ class EngineCore:
             self._sleep_graph_pending = False
             self._sleep_graph_error = f"Sleep graph recapture failed: {exc}"
             self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+            # Finish worker termination before EngineDead reaches the client.
+            # Otherwise client shutdown can kill this process before it kills
+            # workers blocked in a collective, leaving their GPU memory live.
+            self.model_executor.shutdown()
             # Propagate to EngineCore's fatal-error path so queued and future
             # requests receive EngineDead instead of waiting on a paused engine.
             raise

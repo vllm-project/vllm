@@ -725,3 +725,80 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def test_reset_graph_buffers_preserves_every_static_registration(monkeypatch):
+    """MNNVL collectives retain registrations beyond the legacy AR buffer."""
+    from unittest.mock import MagicMock
+
+    comm = object.__new__(car.CustomAllreduce)
+    comm.disabled = False
+    comm._ptr = 10
+    comm.meta_ptrs = [100, 200]
+    comm.buffer_ptrs = [300, 400]
+    comm.rank_data = object()
+    comm.rank = 0
+    comm.fully_connected = True
+    comm._registered_buffers = [[300, 400], [500, 600], [700, 800]]
+    register = MagicMock()
+    dispose = MagicMock()
+    monkeypatch.setattr(car.ops, "init_custom_ar", lambda *args: 11)
+    monkeypatch.setattr(car.ops, "register_buffer", register)
+    monkeypatch.setattr(car.ops, "dispose", dispose)
+    try:
+        comm.reset_graph_buffers()
+        assert [c.args for c in register.call_args_list] == [
+            (11, pointers) for pointers in comm._registered_buffers
+        ]
+        assert comm._ptr == 11
+        dispose.assert_called_once_with(10)
+    finally:
+        comm.disabled = True
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def recaptured_allreduce(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    """A small registration table must be reusable after graph retirement."""
+    import time
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        group = get_tp_group()
+        comm = group.device_communicator.ca_comm
+        assert comm is not None and not comm.disabled
+        # Two graph registrations beyond the static legacy/MNNVL registrations.
+        entries = len(comm._registered_buffers) + 2
+        comm.rank_data = torch.empty(entries * 16 * 8, dtype=torch.uint8, device=device)
+        comm.reset_graph_buffers()
+        inp = torch.full((1024,), rank + 1, dtype=torch.float32, device=device)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        for iteration in range(8):
+            graph = torch.cuda.CUDAGraph()
+            with comm.capture(), torch.cuda.graph(graph, stream=stream):
+                out = comm.all_reduce(inp, registered=True)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(out, torch.full_like(out, 3))
+            graph.reset()
+            del graph, out
+            group.barrier()
+            start = time.monotonic()
+            if iteration == 0 and rank == 1:
+                # Delay closing peer IPC mappings: rank 0 must retain its
+                # physical allocations until the importer has finished.
+                time.sleep(0.5)
+            comm.reset_graph_buffers()
+            group.barrier()
+            if iteration == 0 and rank == 0:
+                assert time.monotonic() - start >= 0.4
+            torch.accelerator.empty_cache()
+
+
+def test_custom_allreduce_repeated_graph_retirement(monkeypatch):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Requires two GPUs with custom allreduce support")
+    multi_process_parallel(monkeypatch, 2, 1, recaptured_allreduce)

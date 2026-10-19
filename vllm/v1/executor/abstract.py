@@ -383,7 +383,15 @@ class Executor(ABC):
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc(
+            "sleep",
+            kwargs=dict(level=level),
+            **(
+                {"timeout": envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS
+                else {}
+            ),
+        )
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= SLEEP_TAGS
         logger.info(
@@ -402,7 +410,15 @@ class Executor(ABC):
                     )
                     return
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        self.collective_rpc(
+            "wake_up",
+            kwargs=dict(tags=tags),
+            **(
+                {"timeout": envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS
+                else {}
+            ),
+        )
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",
