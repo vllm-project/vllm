@@ -346,29 +346,36 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         assert swa_metadata.is_valid_token is not None
         assert self.topk_indices_buffer is not None
         num_decode_tokens = swa_metadata.num_decode_tokens
-        positional = None
-        # Under batch invariance a causal decode row takes its top-k length
-        # from its position, as the prefill rows it must match do. DSpark
-        # draft rows are non-causal proposals the target checks.
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and swa_metadata.decode_swa_width == self.window_size
-        ):
-            assert swa_metadata.query_start_loc is not None
-            assert swa_metadata.seq_lens is not None
-            positional = (
-                swa_metadata.query_start_loc,
-                swa_metadata.seq_lens,
-                self.compress_ratio,
-            )
         indices, lens = compute_global_topk_indices_and_lens(
             self.topk_indices_buffer[:num_decode_tokens],
             swa_metadata.token_to_req_indices,
             flashmla_metadata.block_table[: swa_metadata.num_decodes],
             flashmla_metadata.block_size // self.compress_ratio,
             swa_metadata.is_valid_token[:num_decode_tokens],
-            positional,
         )
+        # Under batch invariance a causal decode row takes its top-k length
+        # from its position, as the prefill rows it must match do, so -1 holes
+        # and entries past that length are masked alike. DSpark draft rows are
+        # non-causal proposals the target checks.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and swa_metadata.decode_swa_width == self.window_size
+        ):
+            from vllm.model_executor.kernels.batch_invariant import (
+                topk_lens_by_position,
+            )
+
+            assert swa_metadata.query_start_loc is not None
+            assert swa_metadata.seq_lens is not None
+            topk_lens_by_position(
+                swa_metadata.token_to_req_indices,
+                swa_metadata.is_valid_token,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                self.compress_ratio,
+                self.topk_indices_buffer.shape[-1],
+                lens,
+            )
         return self._compressed_kv_cache().unsqueeze(-2), indices, lens
 
     def _forward_decode_mega(
