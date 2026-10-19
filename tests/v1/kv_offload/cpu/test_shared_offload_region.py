@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from vllm.distributed.device_communicators.shm_broadcast import SHM_PATH
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
@@ -1391,97 +1390,8 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch, failure_
 
 
 # ---------------------------------------------------------------------------
-# /dev/shm capacity: data-parallel engines share one tmpfs
+# /dev/shm exhaustion while pre-faulting
 # ---------------------------------------------------------------------------
-
-GiB = 1 << 30
-
-
-def _fake_shm(monkeypatch, total: int) -> None:
-    usage = region_module.shutil.disk_usage(SHM_PATH)._replace(total=total, free=total)
-    monkeypatch.setattr(region_module.shutil, "disk_usage", lambda _: usage)
-
-
-def _fake_platform(monkeypatch, kind: str) -> None:
-    from vllm.v1.kv_offload.cpu import spec as cpu_spec_module
-
-    platform = SimpleNamespace(
-        is_cuda_alike=lambda: kind in ("cuda", "rocm"),
-        is_rocm=lambda: kind == "rocm",
-        is_xpu=lambda: kind == "xpu",
-    )
-    monkeypatch.setattr(cpu_spec_module, "current_platform", platform)
-
-
-def _offload_vllm_config(spec_name: str = "CPUOffloadingSpec", connector=None):
-    from vllm.config import KVTransferConfig, VllmConfig
-
-    return VllmConfig(
-        kv_transfer_config=KVTransferConfig(
-            kv_connector=connector or "OffloadingConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "spec_name": spec_name,
-                "cpu_bytes_to_use": 32 * GiB,
-            },
-        )
-    )
-
-
-def test_engine_launch_refuses_offload_that_overfills_shm(monkeypatch):
-    """The check must run where the local engines are started: inside each
-    engine, a dense model's data-parallel rank sees only itself."""
-    from vllm.v1.engine import utils as engine_utils
-
-    _fake_shm(monkeypatch, 252 * GiB)
-    _fake_platform(monkeypatch, "cuda")
-
-    def no_spawn():
-        raise AssertionError("engines started before the /dev/shm check")
-
-    monkeypatch.setattr(engine_utils, "get_mp_context", no_spawn)
-    with pytest.raises(ValueError, match="8 data-parallel engines on this host"):
-        engine_utils.CoreEngineProcManager(
-            local_engine_count=8,
-            start_index=0,
-            local_start_index=0,
-            vllm_config=_offload_vllm_config(),
-            local_client=True,
-            handshake_address="ipc:///unused",
-            executor_class=MagicMock(),
-            log_stats=False,
-        )
-
-
-@pytest.mark.parametrize(
-    "spec_name,platform,connector,engines,refused",
-    [
-        # 8 x 32 GiB overfills a 252 GiB /dev/shm; 7 x 32 GiB fits.
-        ("CPUOffloadingSpec", "cuda", None, 8, True),
-        ("CPUOffloadingSpec", "cuda", None, 7, False),
-        # One engine is left to its own free-space check.
-        ("CPUOffloadingSpec", "cuda", None, 1, False),
-        # The CPU spec keeps a private tensor per rank on ROCm, not /dev/shm.
-        ("CPUOffloadingSpec", "rocm", None, 8, False),
-        # XPU maps the shared region too.
-        ("CPUOffloadingSpec", "xpu", None, 8, True),
-        # Tiering uses the shared region on every platform.
-        ("TieringOffloadingSpec", "rocm", None, 8, True),
-        ("CPUOffloadingSpec", "cuda", "SimpleCPUOffloadConnector", 8, False),
-    ],
-)
-def test_local_engines_shm_check_scope(
-    monkeypatch, spec_name, platform, connector, engines, refused
-):
-    _fake_shm(monkeypatch, 252 * GiB)
-    _fake_platform(monkeypatch, platform)
-    vllm_config = _offload_vllm_config(spec_name, connector)
-    check = region_module.check_local_engines_offload_shm
-    if refused:
-        with pytest.raises(ValueError, match="cannot hold the CPU KV offload"):
-            check(vllm_config, engines)
-    else:
-        check(vllm_config, engines)
 
 
 @pytest.mark.parametrize("named", [False, True])

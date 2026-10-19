@@ -10,7 +10,6 @@ import shutil
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -22,9 +21,6 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.kv_offload.cpu.host_register import host_unregister
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -51,47 +47,6 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
-
-
-def check_local_engines_offload_shm(
-    vllm_config: "VllmConfig", local_engine_count: int
-) -> None:
-    """Refuse CPU offload sizes that the engines about to start on this host
-    cannot hold in /dev/shm together.
-
-    Each engine checks free space only for its own region, and ftruncate
-    reserves nothing, so the combined size is compared with /dev/shm's total
-    size where the engines are launched. Specs that keep their CPU buffer out
-    of /dev/shm are skipped.
-    """
-    if local_engine_count < 2 or not os.path.isdir(SHM_PATH):
-        return
-    ktc = vllm_config.kv_transfer_config
-    if ktc is None or ktc.kv_connector != "OffloadingConnector":
-        return
-    extra_config = ktc.kv_connector_extra_config
-    cpu_bytes = int(extra_config.get("cpu_bytes_to_use") or 0)
-    if not cpu_bytes:
-        return
-
-    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-
-    spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
-    uses_shared_region = getattr(spec_cls, "_uses_shared_region", None)
-    if uses_shared_region is None or not uses_shared_region():
-        return
-
-    total = shutil.disk_usage(SHM_PATH).total
-    needed = cpu_bytes * local_engine_count
-    if needed > total:
-        gib = 1 << 30
-        raise ValueError(
-            f"{SHM_PATH} cannot hold the CPU KV offload buffers: "
-            f"{local_engine_count} data-parallel engines on this host each need "
-            f"{cpu_bytes / gib:.1f} GiB ({needed / gib:.1f} GiB in total), but "
-            f"{SHM_PATH} is {total / gib:.1f} GiB. Lower --kv-offloading-size or "
-            f"enlarge {SHM_PATH} (e.g. --shm-size for containers)."
-        )
 
 
 @functools.cache

@@ -33,6 +33,7 @@ from vllm.utils.system_utils import get_mp_context, set_env_var
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
+from vllm.v1.kv_offload.shm_check import check_local_engines_offload_shm
 from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -252,12 +253,6 @@ class CoreEngineProcManager:
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        # Engines started together share this host's /dev/shm, and each can
-        # only check room for its own CPU KV offload region.
-        from vllm.v1.kv_offload.cpu.shared_offload_region import (
-            check_local_engines_offload_shm,
-        )
-
         check_local_engines_offload_shm(vllm_config, local_engine_count)
 
         self._request_shutdown_timeout = vllm_config.shutdown_timeout
