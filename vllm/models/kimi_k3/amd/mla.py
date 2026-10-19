@@ -196,6 +196,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         positions: torch.Tensor,
         hidden_states: torch.Tensor | QuantizedActivation,
         llama_4_scaling: torch.Tensor | None = None,
+        skip_o_proj: bool = False,
     ) -> torch.Tensor:
         q_c = None
         num_tokens = (
@@ -311,4 +312,6 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             else:
                 attn_out = attn_out * gate.sigmoid()
 
+        if skip_o_proj:  # the specialized decode runs o_proj in its kernel
+            return attn_out
         return self.o_proj(attn_out)[0]
