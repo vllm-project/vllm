@@ -224,7 +224,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker.layer_to_group = {
         layer.name: groups.index(layer.group if hma else "full") for layer in layers
     }
-    worker._mamba_payload_index_by_layer = {
+    worker._hybrid_payload_index_by_layer = {
         layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
     }
     worker._conv_decomp = next(
