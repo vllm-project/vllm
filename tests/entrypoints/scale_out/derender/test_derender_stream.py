@@ -1080,8 +1080,26 @@ class TestStreamLogprobs:
             ignore_eos=True,
             skip_special_tokens=skip_special_tokens,
         )
+        batch_choices, _, _ = await derenderer.derender_completion(
+            [
+                GenerateTokensResponse(
+                    request_id="test-offset-parity",
+                    choices=[
+                        GenerateTokensChoice(
+                            index=0,
+                            token_ids=token_ids,
+                            logprobs=_generate_logprobs(token_ids),
+                            finish_reason="stop",
+                        )
+                    ],
+                )
+            ],
+            completion_request=request,
+        )
+        batch_logprobs = batch_choices[0].logprobs
+        assert batch_logprobs is not None
+        stream_offsets = []
         state = None
-        offset = 0
         for start in range(0, len(token_ids), chunk_size):
             ids = token_ids[start : start + chunk_size]
             chunk, state = await derenderer.derender_completion_stream(
@@ -1095,11 +1113,8 @@ class TestStreamLogprobs:
             logprobs = chunk.choices[0].logprobs
             assert logprobs is not None
             assert len(logprobs.tokens) == len(ids)
-            for token, actual in zip(
-                logprobs.tokens, logprobs.text_offset, strict=True
-            ):
-                assert actual == offset
-                offset += len(token)
+            stream_offsets.extend(logprobs.text_offset)
+        assert stream_offsets == batch_logprobs.text_offset
 
     @pytest.mark.asyncio
     async def test_stream_logprob_state_stays_bounded(self, derenderer, tokenizer):
