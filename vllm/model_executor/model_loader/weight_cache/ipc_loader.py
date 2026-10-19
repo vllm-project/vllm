@@ -13,7 +13,7 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
     get_dp_group,
@@ -175,7 +175,7 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries = self._fetch_entries(model_config).entries
+        entries = self._fetch_entries(model_config, is_reload=True).entries
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -193,6 +193,8 @@ class IpcModelLoader(BaseModelLoader):
         # An unsupported platform is a permanent misconfiguration rather than
         # a transient daemon outage, so it is raised even when fallback is on.
         check_ipc_platform_support()
+        if vllm_config.parallel_config.enable_eplb:
+            raise ValueError("The IPC weight cache loader does not support EPLB.")
         state_fetched = False
         try:
             # Cross-check the routing flag against the identity of the model
@@ -342,9 +344,12 @@ class IpcModelLoader(BaseModelLoader):
                 continue
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
-    def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+    def _fetch_entries(
+        self, model_config: ModelConfig, *, is_reload: bool = False
+    ) -> WeightCacheState:
         dp_group = get_dp_group()
         pp_group = get_pp_group()
+        parallel_config = get_current_vllm_config().parallel_config
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -354,15 +359,14 @@ class IpcModelLoader(BaseModelLoader):
             dp_size=dp_group.world_size,
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
         if not self.fallback:
-            return self._request_state_with_startup_wait(cache_config)
-        return self._request_state(cache_config)
-
-    def _request_state_with_startup_wait(
-        self, cache_config: WeightCacheKey
-    ) -> WeightCacheState:
-        return self._with_startup_wait(lambda: self._request_state(cache_config))
+            return self._with_startup_wait(
+                lambda: self._request_state(cache_config, is_reload=is_reload)
+            )
+        return self._request_state(cache_config, is_reload=is_reload)
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;
@@ -388,9 +392,18 @@ class IpcModelLoader(BaseModelLoader):
                     )
                 )
 
-    def _request_state(self, cache_config: WeightCacheKey) -> WeightCacheState:
+    def _request_state(
+        self, cache_config: WeightCacheKey, *, is_reload: bool = False
+    ) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
-            send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
+            send_msg(
+                conn,
+                {
+                    "cmd": "get_state",
+                    "cache_config": cache_config,
+                    "is_reload": is_reload,
+                },
+            )
             response = recv_msg(conn)
         status = response.get("status")
         if status == "mismatch":

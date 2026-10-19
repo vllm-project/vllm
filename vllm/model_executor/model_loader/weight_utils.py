@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -33,7 +34,11 @@ from vllm.config.load import (
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
 )
-from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_world_group,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
@@ -894,6 +899,8 @@ def drop_checkpoint_cache(
     revision: str | None = None,
     cache_dir: str | None = None,
 ) -> None:
+    if sys.platform != "linux":
+        return
     checkpoint_dir: Path | None = None
     if os.path.isdir(model_name_or_path):
         checkpoint_dir = Path(model_name_or_path)
@@ -1352,6 +1359,7 @@ def fastsafetensors_weights_iterator(
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using instanttensor library."""
@@ -1375,6 +1383,23 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    extra_kwargs: dict[str, Any] = {}
+    if local_expert_ids is not None:
+        checkpoint_names: list[str] = []
+        for path in hf_weights_files:
+            with safe_open(path, framework="pt") as metadata:
+                checkpoint_names.extend(metadata.keys())  # noqa: SIM118
+        # Every rank must make the same decision about collective loading.
+        empty_expert_ids: set[int] = set()
+        if any(should_skip_weight(name, empty_expert_ids) for name in checkpoint_names):
+            process_group = None
+            extra_kwargs["tensor_filter"] = [
+                name
+                for name in checkpoint_names
+                if not should_skip_weight(name, local_expert_ids)
+            ]
+            extra_kwargs["tensor_name_match_mode"] = "exact"
+
     # copy=True yields tensors that own their memory, staying valid after the
     # context exits or InstantTensor reuses its buffer.
     with instanttensor.safe_open(
@@ -1383,6 +1408,7 @@ def instanttensor_weights_iterator(
         device=device,
         process_group=process_group,
         copy=True,
+        **extra_kwargs,
     ) as f:
         # Track bytes so the bar reports load throughput (GB/s).
         pbar = tqdm(
@@ -1491,6 +1517,33 @@ def row_parallel_weight_loader(
 
 
 LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
+
+
+def load_attention_sink(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    """Load this rank's heads of a global sink; padded heads are set to -inf."""
+    tp_size = get_tensor_model_parallel_world_size()
+    heads = loaded_weight.numel()
+    if heads % tp_size:
+        raise ValueError(
+            f"Attention sink heads ({heads}) must be divisible by tp_size ({tp_size})"
+        )
+    local_heads = heads // tp_size
+    start = get_tensor_model_parallel_rank() * local_heads
+    default_weight_loader(
+        param[:local_heads], loaded_weight.narrow(0, start, local_heads)
+    )
+    param.data[local_heads:].fill_(-float("inf"))
+
+
+def make_attention_sink(
+    num_heads: int, dtype: torch.dtype | None = None
+) -> torch.nn.Parameter:
+    """Create a sink with -inf padding and register its TP weight loader."""
+    sink = torch.nn.Parameter(
+        torch.full((num_heads,), -float("inf"), dtype=dtype), requires_grad=False
+    )
+    sink.weight_loader = load_attention_sink
+    return sink
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:

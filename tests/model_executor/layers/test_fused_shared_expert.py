@@ -182,7 +182,8 @@ def get_fse_test_model_config(
             head_dim=128,
             max_position_embeddings=128,
             sliding_window=None,
-            compress_ratios=[1],
+            layer_types=["sliding_attention"],
+            compress_rates={},
             rope_theta=10000.0,
             compress_rope_theta=10000.0,
             rope_parameters={"rope_type": "default"},
@@ -369,12 +370,15 @@ def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
         lambda: True,
     )
 
-    calls: list[tuple[object, str, str]] = []
+    calls: list[tuple[object, str, str, str | None]] = []
 
     def check_compatibility(
-        config: object, expert_prefix: str, shared_expert_prefix: str
+        config: object,
+        expert_prefix: str,
+        shared_expert_prefix: str,
+        moe_backend: str | None = None,
     ) -> tuple[bool, str | None]:
-        calls.append((config, expert_prefix, shared_expert_prefix))
+        calls.append((config, expert_prefix, shared_expert_prefix, moe_backend))
         return True, None
 
     monkeypatch.setattr(
@@ -385,12 +389,14 @@ def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
         quant_config,
         "model.layers.0.mlp",
         shared_expert_name="shared_expert",
+        moe_backend="aiter_mega_moe",
     )
     assert calls == [
         (
             quant_config,
             "model.layers.0.mlp.experts",
             "model.layers.0.mlp.shared_expert",
+            "aiter_mega_moe",
         )
     ]
 
@@ -407,7 +413,7 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     monkeypatch.setattr(
         fused_moe_utils,
         "is_shared_expert_quant_fse_compatible",
-        lambda *_: (False, "shared experts are excluded"),
+        lambda *_, **__: (False, "shared experts are excluded"),
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
@@ -1124,6 +1130,33 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
     quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(targets={f"{shared_prefix}*": "fp8_per_tensor"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
+
+
+def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> None:
+    """Weight-only routed experts keep BF16 activations, unlike an MXFP4 target."""
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            **_QUARK_FSE_CONFIG,
+            "exclude": [],
+            "global_quant_config": {
+                **_QUARK_FSE_CONFIG["global_quant_config"],
+                "input_tensors": None,
+            },
+        }
+    )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "mxfp4"})
     )
 
     assert is_shared_expert_quant_fse_compatible(
