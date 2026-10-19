@@ -198,6 +198,12 @@ class ServingDerender(BaseServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=gen.prompt_logprobs,
+            prompt_token_ids=(
+                gen.prompt_token_ids
+                if request.chat_request is not None
+                and request.chat_request.return_token_ids
+                else None
+            ),
             kv_transfer_params=gen.kv_transfer_params,
             metrics=gen.metrics,
         )
@@ -369,6 +375,9 @@ class ServingDerender(BaseServing):
                 "derender stream replay failed: %s: %s", type(exc).__name__, exc
             )
             return self.create_error_response("invalid stream_state: derender failed")
+
+        if request.chat_request is not None and request.chat_request.return_token_ids:
+            chunk.prompt_token_ids = request.generate_chunk.prompt_token_ids
 
         logger.debug(
             "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
