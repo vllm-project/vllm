@@ -730,11 +730,13 @@ def test_take_events_preserves_payload_when_key_is_reused_before_removal(
     key = _record_chunks(tracker, old_req, group_config, num_chunks=1)[0]
     [old_stored] = tracker.take_events([_stored_event([key])])
 
+    # The same OffloadKey identifies the same content-addressed chunk.  The
+    # regression is about keeping this payload alive across the delayed store,
+    # rather than about two different payloads sharing a key.
     new_req = _request(
-        block_hashes=[_hash(10), _hash(1)],
+        block_hashes=[_hash(0), _hash(1)],
         token_count=8,
     )
-    new_req.all_token_ids = list(range(101, 109))
     tracker.record_store(new_req, group_config, chunk_idx=0, offload_key=key)
 
     if drain_together:
@@ -747,8 +749,8 @@ def test_take_events_preserves_payload_when_key_is_reused_before_removal(
 
     assert old_stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
     assert old_removed.block_hashes == old_stored.block_hashes
-    assert new_stored.block_hashes == [_wire_hash(_hash(10)), _wire_hash(_hash(1))]
-    assert new_stored.token_ids == list(range(101, 109))
+    assert new_stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+    assert new_stored.token_ids == list(range(1, 9))
     assert new_stored.block_size == 4
 
     [new_removed] = tracker.take_events([_removed_event([key])])
@@ -763,11 +765,11 @@ def test_key_reuse_without_old_removal_retires_old_primary_generation():
     key = _record_chunks(tracker, old_req, group_config, num_chunks=1)[0]
     list(tracker.take_events([_stored_event([key])]))
 
-    new_req = _request(block_hashes=[_hash(10), _hash(1)], token_count=8)
+    new_req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
     tracker.record_store(new_req, group_config, chunk_idx=0, offload_key=key)
     [new_stored] = tracker.take_events([_stored_event([key])])
 
-    assert new_stored.block_hashes == [_wire_hash(_hash(10)), _wire_hash(_hash(1))]
+    assert new_stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
     assert len(tracker._metadata_generations[key]) == 1
 
     [removed] = tracker.take_events([_removed_event([key])])
