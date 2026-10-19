@@ -30,6 +30,10 @@ class MiniMaxM3ModelState(DefaultModelState):
         if decode is not None:
             decode.bind_caches()
 
+    def step_fault(self):
+        decode = self.backbone.specialized_decode
+        return None if decode is None else decode.step_fault()
+
     def close(self) -> None:
         if self._decode_finalizer is not None:
             self._decode_finalizer()

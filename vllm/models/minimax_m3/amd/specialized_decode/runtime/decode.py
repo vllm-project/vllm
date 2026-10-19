@@ -12,11 +12,13 @@ import torch
 
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
 
 from .caches import CacheBinding, TensorIdentity, checked_cache_bindings
-from .guards import checked_weights
+from .guards import model_refusals
 from .routing import decide_step
 from .spec import DecodeConfig
+from .weights import MonoLayerWeights
 
 LayerKernel = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor | None],
@@ -25,7 +27,14 @@ LayerKernel = Callable[
 
 
 class KernelExecutor(Protocol):
+    # whether the launches read the KV caches (bound through ``bind``)
+    uses_caches: bool
+    # the sticky device error word every launch checks and sets
+    fault_word: torch.Tensor
+
     def layer(self, layer_id: int) -> LayerKernel | None: ...
+
+    def begin_step(self, slots: torch.Tensor) -> None: ...
 
     def bind(self, layer_id: int, binding: CacheBinding) -> None: ...
 
@@ -35,7 +44,15 @@ class KernelExecutor(Protocol):
 
     def after_step(self) -> None: ...
 
+    def output_step(self) -> None: ...
+
     def close(self) -> None: ...
+
+
+def tp_agree(ok: bool) -> bool:
+    from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+    return tp_agree(ok, get_tp_group().cpu_group)
 
 
 @dataclass(frozen=True)
@@ -61,7 +78,7 @@ class SpecializedDecode:
         self,
         model,
         config: DecodeConfig,
-        executor: KernelExecutor | Callable[[SpecializedDecode], KernelExecutor],
+        executor: Any,
     ) -> None:
         self.model = model
         self.config = config
@@ -70,7 +87,15 @@ class SpecializedDecode:
             for layer in model.layers
             if config.first_layer <= layer.layer_id <= config.last_layer
         )
-        self.weights = checked_weights(model, config)
+        reasons = model_refusals(model, config)
+        if not tp_agree(not reasons):
+            raise ValueError(
+                "MiniMax-M3 specialized decode model unsupported: "
+                + ("; ".join(reasons) or "refused on another TP rank")
+            )
+        self.weights = {
+            layer.layer_id: MonoLayerWeights.from_layer(layer) for layer in self.layers
+        }
         self.executor = executor(self) if callable(executor) else executor
         self._cache_identities: dict[int, dict[str, TensorIdentity]] = {}
         self._closed = False
@@ -89,28 +114,9 @@ class SpecializedDecode:
             ),
         )
 
-    @staticmethod
-    def _health_failed(health: Any) -> bool:
-        return bool(getattr(health, "failed", health))
-
-    def _check_health(self, phase: str) -> None:
-        failure: Exception | None = None
-        health: Any = None
-        try:
-            health = self.executor.health()
-        except Exception as err:
-            failure = err
-
-        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
-
-        local_ok = failure is None and not self._health_failed(health)
-        if not tp_agree(local_ok, get_tp_group().cpu_group):
-            detail = failure if failure is not None else health
-            raise RuntimeError(
-                f"MiniMax specialized-decode kernel failed {phase}: {detail}"
-            ) from failure
-
     def bind_caches(self) -> None:
+        if not self.executor.uses_caches:
+            return
         failure: Exception | None = None
         bindings: dict[int, CacheBinding] = {}
         try:
@@ -129,9 +135,7 @@ class SpecializedDecode:
         except Exception as err:
             failure = err
 
-        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
-
-        if not tp_agree(failure is None, get_tp_group().cpu_group):
+        if not tp_agree(failure is None):
             raise RuntimeError(
                 "rank-uniform MiniMax specialized-decode cache bind failed"
             ) from failure
@@ -146,7 +150,10 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
-        self._check_health("before step")
+        """Mono for a plain-decode step of at most ``max_rows`` rows, eager or
+        inside a FULL graph capture (padded rows are inert in the kernel);
+        stock otherwise. Every predicate reads metadata every TP rank holds
+        alike."""
         if (
             intermediate_tensors is not None
             or self._closed
@@ -172,34 +179,30 @@ class SpecializedDecode:
             raise RuntimeError(
                 "MiniMax specialized-decode executor does not own every sparse layer"
             )
+        assert isinstance(metadata, MiniMaxM3SparseMetadata)
+        self.executor.begin_step(metadata.slot_mapping[: positions.shape[0]])
         self.mono_steps += 1
         return Step(self.config.first_layer, kernels)
 
     def health(self) -> Any:
         return self.executor.health()
 
+    def step_fault(self) -> torch.Tensor:
+        """The device error word, copied with each step's sampled tokens: the
+        runner raises before returning a step's tokens if it is set."""
+        self.executor.output_step()
+        return self.executor.fault_word
+
     def after_step(self, step: Step | None, failure: Exception | None = None) -> None:
-        """Every rank that planned ``step`` completes it here, whether its layer
-        loop raised (``failure``) or not, so no rank is left in a collective."""
-        if step is None or not step.launched:
-            if failure is not None:
-                raise failure
-            return
+        """A rank-local exception in the layer loop marks every rank's error
+        word (their pending waits end; every rank's next output raises), then
+        propagates here."""
         if failure is not None:
-            self.executor.abort()
-        else:
-            try:
-                self.executor.after_step()
-            except Exception as err:
-                failure = err
-
-        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
-
-        if not tp_agree(failure is None, get_tp_group().cpu_group):
-            raise RuntimeError(
-                "MiniMax specialized-decode step failed on a TP rank"
-            ) from failure
-        self._check_health("after step")
+            if step is not None and step.launched:
+                self.executor.abort()
+            raise failure
+        if step is not None and step.launched:
+            self.executor.after_step()
 
     def close(self) -> None:
         if self._closed:

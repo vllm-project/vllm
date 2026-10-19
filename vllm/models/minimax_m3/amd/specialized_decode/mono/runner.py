@@ -12,15 +12,19 @@ from typing import Any
 import torch
 
 from .ffn import (
+    BLOCKS,
     EPOCH_WORDS,
     HIDDEN,
     MAX_TOKENS,
+    THREADS,
     Experts,
     FfnBuild,
     build_ffn,
+    kernel_name,
     scratch_bytes,
     scratch_layout,
 )
+from .residency import active_workgroups_per_cu
 
 
 def _writable_flydsl_cache() -> None:
@@ -51,12 +55,13 @@ class FfnRunner:
         experts: Experts = Experts.ALL,
         timeline: bool = False,
         epoch: torch.Tensor | None = None,
+        **build,
     ) -> None:
         _writable_flydsl_cache()
         self.tp, self.rank, self.sym, self.peers = tp, rank, sym, peers
         self.widths = widths
         self.keys = {
-            s: FfnBuild(tokens=s, tp=tp, experts=experts, timeline=timeline)
+            s: FfnBuild(tokens=s, tp=tp, experts=experts, timeline=timeline, **build)
             for s in widths
         }
         if epoch is None:
@@ -68,13 +73,16 @@ class FfnRunner:
         }
         self._launch = {s: build_ffn(key) for s, key in self.keys.items()}
         self._compiled: dict[int, Any] = {}
+        # every width's driver-reported resident CTAs per CU
+        self.residency: dict[int, int] = {}
 
-    def _args(self, s, part, res_in, res_out, out, w, mode):
+    def _args(self, s, part, res_in, res_out, out, slots, w, mode):
         return (
             part.data_ptr(),
             res_in.data_ptr(),
             res_out.data_ptr(),
             out.data_ptr(),
+            slots.data_ptr(),
             w.post_norm.data_ptr(),
             w.router.data_ptr(),
             w.router_bias.data_ptr(),
@@ -91,24 +99,46 @@ class FfnRunner:
             torch.cuda.current_stream(),
         )
 
-    def warm(self, weights) -> None:
-        """Compile and load every width (a launch that returns at once)."""
+    def warm(self, weights, compute_units: int | None = None) -> None:
+        """Compile and load every width (a launch that returns at once); with
+        ``compute_units``, refuse a width whose grid cannot be resident."""
         import flydsl.compiler as flyc
 
         dummy = torch.zeros(1, HIDDEN, dtype=torch.bfloat16, device=self.epoch.device)
         for s in self.widths:
             if s not in self._compiled:
-                args = self._args(s, dummy, dummy, dummy, dummy, weights, 0)
+                args = self._args(s, dummy, dummy, dummy, dummy, dummy, weights, 0)
                 self._compiled[s] = flyc.compile(self._launch[s], *args)
+            if compute_units is not None and s not in self.residency:
+                name = kernel_name(self.keys[s])
+                per_cu = active_workgroups_per_cu(self._compiled[s], name, THREADS)
+                self.residency[s] = per_cu
+                if per_cu * compute_units < BLOCKS:
+                    raise RuntimeError(
+                        f"{name}: {per_cu} resident CTA(s) per CU x "
+                        f"{compute_units} CUs < its {BLOCKS}-CTA grid"
+                    )
 
-    def __call__(self, part: torch.Tensor, residual: torch.Tensor, weights):
-        """``part``: this rank's unreduced o_proj output; returns the reduced
-        MoE output and the residual after attention."""
+    def __call__(
+        self,
+        part: torch.Tensor,
+        residual: torch.Tensor,
+        weights,
+        slots: torch.Tensor,
+    ):
+        """``part``: this rank's unreduced o_proj output; ``slots``: the step's
+        int64 slot mapping (-1: a padded row, which routes nowhere and returns
+        zeros). Returns the reduced MoE output and the residual after
+        attention."""
         s = part.shape[0]
         assert part.is_contiguous() and residual.is_contiguous()
+        assert (
+            slots.dtype == torch.int64 and slots.is_contiguous() and slots.numel() >= s
+        )
         out = torch.empty_like(part)
         res_out = torch.empty_like(residual)
-        self._compiled[s](*self._args(s, part, residual, res_out, out, weights, 1))
+        args = self._args(s, part, residual, res_out, out, slots, weights, 1)
+        self._compiled[s](*args)
         return out, res_out
 
     def region(self, s: int, name: str) -> torch.Tensor:

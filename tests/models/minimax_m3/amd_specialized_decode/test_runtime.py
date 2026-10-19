@@ -35,7 +35,12 @@ def _metadata() -> MiniMaxM3SparseMetadata:
 
 
 class _Executor:
+    uses_caches = True
+
     def __init__(self):
+        self.fault_word = torch.zeros(4, dtype=torch.int32)
+        self.slots: torch.Tensor | None = None
+        self.outputs = 0
         self.binds: list[tuple[int, CacheBinding]] = []
         self.bind_failure: Exception | None = None
         self.layer_calls: list[int] = []
@@ -48,6 +53,12 @@ class _Executor:
         if self.bind_failure is not None:
             raise self.bind_failure
         self.binds.append((layer_id, binding))
+
+    def begin_step(self, slots):
+        self.slots = slots
+
+    def output_step(self):
+        self.outputs += 1
 
     def health(self):
         return None
@@ -76,9 +87,19 @@ def _binding(*, replacement: torch.Tensor | None = None) -> CacheBinding:
     )
 
 
+def _no_checks(monkeypatch, refusals=()):
+    monkeypatch.setattr(runtime, "model_refusals", lambda model, config: list(refusals))
+    monkeypatch.setattr(
+        runtime, "MonoLayerWeights", SimpleNamespace(from_layer=lambda layer: layer)
+    )
+    monkeypatch.setattr(
+        runtime, "get_tp_group", lambda: SimpleNamespace(cpu_group=None)
+    )
+
+
 @pytest.fixture
 def decode(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(runtime, "checked_weights", lambda model, config: {})
+    _no_checks(monkeypatch)
     layers = [
         SimpleNamespace(layer_id=i, self_attn=SimpleNamespace(layer_name=f"layer.{i}"))
         for i in (3, 4)
@@ -112,13 +133,48 @@ def test_plan_is_once_per_forward_and_returns_immutable_layer_map(
     assert step.layer(4) is not None
     assert instance.mono_steps == 1
     assert instance.stock_steps == 0
+    assert executor.slots is not None and executor.slots.numel() == 1
+
+
+def test_step_fault_is_the_executor_word(decode):
+    instance, executor = decode
+    assert instance.step_fault() is executor.fault_word
+    assert executor.outputs == 1
+
+
+def test_cache_lifecycle_is_skipped_without_cache_reads(decode, monkeypatch):
+    instance, executor = decode
+    executor.uses_caches = False
+    monkeypatch.setattr(
+        runtime, "checked_cache_bindings", lambda layers: pytest.fail("bound")
+    )
+    instance.bind_caches()
+
+
+def test_model_refusal_is_rank_uniform(monkeypatch: pytest.MonkeyPatch):
+    _no_checks(monkeypatch, refusals=["layer 3 is odd"])
+    with pytest.raises(ValueError, match="layer 3 is odd"):
+        runtime.SpecializedDecode(
+            SimpleNamespace(layers=[]), DecodeConfig(), _Executor()
+        )
+
+    _no_checks(monkeypatch)
+    monkeypatch.setattr(runtime, "tp_agree", lambda ok: False)
+    with pytest.raises(ValueError, match="another TP rank"):
+        runtime.SpecializedDecode(
+            SimpleNamespace(layers=[]), DecodeConfig(), _Executor()
+        )
 
 
 def test_executor_is_built_after_weight_checks(monkeypatch: pytest.MonkeyPatch):
     order = []
-    monkeypatch.setattr(
-        runtime, "checked_weights", lambda model, config: order.append("weights")
-    )
+    _no_checks(monkeypatch)
+
+    def refusals(model, config):
+        order.append("weights")
+        return []
+
+    monkeypatch.setattr(runtime, "model_refusals", refusals)
     model = SimpleNamespace(layers=[])
 
     def factory(decode):

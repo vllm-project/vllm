@@ -122,6 +122,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        model_fault: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -168,10 +169,20 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
+            self._model_fault = (
+                None
+                if model_fault is None
+                else model_fault.to("cpu", non_blocking=True)
+            )
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._model_fault is not None and self._model_fault.any():
+            raise RuntimeError(
+                "Model kernel failure reported on device: "
+                f"{self._model_fault.tolist()}; this step's tokens are discarded"
+            )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

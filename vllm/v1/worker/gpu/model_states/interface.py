@@ -242,6 +242,15 @@ class ModelState(ABC):
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def step_fault(self) -> torch.Tensor | None:
+        """A device word that is nonzero once a kernel of the model has failed.
+
+        Called once per sampled step. The runner copies it along with that
+        step's sampled tokens and raises instead of returning them if it is
+        set, so a model can report device-side failures without a host sync.
+        """
+        return None
+
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
         """Wrap or replace the default sampler.
 

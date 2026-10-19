@@ -61,7 +61,7 @@ from vllm.models.deepseek_v41.amd.mono.common.sync import preg, sreg
 
 from .a16w4 import scale_f32, scale_loads, step_mfma, weight_loads
 from .sources import SOURCES
-from .sync import ERROR_WORDS, BoundedMailbox
+from .sync import ERROR_WORDS, WAIT_TICKS, BoundedMailbox
 
 _STREAM = fx.Stream(None)
 HIDDEN = 6144
@@ -98,6 +98,9 @@ ERROR_BYTES = 256  # the error word's line, ahead of the two parity halves
 # sites of a timed-out wait (the error word's fourth field)
 SITE_REDUCE, SITE_NORM, SITE_ROUTER, SITE_ROUTE = 1, 2, 3, 4
 SITE_TABLE, SITE_UP, SITE_DOWN, SITE_FINAL, SITE_EPOCH = 5, 6, 7, 8, 9
+SITE_WRAP = 10
+# launches before the 32-bit tag could repeat a stale pair: fail-stop instead
+EPOCH_LIMIT = (1 << 31) - (1 << 24)
 
 
 class Experts(Enum):
@@ -115,6 +118,9 @@ class FfnBuild:
     tp: int = 4
     experts: Experts = Experts.ALL
     timeline: bool = False
+    # fault injection: this CTA never marks the epoch barrier
+    drop_mark: int = -1
+    wait_ticks: int = WAIT_TICKS
 
 
 def slots(s: int) -> int:
@@ -442,11 +448,13 @@ def stage_route(c, t):
             )
             for i in range(2)
         ]
+        neg = fx.Float32(float("-inf"))
         val = [sc[i] + bias[i] for i in range(2)]
+        val = [fx.isnan(v).select(neg, v) for v in val]
+        sc = [fx.isnan(v).select(fx.Float32(0.0), v) for v in sc]
         taken = [fx.Int32(0), fx.Int32(0)]
         total = fx.Float32(0.0)
         my_id, my_w = fx.Int32(0), fx.Float32(0.0)
-        neg = fx.Float32(float("-inf"))
         for k in range_constexpr(TOPK):
             v0 = (taken[0] == 0).select(val[0], neg)
             v1 = (taken[1] == 0).select(val[1], neg)
@@ -465,7 +473,9 @@ def stage_route(c, t):
             total = total + w
             my_id = (lane == k).select(win, my_id)
             my_w = (lane == k).select(w, my_w)
-        scale = fx.Float32(ROUTED_SCALE) / total
+        scale = fx.Float32(ROUTED_SCALE) / fx.max(total, fx.Float32(1e-20))
+        live = row_valid(c, t)
+        my_id = live.select(my_id, fx.Int32(-1))
         if lane < TOPK:
             c["mb"].put(c["route"], t * 2 * TOPK + lane, my_id)
             c["mb"].put(c["route"], t * 2 * TOPK + TOPK + lane, my_w * scale)
@@ -482,9 +492,10 @@ def tab_st(c, v, i):
 
 @traced
 def load_table(c):
-    """Every token's picks -> the slots in LDS: slot 0 the shared expert over
-    every row, slots 1 .. n_u the picked experts ascending; a slot's columns its
-    rows ascending, each column's pick (t * 4 + k; the shared expert's 4 S + t)."""
+    """Every valid token's picks -> the slots in LDS: slot 0 the shared expert
+    over the valid rows, slots 1 .. n_u the picked experts ascending; a slot's
+    columns its rows ascending, each column's pick (t * 4 + k; the shared
+    expert's 4 S + t). A padded row's picks are -1: in no slot."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     n = s * TOPK
     if tid < n:
@@ -503,9 +514,12 @@ def load_table(c):
     gpu.barrier()
     if tid < n:
         e = tab_ld(c, T_PICK_E + tid)
-        fx.llvm.atomic_or(
-            c["tab"] + (T_MASK + e), fx.Int32(1) << (tid // TOPK), syncscope="workgroup"
-        )
+        if e >= 0:
+            fx.llvm.atomic_or(
+                c["tab"] + (T_MASK + e),
+                fx.Int32(1) << (tid // TOPK),
+                syncscope="workgroup",
+            )
     gpu.barrier()
     e = tid
     m = fx.Int32(0)
@@ -524,20 +538,54 @@ def load_table(c):
             tab_st(c, m, T_SLOT_MASK + slot)
     if (wave == 1) & (lane == 0):
         tab_st(c, below + popcount(ball), T_MISC)
-    if tid == 0:
-        tab_st(c, SHARED, T_SLOT_E)
-        tab_st(c, (1 << s) - 1, T_SLOT_MASK)
-    if tid < s:
-        tab_st(c, tid, T_SLOT_TOK + tid)
-        tab_st(c, n + tid, T_SLOT_PICK + tid)
-    gpu.barrier()
+    shared_slot(c)
     if tid < n:
         t = tid // TOPK
-        sl = tab_ld(c, T_ESLOT + tab_ld(c, T_PICK_E + tid))
-        col = popcount(tab_ld(c, T_SLOT_MASK + sl) & ((fx.Int32(1) << t) - 1))
-        tab_st(c, t, T_SLOT_TOK + sl * 16 + col)
-        tab_st(c, tid, T_SLOT_PICK + sl * 16 + col)
+        e = tab_ld(c, T_PICK_E + tid)
+        if e >= 0:
+            sl = tab_ld(c, T_ESLOT + e)
+            col = popcount(tab_ld(c, T_SLOT_MASK + sl) & ((fx.Int32(1) << t) - 1))
+            tab_st(c, t, T_SLOT_TOK + sl * 16 + col)
+            tab_st(c, tid, T_SLOT_PICK + sl * 16 + col)
     gpu.barrier()
+
+
+@traced
+def shared_slot(c):
+    """Slot 0: the shared expert over the valid rows (columns ascending; an
+    unused column reads row 0)."""
+    s, tid = c["S"], c["tid"]
+    if tid == 0:
+        tab_st(c, SHARED, T_SLOT_E)
+        tab_st(c, c["vmask"], T_SLOT_MASK)
+    if tid < 16:
+        tab_st(c, 0, T_SLOT_TOK + tid)
+    gpu.barrier()
+    if (tid < s) & row_valid(c, fx.min(tid, s - 1)):
+        col = popcount(c["vmask"] & ((fx.Int32(1) << tid) - 1))
+        tab_st(c, tid, T_SLOT_TOK + col)
+        tab_st(c, TOPK * s + tid, T_SLOT_PICK + col)
+    gpu.barrier()
+
+
+def row_valid(c, t):
+    return ((c["vmask"] >> t) & 1) != 0
+
+
+def valid_mask(c):
+    """The step's real rows (a padded row's slot is -1), a bit a row: every
+    wave's lane t < S reads row t's slot."""
+    s, lane = c["S"], c["lane"]
+    hi = fx.Int32(
+        bo.buffer_load(
+            rsrc(c["args"]["slots"]),
+            2 * fx.min(lane, s - 1) + 1,
+            vec_width=1,
+            dtype=T.i32,
+        )
+    )
+    ball = ballot((lane < s) & (hi >= 0))
+    return fx.Int32(ball & fx.Int64((1 << s) - 1))
 
 
 def n_slots(c):
@@ -546,6 +594,11 @@ def n_slots(c):
 
 def slot_count(c, u):
     return popcount(tab_ld(c, T_SLOT_MASK + u))
+
+
+def slot_col(c, cnt):
+    """The lane's column of a slot of ``cnt`` columns (past them: the last)."""
+    return fx.max(fx.min(c["lane"] % 16, cnt - 1), 0)
 
 
 # ---------------------------------------------------------------- experts
@@ -579,7 +632,7 @@ def stage_up(c, u, j, weights=None):
     if const_expr(weights is None):
         weights = up_weights(c, rgs, st0)
     wvs, svs = weights
-    tok = tab_ld(c, T_SLOT_TOK + u * 16 + fx.min(lane % 16, cnt - 1))
+    tok = tab_ld(c, T_SLOT_TOK + u * 16 + slot_col(c, cnt))
     xs = x_operands(c, c["xn"].value, tok, HIDDEN // 2, st0, UP_WAVE_STEPS)
     accs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(2)]
     for i in range_constexpr(UP_WAVE_STEPS):
@@ -634,7 +687,7 @@ def stage_down(c, tasks):
         c["mb"].poll(
             [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
         )
-        col = fx.min(lane % 16, cnt - 1)
+        col = slot_col(c, cnt)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)
         for ti in range_constexpr(nt):
@@ -670,7 +723,7 @@ def stage_down(c, tasks):
                     w = tab_ld(c, T_PICK_W + t * TOPK + k).bitcast(fx.Float32)
                     v = fx.ptr_load(c["contrib"] + ((ti * 80 + t * TOPK + k) * 16 + r))
                     tot = bf16_round(tot + bf16_round(w * v))
-            vals.append(tot)
+            vals.append(row_valid(c, t).select(tot, fx.Float32(0.0)))
         word = bf16_pair(vals[0], vals[1]).bitcast(fx.Int32)
         cp = task * 8 + r2
         for p in range_constexpr(c["tp"]):
@@ -710,7 +763,7 @@ def stamp(c, k):
 
 @traced
 def run_ffn(c, bid):
-    s, tid = c["S"], c["tid"]
+    s = c["S"]
     stamp(c, 0)
     for task in range(first_task(bid, 0), SEAM_TASKS, BLOCKS):
         stage_push(c, task)
@@ -735,12 +788,7 @@ def run_ffn(c, bid):
         rgs = [SHARED * (2 * UP_TILES) + sh, SHARED * (2 * UP_TILES) + UP_TILES + sh]
         weights = up_weights(c, rgs, c["wave"] * UP_WAVE_STEPS)
         await_x(c, s)
-        if tid == 0:
-            tab_st(c, SHARED, T_SLOT_E)
-            tab_st(c, (1 << s) - 1, T_SLOT_MASK)
-        if tid < s:
-            tab_st(c, tid, T_SLOT_TOK + tid)
-        gpu.barrier()
+        shared_slot(c)
         stage_up(c, 0, sh, weights)
     stamp(c, 6)
     load_table(c)
@@ -765,6 +813,10 @@ def kernel_name(key: FfnBuild) -> str:
         name += f"_{key.experts.value}"
     if key.timeline:
         name += "_tl"
+    if key.drop_mark >= 0:
+        name += f"_drop{key.drop_mark}"
+    if key.wait_ticks != WAIT_TICKS:
+        name += f"_w{key.wait_ticks}"
     return name
 
 
@@ -787,6 +839,7 @@ def build_ffn(key: FfnBuild):
         res_in: Int64,
         res_out: Int64,
         out: Int64,
+        slots: Int64,
         norm_w: Int64,
         router_w: Int64,
         bias: Int64,
@@ -808,13 +861,13 @@ def build_ffn(key: FfnBuild):
             lds = fx.SharedAllocator().allocate(Lds).peek()
             ep = fx.Int32(bo.buffer_load(rsrc(epoch), 0, vec_width=1, dtype=T.i32))
             tag = ep + 1
-            if tid == 0:
+            if (tid == 0) & (bid != key.drop_mark):
                 bo.buffer_store(
                     tag, rsrc(epoch), EPOCH_MARKS + bid, cache_modifier=CM_DEV
                 )
             raw = peer_bases(peers, tp)
             par = fx.Int64(ep & 1) * fx.Int64(half) + fx.Int64(ERROR_BYTES)
-            mb = BoundedMailbox(tag, sym, raw, rank, ep)
+            mb = BoundedMailbox(tag, sym, raw, rank, ep, key.wait_ticks)
             c = {
                 "S": s,
                 "tp": tp,
@@ -835,6 +888,7 @@ def build_ffn(key: FfnBuild):
                     "res_in": res_in,
                     "res_out": res_out,
                     "out": out,
+                    "slots": slots,
                     "norm_w": norm_w,
                     "router_w": router_w,
                     "bias": bias,
@@ -846,6 +900,8 @@ def build_ffn(key: FfnBuild):
             }
             for region, (off, _) in layout.items():
                 c[region] = sreg(scratch, off, region)
+            c["vmask"] = valid_mask(c)
+            refuse_wrap(c, ep)
             run_ffn(c, bid)
             epoch_end(c, epoch, tag)
             stamp(c, 11)
@@ -856,6 +912,7 @@ def build_ffn(key: FfnBuild):
         res_in: Int64,
         res_out: Int64,
         out: Int64,
+        slots: Int64,
         norm_w: Int64,
         router_w: Int64,
         bias: Int64,
@@ -877,6 +934,7 @@ def build_ffn(key: FfnBuild):
             res_in,
             res_out,
             out,
+            slots,
             norm_w,
             router_w,
             bias,
@@ -896,20 +954,36 @@ def build_ffn(key: FfnBuild):
 
 
 @traced
+def refuse_wrap(c, ep):
+    if (fx.block_idx.x == 0) & (c["tid"] == 0) & (ep >= EPOCH_LIMIT):
+        c["mb"].fail(SITE_WRAP)
+
+
+@traced
 def epoch_end(c, epoch, tag):
-    """CTA 0, once every CTA marked this launch: the epoch moves on."""
-    tid = c["tid"]
+    """CTA 0, once every CTA marked this launch: the epoch moves on. A mark
+    missing past the wait bound sets the error word instead; the epoch stays."""
+    tid, red = c["tid"], c["red"]
     if fx.block_idx.x == 0:
+        if tid == 0:
+            fx.ptr_store(fx.Int32(0).bitcast(fx.Float32), red)
+        gpu.barrier()
         if tid < BLOCKS:
-            mark = ld_dev(epoch, EPOCH_MARKS + tid)
-            n = fx.Int32(0)
-            while (fx.Int32(mark) != tag) & (n < (1 << 24)):
+            t0 = memrealtime()
+            mark = fx.Int32(ld_dev(epoch, EPOCH_MARKS + tid))
+            late = fx.Int64(0)
+            while (mark != tag) & (late < c["mb"].ticks):
                 rocdl.s_sleep(1)
-                mark = ld_dev(epoch, EPOCH_MARKS + tid)
-                n = n + 1
+                mark = fx.Int32(ld_dev(epoch, EPOCH_MARKS + tid))
+                late = memrealtime() - t0
+            if mark != tag:
+                fx.ptr_store(fx.Int32(1).bitcast(fx.Float32), red)
         gpu.barrier()
         if tid == 0:
-            bo.buffer_store(tag, rsrc(epoch), 0, cache_modifier=CM_DEV)
+            if fx.ptr_load(red).bitcast(fx.Int32) == 0:
+                bo.buffer_store(tag, rsrc(epoch), 0, cache_modifier=CM_DEV)
+            else:
+                c["mb"].fail(SITE_EPOCH)
 
 
 __all__ = [

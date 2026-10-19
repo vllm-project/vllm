@@ -54,16 +54,3 @@ def model_refusals(model, config: DecodeConfig) -> list[str]:
         if cus != config.blocks:
             reasons.append(f"requires {config.blocks} compute units, found {cus}")
     return reasons
-
-
-def checked_weights(model, config: DecodeConfig) -> dict[int, MonoLayerWeights]:
-    reasons = model_refusals(model, config)
-    if reasons:
-        raise ValueError(
-            "MiniMax-M3 specialized decode model unsupported: " + "; ".join(reasons)
-        )
-    return {
-        layer.layer_id: MonoLayerWeights.from_layer(layer)
-        for layer in model.layers
-        if config.first_layer <= layer.layer_id <= config.last_layer
-    }

@@ -94,7 +94,8 @@ def _replay(worker):
         return layer.block_sparse_moe(x), residual
 
     def fused(i, part, residual):
-        return executor.runner(part, residual, weights[i])
+        slots = torch.arange(part.shape[0], dtype=torch.int64, device=part.device)
+        return executor.runner(part, residual, weights[i], slots)
 
     def metrics(got, want):
         got, want = got.float(), want.float()

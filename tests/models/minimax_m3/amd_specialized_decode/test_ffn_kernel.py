@@ -117,18 +117,36 @@ def _pairs(region, n):
     return region[: n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
 
 
-def _run(weights, s, experts=ffn.Experts.ALL, seed=1):
+def _runner(weights, s, tp=1, experts=ffn.Experts.ALL, **build):
     dev = torch.device("cuda")
-    g = torch.Generator(device=dev).manual_seed(seed)
-    part = torch.randn(s, H, device=dev, generator=g).bfloat16()
-    residual = torch.randn(s, H, device=dev, generator=g).mul(4).bfloat16()
-    peer = torch.zeros(ffn.peer_bytes(1), dtype=torch.uint8, device=dev)
-    peers = torch.tensor([peer.data_ptr()], dtype=torch.int64, device=dev)
-    runner = FfnRunner(1, 0, peer.data_ptr(), peers, dev, (s,), experts)
+    bufs = [torch.zeros(ffn.peer_bytes(tp), dtype=torch.uint8, device=dev)]
+    bufs += [torch.zeros_like(bufs[0]) for _ in range(tp - 1)]
+    peers = torch.tensor([b.data_ptr() for b in bufs], dtype=torch.int64, device=dev)
+    runner = FfnRunner(tp, 0, bufs[0].data_ptr(), peers, dev, (s,), experts, **build)
     runner.warm(weights)
-    out, res_out = runner(part, residual, weights)
+    runner.peer_bufs = bufs
+    return runner
+
+
+def _error(buf):
+    return buf[: 4 * ffn.ERROR_WORDS].view(torch.int32).tolist()
+
+
+def _inputs(s, seed=1):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    part = torch.randn(s, H, device="cuda", generator=g).bfloat16()
+    residual = torch.randn(s, H, device="cuda", generator=g).mul(4).bfloat16()
+    return part, residual
+
+
+def _run(weights, s, experts=ffn.Experts.ALL, seed=1, inputs=None, slots=None):
+    part, residual = _inputs(s, seed) if inputs is None else inputs
+    if slots is None:
+        slots = torch.arange(s, dtype=torch.int64, device="cuda")
+    runner = _runner(weights, s, experts=experts)
+    out, res_out = runner(part, residual, weights, slots)
     torch.accelerator.synchronize()
-    assert peer[: 4 * ffn.ERROR_WORDS].view(torch.int32)[0].item() == 0
+    assert _error(runner.peer_bufs[0])[0] == 0
     x = runner.region(s, "xn")[: s * H * 2].view(torch.bfloat16).view(s, H)
     parts = _pairs(runner.region(s, "logit"), s * ffn.EXPERTS * ffn.ROUTER_PARTS)
     parts = parts.view(torch.float32).view(s * ffn.EXPERTS, ffn.ROUTER_PARTS)
@@ -182,26 +200,87 @@ def test_ffn_stages_match_native(weights, s):
     assert cos > 0.9999 and rel < 1e-2
 
 
+SHORT_WAIT = 10_000_000  # 100 ms of the 100 MHz clock
+
+
+def test_production_wait_bound_is_ten_seconds():
+    assert ffn.FfnBuild(tokens=1).wait_ticks == 1_000_000_000
+
+
 def test_missing_peer_times_out_and_marks_every_rank(weights):
     """A TP=2 launch whose peer never runs: its waits give up, the error word
     is set on both ranks, and the launch still completes."""
-    dev = torch.device("cuda")
-    s = 1
-    peer_bufs = [
-        torch.zeros(ffn.peer_bytes(2), dtype=torch.uint8, device=dev) for _ in range(2)
-    ]
-    peers = torch.tensor([b.data_ptr() for b in peer_bufs], device=dev)
-    runner = FfnRunner(2, 0, peer_bufs[0].data_ptr(), peers, dev, (s,))
-    runner.warm(weights)
-    part = torch.randn(s, H, device=dev).bfloat16()
-    runner(part, torch.randn_like(part), weights)
+    runner = _runner(weights, 1, tp=2, wait_ticks=SHORT_WAIT)
+    part, residual = _inputs(1)
+    runner(part, residual, weights, torch.zeros(1, dtype=torch.int64, device="cuda"))
     torch.accelerator.synchronize()
-    for buf in peer_bufs:
-        failed, rank, epoch, site = (
-            buf[: 4 * ffn.ERROR_WORDS].view(torch.int32).tolist()
-        )
+    for buf in runner.peer_bufs:
+        failed, rank, epoch, site = _error(buf)
         # stages that start waiting together race to report their site
         assert (failed, rank, epoch) == (1, 0, 0) and site > 0
+
+
+def test_missing_epoch_mark_fails_without_advancing(weights):
+    runner = _runner(weights, 1, drop_mark=7, wait_ticks=SHORT_WAIT)
+    part, residual = _inputs(1)
+    runner(part, residual, weights, torch.zeros(1, dtype=torch.int64, device="cuda"))
+    torch.accelerator.synchronize()
+    assert _error(runner.peer_bufs[0]) == [1, 0, 0, ffn.SITE_EPOCH]
+    assert runner.epoch[0].item() == 0
+
+
+def test_padded_rows_are_inert(weights):
+    """Rows whose slot is -1 (graph padding) hold NaN: the real rows match a
+    launch without them bit for bit, the padded rows pick no expert and return
+    zeros."""
+    real, pad = 3, 5
+    part, residual = _inputs(real)
+    nan = torch.full((pad, H), float("nan"), device="cuda").bfloat16()
+    slots = torch.tensor([7, 9, 11] + [-1] * pad, dtype=torch.int64, device="cuda")
+    padded = _run(
+        weights,
+        real + pad,
+        inputs=(torch.cat([part, nan]), torch.cat([residual, nan])),
+        slots=slots,
+    )
+    alone = _run(weights, real, inputs=(part, residual))
+    assert torch.equal(padded.out[:real], alone.out)
+    assert torch.equal(padded.res_out[:real], alone.res_out)
+    assert torch.equal(padded.ids[:real], alone.ids)
+    assert (padded.ids[real:] == -1).all()
+    assert (padded.out[real:] == 0).all()
+
+
+def test_all_padded_launch_completes(weights):
+    r = _run(weights, 4, slots=torch.full((4,), -1, dtype=torch.int64, device="cuda"))
+    assert (r.ids == -1).all() and (r.out == 0).all()
+
+
+def test_route_ties_and_near_ties(weights):
+    """Experts 0 and 1 share a router row and bias: an exact 4th-place tie,
+    which the kernel gives to the lower expert. Elsewhere the selection matches
+    AITER's on native FP32 logits wherever the 4th/5th margin exceeds the
+    logits' measured difference."""
+    w = SimpleNamespace(**vars(weights))
+    w.router = weights.router.clone()
+    w.router_bias = weights.router_bias.clone()
+    w.router[1] = w.router[0]
+    w.router_bias[:2] = 0.5
+    w.router_bias[[10, 11, 12]] = 2.0
+    w.router_bias[2:10] = -1.0
+    w.router_bias[13:] = -1.0
+    r = _run(w, 16)
+    assert (r.ids[:, :3].sort(-1).values == torch.tensor([10, 11, 12]).cuda()).all()
+    assert (r.ids[:, 3] == 0).all()
+
+    r = _run(weights, 16, seed=3)
+    logits = r.x.float() @ weights.router.T
+    bound = (r.logits - logits).abs().max().item() * 0.25 * 2
+    ids, _ = _native_route(logits, weights.router_bias)
+    top = (logits.sigmoid() + weights.router_bias).topk(ffn.TOPK + 1, dim=-1).values
+    clear = (top[:, ffn.TOPK - 1] - top[:, ffn.TOPK]) > bound
+    assert clear.float().mean() > 0.5
+    assert torch.equal(r.ids.sort(-1).values[clear], ids.sort(-1).values[clear])
 
 
 @pytest.mark.parametrize("experts", [ffn.Experts.SHARED, ffn.Experts.ROUTED])
@@ -216,3 +295,58 @@ def test_ffn_expert_sides_match_native(weights, s, experts):
     want = _native_experts(r.x, weights, ids, wts)
     cos, rel = _metrics(r.out, want)
     assert cos > 0.9999 and rel < 1e-2
+
+
+def test_every_width_is_resident(weights):
+    """The driver's occupancy of every production build: one 512-thread CTA per
+    CU on each of the 256 CUs."""
+    dev = torch.device("cuda")
+    peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
+    peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
+    runner = FfnRunner(4, 0, peer.data_ptr(), peers, dev)
+    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
+    runner.warm(weights, compute_units=cus)
+    assert sorted(runner.residency) == list(range(1, ffn.MAX_TOKENS + 1))
+    assert all(n * cus >= ffn.BLOCKS for n in runner.residency.values())
+
+
+def test_graph_replay_is_bit_stable(weights):
+    """Every width captured once, replayed 300 rounds in alternation: each
+    replay matches an eager launch bit for bit, also after the persistent slot
+    buffer marks a different set of rows as padding."""
+    dev = torch.device("cuda")
+    widths = (1, 2, 4, 8, 16)
+    peer = torch.zeros(ffn.peer_bytes(1), dtype=torch.uint8, device=dev)
+    peers = torch.tensor([peer.data_ptr()], dtype=torch.int64, device=dev)
+    runner = FfnRunner(1, 0, peer.data_ptr(), peers, dev, widths)
+    runner.warm(weights)
+    inputs = {s: _inputs(s, seed=s) for s in widths}
+    slots = {s: torch.arange(s, dtype=torch.int64, device=dev) for s in widths}
+
+    def eager(s):
+        out, res = runner(*inputs[s], weights, slots[s])
+        return out.clone(), res.clone()
+
+    graphs, outs = {}, {}
+    for s in widths:
+        eager(s)
+        graphs[s] = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graphs[s]):
+            outs[s] = runner(*inputs[s], weights, slots[s])
+    refs = {s: eager(s) for s in widths}
+    for _ in range(300):
+        for s in widths:
+            graphs[s].replay()
+        for s in widths:
+            assert torch.equal(outs[s][0], refs[s][0])
+            assert torch.equal(outs[s][1], refs[s][1])
+
+    for s in widths[1:]:
+        slots[s][s // 2 :] = -1
+        ref = eager(s)
+        graphs[s].replay()
+        assert torch.equal(outs[s][0], ref[0])
+        assert (outs[s][0][s // 2 :] == 0).all()
+    torch.accelerator.synchronize()
+    assert _error(peer)[0] == 0
+    assert runner.epoch[0].item() > 300 * len(widths)

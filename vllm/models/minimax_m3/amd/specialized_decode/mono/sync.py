@@ -37,12 +37,12 @@ def error_word(base):
 
 
 @traced
-def _spin(load_all, pending, err_base):
+def _spin(load_all, pending, err_base, ticks):
     t0 = memrealtime()
     v = load_all()
     err = error_word(err_base)
     late = fx.Int64(0)
-    while pending(v) & (err == 0) & (late < WAIT_TICKS):
+    while pending(v) & (err == 0) & (late < ticks):
         rocdl.s_sleep(1)
         v = load_all()
         err = error_word(err_base)
@@ -59,8 +59,9 @@ def _fail_if(timed_out, fail, site):
 class BoundedMailbox(Mailbox):
     """``Mailbox`` whose polls are bounded; ``fail(site)`` raises the error."""
 
-    def __init__(self, tag, err_base, peer_bases, rank, epoch):
+    def __init__(self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS):
         super().__init__(tag)
+        self.ticks = ticks
         self.err_base = err_base
         self.peer_bases = peer_bases
         self.rank = rank
@@ -110,7 +111,7 @@ class BoundedMailbox(Mailbox):
                 bad = bad | (v[e] != tag)
             return bad
 
-        v, timed_out = _spin(load_all, pending, self.err_base)
+        v, timed_out = _spin(load_all, pending, self.err_base, self.ticks)
         _fail_if(timed_out, self.fail, site)
         outs, e = [], 0
         for _, _, n in specs:
