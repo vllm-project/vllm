@@ -74,6 +74,7 @@ logger = init_logger(__name__)
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
+        "BeamForCausalLM",
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
@@ -98,6 +99,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -749,9 +752,11 @@ class VllmConfig:
         if draft_config is None:
             return False
         return bool(
-            {"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
-                draft_config.architectures or []
-            )
+            {
+                "DFlash2DraftModel",
+                "DFlash2BeamDraftModel",
+                "LiLiCorrDraftModel",
+            }.intersection(draft_config.architectures or [])
         )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
@@ -1056,6 +1061,28 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _maybe_disable_dynamic_sd_for_v1(self) -> None:
+        speculative_config = self.speculative_config
+        # V2 truncates drafts centrally. V1 requires proposer support.
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or self.use_v2_model_runner
+            or speculative_config.method
+            in ("ngram", "eagle", "eagle3", "mtp", "draft_model", "dflash")
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding is not supported with the '%s' "
+            "speculative method on Model Runner V1. "
+            "Disabling num_speculative_tokens_per_batch_size "
+            "and falling back to static num_speculative_tokens=%d.",
+            speculative_config.method,
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.num_speculative_tokens_per_batch_size = None
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1318,15 +1345,26 @@ class VllmConfig:
                 )
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method != "dspark"
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+            if speculative_config.method not in (
+                "dflash",
+                "dspark",
+                "eagle",
+                "eagle3",
+                "mtp",
+            ):
                 raise ValueError(
-                    "Watermarking supports only autoregressive model-based "
-                    "speculative decoding."
+                    "Watermarking supports only dflash, dspark, eagle, eagle3 and "
+                    "mtp speculative decoding."
+                )
+            if self._is_dflash_candidate_draft():
+                raise ValueError(
+                    "Watermarking does not support DFlash2 and LiLiCorr "
+                    "candidate-head drafters yet."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking
@@ -1818,6 +1856,7 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._maybe_disable_dynamic_sd_for_v1()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
@@ -3037,6 +3076,8 @@ class VllmConfig:
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
+            if self.speculative_config.draft_lm_head_quantization is not None:
+                unsupported.append("draft lm_head quantization")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():
@@ -3053,6 +3094,12 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv31_tool_parser import (
     DeepSeekV31ToolParser,
@@ -59,3 +62,22 @@ def test_extract_tool_calls_with_multiple_tools(parser):
 
     # prefix is content
     assert result.content == "some prefix text"
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_extract_tool_calls_with_multiline_arguments(parser, streaming):
+    # The model may pretty-print the JSON arguments over several lines.
+    args = {"x": 1, "y": [1, 2]}
+    model_output = (
+        "<｜tool▁calls▁begin｜>"
+        f"<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{json.dumps(args, indent=2)}"
+        "<｜tool▁call▁end｜>"
+        '<｜tool▁call▁begin｜>bar<｜tool▁sep｜>{"y":2}<｜tool▁call▁end｜>'
+        "<｜tool▁calls▁end｜>"
+    )
+
+    _, tool_calls = run_tool_extraction(parser, model_output, streaming=streaming)
+
+    assert [call.function.name for call in tool_calls] == ["foo", "bar"]
+    assert json.loads(tool_calls[0].function.arguments) == args
+    assert json.loads(tool_calls[1].function.arguments) == {"y": 2}

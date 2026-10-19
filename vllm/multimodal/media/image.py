@@ -16,7 +16,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from ..image import convert_image_mode, normalize_image, open_image, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, open_image
 from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
@@ -74,14 +74,9 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """Convert image mode with custom background color."""
         if isinstance(image, MediaWithBytes):
             image = image.media
-        if self.image_mode is None or image.mode == self.image_mode:
+        if self.image_mode is None:
             return image
-        elif image.mode == "RGBA" and self.image_mode == "RGB":
-            return rgba_to_rgb(image, self.rgba_background_color)
-        else:
-            return convert_image_mode(
-                image, self.image_mode, self.rgba_background_color
-            )
+        return convert_image_mode(image, self.image_mode, self.rgba_background_color)
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:

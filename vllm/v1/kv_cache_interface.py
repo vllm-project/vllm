@@ -175,6 +175,10 @@ class KVCacheSpec:
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
     blocks of up to ``n`` tokens."""
 
+    is_draft: bool = field(default=False, kw_only=True, compare=False)
+    """Whether a draft model owns this layer; excluded from equality so it never
+    affects grouping."""
+
     def __post_init__(self):
         alignment = self.block_stride_alignment
         if isinstance(alignment, int) and alignment <= 0:
@@ -660,6 +664,8 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -686,6 +692,8 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
@@ -707,6 +715,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        topk_buffer_width_set = {spec.topk_buffer_width for spec in specs}
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
@@ -714,6 +723,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
+            and len(topk_buffer_width_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
@@ -721,7 +731,8 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, cache role, "
+            "quantization method, top-k buffer width, tokens per state, "
+            "model version, cache role, "
             "index-sharing role, and block stride alignment."
         )
         merged_spec = cls(
@@ -736,6 +747,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            topk_buffer_width=topk_buffer_width_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
@@ -747,6 +759,8 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1208,6 +1222,8 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1445,7 +1461,7 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
-    # Whether this group contains EAGLE/MTP draft attention layers.
+    # Whether this group holds draft layers and takes the EAGLE last-block drop.
     is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
