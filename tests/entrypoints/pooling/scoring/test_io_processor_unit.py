@@ -169,7 +169,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     assert (doc_start, doc_end) == (10, 40)
     assert prompt_token_ids[:doc_start] == list(range(10, num_query))
     assert prompt_token_ids[doc_start:doc_end] == list(range(num_query, 50))
-    assert token_type_ids[doc_end:] == [tokenizer.pad_token_type_id] * 60
+    assert token_type_ids[doc_end:] == [_DummyTokenizer.pad_token_type_id] * 60
 
 
 def test_token_type_padding_uses_the_tokenizer_pad_type():

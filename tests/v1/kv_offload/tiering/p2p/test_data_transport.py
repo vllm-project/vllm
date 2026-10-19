@@ -628,6 +628,7 @@ class TestNixlPeerFaults:
     def test_remote_disconnect_in_cancel_faults_the_peer(self):
         transport = self._make_transport()
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = _remote_disconnect()
         assert transport.cancel([tid], mode="wait") == []
         transport._agent.check_xfer_state.side_effect = None
@@ -732,6 +733,7 @@ class TestNixlPeerFaults:
     def test_not_found_in_cancel_keeps_the_transfer(self):
         transport = self._make_transport()
         tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid is not None
         transport._agent.check_xfer_state.side_effect = nixlNotFoundError(
             "NIXL_ERR_NOT_FOUND"
         )
