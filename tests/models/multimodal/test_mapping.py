@@ -215,7 +215,7 @@ def test_bailing_vl_mapper_handles_module_and_parameter_names():
 
 
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
-    """Create weights from safetensors checkpoint metadata"""
+    """Create weights from safetensors checkpoint metadata."""
     metadata = try_get_safetensors_metadata(repo)
     weight_names = list(metadata.weight_map.keys())
     with torch.device("meta"):
@@ -223,9 +223,7 @@ def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
 
 
 def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
-    """
-    Create weights from a dummy meta deserialized hf base model with name conversion
-    """
+    """Create weights from a dummy meta-deserialized HF base model, with renaming."""
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
         model = AutoModel.from_config(config)
@@ -233,9 +231,7 @@ def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
 
 
 def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
-    """
-    Create weights from a dummy meta deserialized hf model with name conversion
-    """
+    """Create weights from a dummy meta deserialized hf model with name conversion."""
     model_cls: PreTrainedModel = getattr(transformers, model_arch)
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):

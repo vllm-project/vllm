@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
     convert_to_channelwise,
+    cutlass_fp8_supported,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -103,7 +104,8 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
-        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
+        # For more details, see
+        # csrc/quantization/w8a8/cutlass/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
         if not config.input_symmetric:
             weight = getattr(layer, w_q_name)
@@ -164,8 +166,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "requires CUDA."
+        if not cutlass_fp8_supported():
+            return False, "CUTLASS FP8 kernels not available"
         return True, None
 
     @classmethod

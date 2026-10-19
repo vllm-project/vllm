@@ -35,7 +35,7 @@ MovedRequest = tuple[int, int, MoveDirectionality]
 
 @dataclass(frozen=True)
 class BatchUpdate:
-    """Persistent batch state change info for logitsprocs"""
+    """Persistent batch state change info for logitsprocs."""
 
     batch_size: int  # Current num reqs in batch
 
@@ -124,5 +124,6 @@ class LogitsProcessor(ABC):
         Args:
             batch_update: Non-None iff there have been changes
                 to the batch makeup.
+
         """
         raise NotImplementedError

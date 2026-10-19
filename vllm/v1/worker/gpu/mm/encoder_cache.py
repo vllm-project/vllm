@@ -24,8 +24,7 @@ class EncoderCache:
         self.mm_features.pop(req_id, None)
 
     def reset_mm_cache(self) -> None:
-        """
-        Clear the multi-modal cache that was used during profiling,
+        """Clear the multi-modal cache that was used during profiling,
         but no longer needed during inference.
         """
         # NOTE: v2 encoder cache profiling skips the multi-modal cache

@@ -13,17 +13,17 @@ import torch
 from vllm.platforms import current_platform
 
 
-def _on_gfx950() -> bool:
-    if not current_platform.is_rocm():
+def _fused_chunk_available() -> bool:
+    if not (current_platform.is_rocm() and torch.cuda.is_available()):
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.models.kimi_k3.amd.ops.kda_chunk import is_fused_kda_chunk_supported
 
-    return on_gfx950()
+    return is_fused_kda_chunk_supported()
 
 
 pytestmark = pytest.mark.skipif(
-    not _on_gfx950(),
-    reason="The fused KDA chunk kernel is only built for gfx950",
+    not _fused_chunk_available(),
+    reason="The fused KDA chunk kernel needs a gfx950 build that includes it",
 )
 
 HEAD_DIM = 128
@@ -77,7 +77,7 @@ def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None, **kw):
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend=kw.pop("backend", "fused" if use_fused else "triton"),
         out=out,
         **kw,
     )
@@ -110,6 +110,27 @@ def test_fused_chunk_matches_triton(seqlens: list[int]) -> None:
 
     torch.testing.assert_close(o_fused.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(state_fused, state_ref, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "seqlens",
+    [[1], [64], [1024], [4096], [513, 64, 1, 1200], [512] * 6],
+)
+def test_gluon_chunk_matches_triton(seqlens: list[int]) -> None:
+    """AITER's Gluon chunk_kda must match the Triton chunk path too."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_kda_gluon_prefill_available():
+        pytest.skip("AITER Gluon chunk_kda is not available here")
+
+    inp = _inputs(seqlens, seed=len(seqlens))
+    o_ref, state_ref = _run(inp, use_fused=False)
+    o_gluon, state_gluon = _run(inp, use_fused=False, backend="gluon")
+
+    torch.testing.assert_close(o_gluon.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_gluon, state_ref, rtol=5e-3, atol=5e-3)
+    state_rel = (state_gluon - state_ref).norm() / state_ref.norm()
+    assert state_rel < 5e-3, f"final state relative L2 error {state_rel:.2e}"
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
@@ -648,7 +669,7 @@ def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
         has_initial_state=warm,
         use_qk_l2norm_in_kernel=True,
         cu_seqlens=inp["cu"],
-        use_fused_chunk=use_fused,
+        backend="fused" if use_fused else "triton",
         **kw,
     )
 
@@ -699,6 +720,56 @@ def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
     torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
+    # The layer passes block_table[:, 0], which is contiguous only while the
+    # table has one column. Speculative decoding reserves a state page per
+    # draft token, so the table widens and that column becomes strided.
+    _requires_kernel()
+    seqlens = [512, 320, 64]
+    inp = _inputs(seqlens, seed=43)
+    n = len(seqlens)
+    rows = [3 * i + 5 for i in range(n)]
+    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    ref_cache = cache.clone()
+
+    table = torch.zeros(n, 9, dtype=torch.int32, device="cuda")
+    table[:, 0] = idx
+    column = table[:, 0]
+    assert not column.is_contiguous()
+
+    o_ref, _ = _run_paged(inp, ref_cache, idx, warm, use_fused=use_fused)
+    o_got, _ = _run_paged(inp, cache, column, warm, use_fused=use_fused)
+
+    torch.testing.assert_close(o_got, o_ref)
+    torch.testing.assert_close(cache, ref_cache)
+
+
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
+    # A batch carrying speculative decodes pads its non-spec group with
+    # zero-length sequences whose cache row still belongs to a request, so
+    # consuming no tokens has to mean writing nothing and perturbing nobody.
+    _requires_kernel()
+    live = [200, 1, 128]
+    # _inputs draws h0 last, so the padded batch's live rows are the same draw
+    # as the unpadded one's and the two runs compare elementwise.
+    padded, unpadded = _inputs([*live, 0], seed=41), _inputs(live, seed=41)
+    rows = [3 * i + 5 for i in range(4)]
+
+    cache, idx, warm = _paged_cache(padded, [True] * 4, rows, slots=24)
+    before = cache.clone()
+    _run_paged(padded, cache, idx, warm, use_fused=use_fused)
+
+    ref_cache, ref_idx, ref_warm = _paged_cache(unpadded, [True] * 3, rows[:3], 24)
+    _run_paged(unpadded, ref_cache, ref_idx, ref_warm, use_fused=use_fused)
+
+    assert torch.equal(cache[rows[3]], before[rows[3]]), (
+        "the padded sequence's cache row was written"
+    )
+    torch.testing.assert_close(cache[ref_idx.long()], ref_cache[ref_idx.long()])
 
 
 @pytest.mark.parametrize("groups", [2, 4])

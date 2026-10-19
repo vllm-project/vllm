@@ -45,7 +45,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
     def is_argmax_invariant(self) -> bool:
-        """Min-p never impacts greedy sampling"""
+        """Min-p never impacts greedy sampling."""
         return True
 
     @classmethod
@@ -393,7 +393,6 @@ def process_dict_updates(
     new_state: Callable[[SamplingParams, list[int] | None, list[int]], T | None],
 ) -> bool:
     """Utility function to update dict state for sparse LogitsProcessors."""
-
     if not batch_update:
         # Nothing to do.
         return False

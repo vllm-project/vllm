@@ -963,14 +963,18 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
+    def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        """Compile a batch of warmup keys, allowing backend-specific scheduling."""
+        for compile_key in compile_keys:
+            self.compile(compile_key)
+
     def register_warmup(self, *args: Any, **kwargs: Any) -> None:
         """Register this kernel with the active runner's warmup registry."""
         JitWarmupRegistry.register(self, *args, **kwargs)
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
-        for compile_key in self.get_warmup_keys(*args, **kwargs):
-            self.compile(compile_key)
+        self.compile_many(self.get_warmup_keys(*args, **kwargs))
 
 
 def _same_value(left: Any, right: Any) -> bool:
@@ -1078,6 +1082,10 @@ class JitWarmupRegistry:
         from tqdm import tqdm
 
         from vllm.distributed import is_global_first_rank
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+            VllmTritonJitKernel,
+            compile_triton_warmup,
+        )
 
         kernel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
         for kernel, registrations in self._registrations.items():
@@ -1098,18 +1106,40 @@ class JitWarmupRegistry:
         if not kernel_items:
             return
 
+        parallel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
+        serial_items = []
+        for kernel, compile_keys in kernel_items:
+            if (
+                isinstance(kernel, VllmTritonJitKernel)
+                and kernel.supports_parallel_compile
+            ):
+                parallel_items.append((kernel, compile_keys))
+            else:
+                serial_items.append((kernel, compile_keys))
+
         total_keys = sum(len(compile_keys) for _, compile_keys in kernel_items)
         with tqdm(
-            kernel_items,
+            total=len(kernel_items),
             desc=f"JIT kernel warmup ({total_keys} compile keys)",
             disable=not is_global_first_rank(),
             dynamic_ncols=True,
             unit="kernel",
         ) as progress:
-            for kernel, compile_keys in progress:
-                progress.set_postfix_str(
-                    f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
-                    refresh=False,
+
+            def compile_kernels(
+                items: list[tuple[VllmJitKernel[Any], dict[Any, None]]],
+            ) -> None:
+                for kernel, compile_keys in items:
+                    progress.set_postfix_str(
+                        f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
+                        refresh=False,
+                    )
+                    kernel.compile_many(compile_keys)
+                    progress.update()
+
+            if parallel_items:
+                compile_triton_warmup(
+                    lambda: compile_kernels(parallel_items),
+                    sum(len(keys) for _, keys in parallel_items),
                 )
-                for compile_key in compile_keys:
-                    kernel.compile(compile_key)
+            compile_kernels(serial_items)

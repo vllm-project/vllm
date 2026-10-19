@@ -23,6 +23,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import round_up_to
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
@@ -347,16 +348,17 @@ class EncoderCudaGraphManager:
     def _find_smallest_fitting_budget_given_tokens(
         self, total_tokens: int, budgets: list[int] | None = None
     ) -> int | None:
-        """Find smallest budget >= total_tokens.
-
-        Returns:
-            Token budget if found, None if no fitting budget.
-        """
+        """Find smallest budget >= total_tokens, or None if none fits."""
         budgets = budgets if budgets is not None else self.token_budgets
-        for budget in budgets:
-            if budget >= total_tokens:
-                return budget
-        return None
+        return round_up_to(budgets, total_tokens)
+
+    def _path_fitting_budget(self, path: str, tokens: int) -> int | None:
+        """Smallest captured budget on a path; 0 when idle, None if oversized."""
+        if tokens == 0:
+            return 0
+        return self._find_smallest_fitting_budget_given_tokens(
+            tokens, self.path_token_budgets[path]
+        )
 
     def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         """Get item specs from the model."""
@@ -411,8 +413,11 @@ class EncoderCudaGraphManager:
             mm_kwargs: Multimodal inputs for the batch.
             token_budget: Token budget to use.
             path: Configured encoder path.
+            axis_keys: Resolved capture-axis keys for this batch.
+
         Returns:
             Encoder outputs, or None if graph not captured.
+
         """
         graph_set = self._get_graph_set(path)
         num_items = len(self._get_item_specs(mm_kwargs))
@@ -475,16 +480,30 @@ class EncoderCudaGraphManager:
             if not current_batch:
                 return
             path_budgets = {
-                path: (
-                    0
-                    if current_tokens[path] == 0
-                    else self._find_smallest_fitting_budget_given_tokens(
-                        current_tokens[path], self.path_token_budgets[path]
-                    )
-                )
+                path: self._path_fitting_budget(path, current_tokens[path])
                 for path in paths
             }
             batches.append((list(current_batch), path_budgets))
+
+        def should_defer_item(item_tokens: dict[str, int]) -> bool:
+            """Whether closing the batch strictly reduces summed budgets."""
+            for path in paths:
+                item = item_tokens[path]
+                if item == 0:
+                    continue
+                cur = current_tokens[path]
+                b_cur = self._path_fitting_budget(path, cur)
+                b_alone = self._path_fitting_budget(path, item)
+                b_merged = self._path_fitting_budget(path, cur + item)
+                # Only called when the item fits; lookups land on a budget.
+                assert (
+                    b_cur is not None and b_alone is not None and b_merged is not None
+                )
+                # Only defer items that alone outweigh the whole current
+                # batch; splitting smaller ones fragments flood packing.
+                if b_cur + b_alone < b_merged and b_alone >= b_cur:
+                    return True
+            return False
 
         for orig_idx in sorted_indices:
             item_tokens = {path: per_item_path_tokens[path][orig_idx] for path in paths}
@@ -492,7 +511,7 @@ class EncoderCudaGraphManager:
                 current_tokens[path] + item_tokens[path] <= max_path_budgets[path]
                 for path in paths
             )
-            if current_batch and not fits:
+            if current_batch and (not fits or should_defer_item(item_tokens)):
                 append_current_batch()
                 current_batch = []
                 current_tokens = dict.fromkeys(paths, 0)
@@ -562,6 +581,7 @@ class EncoderCudaGraphManager:
             images_per_rank: Number of items per rank.
             max_output_tokens_per_rank: Max output tokens across all ranks
                 (for padding during all_gather).
+
         """
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
@@ -687,6 +707,7 @@ class EncoderCudaGraphManager:
 
         Returns:
             List of encoder outputs (one per item).
+
         """
         if self.use_dp:
             per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)

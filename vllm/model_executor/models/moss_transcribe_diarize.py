@@ -20,7 +20,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
@@ -66,7 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.multimodal.processing.processor import ProcessorInputs
+from vllm.multimodal.processing.processor import HFMultiModalInputs, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -81,6 +81,8 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+# Appended to the prompt to bias decoding, per the model card's hotword recipe.
+MOSS_HOTWORDS_HINT = "热词提示："
 
 _MOSS_DIARIZED_HEADER_RE = re.compile(
     r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
@@ -89,12 +91,11 @@ _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - c: Audio chunks
-        - m: Mel bins
-        - f: Mel frames
-        - n: Number of audio items
+    """Dimensions:
+    - c: Audio chunks
+    - m: Mel bins
+    - f: Mel frames
+    - n: Number of audio items
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -114,11 +115,10 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
 
 
 class MossTranscribeDiarizeEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of audio items
-        - t: Number of audio tokens
-        - h: Hidden size
+    """Dimensions:
+    - n: Number of audio items
+    - t: Number of audio tokens
+    - h: Hidden size
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -425,59 +425,66 @@ class MossTranscribeDiarizeDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         if num_audios == 0:
             return {}
 
         feature_extractor = self.info.get_feature_extractor()
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=_get_max_audio_samples(feature_extractor),
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=mm_options.get("audio"),
             )
         }
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-        num_audios = mm_counts.get("audio", 0)
-        tokenizer = self.info.get_tokenizer()
-        prompt = cached_encode(
-            tokenizer,
-            AUDIO_PLACEHOLDER * num_audios,
-            add_special_tokens=False,
-        ) or cached_encode(
-            tokenizer,
-            "\n",
-            add_special_tokens=False,
-        )
-        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
 
 
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        builder = self.dummy_inputs
+        tokenizer = self.info.get_tokenizer()
+
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        if num_audios > 0:
+            prompt = cached_encode(
+                tokenizer,
+                AUDIO_PLACEHOLDER * num_audios,
+                add_special_tokens=False,
+            )
+        else:
+            prompt = cached_encode(
+                tokenizer,
+                "\n",
+                add_special_tokens=False,
+            )
+
+        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
+
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        audios = _get_audios_from_mm_data(mm_data)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if hf_inputs.hf_data:
+            hf_inputs.hf_data["audio"] = _get_audios_from_mm_data(hf_inputs.hf_data)
 
-        return dict(audio=audios), hf_processor_mm_kwargs
+        return hf_inputs
 
     def _postprocess_hf_mm_data(
         self,
@@ -627,6 +634,8 @@ class MossTranscribeDiarizeForConditionalGeneration(
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        if hotwords := (stt_params.hotwords or "").strip():
+            question += f"{MOSS_HOTWORDS_HINT}{hotwords}"
         prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant.<|im_end|>\n"
