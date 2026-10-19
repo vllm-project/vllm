@@ -84,6 +84,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "response_template_reasoning_parser",
         "ResponseTemplateReasoningParser",
     ),
+    "beam": (
+        "beam_reasoning_parser",
+        "BeamReasoningParser",
+    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
@@ -148,9 +152,18 @@ _REASONING_PARSERS_TO_REGISTER = {
         "plamo3_engine_reasoning_parser",
         "Plamo3ParserReasoningAdapter",
     ),
+    "muse": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
+    ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",
         "MuseGlimmerReasoningParser",
+    ),
+    # Alias of "muse".
+    "musespark1x": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",

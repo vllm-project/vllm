@@ -155,7 +155,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
@@ -546,7 +546,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         cu_seqlens=prefill_query_start_loc,
                     )
                 )
-            else:
+            elif self.gdn_prefill_backend != "flashinfer":
+                # FlashInfer's chunk kernel consumes cu_seqlens directly and
+                # never reads chunk_indices/chunk_offsets, so skip the FLA
+                # metadata (CPU compute + H2D copies) entirely.
                 chunk_indices, chunk_offsets = self._build_chunk_metadata(
                     prefill_query_start_loc,
                     prefill_query_start_loc_cpu,
