@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MoRIIO WRITE heterogeneous-TP mapping and head/state slicing."""
+"""MoRIIO heterogeneous-TP mapping (WRITE and READ) and head/state slicing."""
 
 import itertools
 import threading
@@ -11,6 +11,9 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import ROLE
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    get_moriio_expected_ack_count,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
@@ -23,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
     _rank_heads,
+    compute_read_tp_mapping,
     compute_write_tp_mapping,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, compute_layout_strides
@@ -376,3 +380,123 @@ def test_consumer_write_failure_drops_partial_write_count(monkeypatch):
     wrapper._handle_structured_message({"type": "write_failed", "transfer_id": "t"})
     assert wrapper._write_done_counts == {}
     assert wrapper.pop_failed_write_req_ids() == {"t"}
+
+
+# ---------------------------------------------------------------------------
+# READ mapping
+
+
+def _sources(consumer_tp_rank, producer_tp_size, consumer_tp_size, heads, is_mla):
+    mapping = compute_read_tp_mapping(
+        consumer_tp_rank, producer_tp_size, consumer_tp_size, heads, is_mla, False
+    )
+    return (
+        [
+            (
+                s.tp_rank,
+                s.target.local_head,
+                s.target.remote_head,
+                s.target.num_heads,
+            )
+            for s in mapping.sources
+        ],
+        mapping.holder_tp_ranks,
+    )
+
+
+@pytest.mark.parametrize(
+    ("consumer", "producer_tp_size", "heads", "is_mla", "expected"),
+    [
+        # Equal TP: read the same rank whole.
+        ((1, 2), 2, 8, False, ([(1, 0, 0, 4)], (1,))),
+        # Split GQA fan-out: decode rank 3 of TP4 takes heads 2..3 of prefill 1.
+        ((3, 4), 2, 8, False, ([(1, 2, 0, 2)], (1,))),
+        # Split GQA fan-in: decode rank 1 of TP2 gathers prefill ranks 2 and 3.
+        ((1, 2), 4, 8, False, ([(2, 0, 0, 2), (3, 0, 2, 2)], (2, 3))),
+        # MLA fan-in: one copy is read, every holder is released.
+        ((0, 1), 4, 1, True, ([(0, 0, 0, 1)], (0, 1, 2, 3))),
+        # Replicated GQA fan-in: TP8 holds each of 2 heads 4 times; decode TP2
+        # rank 1 reads head 1 once and releases all four ranks that hold it.
+        ((1, 2), 8, 2, False, ([(4, 0, 0, 1)], (4, 5, 6, 7))),
+        # MLA fan-out: the latent is read whole from the one holder.
+        ((3, 4), 1, 1, True, ([(0, 0, 0, 1)], (0,))),
+    ],
+)
+def test_read_tp_mapping_sources(consumer, producer_tp_size, heads, is_mla, expected):
+    consumer_tp_rank, consumer_tp_size = consumer
+    assert (
+        _sources(consumer_tp_rank, producer_tp_size, consumer_tp_size, heads, is_mla)
+        == expected
+    )
+
+
+def test_read_tp_mapping_reads_mamba_slices_from_every_holder():
+    """Recurrent state is sharded even when the attention copy is replicated,
+    so a hybrid MLA fan-in reads a state slice from every prefill rank."""
+    mapping = compute_read_tp_mapping(0, 4, 2, 1, True, True)
+    assert [
+        (s.tp_rank, s.target.num_heads, s.target.remote_slice, s.target.remote_slices)
+        for s in mapping.sources
+    ] == [(0, 1, 0, 2), (1, 0, 1, 2)]
+    assert not mapping.interchangeable_holders
+    fan_out = compute_read_tp_mapping(3, 2, 4, 1, True, True)
+    ((source,),) = (fan_out.sources,)
+    assert (source.tp_rank, source.target.local_slice, source.target.local_slices) == (
+        1,
+        1,
+        2,
+    )
+
+
+TP_PAIRS = [
+    (p, d)
+    for p, d in itertools.product([1, 2, 4, 8], repeat=2)
+    if max(p, d) % min(p, d) == 0
+]
+
+
+@pytest.mark.parametrize(("producer_tp_size", "consumer_tp_size"), TP_PAIRS)
+@pytest.mark.parametrize(
+    ("heads", "is_mla", "has_mamba"),
+    [(8, False, False), (2, False, False), (1, True, False), (1, True, True)],
+)
+def test_read_moves_exactly_what_write_would(
+    producer_tp_size, consumer_tp_size, heads, is_mla, has_mamba
+):
+    """READ pulls the same (producer rank, consumer rank, slice) set WRITE
+    pushes, so the two modes cannot disagree on which bytes go where."""
+    written = {
+        (p, target)
+        for p in range(producer_tp_size)
+        for target in compute_write_tp_mapping(
+            p, producer_tp_size, consumer_tp_size, heads, is_mla, has_mamba
+        ).targets
+    }
+    read = {
+        (source.tp_rank, source.target)
+        for d in range(consumer_tp_size)
+        for source in compute_read_tp_mapping(
+            d, producer_tp_size, consumer_tp_size, heads, is_mla, has_mamba
+        ).sources
+    }
+    assert read == written
+
+
+@pytest.mark.parametrize(("producer_tp_size", "consumer_tp_size"), TP_PAIRS)
+def test_read_releases_match_what_prefill_waits_for(producer_tp_size, consumer_tp_size):
+    """Each prefill rank is released by as many decode ranks as it waits for."""
+    releases = [0] * producer_tp_size
+    for d in range(consumer_tp_size):
+        for p in compute_read_tp_mapping(
+            d, producer_tp_size, consumer_tp_size, 1, True, False
+        ).holder_tp_ranks:
+            releases[p] += 1
+    expected = get_moriio_expected_ack_count(producer_tp_size, consumer_tp_size)
+    assert releases == [expected] * producer_tp_size
+
+
+def test_read_tp_mapping_rejects_unshardable_pairs():
+    with pytest.raises(ValueError, match="multiple"):
+        compute_read_tp_mapping(0, 3, 2, 8, False, False)
+    with pytest.raises(ValueError, match="consumer_tp_rank"):
+        compute_read_tp_mapping(2, 2, 2, 8, False, False)

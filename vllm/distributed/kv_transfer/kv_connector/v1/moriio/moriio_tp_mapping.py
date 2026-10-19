@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Producer-to-consumer TP mapping for MoRIIO WRITE transfers.
+"""Producer-to-consumer TP mapping for MoRIIO transfers.
 
 In WRITE mode every prefill (producer) rank pushes its own shard of the KV
 cache and recurrent state into the decode (consumer) ranks that need it:
@@ -14,6 +14,12 @@ cache and recurrent state into the decode (consumer) ranks that need it:
   gathered: each producer writes its shard at its offset inside the consumer's
   block. Copies that would be identical (MLA, replicated heads) are written by
   one producer only.
+
+In READ mode each consumer rank pulls the same bytes: what it reads from a
+producer rank is exactly what that producer would write into it, so the READ
+mapping is derived from the WRITE one. Every producer rank that holds the
+request for this consumer rank is acknowledged, including the ones whose
+identical copy it does not need to read.
 
 Heads follow vLLM's sharding: with ``tp_size <= num_kv_heads`` rank ``i`` holds
 heads ``[i * n, (i + 1) * n)`` with ``n = num_kv_heads // tp_size``; with more
@@ -211,4 +217,99 @@ def compute_write_tp_mapping(
                 has_mamba,
             )
         ),
+    )
+
+
+@dataclass(frozen=True)
+class ReadSource:
+    """What one consumer rank reads from one producer rank.
+
+    ``target`` is the producer's view (``local`` = producer, ``remote`` =
+    consumer), as in :class:`WriteTarget`.
+    """
+
+    tp_rank: int
+    target: WriteTarget
+
+
+@dataclass(frozen=True)
+class MoRIIOReadTPMapping:
+    """Read sources of one consumer rank for one producer engine."""
+
+    producer_tp_size: int
+    consumer_tp_size: int
+    local_num_heads: int
+    remote_num_heads: int
+    sources: tuple[ReadSource, ...]
+    # Producer ranks holding this consumer rank's share of a request; each
+    # frees its blocks once acknowledged.
+    holder_tp_ranks: tuple[int, ...]
+
+    @property
+    def source_tp_ranks(self) -> tuple[int, ...]:
+        return tuple(source.tp_rank for source in self.sources)
+
+    @property
+    def interchangeable_holders(self) -> bool:
+        """Every holder has an identical copy, so any one can be read."""
+        return len(self.sources) == 1 and len(self.holder_tp_ranks) > 1
+
+    def copies_whole_block(self, source: ReadSource) -> bool:
+        """The consumer block is a byte copy of the producer block."""
+        return source.target.num_heads == self.local_num_heads == self.remote_num_heads
+
+
+@cache
+def compute_read_tp_mapping(
+    consumer_tp_rank: int,
+    producer_tp_size: int,
+    consumer_tp_size: int,
+    total_num_kv_heads: int,
+    is_mla: bool,
+    has_mamba: bool,
+) -> MoRIIOReadTPMapping:
+    """Map one consumer rank onto the producer ranks it reads."""
+    validate_write_tp_topology(
+        producer_tp_size, consumer_tp_size, total_num_kv_heads, is_mla
+    )
+    if not 0 <= consumer_tp_rank < consumer_tp_size:
+        raise ValueError(
+            f"consumer_tp_rank {consumer_tp_rank} must be in [0, {consumer_tp_size})"
+        )
+    if consumer_tp_size >= producer_tp_size:
+        ratio = consumer_tp_size // producer_tp_size
+        holders: tuple[int, ...] = (consumer_tp_rank // ratio,)
+    else:
+        ratio = producer_tp_size // consumer_tp_size
+        holders = tuple(range(consumer_tp_rank * ratio, (consumer_tp_rank + 1) * ratio))
+    sources: list[ReadSource] = []
+    for producer_tp_rank in holders:
+        mapping = compute_write_tp_mapping(
+            producer_tp_rank,
+            producer_tp_size,
+            consumer_tp_size,
+            total_num_kv_heads,
+            is_mla,
+            has_mamba,
+        )
+        sources.extend(
+            ReadSource(producer_tp_rank, target)
+            for target in mapping.targets
+            if target.tp_rank == consumer_tp_rank
+        )
+    first = compute_write_tp_mapping(
+        holders[0],
+        producer_tp_size,
+        consumer_tp_size,
+        total_num_kv_heads,
+        is_mla,
+        has_mamba,
+    )
+    return MoRIIOReadTPMapping(
+        producer_tp_size=producer_tp_size,
+        consumer_tp_size=consumer_tp_size,
+        local_num_heads=first.local_num_heads,
+        remote_num_heads=first.remote_num_heads,
+        sources=tuple(sources),
+        holder_tp_ranks=holders,
     )
