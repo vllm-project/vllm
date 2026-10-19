@@ -1395,8 +1395,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "RadioMBartPrefixForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-3.5-Parse",
         trust_remote_code=True,
-        # Enable online initialization once the checkpoint is public.
-        is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
@@ -1818,7 +1816,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="nvidia/Nemotron-3.5-Parse",
         speculative_method="mtp",
         trust_remote_code=True,
-        is_available_online=False,
     ),
     "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct"),
     "Qwen3_5MTP": _HfExamplesInfo(
