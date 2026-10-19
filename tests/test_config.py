@@ -29,6 +29,7 @@ from vllm.config import (
     HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -282,6 +283,27 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_lora_rejected_at_config_time_for_unsupported_model(supported):
+    """Models without SupportsLoRA must fail during config validation with a
+    clear message, not with a bare assert inside the model constructor."""
+    model_config = SimpleNamespace(
+        is_lora_supported=supported,
+        architecture="Zamba2ForCausalLM",
+        architectures=["Zamba2ForCausalLM"],
+        model="Zyphra/Zamba2-1.2B-instruct",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    if supported:
+        lora_config.verify_with_model_config(model_config)
+    else:
+        with pytest.raises(
+            ValueError, match="LoRA is not supported for Zamba2ForCausalLM"
+        ):
+            lora_config.verify_with_model_config(model_config)
 
 
 def test_mamba_cache_mode_all_is_rejected():
@@ -924,7 +946,10 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
+)
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
