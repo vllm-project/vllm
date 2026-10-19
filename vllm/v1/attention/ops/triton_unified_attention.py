@@ -1191,10 +1191,11 @@ def unified_attention(
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
 
-    # gfx1100: tuned 2D launch, in the scope it was tuned and validated for
-    # (16-bit Q, 16-bit or per-tensor fp8 KV cache, causal, no sliding window /
-    # sinks / softcap / ALiBi). Applied after the 2D/3D choice, so it does not
-    # move the 3D threshold.
+    # gfx1100: tuned 2D launch. Applied after the 2D/3D choice, so it does not
+    # move the 3D threshold. Launch parameters do not change the result:
+    # sliding window, sinks, softcap and ALiBi are applied per element inside
+    # each tile. Skipped with tensor descriptors (TILE_SIZE was already clamped
+    # to the block size above).
     gfx1100_head_size = triton.next_power_of_2(head_size)
     if (
         is_gfx1100
@@ -1202,20 +1203,6 @@ def unified_attention(
         and gfx1100_head_size in _GFX1100_2D_CONFIGS
         and num_queries_per_kv <= 16
         and q.element_size() == 2
-        and (
-            (kv_quant_mode == KVQuantMode.NONE and k.dtype == q.dtype)
-            or kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
-        )
-        and use_causal
-        and not use_per_seq_causal
-        and sliding_window_val == 0
-        and sinks is None
-        and softcap == 0
-        and not use_alibi_slopes
-        and not use_qq_bias
-        and not use_mm_prefix
-        and not use_rswa
-        and output_scale is None
         and not use_td
         and not is_batch_invariant
     ):
