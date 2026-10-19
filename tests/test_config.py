@@ -4,6 +4,9 @@
 import json
 import logging
 import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -511,6 +514,28 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_v2_config_can_be_created_without_triton():
+    # Start fresh so config imports observe the frontend's Triton availability.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import os
+                import vllm.triton_utils
+
+                os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+                vllm.triton_utils.HAS_TRITON = False
+                from vllm.config import VllmConfig
+
+                config = VllmConfig()
+                assert config.use_v2_model_runner
+            """),
+        ],
+        check=True,
+    )
+
+
 def test_hisparse_requires_v2_model_runner():
     config = object.__new__(VllmConfig)
     config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
@@ -550,7 +575,6 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -560,7 +584,6 @@ def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -636,7 +659,6 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
 )
 def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
         # Skip the HMA auto-detect block: it imports the connector class,
@@ -652,7 +674,6 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(device_buffer_size=512)
@@ -735,7 +756,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     default_breakable_cudagraph_architectures.cache_clear()
 
@@ -1361,7 +1381,6 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     # The expectations below are the platform-independent defaults; ROCm's
     # DeepSeek carve-out is covered by test_rocm_keeps_compiled_deepseek_defaults.
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     config = SimpleNamespace(
         model_config=model_config,
