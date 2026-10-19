@@ -6,13 +6,16 @@
 """
 
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector import (
+    HF3FSKVConnector,
     HF3FSKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.hf3fs_mock_client import (
@@ -231,3 +234,74 @@ class TestHF3FSKVConnectorStats:
         clone = hf3fs_stats.clone_and_reset()
         assert clone.data["num_transfer_task"] == 2
         assert hf3fs_stats.is_empty()
+
+
+# ===========================================================================
+# TestHF3FSKVConnectorMetadataServerUrl
+# ===========================================================================
+
+
+class TestHF3FSKVConnectorMetadataServerUrl:
+    """Tests that HF3FSKVConnector passes hf3fs_metadata_server_url
+    to Hf3fsMetadataClient.
+    """
+
+    def _make_mock_config(self, extra_config: dict | None = None):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.model_config.use_mla = False
+        mock_vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="HF3FSKVConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=extra_config or {},
+        )
+        return mock_vllm_config
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector.Hf3fsMetadataClient"
+    )
+    def test_scheduler_custom_metadata_server_url(self, mock_client_cls):
+        custom_url = "http://custom-scheduler-meta:18000"
+        vllm_config = self._make_mock_config({"hf3fs_metadata_server_url": custom_url})
+        connector = HF3FSKVConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, MagicMock()
+        )
+        assert connector._metadata_server_url == custom_url
+        mock_client_cls.assert_called_once_with(custom_url)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector.Hf3fsMetadataClient"
+    )
+    def test_scheduler_default_metadata_server_url(self, mock_client_cls):
+        vllm_config = self._make_mock_config()
+        connector = HF3FSKVConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, MagicMock()
+        )
+        assert connector._metadata_server_url == "http://localhost:18000"
+        mock_client_cls.assert_called_once_with("http://localhost:18000")
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector.Hf3fsMetadataClient"
+    )
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector.Hf3fsClient"
+    )
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector.get_tensor_model_parallel_rank",
+        return_value=0,
+    )
+    @patch("os.makedirs")
+    def test_worker_custom_metadata_server_url(
+        self, mock_makedirs, mock_rank, mock_hf3fs_client, mock_meta_client_cls
+    ):
+        custom_url = "http://custom-worker-meta:18000"
+        vllm_config = self._make_mock_config(
+            {
+                "hf3fs_metadata_server_url": custom_url,
+                "hf3fs_storage_path": "./dummy_storage",
+            }
+        )
+        connector = HF3FSKVConnector(vllm_config, KVConnectorRole.WORKER, MagicMock())
+        connector._bytes_per_page = 1024
+        connector._setup_storage_clients()
+        mock_meta_client_cls.assert_called_once_with(custom_url)
