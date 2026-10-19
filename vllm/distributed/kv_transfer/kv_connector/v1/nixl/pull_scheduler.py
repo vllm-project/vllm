@@ -288,5 +288,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )
