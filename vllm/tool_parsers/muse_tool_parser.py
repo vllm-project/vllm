@@ -103,11 +103,24 @@ def _decode_value(raw: str):
     """JSON-decode a parameter value when possible, else keep the raw string.
 
     Mirrors the schema's ``x-parser: json`` with ``allow_non_json: True``.
+
+    Values that decode to a non-finite float are kept as the raw string.
+    ``json.loads`` accepts ``NaN``/``Infinity``/``-Infinity`` and overflows a
+    large exponent such as ``1e999`` to ``inf``, but ``json.dumps`` renders
+    those back as bare ``NaN``/``Infinity`` tokens, which are not valid JSON
+    (RFC 8259). Emitting them would put an unparseable ``arguments`` string on
+    the wire for any strict client. ``allow_nan=False`` also rejects a non-finite
+    float nested inside a decoded list or dict (e.g. ``[1e999]``).
     """
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return raw
+    try:
+        json.dumps(parsed, allow_nan=False)
+    except (ValueError, TypeError):
+        return raw
+    return parsed
 
 
 def _iter_messages(text: str) -> Iterator[tuple[str | None, str, bool]]:
