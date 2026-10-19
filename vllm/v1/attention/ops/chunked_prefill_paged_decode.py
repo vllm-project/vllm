@@ -246,7 +246,11 @@ def kernel_paged_attention_2d(
         context_len = seq_len - 1
 
         if SLIDING_WINDOW > 0:
-            S = tl.where((context_len - seq_offset) < SLIDING_WINDOW, S, -10000)
+            in_window = (context_len - seq_offset) < SLIDING_WINDOW
+            S = tl.where(in_window, S, -10000)
+            # Out-of-window slots may sit in freed blocks that now hold
+            # NaN/Inf, and 0 * NaN = NaN, so zero them out of V too.
+            V = tl.where(in_window[:, None], V, 0.0)
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)

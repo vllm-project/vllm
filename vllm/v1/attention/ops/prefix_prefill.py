@@ -355,6 +355,17 @@ def _fwd_kernel(
             v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
         else:
             v = v_load
+        if SLIDING_WINDOW > 0:
+            # Tokens outside the window of this tile's first query are outside
+            # every query's window, so p is 0 for them. Their slots may sit in
+            # freed blocks that now hold NaN/Inf, and 0 * NaN = NaN, so zero
+            # them out of V too.
+            v = tl.where(
+                (cur_batch_ctx_len + start_m * BLOCK_M) - (start_n + offs_bs_n[:, None])
+                < SLIDING_WINDOW,
+                v,
+                0.0,
+            )
         p = p.to(v.dtype)
 
         acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
