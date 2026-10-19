@@ -95,11 +95,12 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Decided per call, not at decoration: model modules are often
+        # imported before the config auto-enables breakable graphs (an
+        # in-process LLM), and a capture only exists when they are enabled.
         capture = BreakableCUDAGraphCapture.current()
         if capture is None:
             return fn(*args, **kwargs)

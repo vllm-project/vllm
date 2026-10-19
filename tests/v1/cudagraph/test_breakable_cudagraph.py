@@ -28,9 +28,8 @@ if current_platform.is_xpu():
 def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     """Enable breakable cudagraphs for this module's tests only.
 
-    eager_break_during_capture reads the env at decoration time, which
-    happens inside the test bodies, so a per-test fixture suffices.
-    monkeypatch restores the env so other test files running in the same
+    eager_break_during_capture decides per call, so a per-test fixture
+    suffices. monkeypatch restores the env so other test files running in the same
     pytest process are unaffected (a module-level os.environ assignment
     used to leak into test_cudagraph_dispatch.py and break it).
     """
@@ -677,3 +676,38 @@ def test_unwrap_recurses_through_nested_wrappers():
 
     assert inner.unwrap() is model
     assert outer.unwrap() is model
+
+
+def test_decorator_applied_before_enable_still_breaks(
+    cuda_capture_stream, monkeypatch: pytest.MonkeyPatch
+):
+    """Model modules are usually imported before the config auto-enables
+    breakable graphs (an in-process LLM); a function decorated while they
+    were off must still break once a capture is active."""
+    import vllm.envs as envs
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    envs.disable_envs_cache()
+
+    @eager_break_during_capture
+    def attention_like(t: torch.Tensor) -> None:
+        t.mul_(2.0)
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    envs.disable_envs_cache()
+    x = torch.zeros(4, device=DEVICE_TYPE)
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        x.add_(5.0)
+        attention_like(x)
+        x.add_(1.0)
+    torch.accelerator.synchronize()
+    assert cap.num_eager_breaks == 1
+    x.fill_(2.0)
+    cap.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(x, torch.full((4,), 15.0, device=DEVICE_TYPE))
