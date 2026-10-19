@@ -327,16 +327,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteSWAForCausalLM": _HfExamplesInfo("ibm-granite/granite-swash-2b"),
     "GraniteSwitchForCausalLM": _HfExamplesInfo(
         "ibm-granite/granite-switch-4.1-3b-preview",
-        # A Granite Switch checkpoint is a base model plus a set of composed-in
-        # adapters, so it only exists once it has been composed. The first
-        # public one is still being published; flip this to True then.
-        is_available_online=False,
         # num_hidden_layers on disk is inflated by the switch's two cache
         # layers and the model subtracts them again, so shrinking the model to
         # a single layer leaves no decoder layer at all, and leaves layer_types
         # longer than num_hidden_layers. Both are rejected at config time, so
-        # the checkpoint is published small enough to initialize as-is.
+        # this checkpoint is small enough to initialize at its real depth.
         use_original_num_layers=True,
+        # Keeping every layer means the KV cache is sized for all of them, and
+        # the config asks for 131072 positions, which overruns the harness
+        # budget.
+        max_model_len=4096,
     ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
