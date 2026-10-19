@@ -50,7 +50,7 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 16384),
+    (32, 16384, 16384),
 ]
 
 
@@ -147,26 +147,15 @@ def test_fp4_env_defaults():
     """ROCm FP4 env defaults should stay stable for the AITER gates."""
     import vllm.envs as envs
 
-    assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
-    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
+    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is False
 
 
 @pytest.mark.parametrize(
-    (
-        "use_aiter",
-        "use_fp4_asm_gemm",
-        "use_fp4bmm",
-    ),
-    [
-        (True, True, True),
-        (True, True, False),
-        (True, False, True),
-        (False, True, True),
-    ],
+    ("use_aiter", "use_fp4bmm"),
+    [(True, True), (True, False), (False, True)],
 )
 def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     use_aiter,
-    use_fp4_asm_gemm,
     use_fp4bmm,
     monkeypatch,
 ):
@@ -182,22 +171,16 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
     _assert_aiter_supported()
 
     on_gfx950_value = on_gfx950()
-    expected_asm_gemm = use_aiter and use_fp4_asm_gemm and on_gfx950_value
+    expected_asm_gemm = use_aiter and on_gfx950_value
     expected_fp4bmm = use_aiter and use_fp4bmm and on_gfx950_value
 
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-        mp.setenv(
-            "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-            "1" if use_fp4_asm_gemm else "0",
-        )
         mp.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1" if use_fp4bmm else "0")
         _reload_envs()
         rocm_aiter_ops.refresh_env_variables()
 
-        assert (
-            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled() is expected_asm_gemm
-        )
+        assert rocm_aiter_ops.is_asm_fp4_gemm_supported() is expected_asm_gemm
         assert rocm_aiter_ops.is_fp4bmm_enabled() is expected_fp4bmm
 
 
@@ -421,8 +404,12 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     M, K, N = shape
 
     assert M <= 64
-    # The predicate takes K as packed bytes, matching `weight.shape[1]`.
+    # The predicate takes K as packed bytes, matching `weight.shape[1]`, and
+    # must agree with the config the kernel itself resolves.
     assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K // 2)
+    from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
+
+    assert get_gemm_config("GEMM-AFP4WFP4_PRESHUFFLED", M, N, K)[1]
 
     A = torch.randn(M, K, dtype=torch.bfloat16)
     B = torch.randn(N, K, dtype=torch.bfloat16)
@@ -462,6 +449,18 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     assert torch.isfinite(out).all()
 
     _assert_deterministic(run_preshuffled, n_runs=3)
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_fp4_preshuffled_tuned_gate_uses_logical_k():
+    """AITER ships N=16384-K=16384 but not N=16384-K=8192, so a K=8192 layer
+    has no tuned preshuffled config even though twice its K does."""
+    _assert_aiter_supported()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned.cache_clear()
+    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(16384, 16384 // 2)
+    assert not rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(16384, 8192 // 2)
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
@@ -614,11 +613,13 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     out = gemm_afp4wfp4(A_fp4, B_fp4, A_scale, B_scale)
 
     assert out.shape == (M, N)
+    assert out.dtype == torch.bfloat16
     assert not torch.any(torch.isnan(out))
 
+    # Accumulate in FP32, then match the GEMM's BF16 output rounding.
     A_dq = quant_dequant_mxfp4(A)
     B_dq = quant_dequant_mxfp4(B)
-    ref = torch.matmul(A_dq.float(), B_dq.t().float())
+    ref = torch.matmul(A_dq.float(), B_dq.t().float()).to(torch.bfloat16).float()
 
     _print_close_stats(
         f"skinny_gemm M={M} N={N} K={K}",
@@ -677,24 +678,52 @@ def test_asm_fp4_scale_swizzle_rejects_non_2d():
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale():
-    """A misaligned weight_scale must disable ASM and take the Triton path."""
+@pytest.mark.parametrize(
+    ("asm_tuned", "preshuffle_tuned", "weight_shape", "scale_shape", "expected"),
+    [
+        (True, True, (1280, 4096), (1280, 256), True),
+        (True, False, (1280, 4096), (1280, 256), False),
+        (False, True, (1280, 4096), (1280, 256), False),
+        # Tuned, but the scale can't be swizzled for ASM (columns % 8 != 0).
+        (True, True, (2560, 160), (2560, 10), False),
+    ],
+    ids=["tuned", "preshuffle_untuned", "asm_untuned", "misaligned_scale"],
+)
+def test_aiter_mxfp4_asm_layout_follows_aiter_tuned_configs(
+    asm_tuned, preshuffle_tuned, weight_shape, scale_shape, expected, monkeypatch
+):
+    """A layer takes the ASM layout only when aiter has tuned configs for both
+    the ASM GEMM and the preshuffled Triton GEMM, and the scale can be swizzled.
+    Otherwise it stays on the Triton layout."""
     from torch.nn.parameter import Parameter
 
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
 
+    monkeypatch.setattr(rocm_aiter_ops, "is_asm_fp4_gemm_tuned", lambda n, k: asm_tuned)
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_triton_gemm_afp4wfp4_presh_ws_tuned",
+        lambda n, k: preshuffle_tuned,
+    )
     kernel = object.__new__(AiterMxfp4LinearKernel)
-    kernel.use_asm_gemm = True
+    kernel.asm_gemm_supported = True
+    kernel.use_asm_gemm = False
     kernel.out_dtype = torch.bfloat16
 
     layer = torch.nn.Module()
-    layer.weight_scale = Parameter(
-        torch.zeros(2560, 10, dtype=torch.uint8, device="cpu"), requires_grad=False
+    layer.weight = Parameter(
+        torch.zeros(weight_shape, dtype=torch.uint8, device="cuda"),
+        requires_grad=False,
     )
-
+    layer.weight_scale = Parameter(
+        torch.zeros(scale_shape, dtype=torch.uint8, device="cuda"),
+        requires_grad=False,
+    )
     kernel.process_weights_after_loading(layer)
 
-    assert kernel.use_asm_gemm is False
-    # Triton path stores the transposed, contiguous scale.
-    assert tuple(layer.weight_scale.shape) == (10, 2560)
-    assert layer.weight_scale.is_contiguous()
+    assert kernel.use_asm_gemm is expected
+    if not expected:
+        # Triton path stores the transposed, contiguous scale.
+        assert tuple(layer.weight_scale.shape) == scale_shape[::-1]
+        assert layer.weight_scale.is_contiguous()

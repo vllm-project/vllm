@@ -605,6 +605,33 @@ initialize_native_environment() {
   fi
 }
 
+check_dpx_gpu_exclusivity() {
+  local devices=(/dev/dri/renderD*)
+  local device_id lock_status
+
+  if [[ "${#devices[@]}" -ne 1 || ! -c "${devices[0]}" ]]; then
+    echo "DPX guard requires exactly one render device; refusing to start tests." >&2
+    return 1
+  fi
+  # This queue mounts the same host-local HF cache into every pod on the node.
+  if ! mountpoint -q "${HF_HOME}"; then
+    echo "DPX guard requires the shared HF cache mount; refusing to start tests." >&2
+    return 1
+  fi
+  device_id=$(stat -Lc '%t-%T' "${devices[0]}") || return 1
+  mkdir -p "${HF_HOME}/.vllm-dpx-locks" || return 1
+  # Hold the descriptor through workload and teardown; never delete the file.
+  exec {dpx_gpu_lock_fd}>>"${HF_HOME}/.vllm-dpx-locks/${device_id}.lock" || return 1
+  flock -n -E 75 "${dpx_gpu_lock_fd}" && return 0
+  lock_status=$?
+  if [[ "${lock_status}" -eq 75 ]]; then
+    echo "DPX GPU collision: ${devices[0]} (${device_id}) is already locked by another CI job; refusing to start tests." >&2
+  else
+    echo "DPX GPU lock failed (status ${lock_status}); refusing to start tests." >&2
+  fi
+  return 1
+}
+
 run_native_preflight() {
   local expected_gpus="${VLLM_CI_EXPECTED_GPU_COUNT:-1}"
 
@@ -1166,15 +1193,15 @@ collect_rocm_failure_diagnostics() {
     # Bus data identifies a card within the public node without publishing its
     # persistent UUID, serial number, or process list.
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi static -b -g all
+      amd-smi static --bus --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi metric -e -k -P -x -g all
+      amd-smi metric --ecc --ecc-blocks --pcie --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi bad-pages -p -r -u -g all
+      amd-smi static --ras --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi metric -p -t -u -m -v -g all
+      amd-smi metric --power --temperature --usage --mem-usage --gpu all
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" \
-      amd-smi xgmi -l -g all
+      amd-smi xgmi --link-status --gpu all
   elif [[ "${amd_diagnostics_expected_gpu_count}" != "0" ]] \
     && command -v rocm-smi >/dev/null 2>&1; then
     run_failure_diagnostic "${diagnostics_path}" "${probe_deadline}" rocm-smi \
@@ -1485,6 +1512,10 @@ if is_native_runtime; then
     echo "Failed to initialize the native test environment"
     exit 1
   fi
+  if [[ "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" == *dpx* \
+    && "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" != "0" ]]; then
+    check_dpx_gpu_exclusivity || exit 1
+  fi
   if [[ "${commands}" == *python_only_compile.sh* ]]; then
     # This no-GPU job validates the ROCm precompiled/editable install path,
     # rather than CPU runtime platform selection.
@@ -1681,8 +1712,7 @@ if is_multi_node "$commands"; then
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
-    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-    prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+    prefix=${BASH_REMATCH[1]//;/}
     echo "PREFIX: ${prefix}"
 
     export composite_command="(command rocm-smi || true)"
@@ -1697,10 +1727,8 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
-      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-      command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
-      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
-      command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
+      command_node_0=${node0[i]//\"/}
+      command_node_1=${node1[i]//\"/}
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
       echo "COMMANDS: ${step_cmd}"

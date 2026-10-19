@@ -4,10 +4,10 @@
 import importlib.util
 import math
 import threading
-from collections import OrderedDict, defaultdict
-from queue import Queue
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
+
+from .utils import make_moriio_writer
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -90,24 +92,13 @@ def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
     return SimpleNamespace(num_blocks=num_blocks)
 
 
-def _writer_with_fake_worker(fake_worker: Any) -> Any:
-    writer = MoRIIOWriter.__new__(MoRIIOWriter)
-    writer._worker_ref = lambda: fake_worker
-    writer._write_task_q = Queue()
-    writer._write_state_lock = threading.Lock()
-    writer._scheduled_writes = defaultdict(int)
-    writer._scheduled_layers = defaultdict(set)
-    writer._sealed_writes = {}
-    writer.ensure_worker_started = lambda: None
-    return writer
-
-
 def _wrapper_for_messages() -> Any:
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
+    wrapper._write_done_counts = {}
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -117,7 +108,7 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
         request_id="req",
         transfer_id=transfer_id,
         dst_engine_id="remote-engine",
-        local_block_ids=[1, 3],
+        local_block_ids=[[1, 3]],
         remote_block_ids_hint=None,
         layer_name=layer_name,
         event=None,
@@ -356,11 +347,16 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
     calls: list[str] = []
 
     class FakeWorker:
+        _has_mamba: bool
+        layer_to_group: dict[str, int]
         kv_caches: dict[str, torch.Tensor]
         layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
 
         def _region_session_indices(self, layer_name):
             return [list(self.kv_caches).index(layer_name)]
+
+        def _check_peer_block_size(self, layer_name, remote_moriio_meta):
+            pass
 
         def _compute_block_transfer_offsets(
             self,
@@ -375,11 +371,13 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
             return ([call_id], [call_id + 10], [call_id + 20])
 
     fake_worker = FakeWorker()
+    fake_worker._has_mamba = False
+    fake_worker.layer_to_group = dict.fromkeys(kv_caches, 0)
     fake_worker.kv_caches = kv_caches
     fake_worker.layer_name_to_local_kv_cache_metadata = {name: [] for name in kv_caches}
     writer = MoRIIOWriter.__new__(MoRIIOWriter)
     writer._worker_ref = lambda: fake_worker
-    request_info = RemoteAllocInfo(block_ids=[4, 5])
+    request_info = RemoteAllocInfo(block_ids=[[4, 5]])
     remote_meta = _remote_meta()
 
     dense0_plan = writer._prepare_transfer_plan(
@@ -406,10 +404,10 @@ def test_write_transfer_plan_caches_offsets_per_layer_geometry():
 
 
 def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
-    request_info = RemoteAllocInfo(block_ids=[4, 5])
+    request_info = RemoteAllocInfo(block_ids=[[4, 5]])
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
@@ -420,6 +418,81 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
 
     assert request_info.writes_expected == 2
     assert writer._sealed_writes["xfer"] == 2
+
+
+def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
+    worker = SimpleNamespace(
+        _has_mamba=True,
+        kv_caches={"draft": torch.empty((8, 1, 4, 3))},
+        layer_to_group={"draft": 2},
+        _region_session_indices=lambda _: [5],
+        _check_peer_block_size=lambda layer_name, remote_moriio_meta: None,
+        _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("draft")
+    task.local_block_ids = [[10], [20], [30, 31]]
+    remote = RemoteAllocInfo(block_ids=[[40], [50], [60, 61, 62]])
+    meta = _remote_meta()
+    plan = writer._prepare_transfer_plan(task, remote, meta)
+    worker._compute_block_transfer_offsets.assert_called_once_with(
+        "draft", [30, 31], [60, 61], meta, remote_engine_id=task.dst_engine_id
+    )
+    assert plan.sess_idx == 5
+
+
+def test_hybrid_write_posts_both_regions_before_layer_completion():
+    from unittest.mock import Mock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+        MoRIIOConnectorWorker,
+    )
+
+    wrapper = _wrapper_for_messages()
+    info = RemoteAllocInfo(block_ids=[[], [7], [9]])
+    wrapper.done_remote_allocate_req_dict["xfer"] = info
+    wrapper.write_remote_data = Mock(side_effect=["conv-status", "ssm-status"])
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=0,
+        get_engine_name_with_dp=lambda name, rank: name,
+        _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
+        _is_mamba_layer=lambda name: True,
+        _mamba_payload_index_by_layer={"kda": 2},
+        _region_session_indices=lambda name: [0, 1],
+        _compute_mamba_transfer_offsets=Mock(
+            return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
+        ),
+    )
+    worker._mamba_blocks_for_layer = lambda name, blocks: (
+        MoRIIOConnectorWorker._mamba_blocks_for_layer(worker, name, blocks)
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("kda")
+    task.local_block_ids = [[], [1], [3]]
+    task.remote_tp_size = 2
+    task.event = Mock()
+    writer._execute_write_task(task)
+
+    task.event.synchronize.assert_called_once()
+    worker._compute_mamba_transfer_offsets.assert_called_once_with(
+        "kda", [3], [9], remote_tp_size=2
+    )
+    assert wrapper.write_remote_data.call_args_list[0].args == (
+        [2, 4, 8],
+        [10, 20, 30],
+        [50, 60, 70],
+        "conv-session",
+    )
+    assert wrapper.write_remote_data.call_args_list[1].args == (
+        [16],
+        [40],
+        [80],
+        "ssm-session",
+    )
+    assert info.transfer_statuses == ["conv-status", "ssm-status"]
+    assert info.writes_done == 1
+    assert not info.completion_notified
 
 
 def test_write_completion_notifies_once_after_all_sealed_writes_finish():
@@ -456,15 +529,15 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
             )
 
     wrapper = FakeWrapper()
-    request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
+    request_info = RemoteAllocInfo(block_ids=[[4, 5]], writes_expected=2)
     request_info.transfer_statuses.extend(["status-a", "status-b"])
     request_info.completion_request_id = "req"
-    request_info.completion_remote_notify_port = 7000
+    # Final notify port is resolved in _execute_write_task; finalize reads it
+    # as-is, so set the already-offset value (base 7000 + tp_rank-2 offset).
+    request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(
-        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2)
-    )
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -498,6 +571,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper._transfer_timeout = 1
+    wrapper.moriio_engine = object()
     global_status = FakeStatus()
     scoped_status = FakeStatus()
     wrapper.transfer_status = [global_status]
@@ -511,8 +585,8 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
 
 def test_write_failure_marks_terminal_and_clears_scheduled_state():
     wrapper = _wrapper_for_messages()
-    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[[4, 5]])
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -529,8 +603,8 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
 
 def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
     wrapper = _wrapper_for_messages()
-    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[[4, 5]])
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 1
     writer._scheduled_layers["xfer"] = {"dense0"}
     writer._sealed_writes["xfer"] = 1
@@ -621,7 +695,7 @@ def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
 
     if expected == "remote_blocks":
         request_info = wrapper.done_remote_allocate_req_dict["xfer"]
-        assert request_info.block_ids == [4, 5]
+        assert request_info.block_ids == [[4, 5]]
         assert request_info.decode_dp_rank == 3
     elif expected == "write_done":
         assert wrapper.done_write_cache_req_ids == ["xfer"]
@@ -672,14 +746,32 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_local_block_ids_longer_than_remote_raises_value_error():
-    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+def test_local_block_ids_longer_than_remote_raises():
+    # A longer local list is a genuine bug here and must fail loudly; the WRITE
+    # producer save path trims lookahead blocks before they reach this layer.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)  # interleaved
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="longer than remote_block_ids"):
         moriio_layout.compute_block_transfer_offsets(
-            "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
+            "layer",
+            cache,
+            worker.layer_to_spec,
+            [1, 3, 6, 7],
+            [4, 5],
+            _remote_meta().num_blocks,
         )
+
+
+def test_shorter_local_block_ids_still_transfers_only_what_decode_allocated():
+    # READ-mode partial transfer keeps its shorter-local behavior.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    short = moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1], [4, 5], _remote_meta().num_blocks
+    )
+    assert len(short[0]) == 1
 
 
 @pytest.mark.parametrize(

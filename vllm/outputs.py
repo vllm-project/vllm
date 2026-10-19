@@ -10,12 +10,27 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class RequestError:
+    """A request-level error that does not mark the engine as unhealthy."""
+
+    code: str
+    message: str
+    retryable: bool = False
+
+    def to_exception(self) -> GenerationError:
+        if self.retryable:
+            return RetryableRequestError(self.message)
+        return GenerationError(self.message)
 
 
 @dataclass
@@ -27,6 +42,15 @@ class SamplingMask:
     """
 
     token_ids: list[list[int]]
+
+
+@dataclass
+class WeightVersionSpan:
+    """Output tokens `[start, end)` were sampled by weights labelled `version`."""
+
+    version: str
+    start: int
+    end: int
 
 
 @dataclass
@@ -53,6 +77,8 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+        weight_versions: Contiguous weight version spans over output-token indexes.
+            Set on the final output only.
 
     """
 
@@ -67,6 +93,7 @@ class CompletionOutput:
     lora_request: LoRARequest | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+    weight_versions: list[WeightVersionSpan] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -117,6 +144,10 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
+            [prompt_len - 1 - prompt_logprob_start, num_ids]; row i holds the
+            logprobs of its own IDs as predictions of prompt token
+            prompt_logprob_start + i + 1, with -inf in padded columns.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -148,6 +179,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -162,6 +194,7 @@ class RequestOutput:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_token_id_logprobs = prompt_token_id_logprobs
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -191,6 +224,16 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        if next_completion.sampling_mask is not None:
+                            if completion.sampling_mask is None:
+                                completion.sampling_mask = SamplingMask([])
+                            completion.sampling_mask.token_ids.extend(
+                                next_completion.sampling_mask.token_ids
+                            )
+                        if next_completion.spec_decode_metrics is not None:
+                            completion.spec_decode_metrics = (
+                                next_completion.spec_decode_metrics
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -198,6 +241,8 @@ class RequestOutput:
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:
                             completion.routed_experts = next_completion.routed_experts
+                        # Like finish_reason, spans come only with the terminal output.
+                        completion.weight_versions = next_completion.weight_versions
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
@@ -215,6 +260,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_token_id_logprobs={self.prompt_token_id_logprobs}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
@@ -237,6 +283,20 @@ STREAM_FINISHED = RequestOutput(
 _O = TypeVar("_O", default=PoolingOutput)
 
 
+@dataclass(frozen=True)
+class LateChunk:
+    token_range: tuple[int, int]
+    char_range: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class LateChunkingMetadata:
+    chunk_size: int
+    input_tokens: int
+    chunks: list[LateChunk]
+    strategy: str = "fixed_tokens"
+
+
 class PoolingRequestOutput(Generic[_O]):
     """The output data of a pooling request to the LLM.
 
@@ -246,6 +306,8 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+        error: Structured request-level error information, if the request failed.
+        late_chunking: Token and source ranges for fixed-length late chunking.
 
     """
 
@@ -256,20 +318,27 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids: list[int],
         num_cached_tokens: int,
         finished: bool,
+        *,
+        error: RequestError | None = None,
+        late_chunking: LateChunkingMetadata | None = None,
     ):
         self.request_id = request_id
+        self.late_chunking = late_chunking
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
+        self.error = error
 
     def __repr__(self) -> str:
+        error = f", error={self.error!r}" if self.error is not None else ""
         return (
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"finished={self.finished})"
+            f"finished={self.finished}"
+            f"{error})"
         )
 
 
@@ -306,12 +375,18 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "EmbeddingRequestOutput":
+        outputs = (
+            EmbeddingOutput([])
+            if request_output.error is not None
+            else EmbeddingOutput.from_base(request_output.outputs)
+        )
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
-            outputs=EmbeddingOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -349,12 +424,18 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ClassificationRequestOutput":
+        outputs = (
+            ClassificationOutput([])
+            if request_output.error is not None
+            else ClassificationOutput.from_base(request_output.outputs)
+        )
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
-            outputs=ClassificationOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -389,10 +470,16 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ScoringRequestOutput":
+        outputs = (
+            ScoringOutput(0.0)
+            if request_output.error is not None
+            else ScoringOutput.from_base(request_output.outputs)
+        )
         return ScoringRequestOutput(
             request_id=request_output.request_id,
-            outputs=ScoringOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )

@@ -28,6 +28,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
@@ -227,12 +228,17 @@ def verify_peer_is_owner(conn: socket.socket) -> None:
         raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
-def _hash_quant_config(quant_config: Any) -> str:
-    if quant_config is None:
-        return ""
+def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> str:
     if hasattr(quant_config, "to_dict"):
         quant_config = quant_config.to_dict()
-    payload = json.dumps(quant_config, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "checkpoint": quant_config,
+            "runtime": normalize_value(runtime_quant_config),
+        },
+        sort_keys=True,
+        default=str,
+    )
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
@@ -289,10 +295,14 @@ class WeightCacheKey:
     quant_config_hash: str
     revision: str | None
     vllm_version: str
+    pp_size: int = 1
+    pp_rank: int = 0
     is_draft: bool = False
     """Daemon group the weights come from; False is the target model."""
     dp_size: int = 1
     dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -301,9 +311,13 @@ class WeightCacheKey:
         tp_size: int,
         tp_rank: int,
         *,
+        pp_size: int = 1,
+        pp_rank: int = 0,
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -325,14 +339,21 @@ class WeightCacheKey:
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            pp_size=pp_size,
+            pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
-            quant_config_hash=_hash_quant_config(quant_config),
+            quant_config_hash=_hash_quant_config(
+                quant_config=quant_config,
+                runtime_quant_config=model_config.quantization_config,
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:

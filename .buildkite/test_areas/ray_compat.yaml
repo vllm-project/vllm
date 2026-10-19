@@ -18,9 +18,9 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
   mirror:
     amd:
-      label: ":amd: (MI355) Ray Dependency Compatibility Check"
+      label: ":amd: (MI355 DPX) Ray Dependency Compatibility Check"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 25
       working_dir: "/"
       depends_on:

@@ -30,7 +30,7 @@ from itertools import islice
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -74,7 +74,7 @@ from .utils import (
 class BailingAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
@@ -183,7 +183,7 @@ class BailingMLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -217,7 +217,7 @@ class BailingMoE(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool | None = True,
         prefix: str = "",
@@ -328,7 +328,7 @@ class BailingMoE(nn.Module):
 class BailingMoeBlock(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
