@@ -74,6 +74,7 @@ class BlockTables:
         self.input_block_tables: list[torch.Tensor] = [
             torch.zeros_like(b.gpu) for b in self.block_tables
         ]
+        self._num_dirty_rows = 0
 
         self.slot_mappings = torch.zeros(
             self.num_kv_cache_groups,
@@ -151,15 +152,18 @@ class BlockTables:
     ) -> tuple[torch.Tensor, ...]:
         if self.num_kv_cache_groups == 0:
             return ()
+        num_reqs = idx_mapping.shape[0]
+        num_rows = num_reqs_padded
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
+            num_rows = max(num_rows, self._num_dirty_rows)
+            self._num_dirty_rows = num_reqs
         else:
             assert out_ptrs is not None
             assert len(out) == self.num_kv_cache_groups
-        num_reqs = idx_mapping.shape[0]
-        # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
-        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
+        # Also clear rows left by a larger batch in the shared buffer.
+        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_rows)](
             idx_mapping,
             self.block_table_ptrs,
             out_ptrs,
@@ -180,9 +184,12 @@ class BlockTables:
         # Zero the rows so dummy runs write mamba state to the reserved null
         # block rather than through the previous real step's (stale) block
         # ids, which may point at blocks since freed and reallocated.
-        return tuple(
-            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
-        )
+        num_rows = max(num_reqs, self._num_dirty_rows)
+        for block_table in self.input_block_tables:
+            block_table[:num_rows].zero_()
+        # Profiling may populate the returned rows with valid block IDs.
+        self._num_dirty_rows = num_reqs
+        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
     def compute_slot_mappings(
         self,
