@@ -13,7 +13,7 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.distributed import (
     get_dp_group,
@@ -345,8 +345,6 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
-        from vllm.config import get_current_vllm_config
-
         dp_group = get_dp_group()
         pp_group = get_pp_group()
         parallel_config = get_current_vllm_config().parallel_config

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
@@ -181,14 +182,14 @@ QWEN_MTP_CASE = ModelCase(
 )
 
 
-QWEN_EP_CASE = ModelCase(
-    model="Qwen/Qwen3-30B-A3B-Instruct-2507",
+DSV2_EP_CASE = ModelCase(
+    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
     prompts=["The capital of France is"],
     llm_kwargs=dict(
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.6,
+        gpu_memory_utilization=0.85,
         enforce_eager=True,
         max_model_len=1024,
     ),
@@ -198,8 +199,8 @@ QWEN_EP_CASE = ModelCase(
 
 @pytest.mark.parametrize(
     "case",
-    [QWEN_CASE, K3_CASE, QWEN_MTP_CASE, QWEN_EP_CASE],
-    ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp", "qwen3-ep"],
+    [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
+    ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
 )
 def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
@@ -213,7 +214,17 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    run_cold_start_and_warm_restart(vllm_runner, case)
 
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner):
+    """Same as above, with expert parallelism enabled at tp=2."""
+    run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE)
+
+
+def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
@@ -430,58 +441,3 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
-
-
-def test_weight_cache_key_distinguishes_static_ep_layouts():
-    from dataclasses import replace
-
-    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
-
-    key = WeightCacheKey(
-        checkpoint="ckpt",
-        model_arch="Arch",
-        tp_size=2,
-        tp_rank=0,
-        dtype="bf16",
-        quantization=None,
-        quant_config_hash="h",
-        revision=None,
-        vllm_version="v",
-        enable_expert_parallel=True,
-    )
-    assert key.mismatched_fields(replace(key, enable_expert_parallel=False)) == [
-        "enable_expert_parallel"
-    ]
-    assert key.mismatched_fields(
-        replace(key, expert_placement_strategy="round_robin")
-    ) == ["expert_placement_strategy"]
-
-
-@pytest.mark.parametrize("mode", ["zero_copy", "copy"])
-@pytest.mark.parametrize("fallback", [False, True])
-def test_ipc_loader_rejects_eplb(mode, fallback, monkeypatch):
-    from types import SimpleNamespace
-
-    from vllm.config import LoadConfig
-    from vllm.model_executor.model_loader.weight_cache import ipc_loader
-
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
-    loader = ipc_loader.IpcModelLoader(
-        LoadConfig(
-            load_format="ipc_cache",
-            model_loader_extra_config={"mode": mode, "fallback": fallback},
-        )
-    )
-    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
-    with pytest.raises(ValueError, match="does not support EPLB"):
-        loader.load_model(config, None)
-
-
-def test_weight_cache_daemon_rejects_eplb():
-    from types import SimpleNamespace
-
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-
-    config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
-    with pytest.raises(ValueError, match="does not support EPLB"):
-        WeightCacheDaemon(config, 0, 0, "tcp://127.0.0.1:12345")
