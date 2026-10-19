@@ -61,3 +61,14 @@ The full evaluation matrix SHALL include GPT-OSS-120B and DeepSeek-V4-Flash on t
 
 - **WHEN** the local debug scenario passes
 - **THEN** the report records that result while leaving unexecuted external model evaluations incomplete
+
+### Requirement: Deployment-scale overhead comparisons
+
+Primary performance comparisons SHALL use `gpu_memory_utilization` of at least 0.5 without a small fixed KV-byte override.
+Validation SHALL increase workload pressure through distinct prefixes, rollout branches and concurrency, and retain a cache-fit comparison at the same memory setting.
+Reports SHALL separate instrumented profiling from normal timing and record equal-work fingerprints, control RPC cost and request phase breakdowns.
+
+#### Scenario: Cache fits the deployment memory budget
+
+- **WHEN** the workload fits and optional control provides no extra reuse
+- **THEN** the comparison still measures its control and scheduler overhead against native serving and preserves any regression

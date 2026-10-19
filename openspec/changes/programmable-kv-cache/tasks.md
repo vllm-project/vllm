@@ -71,10 +71,10 @@
 ## 8. Complete the reviewable delivery
 
 - [x] 8.1 Document configuration, plugin extension contracts, operation semantics, backend coverage, examples, and measured limitations.
-- [ ] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
-- [ ] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
+- [x] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
+- [x] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
 - [ ] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
-- [x] 8.5 Reconcile delivered coverage with docs/programmable-kvc/task2do.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.
+- [x] 8.5 Reconcile delivered coverage with the follow-up scope in integration-paths.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.
 
 ## Evidence corrections, 2026-10-06
 
@@ -109,7 +109,7 @@ Stopped at the user's requested boundary on October 12 after quota confirmation 
 See the [experiment report](../../../docs/programmable-kvc/rollout-report-2026-10-12.md) and [test guide](../../../docs/programmable-kvc/testing.md).
 Pressure/fit and ablations ran; forecast sensitivity, the new fault/restart/128-question harness and final broad checks did not.
 Their encompassing tasks remain unchecked.
-Progress is 56/64; no experiment or regression queue remains active.
+At that stop point progress was 56/64 and no experiment or regression queue remained active.
 
 - [x] 10.1 Implement guarded weight-update lifecycle and namespace transition; verify real tensor updates cannot reuse old local or remote KV.
 - [x] 10.2 Add bounded current-residency queries and control-result acknowledgement with preserved duplicate semantics and observable capacity.
@@ -117,3 +117,13 @@ Progress is 56/64; no experiment or regression queue remains active.
 - [x] 10.4 Integrate the real verl tool loop and executable tools with an application-directed controller, generated branches, fallback and cleanup.
 - [ ] 10.5 Run repeated fixed-work and live rollout comparisons across cache pressure, policy ablations and adverse predictions; evaluate the 25% throughput target and preserve all results.
 - [ ] 10.6 Run relevant regression/lint/model checks and reconcile runtime documentation, acceptance gaps and the final performance report.
+
+## 11. Control overhead and deployment-scale experiments
+
+Resumed on October 18 at the user's request. The October 12 stop boundary no longer applies.
+
+- [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
+- [ ] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
+- [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
+- [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
+- [ ] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.

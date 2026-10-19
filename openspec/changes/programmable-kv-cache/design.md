@@ -16,7 +16,7 @@ Scheduler and KV manager changes are authorized.
 One complete PR is the delivery unit.
 The existing uncommitted discussion-document edit belongs to the user.
 
-The updated local discussion sources are `docs/programmable-kvc/chats.md` and `notes.md`.
+The local discussion sources were `docs/programmable-kvc/chats.md` and `notes.md`, retained in commit `ac5094f177` before removal of the local notes.
 They support a broader delivery than three optimization algorithms: engine-local session indexing available to scheduler/offload consumers, request-independent session-addressable APIs, extensible hint transport, and association-event feedback.
 Participant preferences in the chat are evidence for design proposals, not proof that every event or index detail is an upstream standard.
 `coverage.md` maps those requirements to implementation and examples.
@@ -227,7 +227,7 @@ Demonstrate both an explicit command and an opt-in native signal-driven policy u
 Preserve the G1-only baseline for comparison.
 
 The user confirmed a runnable lightweight orchestrator for the first complete delivery.
-Dynamo integration is subsequent work, tracked outside OpenSpec in `docs/programmable-kvc/task2do.md`.
+Dynamo integration is subsequent work, described in `integration-paths.md`.
 The lightweight sender must exercise real Python/HTTP ingress and Mooncake calls; it is not a mock for engine/backend work and must not be presented as an already-working Dynamo integration.
 
 Use deterministic workload descriptions with real model execution for performance: shared prompt families, multiple branches, tool waits, variable output lengths, memory-pressure sweeps, incorrect resume predictions, and cross-engine resumes.
@@ -277,6 +277,17 @@ Optimize observation/selection costs only with behavioral regressions and measur
 Application recovery handles deferral, missing data, partial scope, restarts and failed transfers with bounded retries and ordinary-compute fallback.
 No public Pin or changes to Mooncake are introduced.
 
+### Control overhead and deployment-scale validation (2026-10-18)
+
+The user resumed implementation and experiments, requesting minimum control overhead and a local commit after full relevant validation.
+Primary performance runs SHALL use at least `gpu_memory_utilization=0.5`, without a small fixed KV-byte override.
+Increase distinct prefix families, branches and client concurrency to create pressure; retain a cache-fit control at the same deployment memory setting.
+Record actual cache capacity, source hashes, commands, repeated equal-work comparisons, request phases, control RPC counts/times and GPU samples.
+Instrumented profiles SHALL be identified separately from normal performance runs.
+Move optional control waiting out of the next inference request's critical path while preserving engine load publication barriers and draining all submitted control before task cleanup.
+Reuse terminal submission results while still collecting asynchronous derived outcomes.
+Test lifecycle, transfer races, cancellation, reset/restart, model correctness and disabled/idle paths; smoke runs do not satisfy acceptance.
+
 ## Risks / Trade-offs
 
 - Partial blocks and hybrid groups have different reusable boundaries → resolve coverage through cache-group semantics and report unsupported/partial scope; do not equate bytes copied with a valid prefix hit.
@@ -312,7 +323,7 @@ Remaining concrete design discussion:
 
 ## Follow-up work
 
-`docs/programmable-kvc/task2do.md` is the separate follow-up tracker.
+`integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.
 The supplied diagram's future KVCR G1 path requires its own agreed integration and is not represented as current support.
 This change's native Mooncake full-path example, shared GPU mechanisms, and existing KVCR compatibility checks remain first-release work.
@@ -329,8 +340,8 @@ This change's native Mooncake full-path example, shared GPU mechanisms, and exis
 - <https://github.com/vllm-project/agentic-api/issues/367>
 - <https://verl.readthedocs.io/en/latest/advance/agent_loop.html>
 - <https://github.com/verl-project/verl/blob/main/docs/start/agentic_rl.rst>
-- Local source: `docs/programmable-kvc/chats.md`, especially sections on SessionPrefixIndex, KVEvents, request-independent retention, and envelopes.
-- Local source: `docs/programmable-kvc/notes.md`.
+- Historical source at `ac5094f177`: `docs/programmable-kvc/chats.md`, especially sections on SessionPrefixIndex, KVEvents, request-independent retention, and envelopes.
+- Historical source at `ac5094f177`: `docs/programmable-kvc/notes.md`.
 
 ## RFC #59708 alignment, authorized 2026-10-06
 

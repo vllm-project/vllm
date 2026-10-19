@@ -12,7 +12,7 @@ Preserve the complementary backend-interpreted KVCR path.
 - Separate transport/dispatch from payload interpretation: vLLM interprets native actions for the Mooncake path; KVCR-owned payloads remain opaque to vLLM's native interpreter and are forwarded to KVCR.
   GPU resource operations remain engine-controlled regardless of the interpretation owner.
 - Run the primary full-path example with a lightweight orchestrator and real vLLM/Mooncake execution.
-  Route each entire envelope to one interpretation path; defer Dynamo integration and mixed-owner envelopes to the explicit follow-up tracker in `docs/programmable-kvc/task2do.md`.
+  Route each entire envelope to one interpretation path; defer Dynamo integration and mixed-owner envelopes to the follow-up scope in `integration-paths.md`.
 - Implement application-controlled KV behavior using the already-merged KvHintsEnvelope/KvHintAction contract: explicit session/continuation management, session-addressable cache operations, and complete operation feedback.
   Keep explicit state commands separate from optional policy signals and publish incremental association events with state queries.
 - Resolve logical hashes, sessions, continuations, and token ranges while separating logical associations, physical residency, retention declarations, and active request/transfer references.

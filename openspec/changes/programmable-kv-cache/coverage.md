@@ -7,9 +7,11 @@ Names below denote responsibilities rather than finalized action payloads or Pyt
 
 The primary first-release path is lightweight orchestrator → merged envelope → native vLLM interpretation → real Mooncake calls → completion and actual reuse.
 Preserve KVCR's opaque forwarding/interpretation path as well.
-Each entire envelope selects one path; real Dynamo integration and mixed-owner envelopes are subsequent work in `docs/programmable-kvc/task2do.md`.
+Each entire envelope selects one path; real Dynamo integration and mixed-owner envelopes are subsequent work in `integration-paths.md`.
 
 ## What the local discussions establish
+
+The discussion files below are historical sources retained in commit `ac5094f177`, preceding removal of the local notes.
 
 | Local evidence | Design implication | Detail still requiring a choice |
 | --- | --- | --- |

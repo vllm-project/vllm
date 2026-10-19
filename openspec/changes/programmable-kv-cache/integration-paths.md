@@ -134,7 +134,9 @@ Mocks can verify API contracts; full-path acceptance needs real Store calls.
    Both native and KVCR paths remain supported; mixed-owner envelopes are subsequent work.
 3. Exact route-selection method/configuration and consumer capability reporting must be specified for the first release without changing the merged records.
 
-Future tasks, dependencies, and acceptance criteria are tracked in `docs/programmable-kvc/task2do.md`, outside OpenSpec.
+This section records the follow-up scope after removal of the separate local notes.
+Dynamo integration, mixed-owner envelopes, and concrete KVCR G1 integration remain subsequent work.
+Unexecuted first-release performance, failure and external-model acceptance remains in `tasks.md`.
 
 The user has allowed related repositories under `../` for required adaptations.
 The confirmed no-Mooncake-project-modification boundary still applies.

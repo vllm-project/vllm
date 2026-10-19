@@ -1,12 +1,33 @@
 # Validation evidence index
 
 测试方法与下一轮设计见[testing.md](../../../docs/programmable-kvc/testing.md)。
-当前结论、逐轮数据及未完成验收见[实验报告](../../../docs/programmable-kvc/rollout-report-2026-10-12.md)，任务状态见[tasks.md](tasks.md)。
+当前结论、逐轮数据及未完成验收见[本轮实验报告](../../../docs/programmable-kvc/rollout-report-2026-10-18.md)，任务状态见[tasks.md](tasks.md)。
 本文只定位证据，不重复实验叙述。
 下文的 `results/` 文件均为本地实验数据，该目录已加入 `.gitignore`，Git 不跟踪这些原始文件。
 版本库保留测试方法和结果报告；读取逐请求证据需要对应的本地数据或实验归档。
 
 ## Current local round
+
+原始数据位于[rollout-2026-10-18](../../../benchmarks/programmable_kv_cache/results/rollout-2026-10-18/)。
+只使用本地 GPU 0、3；主要性能场景为利用率 0.5，无固定 KV 字节覆盖。
+
+| 数据 | 范围 |
+| --- | --- |
+| `baseline/trace.json.gz`、`baseline/native-0.json.gz` | 256 条真实 verl 轨迹及一轮固定工作量原生回放；并发 64、32 个前缀家族 |
+| `profile-device-cold-policy/` | 完整策略诊断、四进程 Yappi、两卡 CUDA trace 和逐请求/逐操作记录；诊断时间独立于普通性能对照 |
+| `profile-device-cold-policy/post-validation.json` | 原矩阵的函数限定名检查失败后，独立核验客户端、指纹、清理、GPU 归属和 CPU 时间；原失败矩阵保持原样 |
+| `control-coverage-before-after.json` | 共享冷内容修正前后的完整 Mamba 组准备、实际命中和传输计数 |
+| `cpu-regression-merged.log`、`cpu-layout-region.log` | 合并后 1,973 项 CPU 回归通过；另有 60 项布局/区域检查通过，范围不重叠 |
+| `gpu-buffers-merged.log` | 合并后实际 GPU/CPU/Mooncake 搬运 56 项通过，1 项 ROCm 专用检查跳过 |
+| `precommit-driver-staged.log`、`mypy-3.12-driver-staged.log` | 包括新 profiling bootstrap 的 staged 默认检查与 Python 3.12 全量类型检查通过 |
+| `commit-core.log`、`commit-driver.log` | 核心修复 `af2c0d7ab2` 与异步驱动/性能工具 `10121d7920`；提交 hook 和 sign-off 检查通过 |
+| `profile-*/` 的其他失败记录 | 采样停滞、无效 CPU 时间、共享 GPU 干扰和同步压缩造成的超时；保留原始失败，不作为性能通过记录 |
+
+`functional/` 已完成当时版本的恢复、权重与 128 题 Mooncake 质量检查；合并后脚本的重验边界与失败另列在本轮报告。
+按用户最新要求，优先运行 `priority-quota/` 的普通压力计时并逐次提交，细化输出校验暂缓。
+重复压力/容量充足对照和预测实验仍待完成，结果逐项记录，不从旧的小配额数据推断。
+
+## October 11 historical round
 
 原始数据位于[rollout-2026-10-11](../../../benchmarks/programmable_kv_cache/results/rollout-2026-10-11/)。
 
