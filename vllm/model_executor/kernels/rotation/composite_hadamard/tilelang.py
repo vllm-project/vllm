@@ -22,7 +22,7 @@ def composite_hadamard_tilelang(
     k: int,
     p: int,
 ) -> torch.Tensor:
-    """Apply H_P/sqrt(P), followed by checkpoint mixing and 1/sqrt(K)."""
+    """Apply the composite transform; FP32 uses the PyTorch reference."""
     if x.numel() == 0:
         return torch.empty_like(x, memory_format=torch.contiguous_format)
 
