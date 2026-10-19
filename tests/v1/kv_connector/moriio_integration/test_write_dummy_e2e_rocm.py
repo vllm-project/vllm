@@ -26,9 +26,9 @@ token, the others are a whole number of hybrid cache blocks plus one token
 a whole number of chunks plus one token. With the split matched, a correct
 transfer reproduces the direct serve's first-token log-probabilities exactly,
 so the comparison needs no noise allowance. The
-servers compile with Inductor's deterministic mode, since otherwise each one
-benchmarks its own reduction launch configs and separately started servers
-can drift apart by a few bf16 logit steps. Guards:
+servers compile with Inductor's deterministic mode and without pointwise
+autotuning, since otherwise each one benchmarks its own launch configs and
+separately started servers can drift apart by a few bf16 logit steps. Guards:
 
 * decode must report an external prefix-cache hit for every transferred token
   of every prompt, so the match is not a local recompute;
@@ -303,12 +303,17 @@ CASES = [
 def _graph_args(mode: str) -> list[str]:
     if mode == "NONE":
         return ["--enforce-eager"]
-    # Inductor otherwise picks reduction launch configs by timing them, so each
-    # separately compiled server may sum in a different order and drift by a
-    # few bf16 logit steps; deterministic mode fixes the choice.
+    # Inductor otherwise picks launch configs by timing them, so separately
+    # compiled servers may drift by a few bf16 logit steps: reductions sum in a
+    # different order, and on ROCm the pointwise block size changes which
+    # multiply-adds are fused into FMAs. Deterministic mode fixes only the
+    # reduction configs, so pointwise autotuning is off as well.
     config = {
         "cudagraph_mode": mode,
-        "inductor_compile_config": {"deterministic": True},
+        "inductor_compile_config": {
+            "deterministic": True,
+            "triton.autotune_pointwise": False,
+        },
     }
     return ["--compilation-config", json.dumps(config)]
 
