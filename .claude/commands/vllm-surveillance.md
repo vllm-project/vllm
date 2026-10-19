@@ -181,6 +181,22 @@ print('--- statut ---'); print(collections.Counter(r.get('status') for r in rec)
 - **⚠️ MAIS une clé connue ne dit RIEN sur le client (arbitrage po-2025, 09/10).** Le hub claudish appelle `:5002` **sous MEDIUM pour *tous* ses clients** : la clé est un **seuil de sécurité**, pas un **discriminateur d'identité**. Pour attribuer une charge, le discriminant est la **TAILLE DES CORPS** — un client à contexte long (~57 K) se distingue par `body_bytes > 100 Ko`, jamais par la clé. Ne pas conclure « c'est interne, donc c'est bénin » : un client interne qui boucle (cf. latch Zoo #4025, ~20 h) pèse autant qu'un externe.
 - **`body_bytes` > 100 Ko = requêtes long-contexte** : ce sont elles qui pilotent le high-water VRAM. Un client qui boucle là-dessus (cf. latch Zoo #4025) se voit ici **avant** de se voir en VRAM.
 
+### (5quater) Charge Minimax/failover — amortissement des préfixes (ajouté 19/10, mandat user « surveiller l'utilisation comme le feu »)
+
+**Contexte.** Le moteur est onboardé comme marche de failover **Minimax** (mur quota ~23/10 09:00Z, reset 25/10 23:05Z — claudish #543) ; cap tandem Cand/Jamin doublé ; **maxing PERMANENT plusieurs jours attendu** = sessions récurrentes dont les préfixes sont déjà vus. Régime sain : chaque tour ne paie que son **delta** (gros prefill payé une fois, replay tier 51× moins cher). Pathologie : **re-prefill massifs récurrents** quand le working set dépasse GPU KV 429K + tier ~685K ≈ 1,11M tok → LRU jette du contexte vivant. Position lane (19/10, #543 c.6277127297) : cap progressif 2→3→5, routage-cloud avant le mur.
+
+**À relever chaque cycle tant que la charge Minimax est active :**
+
+1. **Hit rate prefix** (compteurs `/metrics`, reset à chaque boot — noter l'âge moteur) :
+   ```bash
+   curl -s http://localhost:5002/metrics | grep -E '^vllm:(prefix_cache|gpu_prefix_cache|cpu_prefix_cache).*(queries|hits)_total'
+   ```
+   En croisière longue (sessions récurrentes) le ratio hits/queries doit **monter**. Ratio plat ~0 avec des corps >100K en jeu = **amortissement cassé** → alerte user + registre.
+2. **Signature re-prefill (census §5ter)** : même IP/empreinte avec `body_bytes > 100K` **répétés à cadence de tour** (au lieu de delta 1-10K) = le client re-paie tout son contexte à chaque tour.
+3. **Préemptions** : `vllm:num_preemptions_total` (reset au boot) qui **monte en continu** = saturation KV réelle (plus discriminant que la VRAM). `kv_offload_cpu_cache_usage_perc` reste une gauge in-flight, PAS une jauge de remplissage.
+4. **Wedge watch renforcé** : les prefills géants affament les sondes (GEN_TIMEOUT 90 s) ; `WEDGE fail 1/2` pendant un gros prefill = attendu ; `2/2` → vérifier d'abord que des sessions longues sont en vol avant de conclure à une panne.
+5. **Escalade = décision user, jamais auto** : si préemptions récurrentes + hit rate cassé + re-prefill massifs → (a) **marge commit d'abord** (§3 — le tier 24 GiB peut monter 32-48 GiB SI marge < 85 %), (b) **ré-éval NVFP4** (re-commande 1 var `KV_DTYPE_SWIFT15=nvfp4`, record PR #123 : KV 750K mais −13/−17 % débit). **TQ k8v4 dominé par nvfp4 sur chaque métrique mesurée — ne jamais re-tester.**
+
 ## (6) Triage coordination
 
 Inbox `roosync_messages` : lire l'adressé `myia-ai-01:vllm`, répondre/ack, `mark_read` ciblé (**`bulk_mark_read` exige un filtre `from`/`subject` — sans filtre il marque TOUT l'inbox**). Adressage machine-only = bug #3960 : ignorer les dispatchs d'autres workspaces. Dashboards : lire global + workspace-vllm ; rendre les lignes demandées (split-brain, matrices, etc.) ; relayer à l'user les réponses aux issues ouvertes par la lane.
