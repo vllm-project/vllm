@@ -13,6 +13,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from enum import Enum
 from typing import Any, NamedTuple
 
@@ -36,6 +37,14 @@ def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return {name: spec.kv_cache_specs[name] for name in group.layer_names}
     return dict.fromkeys(group.layer_names, spec)
+
+
+def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
+    """Every field that shapes a layer's stored bytes, in a stable form."""
+    return {
+        "kind": type(spec).__name__,
+        **{item.name: str(getattr(spec, item.name)) for item in dataclass_fields(spec)},
+    }
 
 
 @dataclass(frozen=True)
@@ -159,8 +168,10 @@ class UMBPNamespace:
                 {
                     "layers": group.layer_names,
                     "block_size": group.kv_cache_spec.block_size,
-                    "kind": type(group.kv_cache_spec).__name__,
-                    "dtype": str(getattr(group.kv_cache_spec, "dtype", None)),
+                    "layer_specs": {
+                        name: _spec_fingerprint(spec)
+                        for name, spec in _layer_specs(group).items()
+                    },
                 }
                 for group in kv_cache_config.kv_cache_groups
             ],
@@ -168,7 +179,7 @@ class UMBPNamespace:
             "pp": parallel_config.pipeline_parallel_size,
             "pcp": getattr(parallel_config, "prefill_context_parallel_size", 1),
             "dcp": getattr(parallel_config, "decode_context_parallel_size", 1),
-            "layout_version": 1,
+            "layout_version": 2,
         }
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
