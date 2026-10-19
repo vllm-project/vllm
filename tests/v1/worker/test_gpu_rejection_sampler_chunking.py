@@ -53,6 +53,9 @@ def _make_rejection_sampler(
     rejection_sampler.enable_adaptive_verification = False
     rejection_sampler.synthetic_conditional_rates = None
     rejection_sampler.use_block_verification = False
+    rejection_sampler.fly_window_size = 0
+    rejection_sampler.fly_entropy_threshold = 0.3
+    rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
     return rejection_sampler
 
