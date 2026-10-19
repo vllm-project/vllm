@@ -739,6 +739,77 @@ guide: |
   --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}'
   ```
 
+  ## GB200: InferenceX AgentX aggregated (Dynamo + vLLM)
+
+  The GB200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp4-gb200-dynamo-vllm-agentic-agg-mtp`, [SemiAnalysisAI/InferenceX#4281](https://github.com/SemiAnalysisAI/InferenceX/pull/4281)) serves the NVFP4 checkpoint with the GQA EAGLE3 draft (three speculative tokens) as one aggregated vLLM worker behind the Dynamo frontend's KV-aware router. TP4 runs on one 4-GPU GB200 tray; TP8 spans two trays. Image `vllm/vllm-openai:nightly-5555a2d8f7116b2b4877f66516f4128176cf722a`, Dynamo `1.6.0.dev20261016` (`pip install ai-dynamo==1.6.0.dev20261016`).
+
+  | Clients | TP | `--max-num-seqs` | Host KV offload | CUDA graph capture sizes |
+  |---:|---:|---:|---|---|
+  | 1 | 4 | 2 | none | `1,2,4,8` |
+  | 1 | 8 | 2 | none | `1,2,4,8` |
+  | 10 | 4 | 16 | none | `1,2,4` then every 4 up to `64` |
+  | 20 | 4 | 8 | SimpleCPUOffload | every 4 from `4` to `32` |
+  | 25 | 4 | 16 | SimpleCPUOffload | every 4 from `4` to `64` |
+  | 30 | 4 | 45 | SimpleCPUOffload | every 4 from `4` to `180` |
+
+  Every list ends with `256,512,1024,2048` and uses `{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[...]}`. Sizes 1 and 2 give the drafter's decode steps full CUDA graphs at concurrency 1.
+
+  ### Services and environment
+
+  Start etcd and NATS (32 MB max payload) once:
+
+  ```bash
+  etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+  printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+  ```
+
+  On every worker tray:
+
+  ```bash
+  export VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_FLASHINFER_ALLREDUCE_BACKEND=trtllm
+  export NCCL_CUMEM_ENABLE=1 NCCL_MNNVL_ENABLE=1 NCCL_NVLS_ENABLE=1
+  export UCX_MEMTYPE_CACHE=n UCX_TLS=cuda_copy,cuda_ipc,rc
+  ```
+
+  Set `UCX_NET_DEVICES` and `NCCL_IB_HCA` to the node's RDMA devices. For TP8 across two trays, use `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl` instead of `trtllm`. Loading the 1M-context engine takes a while, so raise `VLLM_ENGINE_READY_TIMEOUT_S` and `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` well above their defaults.
+
+  ### Worker
+
+  ```bash
+  python3 -m dynamo.vllm --model nvidia/MiniMax-M3-NVFP4 --served-model-name nvidia/MiniMax-M3-NVFP4 \
+    --request-plane tcp --device-ids 0,1,2,3 \
+    --tensor-parallel-size 4 --pipeline-parallel-size 1 --trust-remote-code \
+    --attention-config '{"backend":"FLASHINFER","use_trtllm_attention":true,"indexer_kv_dtype":"fp8","minimax_m3_msa_decode_backend":"cutlass"}' \
+    --kv-cache-dtype fp8 --block-size 128 --enable-prefix-caching \
+    --speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","num_speculative_tokens":3,"attention_backend":"FLASHINFER","use_local_argmax_reduction":true}' \
+    --max-model-len 1048576 --max-num-batched-tokens 16384 --max-num-seqs <S> \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[<sizes from the table>,256,512,1024,2048]}' \
+    --gpu-memory-utilization 0.9 --no-enable-flashinfer-autotune --stream-interval 20 --language-model-only \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}' \
+    --reasoning-parser minimax_m3 --dyn-reasoning-parser minimax_m3 --dyn-tool-call-parser minimax_m3
+  ```
+
+  For TP8, run the same command on both trays with `--tensor-parallel-size 8 --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip>`.
+
+  For the host-KV-offload points, also set `VLLM_USE_SIMPLE_KV_OFFLOAD=1` and add:
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":777389080576,"cpu_bytes_to_use_per_rank":194347270144,"lazy_offload":true}}'
+  ```
+
+  That gives each of the four ranks about 181 GiB of pinned host memory for KV blocks.
+
+  ### Frontend
+
+  ```bash
+  export DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE_BYTES=8589934592
+  python3 -m dynamo.frontend --trust-remote-code \
+    --router-mode kv --router-kv-events --router-temperature 0 \
+    --router-session-affinity-ttl-secs 14400 --kv-cache-block-size 128
+  ```
+
+  The KV router uses the workers' KV events to send each request to the worker holding its prefix, and session affinity keeps a conversation on that worker; send the conversation ID as the Dynamo session ID.
+
   ## Quantized Variant (MXFP4 on MI355X)
 
   [`amd/MiniMax-M3-MXFP4`](https://huggingface.co/amd/MiniMax-M3-MXFP4)
