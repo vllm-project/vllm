@@ -12,6 +12,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
@@ -599,9 +600,8 @@ def dispatch_cpu_unquantized_gemm(
             )
         )
         if remove_weight:
-            layer.weight = torch.nn.Parameter(
-                torch.empty(0, dtype=dtype, device=layer.weight.device),
-                requires_grad=False,
+            replace_parameter(
+                layer, "weight", torch.empty(0, dtype=dtype, device=layer.weight.device)
             )
         logger.debug_once(
             "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
@@ -628,9 +628,8 @@ def dispatch_cpu_unquantized_gemm(
             bias,
         )
         if remove_weight:
-            layer.weight = torch.nn.Parameter(
-                torch.empty(0, dtype=dtype, device=layer.weight.device),
-                requires_grad=False,
+            replace_parameter(
+                layer, "weight", torch.empty(0, dtype=dtype, device=layer.weight.device)
             )
         logger.debug_once(
             "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
@@ -646,9 +645,10 @@ def dispatch_cpu_unquantized_gemm(
             handler = ops.create_onednn_mm(origin_weight.t(), 32)
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
-                layer.weight = torch.nn.Parameter(
+                replace_parameter(
+                    layer,
+                    "weight",
                     torch.empty(0, dtype=dtype, device=layer.weight.device),
-                    requires_grad=False,
                 )
             logger.debug_once("CPU unquantized GEMM dispatch: using oneDNN onednn_mm")
             return
