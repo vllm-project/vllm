@@ -161,6 +161,22 @@ steps:
       # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
 
+- label: ":amd: (MI355) Kimi K3 Multi-GPU"
+  key: amd-kimi-k3-multi-gpu-mi355
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - tests/models/kimi_k3/
+  - vllm/platforms/rocm.py
+  commands:
+  - 'pytest -v -s -m "distributed" models/kimi_k3'
+
 - label: ":nvidia: (4xB200) Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
