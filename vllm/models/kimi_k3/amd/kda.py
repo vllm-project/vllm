@@ -194,8 +194,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        # AITER's Gluon kernels currently require FP32 recurrent states.
+        self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
+            rocm_aiter_ops.is_kda_gluon_decode_available()
+        )
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
@@ -203,6 +206,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
+            recurrent_state_dtype,
         )
         if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
@@ -256,7 +260,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
         self.kda_prefill_backend = backend
         if backend == "auto":
-            if self.use_safe_gate and rocm_aiter_ops.is_kda_gluon_prefill_available():
+            if (
+                recurrent_state_dtype == torch.float32
+                and self.use_safe_gate
+                and rocm_aiter_ops.is_kda_gluon_prefill_available()
+            ):
                 self.kda_prefill_backend = "gluon"
             elif is_fused_kda_chunk_supported():
                 self.kda_prefill_backend = "fused"
