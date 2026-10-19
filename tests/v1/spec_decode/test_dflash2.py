@@ -151,11 +151,8 @@ def test_draft_quant_exclusions_include_global_layer_indices():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize(
-    "rows,heads,scale", [(8, 1, 1.0), (64, 2, 0.25), (256, 1, 1.0)]
-)
-@pytest.mark.parametrize("neox", [True, False])
-def test_beam_fused_context_kv(rows, heads, scale, neox):
+@pytest.mark.parametrize("rows,heads", [(8, 1), (64, 2), (256, 1)])
+def test_beam_fused_context_kv(rows, heads):
     """All layer pointers and strided cache pages match the staged context path."""
     from vllm import _custom_ops as ops
     from vllm.models.beam.nvidia.dflash2_context_ops import store_context_kv
@@ -171,9 +168,9 @@ def test_beam_fused_context_kv(rows, heads, scale, neox):
     keys = torch.empty_like(staged[0])
     ops.rms_norm(keys, staged[0], weight, 1e-6)
     ops.rotary_embedding(
-        positions.repeat(layers), keys.view(layers * rows, -1), None, dim, rope, neox
+        positions.repeat(layers), keys.view(layers * rows, -1), None, dim, rope, True
     )
-    values = staged[1] * scale
+    values = staged[1]
     storage = torch.randn(
         (rows + page - 1) // page,
         layers,
@@ -195,9 +192,7 @@ def test_beam_fused_context_kv(rows, heads, scale, neox):
     pointers = torch.tensor(
         [c.data_ptr() for c in caches], device="cuda", dtype=torch.int64
     )
-    store_context_kv(
-        kv, weight, positions, rope, pointers, slots, caches[0], 1e-6, scale, neox
-    )
+    store_context_kv(kv, weight, positions, rope, pointers, slots, caches[0], 1e-6)
     torch.testing.assert_close(storage, expected, rtol=0.01, atol=0.015625)
 
 
@@ -242,8 +237,6 @@ def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
             slots,
             actual[:, 0].view(dtype),
             1e-6,
-            0.25,
-            True,
             scale_ptrs,
         )
 
@@ -254,7 +247,7 @@ def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
     for factor in (1.0, 0.5):
         scales.mul_(factor)
         kv.mul_(factor)
-        store_context_kv(*args, bf16_ptrs, positions, bf16[:, 0], 1e-6, 0.25, True)
+        store_context_kv(*args, bf16_ptrs, positions, bf16[:, 0], 1e-6)
         for layer in range(layers):
             source = bf16[:, layer].transpose(1, 2).reshape(-1, heads, 2 * dim)
             cache = expected[:, layer].transpose(1, 2)

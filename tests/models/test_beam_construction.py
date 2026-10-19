@@ -17,7 +17,6 @@ from torch import nn
 
 from vllm import LLM, SamplingParams
 from vllm.models.beam.nvidia import model as beam
-from vllm.models.beam.nvidia import moe as beam_moe
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -37,7 +36,6 @@ TINY_CONFIG = {
     "head_dim": 16,
     "max_position_embeddings": 512,
     "rms_norm_eps": 1e-6,
-    "rope_theta": 10000.0,
     "sliding_window": 128,
     "moe_intermediate_size": 256,
     "num_experts_per_tok": 2,
@@ -212,33 +210,3 @@ def test_dflash_target_layers_capture_layer_outputs(monkeypatch):
     assert len(aux_hidden_states) == 2
     torch.testing.assert_close(aux_hidden_states[0], torch.tensor([[2.0, 3.0]]))
     torch.testing.assert_close(aux_hidden_states[1], torch.tensor([[3.0, 4.0]]))
-
-
-@pytest.mark.parametrize("scale,expected", [(None, 1.0), (0.0, 0.0), (2.5, 2.5)])
-def test_moe_preserves_explicit_routed_scaling(monkeypatch, scale, expected):
-    """Only an absent scale defaults to one; zero must disable routed output."""
-
-    def gate(*args, out_dtype, **kwargs):
-        result = nn.Module()
-        result.out_dtype = out_dtype
-        return result
-
-    def experts(**kwargs):
-        assert kwargs["routed_scaling_factor"] == expected
-        assert kwargs["apply_routed_scale_to_output"] is True
-        return nn.Identity()
-
-    monkeypatch.setattr(beam_moe, "GateLinear", gate)
-    monkeypatch.setattr(beam_moe, "FusedMoEFactory", experts)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_config=BeamConfig(**{**TINY_CONFIG, "routed_scaling_factor": scale})
-        ),
-        quant_config=None,
-        parallel_config=SimpleNamespace(
-            use_sequence_parallel_moe=False,
-            enable_eplb=False,
-            eplb_config=SimpleNamespace(num_redundant_experts=0),
-        ),
-    )
-    beam_moe.BeamSparseMoeBlock(config)

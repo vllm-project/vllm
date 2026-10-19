@@ -11,13 +11,12 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from .activation import beam_silu_mul
 
 
 class BeamMLP(nn.Module):
-    """Dense SwiGLU MLP (used by ``mlp_only_layers``)."""
+    """SwiGLU MLP for the ``dense`` entries of ``mlp_layer_types``."""
 
     def __init__(
         self,
@@ -64,20 +63,17 @@ class BeamSparseMoeBlock(nn.Module):
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
-        router_dtype = STR_DTYPE_TO_TORCH_DTYPE[config.moe_router_dtype or "float32"]
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
             bias=False,
-            params_dtype=router_dtype,
-            out_dtype=router_dtype,
+            params_dtype=torch.float32,
+            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
-        e_score_correction_bias = None
-        if config.topk_method == "noaux_tc":
-            e_score_correction_bias = nn.Parameter(
-                torch.zeros(config.num_experts, dtype=torch.float32)
-            )
+        e_score_correction_bias = nn.Parameter(
+            torch.zeros(config.num_experts, dtype=torch.float32)
+        )
         self.gate.register_parameter("e_score_correction_bias", e_score_correction_bias)
 
         self.experts = FusedMoEFactory(
@@ -93,13 +89,9 @@ class BeamSparseMoeBlock(nn.Module):
             ),
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
-            scoring_func=config.scoring_func,
+            scoring_func="sigmoid",
             e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=(
-                config.routed_scaling_factor
-                if config.routed_scaling_factor is not None
-                else 1.0
-            ),
+            routed_scaling_factor=config.routed_scaling_factor,
             apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,
             enable_eplb=parallel_config.enable_eplb,

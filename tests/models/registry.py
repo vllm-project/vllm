@@ -220,7 +220,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "reflection/Beam-1.0-501B-A23B-NVFP4",
         is_available_online=False,
         # Include MoE in the reduced one-layer initialization test.
-        hf_overrides={"mlp_only_layers": []},
+        hf_overrides={"mlp_layer_types": ["sparse"]},
     ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}

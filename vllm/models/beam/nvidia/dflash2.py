@@ -38,15 +38,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen3_dflash import _resolve_layer_attention
 from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    get_draft_quant_config,
     maybe_prefix,
 )
-from vllm.transformers_utils.config import set_default_rope_theta
 
 from .dflash2_ops import candidate_edges
 
@@ -64,7 +61,6 @@ class DFlash2BeamAttention(nn.Module):
         prefix: str,
     ) -> None:
         super().__init__()
-        draft_config = config.dflash_config
         hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         total_num_heads = config.num_attention_heads
@@ -76,13 +72,13 @@ class DFlash2BeamAttention(nn.Module):
             assert tp_size % total_num_kv_heads == 0
         self.num_heads = total_num_heads // tp_size
         self.num_kv_heads = max(1, total_num_kv_heads // tp_size)
-        self.head_dim = (
-            getattr(config, "head_dim", None) or hidden_size // total_num_heads
-        )
+        self.head_dim = config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.v_scale = draft_config.get("attention_value_scale")
-        sliding_window, self.causal = _resolve_layer_attention(config, layer_idx)
+        # Every layer is non-causal sliding-window attention over the block.
+        assert config.layer_types[layer_idx] == "sliding_attention"
+        assert not config.is_causal
+        self.causal = False
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -101,8 +97,7 @@ class DFlash2BeamAttention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=config.max_position_embeddings,
-            # Fixed by how the drafter was distilled, not by the target.
-            is_neox_style=getattr(config, "is_neox_style", True),
+            is_neox_style=True,
             rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
@@ -111,7 +106,7 @@ class DFlash2BeamAttention(nn.Module):
             self.head_dim**-0.5,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
-            per_layer_sliding_window=sliding_window,
+            per_layer_sliding_window=config.sliding_window,
             prefix=f"{prefix}.attn",
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -124,8 +119,6 @@ class DFlash2BeamAttention(nn.Module):
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.v_scale is not None:
-            v = v * self.v_scale
         cache, slots = None, None
         mapping = get_forward_context().slot_mapping
         assert isinstance(mapping, dict)
@@ -193,11 +186,6 @@ class DFlash2BeamDecoderLayer(nn.Module):
         prefix: str,
     ) -> None:
         super().__init__()
-        if config.hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. Only silu is supported."
-            )
-        set_default_rope_theta(config, default_theta=1000000)
         self.self_attn = DFlash2BeamAttention(
             config, layer_idx, vllm_config.cache_config, f"{prefix}.self_attn"
         )
@@ -341,19 +329,7 @@ class DFlash2BeamModel(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         draft_config = config.dflash_config
-        if (
-            getattr(config, "attention_bias", False)
-            or draft_config.get("attention_sink_bias")
-            or get_draft_quant_config(vllm_config)
-        ):
-            raise NotImplementedError(
-                "The Beam DFlash2 drafter supports only unquantized drafts "
-                "without attention biases or sinks."
-            )
         params_dtype = vllm_config.model_config.dtype
-        self.input_embedding_scale = float(
-            draft_config.get("input_embedding_scale", 1.0)
-        )
 
         # Replaced by the target's embedding when the speculator loads the draft.
         self.embed_tokens = VocabParallelEmbedding(
@@ -377,11 +353,8 @@ class DFlash2BeamModel(nn.Module):
             ]
         )
 
-        target_hidden_size = (
-            getattr(config, "target_hidden_size", None) or config.hidden_size
-        )
         self.fc = ReplicatedLinear(
-            target_hidden_size * len(draft_config["target_layer_ids"]),
+            config.hidden_size * len(draft_config["target_layer_ids"]),
             config.hidden_size,
             bias=False,
             params_dtype=params_dtype,
@@ -404,10 +377,7 @@ class DFlash2BeamModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        embeds = self.embed_tokens(input_ids)
-        if self.input_embedding_scale != 1.0:
-            embeds = embeds * self.input_embedding_scale
-        return embeds
+        return self.embed_tokens(input_ids)
 
     def build_context_kv_weights(self) -> None:
         """Stack every layer's K/V projection and K-norm weight.
@@ -540,8 +510,6 @@ class DFlash2BeamModel(nn.Module):
             slots,
             cache.view(fp8_dtype) if fp8_dtype is not None else cache,
             first.k_norm.variance_epsilon,
-            first.v_scale if first.v_scale is not None else 1.0,
-            rotary.is_neox_style,
             self._context_scale_ptrs,
         )
 
@@ -593,11 +561,9 @@ class DFlash2BeamForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         draft_config = self.config.dflash_config
-        softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size,
-            scale=float(draft_config.get("output_multiplier", 1.0)),
-            soft_cap=softcap if softcap > 0 else None,
+            soft_cap=float(draft_config["final_logit_softcapping"]),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

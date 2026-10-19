@@ -8,20 +8,13 @@ import torch
 
 def _torch_rms_norm(x, weight, eps):
     y = x.float()
-    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps)
-    if weight is not None:
-        y = y * weight.float()
+    y = y * torch.rsqrt(y.square().mean(-1, keepdim=True) + eps) * weight.float()
     return y.to(x.dtype)
 
 
 def _torch_boundary(x, residual, post_weight, post_eps, next_weight, next_eps, scales):
-    if post_eps is not None:
-        x = _torch_rms_norm(x, post_weight, post_eps)
-    residual = residual.to(x.dtype)
-    if scales is not None:
-        x = x * scales[0]
-        residual = residual * scales[1]
-    hidden = x + residual
+    x = _torch_rms_norm(x, post_weight, post_eps) * scales[0]
+    hidden = x + residual.to(x.dtype) * scales[1]
     normalized = (
         _torch_rms_norm(hidden, next_weight, next_eps) if next_eps is not None else None
     )
@@ -107,10 +100,9 @@ def test_dense_activation_rounds_after_product(default_vllm_config, dtype, rows,
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("has_weight", [False, True])
 @pytest.mark.parametrize("shape", [(33, 513), (17, 6, 128)])
 @torch.inference_mode()
-def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, has_weight, shape):
+def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, shape):
     """QKV slices and near-epsilon values retain the reference's FP32 affine."""
     from vllm.models.beam.nvidia.layernorm import beam_rms_norm
 
@@ -123,11 +115,7 @@ def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, has_weight, sh
     )
     x = storage[..., 1 : shape[-1] + 1]
     x[::2].mul_(1e-3)
-    weight = (
-        torch.randn(shape[-1], device="cuda", dtype=dtype, generator=generator)
-        if has_weight
-        else None
-    )
+    weight = torch.randn(shape[-1], device="cuda", dtype=dtype, generator=generator)
     expected = _torch_rms_norm(x, weight, 1e-6)
     actual = beam_rms_norm(x, weight, 1e-6)
     # FP32 reduction trees may differ; allow one BF16 ULP after final rounding.
@@ -142,14 +130,9 @@ def test_fused_norm_preserves_fp32_affine_for_strided_rows(dtype, has_weight, sh
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("shape", [(0, 5120), (33, 513)])
-@pytest.mark.parametrize(
-    "post,next_,scaled",
-    [(True, True, True), (True, True, False), (False, True, True), (True, False, True)],
-)
+@pytest.mark.parametrize("next_", [False, True])
 @torch.inference_mode()
-def test_norm_residual_norm_preserves_intermediate_rounding(
-    dtype, shape, post, next_, scaled
-):
+def test_norm_residual_norm_preserves_intermediate_rounding(dtype, shape, next_):
     """Both residual and next input must retain BF16 casts between fused stages."""
     from vllm.models.beam.nvidia.layernorm import beam_norm_residual_norm
 
@@ -159,15 +142,15 @@ def test_norm_residual_norm_preserves_intermediate_rounding(
     ]
     residual = torch.randn_like(x)
     x[::2].mul_(1e-3)
-    post_weight = torch.randn(shape[1], device="cuda", dtype=dtype) if post else None
+    post_weight = torch.randn(shape[1], device="cuda", dtype=dtype)
     next_weight = torch.randn(shape[1], device="cuda", dtype=dtype) if next_ else None
-    scales = (0.125, 0.9682458365518543) if scaled else None
+    scales = (0.125, 0.9682458365518543)
     original_x, original_residual = x.clone(), residual.clone()
     args = (
         x,
         residual,
         post_weight,
-        1e-6 if post else None,
+        1e-6,
         next_weight,
         1e-6 if next_ else None,
         scales,
@@ -190,9 +173,7 @@ def _separate_qk_norm_rope(
     head_dim,
     rotary_dim=0,
     neox=True,
-    mode="none",
-    offset=1,
-    divisor=1.0,
+    ssmax=False,
 ):
     from vllm import _custom_ops as ops
 
@@ -206,14 +187,8 @@ def _separate_qk_norm_rope(
         qf, kf = q.float(), k.float()
         ops.rotary_embedding(positions, qf, kf, head_dim, cache, neox)
         q, k = qf.to(q.dtype), kf.to(k.dtype)
-    elif mode != "none":
-        p = positions.float() + offset
-        if mode == "default":
-            scale = p.log() / divisor
-        elif mode == "root10":
-            scale = (0.1 * torch.log1p(p / 2048)).exp()
-        else:
-            scale = (130 * torch.expm1(0.001 * p.log())).clamp(min=1.0)
+    elif ssmax:
+        scale = (0.1 * torch.log1p((positions.float() + 1) / 2048)).exp()
         q = (q * scale[:, None]).to(q.dtype)
     return q, k
 
@@ -221,41 +196,30 @@ def _separate_qk_norm_rope(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("rows", [0, 1, 17, 512, 2049])
-@pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("floor,temperature", [(0.13, 0.7), (0.0, 1.0)])
 @torch.inference_mode()
-def test_output_gate_preserves_activation_dtype_rounding(
-    dtype, rows, bias, packed, floor, temperature
-):
+def test_output_gate_preserves_activation_dtype_rounding(dtype, rows, packed):
     from vllm.models.beam.nvidia.attention_ops import beam_output_gate
 
     torch.manual_seed(42)
     x = torch.randn(rows, 768, device="cuda", dtype=dtype)
     gate = torch.randn(rows, 1792 if packed else 768, device="cuda", dtype=dtype) * 8
     gate = gate[:, -768:]
-    weight = torch.randn(6, device="cuda", dtype=dtype) if bias else None
-    kwargs = dict(num_heads=6, head_dim=128, floor=floor, temperature=temperature)
+    weight = torch.randn(6, device="cuda", dtype=dtype)
     # Preserve each activation-dtype operation in the parent implementation.
-    g = gate.view(rows, 6, 128)
-    if weight is not None:
-        g = g + weight[None, :, None]
-    expected = x * (
-        floor + (1 - floor) * torch.sigmoid(g.reshape_as(gate) / temperature)
-    )
-    actual = beam_output_gate(x, gate, weight, **kwargs)
+    g = gate.view(rows, 6, 128) + weight[None, :, None]
+    expected = x * torch.sigmoid(g.reshape_as(gate))
+    actual = beam_output_gate(x, gate, weight, num_heads=6, head_dim=128)
     torch.testing.assert_close(actual, expected, rtol=2e-6, atol=1e-7)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize(
-    "rotary_dim,neox,weighted", [(0, True, False), (128, True, True), (64, False, True)]
-)
+@pytest.mark.parametrize("rotary_dim,neox", [(0, True), (128, True), (64, False)])
 @pytest.mark.parametrize("head_dim,q_heads,k_heads", [(128, 6, 1), (80, 4, 2)])
 @torch.inference_mode()
 def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
-    dtype, rotary_dim, neox, weighted, head_dim, q_heads, k_heads
+    dtype, rotary_dim, neox, head_dim, q_heads, k_heads
 ):
     from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
 
@@ -266,8 +230,8 @@ def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
     qkv = torch.randn(rows, sum(sizes) + 1, device="cuda", dtype=dtype)[:, 1:]
     q, k, _ = qkv.split(sizes, -1)
     q[::2].mul_(1e-3)
-    qw = torch.randn(head_dim, device="cuda", dtype=dtype) if weighted else None
-    kw = torch.randn(head_dim, device="cuda", dtype=dtype) if weighted else None
+    qw = torch.randn(head_dim, device="cuda", dtype=dtype)
+    kw = torch.randn(head_dim, device="cuda", dtype=dtype)
     positions = torch.arange(rows, device="cuda") * 3
     angle = torch.randn(max(1, rows * 3), rotary_dim // 2, device="cuda")
     cache = torch.cat((angle.cos(), angle.sin()), -1)
@@ -310,7 +274,7 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
 
     def fused():
         return beam_qk_norm_rope(
-            *args, ssmax_mode="root10", value=v, kv_cache=cache, slot_mapping=slots
+            *args, ssmax=True, value=v, kv_cache=cache, slot_mapping=slots
         )
 
     fused()
@@ -325,7 +289,7 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
         slots[0] = -1
     cache.zero_()
     graph.replay()
-    expected = beam_qk_norm_rope(*args, ssmax_mode="root10")
+    expected = beam_qk_norm_rope(*args, ssmax=True)
     for result, reference in zip(actual, expected):
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
     valid = slots >= 0
@@ -342,19 +306,8 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize(
-    "mode,offset,divisor",
-    [
-        ("default", 1, 1.0),
-        ("default", 16, 2.772588722239781),
-        ("root10", 1, 1.0),
-        ("root1000", 1, 1.0),
-    ],
-)
 @torch.inference_mode()
-def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(
-    dtype, mode, offset, divisor
-):
+def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(dtype):
     from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
 
     torch.manual_seed(42)
@@ -364,8 +317,9 @@ def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(
     qkv = torch.randn(len(positions), 1025, device="cuda", dtype=dtype)[:, 1:]
     q, k, _ = qkv.split((768, 128, 128), -1)
     qw, kw = [torch.randn(128, device="cuda", dtype=dtype) for _ in range(2)]
-    args = (q, k, qw, kw, 1e-6, positions, None, 128, 0, True, mode, offset, divisor)
-    actual, expected = beam_qk_norm_rope(*args), _separate_qk_norm_rope(*args)
+    args = (q, k, qw, kw, 1e-6, positions, None, 128, 0, True)
+    actual = beam_qk_norm_rope(*args, ssmax=True)
+    expected = _separate_qk_norm_rope(*args, ssmax=True)
     for value, reference in zip(actual, expected):
         # Norm and position scaling each round to BF16; allow two rounding steps.
         torch.testing.assert_close(
@@ -392,23 +346,23 @@ def test_attention_fusions_replay_with_changed_positions_and_gates(rotary_dim):
     angle = torch.randn(128, 64, device="cuda")
     cache = torch.cat((angle.cos(), angle.sin()), -1)
     gate = torch.randn_like(q)
+    weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn(6, device="cuda", dtype=torch.bfloat16)
 
     def run():
         nq, nk = beam_qk_norm_rope(
             q,
             k,
-            None,
-            None,
+            weight,
+            weight,
             1e-6,
             positions,
             cache,
             128,
             rotary_dim,
-            ssmax_mode="root10",
+            ssmax=not rotary_dim,
         )
-        return beam_output_gate(
-            nq, gate, None, num_heads=6, head_dim=128, floor=0.13, temperature=0.7
-        ), nk
+        return beam_output_gate(nq, gate, bias, num_heads=6, head_dim=128), nk
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -471,14 +425,12 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
             cache if rotary_dim else None,
             128,
             rotary_dim,
-            ssmax_mode="none" if rotary_dim else "root10",
+            ssmax=not rotary_dim,
             value=qkv[:tokens, 896:] if insert_kv else None,
             kv_cache=kv_cache if insert_kv else None,
             slot_mapping=slots[: tokens - 1] if insert_kv else None,
         )
-        beam_output_gate(
-            q, q, bias, num_heads=6, head_dim=128, floor=0.1, temperature=1.2
-        )
+        beam_output_gate(q, q, bias, num_heads=6, head_dim=128)
         beam_rms_norm(x[:tokens], norm_weight, 1e-6)
         beam_softcap_logits(x[:tokens], 30.0)
         beam_norm_residual_norm(
