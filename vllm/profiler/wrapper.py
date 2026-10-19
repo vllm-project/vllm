@@ -696,6 +696,14 @@ _SUPPORTED_PROFILER_KINDS: dict[str, frozenset[ProfilerKind]] = {
 }
 
 
+def get_default_torch_profiler_activities() -> list[torch.profiler.ProfilerActivity]:
+    """Default torch profiler activities for the current platform."""
+    return [
+        TorchProfilerActivityMap[activity]
+        for activity in _DEFAULT_TORCH_PROFILER_ACTIVITIES[current_platform.device_type]
+    ]
+
+
 def validate_worker_profiler_config(profiler_config: ProfilerConfig) -> None:
     """Validate profiler selections against the worker's capabilities."""
     profiler_type = profiler_config.profiler
