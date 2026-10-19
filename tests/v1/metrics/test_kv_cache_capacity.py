@@ -45,6 +45,7 @@ def test_kv_cache_capacity_is_preserved_per_dp_engine(monkeypatch):
     )
     vllm_config = SimpleNamespace(
         cache_config=cache_config,
+        parallel_config=SimpleNamespace(_coord_store_port=0),
         model_config=SimpleNamespace(
             is_diffusion=False,
             max_model_len=8192,
