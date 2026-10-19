@@ -119,3 +119,83 @@ def test_sharded_spec_decode_path(monkeypatch):
     out = processor.apply_with_spec_decode(logits, num_draft_tokens=[3])
     assert out[0, STOP_ID - LOCAL].item() == float("-inf")
     assert torch.equal(out[1:], logits[1:])
+
+
+# ---------------------------------------------------------------------------
+# Full-vocabulary logits with TP > 1: the default LM-head path all-gathers
+# (and trims to the original vocab) before sampling, so the processor must
+# keep masking in global coordinates even when TP > 1. Regression tests for
+# the case where TP size alone was used to decide the coordinate system.
+# ---------------------------------------------------------------------------
+
+
+def test_full_vocab_logits_masked_with_tp_gt_1(monkeypatch):
+    """TP > 1 + full-vocabulary logits must mask in global coordinates.
+
+    Regression: with the coordinate system inferred from TP size alone,
+    rank 0 (shard [0, 32)) dropped the global id 40 even though the
+    gathered logits contain the full vocabulary, so the stop token was
+    never masked.
+    """
+    processor = make_processor(monkeypatch, rank=0)
+    add_request(processor, [STOP_ID])
+    logits = torch.randn(1, VOCAB)
+    logits[0, STOP_ID] = 10.0
+    out = processor.apply(logits)
+    assert out[0, STOP_ID].item() == float("-inf")
+    assert out.argmax(-1).item() != STOP_ID
+    mask = torch.ones(VOCAB, dtype=torch.bool)
+    mask[STOP_ID] = False
+    assert torch.equal(out[0, mask], logits[0, mask])
+
+
+def test_full_vocab_logits_masked_on_any_rank(monkeypatch):
+    """With full-vocabulary logits the TP rank must not affect masking."""
+    processor = make_processor(monkeypatch, rank=3)  # shard [96, 128)
+    add_request(processor, [STOP_ID])
+    logits = torch.randn(1, VOCAB)
+    out = processor.apply(logits)
+    assert out[0, STOP_ID].item() == float("-inf")
+
+
+def test_full_vocab_restore_path_with_tp_gt_1(monkeypatch):
+    """Structured-output restore semantics hold in global coordinates."""
+    processor = make_processor(monkeypatch, rank=0)
+    add_request(
+        processor,
+        [STOP_ID],
+        structured_outputs=StructuredOutputsParams(json={"type": "object"}),
+    )
+    logits = torch.full((1, VOCAB), float("-inf"))
+    out = processor.apply(logits)
+    assert out[0, STOP_ID].item() == float("-inf")
+
+
+def test_full_vocab_spec_decode_path_with_tp_gt_1(monkeypatch):
+    """apply_with_spec_decode masks in global coordinates for full logits."""
+    processor = make_processor(monkeypatch, rank=0)
+    add_request(processor, [STOP_ID])
+    logits = torch.randn(3, VOCAB)
+    out = processor.apply_with_spec_decode(logits, num_draft_tokens=[3])
+    assert out[0, STOP_ID].item() == float("-inf")
+    assert torch.equal(out[1:], logits[1:])
+
+
+# ---------------------------------------------------------------------------
+# Constructor contract: the processor must be constructible from a bare
+# VllmConfig (model_config/parallel_config=None, as done by some existing
+# tests); without a vocab size it falls back to global-only indexing.
+# ---------------------------------------------------------------------------
+
+
+def test_constructs_without_model_config():
+    """A config without model_config/parallel_config falls back to global-only
+    indexing (same contract as constructing with a bare ``VllmConfig()``,
+    whose model_config and parallel_config are both None)."""
+    vllm_config = SimpleNamespace(model_config=None, parallel_config=None)
+    processor = MinTokensLogitsProcessor(vllm_config, torch.device(DEVICE), False)
+    add_request(processor, [STOP_ID])
+    logits = torch.randn(1, VOCAB)
+    expected = logits.clone()
+    expected[0, STOP_ID] = float("-inf")
+    assert torch.equal(processor.apply(logits), expected)
