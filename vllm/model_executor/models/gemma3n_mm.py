@@ -635,12 +635,16 @@ class Gemma3nForConditionalGeneration(
 
             # NOTE (NickLucche) In order to be compatible with cudagraph, the
             # buffer needs to be consistent, so we pre-allocate here.
-            self.per_layer_embeddings = torch.zeros(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                self.config.text_config.num_hidden_layers,
-                self.config.text_config.hidden_size_per_layer_input,
-                device=self.language_model.model.embed_tokens.weight.device,
-                dtype=self.language_model.model.embed_tokens.weight.dtype,
+            self.register_buffer(
+                "per_layer_embeddings",
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    self.config.text_config.num_hidden_layers,
+                    self.config.text_config.hidden_size_per_layer_input,
+                    device=self.language_model.model.embed_tokens.weight.device,
+                    dtype=self.language_model.model.embed_tokens.weight.dtype,
+                ),
+                persistent=False,
             )
 
     def _parse_and_validate_image_input(
