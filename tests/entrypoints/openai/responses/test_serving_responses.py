@@ -1536,6 +1536,9 @@ async def test_responses_per_request_metrics_follow_server_flag():
     enabled_response = await _make_full_metrics_response(True)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms == pytest.approx(
+        500.0
+    )
 
 
 @pytest.mark.asyncio
@@ -2210,6 +2213,30 @@ def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
     delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
     completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
     return (delta if streamed else []) + [completed]
+
+
+def test_harmony_context_records_first_content_timestamp():
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(
+            segments=[Segment("analysis", None, "thinking")],
+            reasoning_token_count=1,
+        ),
+        ChunkResult(
+            segments=[Segment("final", None, "answer")],
+            reasoning_token_count=0,
+        ),
+    ]
+    context = HarmonyContext([], [], frozenset(), parser)
+
+    reasoning_output = _make_request_output("thinking", [10], _PER_REQUEST_STATS)
+    reasoning_output.finished = False
+    reasoning_output.outputs[0].finish_reason = None
+    context.append_output(reasoning_output)
+    assert context.first_content_token_ts is None
+
+    context.append_output(_make_request_output("answer", [20], _PER_REQUEST_STATS))
+    assert context.first_content_token_ts == _PER_REQUEST_STATS.last_token_ts
 
 
 async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
