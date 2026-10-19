@@ -178,9 +178,18 @@ _TOOL_PARSERS_TO_REGISTER = {
         "plamo3_engine_tool_parser",
         "Plamo3EngineToolParser",
     ),
+    "muse": (
+        "muse_tool_parser",
+        "MuseToolParser",
+    ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",
         "MuseGlimmerToolParser",
+    ),
+    # Alias of "muse".
+    "musespark1x": (
+        "muse_tool_parser",
+        "MuseToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",
@@ -220,6 +229,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "step5": (
+        "step5_tool_parser",
+        "Step5ToolParser",
     ),
     "inkling": (
         "inkling_tool_parser",
