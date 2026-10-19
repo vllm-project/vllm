@@ -19,7 +19,7 @@
 #
 # Trust: ci-infra sets ROCM_CI_REPO.
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-ci-pr  (PR-namespaced tags, separate cache)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 

@@ -1,7 +1,7 @@
 group: Hardware - AMD Build
 
 # ROCm images: .buildkite/scripts/rocm/build.sh + docker/docker-bake-rocm.hcl. ci-infra's AMD CI pipeline
-# (test-template-amd.j2) renders these same steps and sets ROCM_CI_REPO (trusted rocm/vllm-ci, else rocm/vllm-ci-pr).
+# (test-template-amd.j2) renders these same steps and sets ROCM_CI_REPO (trusted rocm/vllm-ci, else rocm/vllm-dev).
 # Base groups are per stack/repo/PR/branch: main CI shares them with .buildkite/rocm-release.yaml.
 steps:
   - label: ":docker: Ensure ROCm stack + runtime"
