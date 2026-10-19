@@ -20,9 +20,10 @@ Usage:
 
 import argparse
 import json
-import re
 import statistics
 import sys
+
+import regex as re
 
 # Matches the SpecDecoding metrics line emitted by SpecDecodingLogging.log().
 _LINE = re.compile(
