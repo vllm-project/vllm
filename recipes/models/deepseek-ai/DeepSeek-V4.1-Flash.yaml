@@ -362,7 +362,7 @@ strategy_overrides:
       # H200 takes the TP4 default on 8x141 GB. Moving the Engram tables to
       # pinned host DRAM (23.6 GiB per rank, 94 GiB across the replica) drops
       # resident weights to 81.2 GiB per GPU and leaves 38.5 GiB of KV per GPU,
-      # about 20M tokens, measured on the InferenceX AgentX sweep. Without the
+      # about 20M tokens, measured on the InferenceX validation sweep. Without the
       # offload the tables stay row-sharded in HBM and the KV pool collapses.
       h200:
         extra_args:
@@ -763,7 +763,7 @@ guide: |
   BASH
   ```
 
-  The AgentX sweep uses task concurrencies 1, 2, 4, 8, 16 and 32, GPU-resident KV,
+  The validation sweep uses task concurrencies 1, 2, 4, 8, 16 and 32, GPU-resident KV,
   and `WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126`. Five-token DSpark
   uses golden acceptance length 3.51. For replay setup and results, see
   [InferenceX #3058](https://github.com/SemiAnalysisAI/InferenceX/pull/3058) and its
@@ -893,7 +893,7 @@ guide: |
   serving profile. For high interactivity on any of them, use
   `--tensor-parallel-size 4`.
 
-  ## B200 AgentX tuning
+  ## B200 scheduling and KV offload
 
   On B200, TP2 at concurrency 1 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'`,
   `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. DEP2 (TP1 x DP2 with expert
@@ -906,323 +906,70 @@ guide: |
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
   server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`.
 
-  ## B300 Dynamo sidecar deployment
+  ## Dynamo sidecar serving
 
-  This deployment uses the original [DeepSeek-V4.1-Flash checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash),
-  not the newer 1017 checkpoint selected by the default builder. It follows
-  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231), at
-  revision `5fafe8ccb7e4a849eadaea7703456cb0f950f89b`. The commands below are a
-  separate deployment from the builder's vLLM/SMG strategies: each engine runs
-  `vllm-rs serve`, with a colocated Dynamo gRPC sidecar and a shared KV-aware frontend.
-  Both aggregated TP4 and disaggregated DEP2-prefill/DEP8-decode layouts use
-  five-token probabilistic DSpark with block rejection and adaptive verification disabled.
+  Dynamo can route requests to vLLM's native gRPC server through a colocated
+  sidecar. Choose the checkpoint, hardware and parallelism in the command
+  builder above. For compatible runtime installation and complete launch
+  examples, see the [Dynamo vLLM sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md).
 
-  ### Runtime and fabric prerequisites
+  The B300 deployment in [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231)
+  validated this integration with the original
+  [DeepSeek-V4.1-Flash checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash).
+  The builder defaults to DeepSeek-V4.1-Flash-1017; that checkpoint was not
+  covered by this deployment's validation.
 
-  Use `vllm/vllm-openai:nightly-x86_64-dev-20261012-59e75f4` on x86-64 B300 nodes.
-  Stage the original checkpoint on every worker and mount it at `/model`.
-  Reserve host memory for Engram weight offload; the frontend also budgets 8 GB
-  for its tokenizer cache. Each DEP2 prefill engine additionally reserves
-  75,161,927,680 bytes (70 GiB) per DP rank for lazy CPU KV offload.
-  Use host networking, sufficient shared memory, GPU access, and the host's EFA
-  devices in every worker container. Host EFA drivers must already be installed.
-  Install the matching Dynamo packages in the serving container without replacing vLLM:
+  ### Connect the engine and sidecar
 
-  ```bash
-  uv pip install --system --extra-index-url https://pypi.nvidia.com \
-    ai-dynamo-runtime==1.6.0.dev20261010 ai-dynamo==1.6.0.dev20261010
+  Use the generated model and hardware arguments with `vllm-rs serve`.
+  Add `--grpc-port 19000` and set `--reasoning-parser None`; omit the engine's
+  `--tool-call-parser` and `--enable-auto-tool-choice` flags because the
+  sidecar handles reasoning and tool parsing. For KV-aware routing, enable
+  KV events on the engine with `--kv-events-config`:
+
+  ```json
+  {"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}
   ```
 
-  For disaggregation, use [AWS EFA installer 1.50.0](https://efa-installer.amazonaws.com/aws-efa-installer-1.50.0.tar.gz)'s Ubuntu 24.04 x86-64
-  userspace packages (archive SHA256
-  `fa6dff8593d866866c13cb4640d9059835cd4efa427971f100ab40c97bef2841`).
-  Install `udev`, `libhwloc15`, the installer's `rdma-core` packages
-  (`libibverbs1`, `ibverbs-providers`, `libibumad3`, `librdmacm1`, `rdma-core`),
-  `libfabric1-aws`, and `libfabric-aws-bin`. Make `/opt/amazon/efa/lib`
-  visible to the dynamic linker and run `ldconfig`. If the NIXL LIBFABRIC
-  plugin requires `libcudart.so.12`, install `nvidia-cuda-runtime-cu12` and
-  expose that package's library directory to the linker as well.
-  Check `ldd` on `libplugin_LIBFABRIC.so` and run
-  `/opt/amazon/efa/bin/fi_info -p efa` in each container before launch.
-  See the [AWS EFA installation guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html).
-
-  ### Discovery and frontend
-
-  Provide a shared etcd endpoint. For a single-member service, set `INFRA_IP`
-  to its reachable host address and run an installed `etcd` binary:
-
-  ```bash
-  etcd --data-dir ./etcd-data --listen-client-urls http://0.0.0.0:2379 \
-    --advertise-client-urls "http://$INFRA_IP:2379"
-  ```
-
-  Set these values in every frontend and worker shell, substituting the etcd host:
+  With etcd running, set its reachable address in each frontend and sidecar
+  shell, along with the shared request and event planes:
 
   ```bash
   export ETCD_ENDPOINTS=http://ETCD_HOST:2379
-  export DYN_REQUEST_PLANE=tcp DYN_EVENT_PLANE=zmq PYTHONHASHSEED=0
+  export DYN_REQUEST_PLANE=tcp DYN_EVENT_PLANE=zmq
   ```
 
-  Run one frontend. Keep a stable `X-Dynamo-Session-ID` HTTP header across
-  turns of the same conversation to use the four-hour session affinity:
+  In a separate shell on the engine host, connect one sidecar to the engine:
 
   ```bash
-  export DYN_ROUTER_TEMPERATURE=0 DYN_LOG=warn
-  unset DYN_ROUTER_QUEUE_THRESHOLD
-  export DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE=1
-  export DYN_TOKENIZER_CACHE_BYTES=8000000000
-  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600
-  export DYN_TCP_CHANNEL_BUFFER=128 DYN_TCP_REQUEST_TIMEOUT=60
-  uv run --no-project python -m dynamo.frontend --http-port 8000 \
-    --router-mode kv --router-session-affinity-ttl-secs 14400
-  ```
-
-  The active-decode/prefill admission thresholds are unset in this deployment.
-  For disaggregation, the frontend can share the first decode host; give it a
-  separate CPU allocation and NUMA affinity appropriate to that machine.
-
-  ### Worker arguments
-
-  Save the following as `worker-args.sh` in each worker container. These arrays
-  hold the serving settings; the profile selector below supplies graph and batch limits.
-  The prefill and decode roles use TP1 with DP2/DP8 and expert parallelism;
-  they are independent engines, not a TP2 or TP8 process group.
-
-  ```bash
-  AGG_ARGS=(
-    --served-model-name 'deepseek-ai/DeepSeek-V4.1-Flash'
-    --language-model-only
-    --tokenizer-mode 'deepseek_v41'
-    --reasoning-parser 'None'
-    --tensor-parallel-size '4'
-    --engram-config '{"cpu_offload":true,"use_thp":true}'
-    --kernel-config '{"enable_flashinfer_autotune":true}'
-    --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
-    --kv-cache-dtype 'fp8'
-    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
-    --max-model-len '1048576'
-    --numa-bind
-  )
-  PD_ARGS=(
-    --served-model-name 'deepseek-ai/DeepSeek-V4.1-Flash'
-    --language-model-only
-    --tokenizer-mode 'deepseek_v41'
-    --reasoning-parser 'None'
-    --kv-cache-dtype 'fp8'
-    --max-model-len '1048576'
-    --tensor-parallel-size '1'
-    --enable-expert-parallel
-    --enable-ep-weight-filter
-    --cpu-distributed-timeout-seconds '7200'
-    --attention-config '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
-    --engram-config '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}'
-    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
-    --prefill-schedule-interval '2'
-    --gpu-memory-utilization '0.95'
-    --kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
-    --numa-bind
-  )
-  PREFILL_ARGS=(
-    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":75161927680,"lazy_offload":true}}]}}'
-    --data-parallel-size '2'
-    --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}'
-    --max-num-seqs '64'
-    --max-num-batched-tokens '16384'
-    --long-prefill-token-threshold '8192'
-    --prefix-cache-retention-interval '32768'
-  )
-  DECODE_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}}'
-    --data-parallel-size '8'
-    --enable-eplb
-    --eplb-config '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":true,"log_balancedness_interval":3000}'
-    --no-enable-prefix-caching
-    --numa-bind-nodes 0 0 0 0 1 1 1 1
-  )
-  ```
-
-  Save these graph/batch profiles as `profiles.sh`. Choose the same PD profile
-  for the decode engine and its associated prefill layout:
-
-  | Profile | Prefill engines (2 GPUs each) | Decode engines (8 GPUs each) | Decode max sequences | Decode token budget |
-  | --- | ---: | ---: | ---: | ---: |
-  | pd-1 | 2 | 1 | 18 | 180 |
-  | pd-2 | 2 | 1 | 40 | 400 |
-  | pd-3 | 3 | 1 | 72 | 720 |
-  | pd-4 | 4 | 1 | 132 | 1320 |
-  | pd-5 | 5 | 1 | 168 | 1680 |
-
-  ```bash
-  case "$PROFILE" in
-    agg-serial)
-      PROFILE_ARGS=(
-    --max-num-seqs '1'
-    --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[5,6,10,12,15,18,20,24,25,30,35,36,40,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
-    --max-cudagraph-capture-size '4092'
-    --max-num-batched-tokens '4096'
-      ) ;;
-    agg-batch)
-      PROFILE_ARGS=(
-    --max-num-seqs '32'
-    --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048,2304,2560,2816,3072,3328,3584,3840,4096]}'
-    --max-cudagraph-capture-size '8190'
-    --max-num-batched-tokens '8192'
-      ) ;;
-    pd-1)
-      PROFILE_ARGS=(
-    --max-num-seqs '18'
-    --max-num-batched-tokens '180'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":108,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108]}'
-      ) ;;
-    pd-2)
-      PROFILE_ARGS=(
-    --max-num-seqs '40'
-    --max-num-batched-tokens '400'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":240,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240]}'
-      ) ;;
-    pd-3)
-      PROFILE_ARGS=(
-    --max-num-seqs '72'
-    --max-num-batched-tokens '720'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":432,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432]}'
-      ) ;;
-    pd-4)
-      PROFILE_ARGS=(
-    --max-num-seqs '132'
-    --max-num-batched-tokens '1320'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":792,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432,438,444,450,456,462,468,474,480,504,528,552,576,600,624,648,672,696,720,744,768,792]}'
-      ) ;;
-    pd-5)
-      PROFILE_ARGS=(
-    --max-num-seqs '168'
-    --max-num-batched-tokens '1680'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1008,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432,438,444,450,456,462,468,474,480,486,492,498,504,510,516,522,528,534,540,546,552,558,564,570,576,582,588,594,600,606,612,618,624,630,636,642,648,654,660,666,672,678,684,690,696,702,708,714,720,726,732,738,744,750,756,762,768,774,780,786,792,798,804,810,816,822,828,834,840,846,852,858,864,870,876,882,888,894,900,906,912,918,924,930,936,942,948,954,960,966,972,978,984,990,996,1002,1008]}'
-      ) ;;
-    *) echo 'Choose agg-serial, agg-batch, or pd-1 through pd-5' >&2; return 1 ;;
-  esac
-  ```
-
-  `agg-serial` sets one maximum sequence and a 4096-token budget;
-  `agg-batch` sets 32 maximum sequences and an 8192-token budget. Both use four GPUs.
-  PD profiles change the decode batch limits and graph captures while retaining
-  the same prefill settings. Place up to four independent DEP2 prefill engines
-  on an eight-GPU node. `pd-5` needs a second prefill node for its fifth engine,
-  plus the separate eight-GPU decode node.
-
-  ### Launch an engine and its sidecar
-
-  In a worker shell, source the common discovery exports and the following
-  role-specific environment. Aggregated workers need:
-
-  ```bash
-  export VLLM_USE_V2_MODEL_RUNNER='1'
-  export VLLM_ENGINE_READY_TIMEOUT_S='7200'
-  ```
-
-  Both disaggregated roles additionally need:
-
-  ```bash
-  export VLLM_USE_V2_MODEL_RUNNER='1'
-  export VLLM_ENGINE_READY_TIMEOUT_S='7200'
-  export VLLM_RPC_TIMEOUT='600000'
-  export VLLM_ALLREDUCE_USE_SYMM_MEM='0'
-  export VLLM_RANDOMIZE_DP_DUMMY_INPUTS='1'
-  export NCCL_CUMEM_ENABLE='1'
-  export UCX_TLS='cuda_copy,cuda_ipc,srd,tcp'
-  export UCX_MEMTYPE_CACHE='n'
-  export UCX_MEMTYPE_REG_WHOLE='n'
-  export UCX_RNDV_PIPELINE_ERROR_HANDLING='y'
-  export UCX_MODULE_DIR='/usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/ucx'
-  export NIXL_UCX_SGL_ENABLE='0'
-  export FI_PROVIDER='efa'
-  export FI_EFA_USE_DEVICE_RDMA='1'
-  export FI_EFA_FORK_SAFE='1'
-  export DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS='9000'
-  ```
-
-  Decode workers also set `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4`.
-  Keep the pinned NIXL UCX module directory; if the image is repackaged, locate
-  its equivalent rather than using a host UCX installation.
-
-  For each independent engine, set `ROLE` (`agg`, `prefill`, or `decode`),
-  `PROFILE`, `ENGINE_IP` (that engine's reachable host IP), `INSTANCE`
-  (0–3, unique among engines on one host), and `CUDA_VISIBLE_DEVICES`.
-  An aggregated engine uses `0,1,2,3`; a prefill engine uses one disjoint pair
-  (`0,1`, `2,3`, `4,5`, or `6,7`); decode uses all eight GPUs.
-  Each engine has its own RPC, KV-event, NIXL, HTTP and gRPC ports.
-  Keep those ports reachable between worker and frontend hosts.
-
-  Run this block once per engine, in its own shell:
-
-  ```bash
-  set -eo pipefail
-  : "${ROLE:?Set ROLE}" "${PROFILE:?Set PROFILE}" "${ENGINE_IP:?Set ENGINE_IP}"
-  : "${INSTANCE:?Set INSTANCE}" "${CUDA_VISIBLE_DEVICES:?Set CUDA_VISIBLE_DEVICES}"
-  case "$ROLE:$PROFILE" in
-    agg:agg-*|prefill:pd-*|decode:pd-*) ;;
-    *) echo "ROLE and PROFILE must select the same deployment" >&2; exit 1 ;;
-  esac
-  source worker-args.sh
-  source profiles.sh
-  export DYN_SYSTEM_PORT=$((7500 + INSTANCE))
-  export VLLM_NIXL_SIDE_CHANNEL_HOST="$ENGINE_IP"
-  export VLLM_NIXL_SIDE_CHANNEL_PORT=$((5400 + INSTANCE))
-  export DYN_VLLM_KV_EVENT_PORT=$((5200 + INSTANCE))
-  export VLLM_PLUGINS=
-  grpc_port=$((19000 + INSTANCE))
-  http_port=$((6100 + INSTANCE))
-  rpc_port=$((8400 + INSTANCE))
-  export VLLM_PORT=$((20000 + INSTANCE))
-  events=$(printf '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://%s:%s"}' "$ENGINE_IP" "$DYN_VLLM_KV_EVENT_PORT")
-  SIDECAR_ARGS=()
-  case "$ROLE" in
-    agg)
-      ROLE_ARGS=("${AGG_ARGS[@]}" "${PROFILE_ARGS[@]}" --kv-events-config "$events")
-      deadline=3600 ;;
-    prefill)
-      ROLE_ARGS=("${PD_ARGS[@]}" "${PREFILL_ARGS[@]}"
-        --data-parallel-size-local 2 --data-parallel-address "$ENGINE_IP"
-        --data-parallel-rpc-port "$rpc_port" --kv-events-config "$events")
-      SIDECAR_ARGS=(--disaggregation-mode prefill --component prefill)
-      deadline=9000 ;;
-    decode)
-      export VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4
-      ROLE_ARGS=("${PD_ARGS[@]}" "${DECODE_ARGS[@]}" "${PROFILE_ARGS[@]}"
-        --data-parallel-size-local 8 --data-parallel-address "$ENGINE_IP"
-        --data-parallel-rpc-port "$rpc_port")
-      SIDECAR_ARGS=(--disaggregation-mode decode)
-      deadline=9000 ;;
-    *) echo 'Choose agg, prefill, or decode' >&2; exit 1 ;;
-  esac
-  vllm-rs serve /model --host 127.0.0.1 --port "$http_port" \
-    --grpc-port "$grpc_port" "${ROLE_ARGS[@]}" &
-  engine_pid=$!
-  trap 'kill "$engine_pid"' EXIT
+  export DYN_VLLM_KV_EVENT_PORT=5200
   uv run --no-project python -m dynamo.vllm.sidecar \
-    --grpc-endpoint "127.0.0.1:$grpc_port" \
-    --grpc-startup-deadline-secs "$deadline" \
-    --dyn-tool-call-parser deepseek_v41 --dyn-reasoning-parser deepseek_v41 \
-    "${SIDECAR_ARGS[@]}"
+    --grpc-endpoint 127.0.0.1:19000 \
+    --dyn-tool-call-parser deepseek_v41 --dyn-reasoning-parser deepseek_v41
   ```
 
-  The sidecar performs reasoning/tool parsing; the engine keeps
-  `--reasoning-parser None`. Prefill uses a NIXL LIBFABRIC push connector composed
-  with lazy CPU KV offload, while decode consumes through NIXL and disables prefix
-  caching. The decode NUMA map assumes four GPUs per socket; adjust the binding
-  to the actual host topology if it differs. Run a health check on the frontend
-  and a chat completion after all engines register:
+  Start a shared frontend:
+
+  ```bash
+  uv run --no-project python -m dynamo.frontend --http-port 8000 --router-mode kv
+  ```
+
+  For disaggregated serving, follow Dynamo's launch examples to configure
+  the prefill and decode engines, NIXL KV transfer and the host's transport.
+  Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
+  and `--disaggregation-mode decode` to decode sidecars. Allocate distinct
+  gRPC and KV-event ports when running several engines on the same host.
+
+  Check the frontend after the workers register:
 
   ```bash
   curl --fail http://FRONTEND_HOST:8000/health
   curl --fail http://FRONTEND_HOST:8000/v1/chat/completions \
-    -H 'Content-Type: application/json' -H 'X-Dynamo-Session-ID: example-session' \
+    -H 'Content-Type: application/json' \
     -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
   ```
 
-  These examples omit scheduler/benchmark plumbing, telemetry-only settings,
-  cache-directory mounts and logging controls. They retain production serving
-  limits, kernel/graph choices, transport, offload, routing and DSpark settings.
-  Synthetic acceptance injection is excluded; real requests use block rejection.
+  Set the request's `model` to the served model name selected for the engine.
 
   ## DGX Station (GB300) Tensor Parallel
 
