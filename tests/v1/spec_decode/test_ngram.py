@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 
 from vllm.config import (
@@ -11,6 +16,41 @@ from vllm.v1.spec_decode.ngram_proposer import (
     NgramProposer,
     _find_longest_matched_ngram_and_propose_tokens,
 )
+
+
+def test_ngram_preserves_torch_threads_on_first_proposal():
+    # A fresh process is required to exercise Numba's first pool initialization.
+    code = textwrap.dedent("""\
+        from types import SimpleNamespace
+        import numpy as np
+        import numba
+        import torch
+        from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
+        assert torch.get_num_threads() == 1
+        proposer = NgramProposer(SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                prompt_lookup_min=2, prompt_lookup_max=2,
+                num_speculative_tokens=2),
+            model_config=SimpleNamespace(max_model_len=16),
+            scheduler_config=SimpleNamespace(max_num_seqs=1),
+            parallel_config=SimpleNamespace(tensor_parallel_size=1)))
+        for _ in range(2):
+            drafts = proposer.propose(
+                2, [[2]], np.array([4], dtype=np.int32),
+                np.array([[1, 2, 1, 2]], dtype=np.int32))
+            assert drafts == [[1, 2]]
+            assert torch.get_num_threads() == 1
+            assert numba.get_num_threads() == 2
+    """)
+    env = dict(
+        os.environ,
+        OMP_NUM_THREADS="1",
+        NUMBA_NUM_THREADS="2",
+        NUMBA_THREADING_LAYER="omp",
+        CUDA_VISIBLE_DEVICES="",
+    )
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=120)
 
 
 def test_find_longest_matched_ngram_and_propose_tokens():

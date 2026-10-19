@@ -97,7 +97,11 @@ class NgramProposer:
         # avoid calling numba function with empty list which causes error
         # ValueError: cannot compute fingerprint of empty list
         if num_ngram_requests := len(valid_ngram_requests):
+            torch_threads = torch.get_num_threads()
             original_num_numba_threads = get_num_threads()
+            # Initializing Numba's OpenMP pool can reset Torch's thread limit.
+            if torch.get_num_threads() != torch_threads:
+                torch.set_num_threads(torch_threads)
             # Ensure we use at least one thread.
             # If total tokens is small, using multiple threads
             # may slow down due to overhead.
