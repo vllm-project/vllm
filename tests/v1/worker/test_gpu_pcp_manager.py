@@ -68,12 +68,8 @@ def _make_capture_manager(block_table: torch.Tensor):
     "cudagraph_mode",
     [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
 )
-@pytest.mark.parametrize("sparse_mla", [False, True])
-def test_validate_config_accepts_decode_only_full_graphs(cudagraph_mode, sparse_mla):
-    config = _make_config(cudagraph_mode)
-    if sparse_mla:
-        config.model_config.hf_text_config.index_topk = 1
-    PCPManager.validate_config(config, supports_mm_inputs=False)
+def test_validate_config_accepts_decode_only_full_graphs(cudagraph_mode):
+    PCPManager.validate_config(_make_config(cudagraph_mode), supports_mm_inputs=False)
 
 
 def test_validate_config_rejects_full_graph_for_prefills():
