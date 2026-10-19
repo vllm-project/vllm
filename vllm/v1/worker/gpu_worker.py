@@ -1191,6 +1191,7 @@ class Worker(WorkerBase):
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.
+        # A context request is a request that has not yet generated any tokens
         if not self.profiler:
             return nullcontext()
 
@@ -1199,10 +1200,7 @@ class Worker(WorkerBase):
             return nullcontext()
 
         iteration_details = scheduler_output.iteration_details
-        if iteration_details is None:
-            return self.profiler.annotate_context_manager(
-                f"execute_{scheduler_output.total_num_scheduled_tokens}"
-            )
+        assert iteration_details is not None
 
         if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase
@@ -1234,9 +1232,6 @@ class Worker(WorkerBase):
             new_req_ids = {
                 new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
             }
-            cached_prefill_req_ids = (
-                scheduler_output.scheduled_cached_reqs.prefill_req_ids or ()
-            )
             num_computed_tokens_ids = {
                 new_req.req_id: new_req.num_computed_tokens
                 for new_req in scheduler_output.scheduled_new_reqs
@@ -1252,7 +1247,10 @@ class Worker(WorkerBase):
                 query_len = num_tokens
                 total_scheduled_tokens += query_len
                 seq_len = num_computed_tokens_ids.get(req_id, 0) + query_len
-                if req_id in new_req_ids or req_id in cached_prefill_req_ids:
+                if (
+                    scheduler_output.scheduled_cached_reqs.is_context_phase(req_id)
+                    or req_id in new_req_ids
+                ):
                     ctx_seq_len_sum += seq_len
                     ctx_qq_compute += query_len * query_len
                     ctx_qk_compute += query_len * seq_len

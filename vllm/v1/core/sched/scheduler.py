@@ -1808,18 +1808,11 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
-        prefill_req_ids: set[str] | None = None
-        if (
-            self.vllm_config.profiler_config.profiler is not None
-            and self.vllm_config.profiler_config.detailed_trace_annotation
-        ):
-            prefill_req_ids = set()
 
         num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
-            is_prefill = req.is_prefill_chunk
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -1838,7 +1831,6 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append(token_ids)
             if idx >= num_running_reqs:
                 resumed_req_ids.add(req_id)
-                is_prefill = True
             if not self.use_v2_model_runner:  # noqa: SIM102
                 if req_id not in self.prev_step_scheduled_req_ids:
                     all_token_ids[req_id] = req.all_token_ids.copy()
@@ -1846,15 +1838,12 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(
-                req.num_output_tokens + req.num_output_placeholders
-            )
-            if iteration_details is not None and not is_prefill:
+            num_outputs = req.num_output_tokens + req.num_output_placeholders
+            num_output_tokens.append(num_outputs)
+            if iteration_details is not None and num_outputs > 0:
                 # Count decode requests here; all other scheduled reqs are prefills
                 iteration_details.num_decode_requests += 1
                 iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
-            if prefill_req_ids is not None and is_prefill:
-                prefill_req_ids.add(req_id)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1864,7 +1853,6 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
-            prefill_req_ids=prefill_req_ids,
         )
 
     def _reject_on_encoder_cache_embed_mismatch(
