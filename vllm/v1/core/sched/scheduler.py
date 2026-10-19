@@ -3006,10 +3006,9 @@ class Scheduler(SchedulerInterface):
                 request = self.running.pop()
                 self._preempt_request(request, timestamp, drop_stale_output=True)
 
-            # Clear scheduled request ids cache. Since we are forcing preemption
-            # + resumption in the same step, we must act as if these requests were
-            # not scheduled in the prior step. They will be flushed from the
-            # persistent batch in the model runner.
+            # Clear scheduled request IDs so resumed requests are flushed from
+            # the model runner's persistent batch, even within the same step.
+            # Requests with retained in-flight KV records wait for them to drain.
             self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
@@ -3585,7 +3584,8 @@ class Scheduler(SchedulerInterface):
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
+                "(failure_policy=fail, %d tokens affected, excluding preempted "
+                "requests). Request IDs: %s",
                 total_failed_requests,
                 total_failed_tokens,
                 all_failed_req_ids,
@@ -3594,7 +3594,8 @@ class Scheduler(SchedulerInterface):
 
         logger.warning(
             "Recovered from KV load failure: "
-            "%d request(s) rescheduled (%d tokens affected).",
+            "%d request(s) rescheduled "
+            "(%d tokens affected, excluding preempted requests).",
             total_failed_requests,
             total_failed_tokens,
         )
