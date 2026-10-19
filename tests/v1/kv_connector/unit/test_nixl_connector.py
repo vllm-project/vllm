@@ -148,6 +148,7 @@ class FakeNixlWrapper:
     def __init__(self, agent_name: str, *args, **kwargs):
         self._cycles_before_xfer_done = 0
         self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(lambda: 0)
+        self.invalid_remote_agents: set[str] = set()
 
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
@@ -170,6 +171,7 @@ class FakeNixlWrapper:
         return self.AGENT_METADATA
 
     def add_remote_agent(self, agent_metadata: bytes) -> str:
+        self.invalid_remote_agents.discard(self.REMOTE_AGENT_NAME)
         return self.REMOTE_AGENT_NAME
 
     def get_new_notifs(self) -> dict[str, list[bytes]]:
@@ -190,6 +192,9 @@ class FakeNixlWrapper:
 
     def remove_remote_agent(self, agent: str) -> None:
         pass
+
+    def check_remote_metadata(self, agent: str) -> bool:
+        return agent not in self.invalid_remote_agents
 
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
         pass
@@ -2276,6 +2281,7 @@ def recv_worker():
     worker._handshake_futures = {}
     worker._remote_agents = {}
     worker._engine_by_address = {}
+    worker._failed_remote_engines = set()
     worker._failed_reqs_by_engine = defaultdict(set)
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
@@ -3172,9 +3178,8 @@ class TestPeerReplacement:
         return metadata
 
     def _fail_old_peer(self):
-        # An earlier request failed too, so this failure releases the peer.
-        self.worker._failed_reqs_by_engine["old"].add("earlier-req")
         self.worker.start_load_kv(self._request("old"))
+        self.nixl.invalid_remote_agents.add("old")
         self.transport.check_xfer_state.return_value = "ERR"
 
     def test_cleans_old_peer_after_confirmed_handshake(self):
@@ -3226,7 +3231,12 @@ class TestPeerReplacement:
         ],
         ids=["healthy", "failed-sibling-completes", "failed-sibling-fails"],
     )
-    def test_waits_for_reads_before_cleanup_and_failure_reporting(self, states, failed):
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_waits_for_reads_before_cleanup_and_failure_reporting(
+        self, states, failed, invalidated
+    ):
+        if invalidated:
+            self.nixl.invalid_remote_agents.add("old")
         self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
         self.worker._recving_transfers["old-req"] = [1, 2] if failed else [1]
         self.transport.check_xfer_state.side_effect = states
@@ -3275,6 +3285,7 @@ class TestPeerReplacement:
         self.worker._ensure_handshake("other", "other-host", 1234, 1)
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
 
         self._connect("other", host="other-host")
         self.worker.get_transfer_results()
@@ -3297,32 +3308,37 @@ class TestPeerReplacement:
         assert "old" in self.worker._handshake_futures
         self.transport.send_notif.assert_not_called()
 
-    def test_failed_read_releases_peer_with_loaded_metadata(self):
-        # The connection to a peer can stay failed while its metadata stays
-        # loaded, so failed reads release every rank of the peer.
+    @pytest.mark.parametrize("missing", [False, True, RuntimeError("probe failed")])
+    def test_recovery_requires_confirmed_missing_metadata(self, missing):
         self._fail_old_peer()
+        # A missing rank suffices even if another rank still has metadata.
         self.worker._remote_agents["old"][(0, 1)] = "old-other-rank"
+        self.nixl.invalid_remote_agents.clear()
+        if missing is True:
+            self.nixl.invalid_remote_agents.add("old-other-rank")
+        elif isinstance(missing, Exception):
+            self.transport.check_remote_metadata.side_effect = missing
 
         result = self.worker.get_transfer_results()
         assert result.finished_recving == result.failed_recving == {"old-req"}
         assert self.worker.get_block_ids_with_load_errors() == {1}
-        assert "old" not in self.worker._remote_agents
+        assert ("old" not in self.worker._remote_agents) is (missing is True)
+        assert self.transport.release_dlist_handle.call_count == (missing is True)
+
+    def test_failed_reads_release_peer_with_loaded_metadata(self):
+        # The connection to a peer can stay failed while its metadata stays
+        # loaded, so repeated failed reads release every rank of the peer.
+        self.worker._remote_agents["old"][(0, 1)] = "old-other-rank"
+        self.transport.check_xfer_state.return_value = "ERR"
+        for req_id in ("old-req", "next"):
+            self.worker.start_load_kv(self._request("old", req_id=req_id))
+            result = self.worker.get_transfer_results()
+            assert result.finished_recving == result.failed_recving == {req_id}
+            assert ("old" in self.worker._remote_agents) is (req_id == "old-req")
         assert self.transport.release_dlist_handle.call_count == 1
         self.transport.remove_remote_agent.assert_has_calls(
             [call("old"), call("old-other-rank")], any_order=True
         )
-
-    def test_single_failed_request_keeps_peer(self):
-        self.worker.start_load_kv(self._request("old"))
-        self.transport.check_xfer_state.return_value = "ERR"
-        assert self.worker.get_transfer_results().failed_recving == {"old-req"}
-        assert "old" in self.worker._remote_agents
-        assert not self.worker._invalid_remote_engines
-
-        self.worker.start_load_kv(self._request("old", req_id="next"))
-        assert self.worker.get_transfer_results().failed_recving == {"next"}
-        assert "old" not in self.worker._remote_agents
-        self.transport.remove_remote_agent.assert_called_once_with("old")
 
     def test_completed_read_resets_failed_requests(self):
         for req_id, state in [("a", "ERR"), ("b", "DONE"), ("c", "ERR")]:
@@ -3373,12 +3389,12 @@ class TestPeerReplacement:
         self,
     ):
         self._connect("healthy", host="other-host")
-        self.worker._failed_reqs_by_engine["old"].add("earlier-req")
         self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
         self.worker._recving_metadata.update(self._request("healthy").reqs_to_recv)
         self.worker._recving_transfers.update(
             {"old-req": [10, 11], "healthy-req": [12]}
         )
+        self.nixl.invalid_remote_agents.add("old")
         self.transport.check_xfer_state.side_effect = (
             lambda h: "ERR" if h == 10 else "PROC"
         )
@@ -3446,7 +3462,7 @@ class TestPeerReplacement:
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
     @pytest.mark.parametrize("expired", [False, True])
-    def test_success_and_expiry_keep_peer(self, expired):
+    def test_success_and_expiry_do_not_probe_metadata(self, expired):
         metadata = self._request("old")
         if expired:
             metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 0.0
@@ -3461,6 +3477,7 @@ class TestPeerReplacement:
             assert result.failed_recving == ({"old-req"} if expired else set())
             assert expiry.call_count == int(expired)
             failure.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
         self.transport.remove_remote_agent.assert_not_called()
 
     @pytest.mark.parametrize("awaiting_kvs", [False, True])
@@ -3484,6 +3501,7 @@ class TestPeerReplacement:
         self.transport.remove_remote_agent.assert_not_called()
 
     def test_eviction_clears_pending_recovery(self):
+        self.worker._failed_remote_engines.add("old")
         self.worker._failed_reqs_by_engine["old"].add("old-req")
         self.worker._invalid_remote_engines.add("old")
         self.worker._engine_ttl = 1
@@ -3491,6 +3509,7 @@ class TestPeerReplacement:
         self.worker._evict_stale_engines()
         self.worker.get_transfer_results()
         self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert not self.worker._failed_remote_engines
         assert not self.worker._failed_reqs_by_engine
         assert not self.worker._invalid_remote_engines
 
