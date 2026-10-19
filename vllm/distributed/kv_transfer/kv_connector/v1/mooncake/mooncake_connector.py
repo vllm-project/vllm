@@ -2461,6 +2461,12 @@ class MooncakeConnectorWorker:
                             self._acked_layout_peers.add(worker_addr)
                         self.process_pulling_result(response, pull_metas)
                         if status == MooncakeXferResponseStatus.FINISH:
+                            # P may omit expired requests from its final response.
+                            self._handle_failed_recv(
+                                pull_metas,
+                                list(pull_metas),
+                                "peer finished without reporting a transfer result",
+                            )
                             return
             except zmq.ContextTerminated:
                 logger.debug(
