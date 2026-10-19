@@ -35,6 +35,9 @@ pub struct GenerateSamplingParams {
     /// Whether to include the matched stop string in the output. Only
     /// meaningful with `stop`.
     pub include_stop_str_in_output: Option<bool>,
+    /// Decode token IDs to replay instead of sampling, gated by
+    /// `--enable-trace-replay` in Python. Not supported.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
