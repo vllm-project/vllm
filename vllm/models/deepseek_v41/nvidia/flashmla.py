@@ -64,7 +64,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
-        self._prefill_num_heads = (
+        self._prefill_num_heads = self._get_prefill_num_heads()
+
+    def _get_prefill_num_heads(self) -> int:
+        return (
             self.n_local_heads
             if current_platform.is_device_capability_family(90)
             and self.n_local_heads in (8, 16, 32)
