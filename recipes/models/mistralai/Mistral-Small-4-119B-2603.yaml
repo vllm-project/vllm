@@ -1,0 +1,263 @@
+meta:
+  title: "Mistral-Small-4-119B"
+  slug: "mistral-small-4-119b"
+  provider: "Mistral AI"
+  description: "Mistral Small 4 (119B MoE, 6.5B active) — multimodal hybrid instruct + reasoning model with native FP8 weights and 256K context"
+  date_added: 2026-05-13
+  date_updated: 2026-05-13
+  tasks:
+    - multimodal
+  related_recipes:
+    - mistralai/Mistral-Medium-3.5-128B
+    - mistralai/Mistral-Large-3-675B-Instruct-2512
+
+model:
+  model_id: "mistralai/Mistral-Small-4-119B-2603"
+  min_vllm_version: "0.20.0"
+  architecture: moe
+  parameter_count: "119B"
+  active_parameters: "6.5B"
+  context_length: 262144
+  base_args:
+    - "--max-model-len"
+    - "262144"
+  base_env: {}
+
+dependencies:
+  - note: "Mistral tokenizer / chat-template runtime — Mistral Small 4 needs >= 1.11.0 (vLLM 0.20.1+ bundles it, pin explicitly if you hit an older cached wheel)"
+    command: 'uv pip install -U "mistral_common>=1.11.0"'
+  - note: "Transformers v5 silences YaRN warnings and is required for the latest Mistral 4 chat template"
+    command: "uv pip install -U transformers"
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice — emits [TOOL_CALLS] / [ARGS] from the chat template"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  reasoning:
+    description: "Mistral reasoning parser extracts [THINK]...[/THINK] into message.reasoning (emitted when reasoning_effort='high')"
+    args:
+      - "--reasoning-parser"
+      - "mistral"
+  spec_decoding:
+    description: "EAGLE speculative decoding via the mistralai/Mistral-Small-4-119B-2603-eagle 2-layer draft head"
+    default_mode: eagle
+    modes:
+      eagle:
+        label: "EAGLE"
+        description: "EAGLE speculative decoding."
+        args:
+          - "--speculative-config"
+          - '{"model":"mistralai/Mistral-Small-4-119B-2603-eagle","num_speculative_tokens":3,"method":"eagle","max_model_len":"65536"}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark drafting with an externally trained draft model; the served checkpoint is unchanged."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"model": "RedHatAI/Mistral-Small-4-119B-2603-speculator.dspark", "num_speculative_tokens": 7, "method": "dspark"}'
+      dflash:
+        label: "DFlash"
+        description: "DFlash speculative decoding with an externally trained draft model; the served checkpoint is unchanged."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"model": "RedHatAI/Mistral-Small-4-119B-2603.dflash", "num_speculative_tokens": 7, "method": "dflash"}'
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 143
+    description: "Native FP8 E4M3 weights (vision tower / projector / lm_head kept in BF16); recommended on 2xB200/H200 or MI300X"
+  nvfp4:
+    model_id: "mistralai/Mistral-Small-4-119B-2603-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 72
+    description: "NVFP4 4-bit weights for B200-class GPUs (Marlin fallback on Hopper)"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Mistral-Small-4-119B-2603-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 72
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides:
+  single_node_tp:
+    # Mistral recommends TP=2 for both FP8 and NVFP4; TEP/DEP not yet
+    # documented by the model authors. Override the default full-node TP.
+    tp: 2
+
+guide: |
+  ## Overview
+
+  Mistral Small 4 119B is a hybrid Mixture-of-Experts model from Mistral AI:
+  **128 experts, 4 active per token** (plus 1 shared expert), 119B total
+  parameters with **6.5B activated per token**. It unifies the capabilities of
+  three earlier Mistral families — **Instruct**, **Reasoning** (formerly
+  Magistral), and **Devstral** — into a single checkpoint, with per-request
+  toggling between fast instant-reply and step-by-step reasoning via
+  `reasoning_effort`.
+
+  The weights ship pre-quantized to FP8 E4M3 (the vision tower, multimodal
+  projector, and `lm_head` are kept in BF16). Multimodal input accepts text
+  and image (Pixtral-style encoder, 1540x1540, patch size 14). Context length
+  is **256K** via YaRN scaling (factor 128x over the 8K base) — the config
+  advertises 1M positions but Mistral recommends serving at 256K.
+
+  Mistral Small 4 also ships two companion checkpoints:
+
+  - **NVFP4** ([`mistralai/Mistral-Small-4-119B-2603-NVFP4`](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-NVFP4)) —
+    4-bit `compressed-tensors` weights (~72 GB raw).
+  - **EAGLE draft head** ([`mistralai/Mistral-Small-4-119B-2603-eagle`](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-eagle)) —
+    a 2-layer Mistral-style draft trained on the 119B target; enable via the
+    `spec_decoding` feature.
+
+  ## Prerequisites
+
+  - Hardware: 2xB200 / 2xH200 / 2xMI300X (FP8 default) or 1xB200 with reduced
+    context (NVFP4).
+  - vLLM **>= 0.20.0** — earlier releases load the model but trip on the
+    Mistral tool-call / reasoning parsers fixed in PR #39217 (in 0.19.1+)
+    and the grammar factory landed in 0.20.0.
+
+  ### Install vLLM
+
+  ```bash
+  uv venv && source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  uv pip install -U "mistral_common>=1.11.0" transformers
+  ```
+
+  Verify with `python -c "import mistral_common; print(mistral_common.__version__)"`.
+
+  ## Launch command
+
+  FP8 default (2xB200 / 2xH200):
+
+  ```bash
+  vllm serve mistralai/Mistral-Small-4-119B-2603 \
+    --max-model-len 262144 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser mistral --enable-auto-tool-choice \
+    --reasoning-parser mistral \
+    --max-num-batched-tokens 16384 --max-num-seqs 128 \
+    --gpu-memory-utilization 0.8
+  ```
+
+  NVFP4 variant (single B200, or 2xB200 for full 256K context):
+
+  ```bash
+  vllm serve mistralai/Mistral-Small-4-119B-2603-NVFP4 \
+    --max-model-len 262144 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser mistral --enable-auto-tool-choice \
+    --reasoning-parser mistral \
+    --max-num-batched-tokens 16384 --max-num-seqs 128 \
+    --gpu-memory-utilization 0.8
+  ```
+
+  Mistral publishes a custom Docker image
+  [`mistralllm/vllm-ms4:latest`](https://hub.docker.com/r/mistralllm/vllm-ms4)
+  with patched tool-call / reasoning parsing — use it if you're pinned to a
+  vLLM version below 0.20.0 and hit either of those issues.
+
+  ## EAGLE speculative decoding
+
+  The EAGLE draft head is **not** included in the default config — toggle the
+  `spec_decoding` feature (or pass `--speculative-config` directly):
+
+  ```bash
+  vllm serve mistralai/Mistral-Small-4-119B-2603 \
+    --max-model-len 262144 \
+    --tensor-parallel-size 2 \
+    --tool-call-parser mistral --enable-auto-tool-choice \
+    --reasoning-parser mistral \
+    --max-num-batched-tokens 16384 --max-num-seqs 128 \
+    --gpu-memory-utilization 0.8 \
+    --speculative-config '{
+      "model": "mistralai/Mistral-Small-4-119B-2603-eagle",
+      "num_speculative_tokens": 3,
+      "method": "eagle",
+      "max_model_len": "65536"
+    }'
+  ```
+
+  ## Client usage
+
+  Reasoning is opt-in per request via `reasoning_effort`. Only `"none"` and
+  `"high"` are accepted — anything else raises an exception in the chat
+  template. Recommended sampling:
+
+  - `reasoning_effort="none"`: `temperature` 0.0–0.7 depending on task.
+  - `reasoning_effort="high"`: `temperature=0.7`.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="mistralai/Mistral-Small-4-119B-2603",
+      messages=[{"role": "user", "content": "Plan a 3-day Paris trip."}],
+      extra_body={"reasoning_effort": "high"},
+      temperature=0.7, max_tokens=4096,
+  )
+  msg = resp.choices[0].message
+  print("reasoning:", msg.reasoning)
+  print("answer:", msg.content)
+  ```
+
+  Image input (vision):
+
+  ```python
+  resp = client.chat.completions.create(
+      model="mistralai/Mistral-Small-4-119B-2603",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://..."}},
+              {"type": "text", "text": "Describe this image."},
+          ],
+      }],
+      max_tokens=512,
+  )
+  ```
+
+  Tool calling follows the standard OpenAI schema — the chat template emits
+  `[AVAILABLE_TOOLS]` / `[TOOL_CALLS]` tokens which the `mistral` tool-call
+  parser surfaces as `message.tool_calls`.
+
+  ## Troubleshooting
+
+  - **OOM at full 256K context** on 2xH200: drop `--max-model-len` to 131072
+    or 65536, or move to NVFP4.
+  - **`reasoning_effort` rejected**: the chat template only accepts `"none"`
+    and `"high"`.
+  - **NVFP4 weight-loader errors** on older wheels: try Mistral's
+    `mistralllm/vllm-ms4:latest` Docker image, which carries the parser /
+    weight-loader fixes Mistral ships ahead of the upstream merge.
+
+  ## References
+
+  - [Model card](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603)
+  - [NVFP4 variant](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-NVFP4)
+  - [EAGLE draft head](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-eagle)

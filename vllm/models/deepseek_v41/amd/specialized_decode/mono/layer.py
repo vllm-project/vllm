@@ -44,11 +44,11 @@ from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.sync import (
 from .attention import back as mb_back
 from .attention import front as mb_front
 from .attention.device import BLOCKS, CM_DEV, THREADS, gstore, kernel_symbol, rsrc
-from .attention.plan import HIDDEN, Dims, back_scratch, front_scratch
+from .attention.plan import HIDDEN, WINDOW, Dims, back_scratch, front_scratch
 from .sources import SOURCES
 from .stages import moe, seam
 from .stages.dims import Dims as StageDims
-from .stages.moe_shape import SORT_NETS, MoeBuild, route_shape
+from .stages.moe_shape import EXPERTS, SORT_NETS, TOPK, MoeBuild, route_shape
 
 _STREAM = fx.Stream(None)
 MAX_TOKENS = 48
@@ -79,21 +79,49 @@ class MonoBuild:
     # the layer selects its own top-k (an index source): K1 hands its normed
     # input and qr out for vLLM's indexer, K2 builds the key table
     index: bool = False
+    # a layer of the DSpark draft: its routed experts and top-k, the FP4 groups
+    # of an ug task, and the width of its (non-causal) SWA index rows
+    experts: int = EXPERTS
+    topk: int = TOPK
+    ug_groups: int = 2
+    swa_width: int = WINDOW
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
-    return MoeBuild(tokens=key.tokens, tp=key.tp)
+    return MoeBuild(
+        tokens=key.tokens,
+        experts=key.experts,
+        topk=key.topk,
+        tp=key.tp,
+        ug_groups=key.ug_groups,
+    )
 
 
 def _front_key(key: MonoBuild):
-    return mb_front.FrontBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_front.FrontBuild(
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width
+    )
+
+
+def _symbol_params(key: MonoBuild) -> dict:
+    """The kernel symbol's draft-only parameters (none for a target layer)."""
+    out = {}
+    if key.experts != EXPERTS:
+        out["e"] = key.experts
+    if key.topk != TOPK:
+        out["k"] = key.topk
+    if key.ug_groups != 2:
+        out["g"] = key.ug_groups
+    if key.swa_width != WINDOW:
+        out["w"] = key.swa_width
+    return out
 
 
 def _back_key(key: MonoBuild):
     return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
 
 
-def scratch_layout(s: int, tp: int) -> dict:
+def scratch_layout(s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
     flags. Each width has a scratch of its own (``DSV41MonoLayer.scratch``):
@@ -116,7 +144,9 @@ def scratch_layout(s: int, tp: int) -> dict:
     place(front_scratch(s, d))
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0))
-    regions = moe.scratch_layout(_moe_key(MonoBuild(s, tp, 1))).items()
+    regions = moe.scratch_layout(
+        _moe_key(MonoBuild(s, tp, 1, experts=experts, topk=topk))
+    ).items()
     mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
@@ -125,8 +155,10 @@ def scratch_layout(s: int, tp: int) -> dict:
     return out
 
 
-def scratch_bytes(s: int = MAX_TOKENS, tp: int = 2) -> int:
-    return max(o + n for o, n in scratch_layout(s, tp).values())
+def scratch_bytes(
+    s: int = MAX_TOKENS, tp: int = 2, experts: int = EXPERTS, topk: int = TOPK
+) -> int:
+    return max(o + n for o, n in scratch_layout(s, tp, experts, topk).values())
 
 
 def peer_half_bytes(tp: int) -> int:
@@ -179,7 +211,7 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp)
+    layout = scratch_layout(s, tp, key.experts, key.topk)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
@@ -205,6 +237,7 @@ def build_mono_k1(key: MonoBuild):
         tl=key.timeline,
         f=key.fold,
         i=key.index,
+        **_symbol_params(key),
     )
     keyed = key_tuple(key, SOURCES)
 
@@ -473,7 +506,7 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
     the residual), the MoE and its all-reduce into ``a["out"]``, then the
     launch pair's epoch moved on."""
     s, tp = key.tokens, key.tp
-    layout = scratch_layout(s, tp)
+    layout = scratch_layout(s, tp, key.experts, key.topk)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
     GATE0 = SLICES
@@ -569,7 +602,7 @@ def run_ffn(key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None):
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp)
+    layout = scratch_layout(s, tp, key.experts, key.topk)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
@@ -589,7 +622,13 @@ def build_mono_k2(key: MonoBuild):
         moe: MoeLds  # type: ignore[valid-type]
 
     name = kernel_symbol(
-        "dsv41_mono_k2", s=s, tp=tp, r=key.ratio, tl=key.timeline, i=key.index
+        "dsv41_mono_k2",
+        s=s,
+        tp=tp,
+        r=key.ratio,
+        tl=key.timeline,
+        i=key.index,
+        **_symbol_params(key),
     )
     keyed = key_tuple(key, SOURCES)
 
@@ -703,6 +742,7 @@ def build_mono_k2(key: MonoBuild):
                 "tid": c["tid"],
                 "dev": True,
                 "ratio": key.ratio,
+                "swa_width": key.swa_width,
                 "args": {
                     "slot": slot,
                     "swa_idx": swa_idx,

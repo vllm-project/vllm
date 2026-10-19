@@ -1,0 +1,156 @@
+meta:
+  title: "NVIDIA Nemotron-Nano-9B-v2"
+  slug: "nemotron-nano-9b-v2"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron-Nano 9B (Mamba-hybrid dense) reasoning + tool-use model with FP8 / NVFP4 / Japanese variants"
+  date_added: 2026-04-28
+  date_updated: 2026-04-28
+  tasks:
+    - text
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    - nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+  min_vllm_version: "0.10.1"
+  architecture: dense
+  parameter_count: "9B"
+  active_parameters: "9B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Custom Nemotron tool-call parser plugin (download: nemotron_toolcall_parser_no_streaming.py)"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-parser-plugin"
+      - "nemotron_toolcall_parser_no_streaming.py"
+      - "--tool-call-parser"
+      - "nemotron_json"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "BF16 weights on 1 GPU"
+
+  fp8:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8"
+    precision: fp8
+    vram_minimum_gb: 11
+    description: "FP8 weights"
+
+  nvfp4:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-9B-v2-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 6
+    description: "NVFP4 weights for Blackwell"
+
+  base:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-9B-v2-Base"
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "Pre-RL base checkpoint (BF16)"
+
+  japanese:
+    model_id: "nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese"
+    precision: bf16
+    vram_minimum_gb: 22
+    description: "Japanese-specialized fine-tune (BF16)"
+
+  redhat_fp8:
+    model_id: "RedHatAI/NVIDIA-Nemotron-Nano-9B-v2-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 11
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Nemotron-Nano-9B-v2 is a 9B Mamba-hybrid dense reasoning model that runs on a single
+  H100/H200/B200. Variants ship in BF16, FP8, and NVFP4; a Japanese-specialized
+  fine-tune and a pre-RL Base checkpoint are also available.
+
+  ## Prerequisites
+
+  - Hardware: 1x H100/H200/B200 (or comparable)
+  - vLLM >= 0.10.1 (`pip install -U vllm`)
+  - Docker with NVIDIA Container Toolkit (recommended)
+
+  ## Launch command
+
+  ```bash
+  wget https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2/resolve/main/nemotron_toolcall_parser_no_streaming.py
+
+  vllm serve nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
+    --trust-remote-code \
+    --max-model-len 131072 \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-parser-plugin nemotron_toolcall_parser_no_streaming.py \
+    --tool-call-parser nemotron_json
+  ```
+
+  FP8:
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8 \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+  ```
+
+  NVFP4 (Blackwell only):
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-Nano-9B-v2-NVFP4 \
+    --trust-remote-code \
+    --tensor-parallel-size 1
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model nvidia/NVIDIA-Nemotron-Nano-9B-v2 \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 --random-output-len 1024 \
+    --num-warmups 20 \
+    --ignore-eos \
+    --max-concurrency 256 \
+    --num-prompts 1024
+  ```
+
+  ## References
+
+  - [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
+  - [Nemotron-Nano-9B-v2-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8)
+  - [Nemotron-Nano-9B-v2-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-NVFP4)
+  - [Nemotron-Nano-9B-v2-Base](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-Base)
+  - [Nemotron-Nano-9B-v2-Japanese](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2-Japanese)
