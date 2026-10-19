@@ -19,6 +19,8 @@ steps:
     - GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -49,6 +51,8 @@ steps:
     - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -88,6 +92,8 @@ steps:
     - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
       dind: false
       device: mi300_4
@@ -119,6 +125,8 @@ steps:
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -149,6 +157,8 @@ steps:
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy"
       dind: false
       device: mi300_4
@@ -179,6 +189,8 @@ steps:
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
       dind: false
       device: mi300_4
