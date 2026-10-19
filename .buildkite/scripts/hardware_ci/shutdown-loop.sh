@@ -3,7 +3,7 @@
 cd tests || exit 1
 rc=0
 for i in 1 2 3 4 5 6 7 8; do
-  echo "=== shutdown iter ${i} psm=$(ls /dev/shm/psm_* 2>/dev/null | wc -l) tmp_dist=$(ls /tmp/vllm_dist_* 2>/dev/null | wc -l) ==="
+  echo "=== shutdown iter ${i} psm=$(find /dev/shm -maxdepth 1 -name 'psm_*' | wc -l) tmp_dist=$(find /tmp -maxdepth 1 -name 'vllm_dist_*' | wc -l) ==="
   pytest -v -s v1/shutdown || rc=1
 done
 exit ${rc}
