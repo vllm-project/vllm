@@ -144,6 +144,9 @@ fn build_router_with_options(
         .route("/v1/messages/count_tokens", post(not_supported))
         // TODO: implement batched chat completions.
         .route("/v1/chat/completions/batch", post(not_supported))
+        // TODO: implement the decisions APIs.
+        .route("/v1/decisions", post(not_supported))
+        .route("/v1/systemone", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
