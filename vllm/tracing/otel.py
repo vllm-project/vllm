@@ -55,6 +55,7 @@ except ImportError:
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
     ResourceAttributes = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
 
 # OTel spec constants.
 _SERVICE_NAME_KEY = "service.name"
