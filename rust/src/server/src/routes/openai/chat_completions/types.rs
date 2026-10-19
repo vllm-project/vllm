@@ -247,6 +247,10 @@ pub struct ChatCompletionRequest {
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
 
+    /// Include the chat-templated prompt string in the response. Not supported
+    /// yet.
+    pub return_prompt_text: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -332,6 +336,7 @@ impl Default for ChatCompletionRequest {
             session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
+            return_prompt_text: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
