@@ -21,12 +21,14 @@ steps:
   - tests/entrypoints/unit_tests
   - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s entrypoints/unit_tests &&
-    pytest -v -s entrypoints/rl/weight_transfer'
+    pytest -v -s entrypoints/rl/weight_transfer &&
+    pytest -v -s entrypoints/common'
 
 - label: ":intel: (BMG) Entrypoints Integration (LLM)"
   key: entrypoints-integration-llm-intel
