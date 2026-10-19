@@ -412,29 +412,33 @@ def test_elastic_ep_scale_while_scaling():
 @multi_gpu_test(num_gpus=2)
 def test_elastic_ep_rejects_invalid_size():
     """nixl_ep_v2 refuses a size that is not whole NVLink domains or inside
-    the first one, before any engine is touched: HTTP 400, serving goes on."""
-    from vllm.distributed.eplb.eplb_communicator import has_nixl
-    from vllm.utils.import_utils import has_nixl_ep_v2
+    the first one, before any engine is touched: HTTP 400, serving goes on.
 
-    if not has_nixl():
-        pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
-    if not has_nixl_ep_v2():
-        pytest.skip("nixl.runtime.ep is not installed")
+    Defaults: DP 2, max 8, domain 4, DP 5 refused, valid sizes 2,3,4,8 (DP 1
+    fails the expert-fit check). Across domains, e.g. DP 8, max 16, domain
+    8: VLLM_TEST_ELASTIC_EP_INITIAL_DP, _MAX_DP, VLLM_NIXL_EP_V2_DOMAIN_SIZE,
+    VLLM_TEST_ELASTIC_EP_INVALID_DP and _VALID (comma-separated)."""
+    _skip_unless_nixl_ep_v2()
+    initial_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INITIAL_DP", "2"))
+    max_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_MAX_DP", "8"))
+    domain_size = os.getenv("VLLM_NIXL_EP_V2_DOMAIN_SIZE", "4")
+    invalid_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INVALID_DP", "5"))
+    valid = os.getenv("VLLM_TEST_ELASTIC_EP_VALID", "2,3,4,8")
+    valid_sizes = [int(size) for size in valid.split(",")]
 
     with RemoteOpenAIServer(
         MODEL_NAME,
-        _base_serve_args(2, 8, all2all_backend="nixl_ep_v2"),
-        env_dict={"VLLM_NIXL_EP_V2_DOMAIN_SIZE": "4"},
+        _base_serve_args(initial_dp_size, max_dp_size, all2all_backend="nixl_ep_v2"),
+        env_dict={"VLLM_NIXL_EP_V2_DOMAIN_SIZE": domain_size},
         max_wait_seconds=1200,
     ) as server:
         response = requests.post(
             server.url_for("scale_elastic_ep"),
-            json={"new_data_parallel_size": 5},
+            json={"new_data_parallel_size": invalid_dp_size},
             timeout=300,
         )
         assert response.status_code == 400, response.text
-        # DP 1 fails the expert-fit check.
-        assert "[2, 3, 4, 8]" in response.text, response.text
+        assert str(valid_sizes) in response.text, response.text
         probe = requests.post(server.url_for("is_scaling_elastic_ep"), timeout=30)
         assert probe.status_code == 200, probe.status_code
         completion = requests.post(
