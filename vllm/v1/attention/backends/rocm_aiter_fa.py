@@ -703,6 +703,27 @@ class AiterFlashAttentionMetadataBuilder(
             )
         )
 
+    def _flydsl_plan(
+        self, seq_lens: torch.Tensor, num_decodes: int, query_len: int
+    ) -> Any:
+        """Return the work plan for this decode batch, refreshed in place.
+
+        build() and build_for_drafting() share one plan per (batch size, query
+        length). The refresh is a GPU kernel that reads seq_lens in stream
+        order, so a plan that the previous forward still reads is only
+        overwritten after that forward.
+        """
+        key = (num_decodes, query_len)
+        plan = rocm_aiter_ops.flydsl_pa_decode_plan(
+            seq_lens,
+            # Must match the KV cache the kernel reads, not the model config.
+            self.kv_cache_spec.num_kv_heads,
+            query_length=query_len,
+            plan=self._flydsl_plans.get(key),
+        )
+        self._flydsl_plans[key] = plan
+        return plan
+
     def build(
         self,
         common_prefix_len: int,
@@ -788,15 +809,11 @@ class AiterFlashAttentionMetadataBuilder(
                 num_decode_tokens,
                 common_attn_metadata.causal,
             ):
-                key = (num_decodes, decode_max_query_len)
-                flydsl_plan = rocm_aiter_ops.flydsl_pa_decode_plan(
+                flydsl_plan = self._flydsl_plan(
                     common_attn_metadata.seq_lens[:num_decodes],
-                    # Must match the KV cache the kernel reads, not the model config.
-                    self.kv_cache_spec.num_kv_heads,
-                    query_length=decode_max_query_len,
-                    plan=self._flydsl_plans.get(key),
+                    num_decodes,
+                    decode_max_query_len,
                 )
-                self._flydsl_plans[key] = flydsl_plan
             decode_metadata = AiterFlashAttentionDecodeMetadata(
                 max_query_len=decode_max_query_len,
                 swa_block_table=swa_block_table,
@@ -959,6 +976,66 @@ class AiterFlashAttentionMetadataBuilder(
             kv_sharing_metadata=kv_sharing_metadata,
         )
         return attn_metadata
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> AiterFlashAttentionMetadata:
+        """Build attention metadata for draft model without CPU-GPU sync.
+
+        During EAGLE drafting all requests are uniform decodes, so we can
+        skip split_decodes_prefills_and_extends() and avoid all .cpu() /
+        .item() calls that would otherwise break CUDA graph capture.
+        """
+        self._build_asm_kv_scale_tables()
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
+        # The draft passes are uniform decodes too: the first pass has the
+        # width of the verify step, and the later passes have one token. So
+        # they take the FlyDSL decode like the target model does. The query
+        # lengths come from the host copy of query_start_loc, which needs no
+        # GPU sync.
+        flydsl_plan = None
+        if self.use_flydsl_pa_decode:
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            query_lens_cpu = (
+                query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+            )
+            if self._flydsl_takes_decodes(
+                query_lens_cpu, max_query_len, num_tokens, common_attn_metadata.causal
+            ):
+                flydsl_plan = self._flydsl_plan(
+                    common_attn_metadata.seq_lens[:num_reqs], num_reqs, max_query_len
+                )
+
+        decode_metadata = AiterFlashAttentionDecodeMetadata(
+            max_query_len=max_query_len,
+            flydsl_plan=flydsl_plan,
+            flydsl_query_len=max_query_len,
+        )
+
+        return AiterFlashAttentionMetadata(
+            num_actual_tokens=num_tokens,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            seq_lens=common_attn_metadata.seq_lens,
+            block_table=common_attn_metadata.block_table_tensor,
+            causal=common_attn_metadata.causal,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            num_decodes=num_reqs,
+            num_decode_tokens=num_tokens,
+            num_prefills=0,
+            num_extends=0,
+            num_extend_tokens=0,
+            decode_metadata=decode_metadata,
+            prefill_metadata=None,
+            extend_metadata=None,
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
+        )
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
