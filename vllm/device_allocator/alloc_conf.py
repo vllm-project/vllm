@@ -17,6 +17,8 @@ flip just that field, and write the whole string back.
 """
 
 import os
+from collections.abc import Generator
+from contextlib import contextmanager
 
 import torch
 
@@ -117,3 +119,20 @@ def set_alloc_conf(conf: str) -> None:
         setter(conf)
         return
     torch.cuda.memory._set_allocator_settings(conf)
+
+
+@contextmanager
+def non_expandable_allocations(enabled: bool = True) -> Generator[None, None, None]:
+    """Run the body with ``expandable_segments`` off, then restore the config."""
+    if not enabled:
+        yield
+        return
+    conf = current_alloc_conf()
+    if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
+        yield
+        return
+    set_alloc_conf(with_conf_flag(conf, EXPANDABLE_SEGMENTS, False))
+    try:
+        yield
+    finally:
+        set_alloc_conf(conf)

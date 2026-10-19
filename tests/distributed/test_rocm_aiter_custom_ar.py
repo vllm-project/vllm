@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
+from vllm.device_allocator import alloc_conf
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group, graph_capture
 from vllm.envs import disable_envs_cache
@@ -132,6 +133,69 @@ def test_rocm_aiter_custom_allreduce(
     test_target,
 ):
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def graph_allreduce_expandable_segments(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+) -> None:
+    with monkeypatch.context() as m:
+        _configure_aiter_custom_ar_env(m)
+
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        conf = alloc_conf.with_conf_flag(
+            alloc_conf.current_alloc_conf(), alloc_conf.EXPANDABLE_SEGMENTS, True
+        )
+        alloc_conf.set_alloc_conf(conf)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        aiter_ar_comm = get_tp_group().device_communicator.aiter_ar_comm
+        assert aiter_ar_comm.registers_graph_buffers
+
+        shape, dtype = test_cases[-1]
+        with graph_capture(device=device) as graph_capture_context:
+            # Registered path: the input is bound directly, with no staging copy.
+            assert aiter_ar_comm.aiter_ca.enable_register_for_capturing
+            inp = torch.ones(shape, dtype=dtype, device=device)
+            expected = inp * tp_size
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                out = tensor_model_parallel_all_reduce(inp)
+
+        assert alloc_conf.expandable_segments_enabled()
+        graph.replay()
+        torch.testing.assert_close(out, expected)
+
+
+def _aiter_defers_capture_registration() -> bool:
+    if not is_aiter_found():
+        return False
+    from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce
+
+    return getattr(CustomAllreduce, "defers_capture_registration", False)
+
+
+@pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+def test_aiter_defers_capture_registration():
+    """graph_capture() relies on this marker (ROCm/aiter#5799, AITER v0.1.26)."""
+    assert _aiter_defers_capture_registration()
+
+
+@pytest.mark.skipif(
+    not _aiter_defers_capture_registration(),
+    reason="AITER does not decide graph-buffer registration at capture time",
+)
+@multi_gpu_test(num_gpus=2)
+def test_rocm_aiter_custom_allreduce_skips_copy_with_expandable_segments(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    multi_process_parallel(monkeypatch, 2, 1, graph_allreduce_expandable_segments)
 
 
 def _get_aiter_ag_rs_comm():
