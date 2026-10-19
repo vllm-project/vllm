@@ -14,6 +14,8 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Original KVCacheConfig group index.
+    group_id: int
 
 
 @dataclass(frozen=True)

@@ -7,11 +7,14 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+mod xgrammar;
+
 /// Structured-output backend selected for EngineCore grammar compilation.
 ///
 /// Python vLLM stores this in `StructuredOutputsParams._backend` after request
-/// validation. The Rust frontend currently always lowers structured-output
-/// requests to guidance, while ignoring any user-supplied `_backend` value.
+/// validation. The Rust frontend picks the backend itself and ignores any
+/// user-supplied `_backend` value: gRPC constraints and parser-built output
+/// grammars use xgrammar, other HTTP constraints use guidance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StructuredOutputBackend {
@@ -104,6 +107,64 @@ impl StructuredOutputsParams {
             backend: StructuredOutputBackend::default(),
         }
     }
+
+    pub fn validate(&self) -> Result<()> {
+        match &self.constraint {
+            StructuredOutputConstraint::Grammar(grammar) if grammar.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.grammar cannot be an empty string".to_string(),
+                })
+            }
+            StructuredOutputConstraint::Json(Value::String(value)) => {
+                if value.trim().is_empty() {
+                    return Err(Error::InvalidStructuredOutputsParams {
+                        message: "structured_outputs.json cannot be an empty string".to_string(),
+                    });
+                }
+                let schema = serde_json::from_str::<Value>(value).map_err(|_| {
+                    Error::InvalidStructuredOutputsParams {
+                        message: "Invalid JSON grammar specification.".to_string(),
+                    }
+                })?;
+                self.validate_json_schema(&schema)
+            }
+            StructuredOutputConstraint::Json(schema) => self.validate_json_schema(schema),
+            StructuredOutputConstraint::Choice(choice) if choice.is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.choice cannot be empty".to_string(),
+                })
+            }
+            // NUL is never meaningful in a regex and the regex-to-grammar
+            // conversion does not handle it; Python rejects it for every backend.
+            StructuredOutputConstraint::Regex(regex) if regex.contains('\0') => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.regex must not contain a NUL character ('\\x00')"
+                        .to_string(),
+                })
+            }
+            StructuredOutputConstraint::StructuralTag(tag) if tag.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.structural_tag cannot be an empty string"
+                        .to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Reject a schema the selected backend would accept but enforce only in
+    /// part, as Python does when validating against xgrammar.
+    fn validate_json_schema(&self, schema: &Value) -> Result<()> {
+        if self.backend == StructuredOutputBackend::Xgrammar
+            && xgrammar::has_unsupported_json_features(schema)
+        {
+            return Err(Error::InvalidStructuredOutputsParams {
+                message: "The provided JSON schema contains features not supported by xgrammar."
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Wire-compatible structured-output payload used by Python engine-core.
@@ -176,7 +237,7 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
         }
         insert_constraint!("structural_tag", raw.structural_tag.map(StructuralTag));
 
-        Ok(Self {
+        let params = Self {
             constraint: constraint.map(|(_, c)| c).ok_or_else(|| {
                 Error::InvalidStructuredOutputsParams {
                     message: "missing structured output constraint".to_string(),
@@ -188,7 +249,9 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
                 whitespace_pattern: raw.whitespace_pattern,
             },
             backend: raw.backend,
-        })
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 
@@ -287,6 +350,79 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("json_object must be true"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_json_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "json": "  ",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_grammar_from_constructor() {
+        let error = StructuredOutputsParams::grammar("  ").validate().unwrap_err();
+        assert!(error.to_string().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_json_string_from_constructor() {
+        let error = StructuredOutputsParams::json(Value::String("  ".to_string()))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_json_string() {
+        let error = StructuredOutputsParams::json(Value::String("not json".to_string()))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid JSON grammar specification."));
+    }
+
+    #[test]
+    fn validate_rejects_empty_choice() {
+        let error = StructuredOutputsParams::choice(vec![]).validate().unwrap_err();
+        assert!(error.to_string().contains("choice cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_nul_in_regex() {
+        let error = StructuredOutputsParams::regex("a\0b").validate().unwrap_err();
+        assert!(error.to_string().contains("must not contain a NUL character"));
+    }
+
+    #[test]
+    fn validate_rejects_json_features_xgrammar_ignores() {
+        let schema = serde_json::json!({ "type": "array", "uniqueItems": true });
+        for params in [
+            StructuredOutputsParams::json(schema.clone()),
+            StructuredOutputsParams::json(Value::String(schema.to_string())),
+        ] {
+            assert!(params.validate().is_ok(), "guidance enforces {schema}");
+            let error = StructuredOutputsParams {
+                backend: StructuredOutputBackend::Xgrammar,
+                ..params
+            }
+            .validate()
+            .unwrap_err();
+            assert!(error.to_string().contains("not supported by xgrammar"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_structural_tag() {
+        let error = StructuredOutputsParams::structural_tag("\n\t").validate().unwrap_err();
+        assert!(error.to_string().contains("structural_tag cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_accepts_non_empty_grammar() {
+        assert!(StructuredOutputsParams::grammar("root ::= \"a\"").validate().is_ok());
     }
 
     #[test]

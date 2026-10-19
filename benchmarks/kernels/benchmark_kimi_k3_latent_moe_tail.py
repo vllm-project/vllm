@@ -27,6 +27,7 @@ Examples:
 
 For multi-node runs, launch one ``torchrun`` agent per node and use a shared
 rendezvous endpoint.
+
 """
 
 from __future__ import annotations

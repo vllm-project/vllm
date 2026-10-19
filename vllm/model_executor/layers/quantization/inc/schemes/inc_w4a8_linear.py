@@ -106,7 +106,7 @@ class INCXPUW4A8LinearMethod(INCXPULinearMethod):
             layer.scales_fp16,
             layer.qzeros,
             self.group_size,
-            None,
+            None,  # Retained by the external XPU op ABI.
             bias,
         )
         return out.to(x.dtype).reshape(out_shape)

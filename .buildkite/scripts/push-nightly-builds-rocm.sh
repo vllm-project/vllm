@@ -2,61 +2,85 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Push ROCm nightly base image and nightly image from ECR 
-# to Docker Hub as vllm/vllm-openai-rocm:base-nightly and vllm/vllm-openai-rocm:nightly
-# and vllm/vllm-openai-rocm:base-nightly-<commit> and vllm/vllm-openai-rocm:nightly-<commit>.
-# Run when NIGHTLY=1 after build-rocm-release-image has pushed to ECR.
+# Push a ROCm stack's nightly base image and nightly image from ECR to Docker Hub
+# under vllm/vllm-openai-rocm, as base-nightly-<variant>, nightly-<variant> and their
+# -<commit> forms, then prune old nightly tags. With --default, also push the plain
+# base-nightly and nightly tags for the same images.
+# Run when NIGHTLY=1 after the stack's release image has been pushed to ECR.
+#
+# Usage: push-nightly-builds-rocm.sh <base-dockerfile> [--default]
+#   e.g. "docker/Dockerfile.rocm_base --default" (ROCm 10.0, also :nightly)
+#   and "docker/Dockerfile.rocm_72_base" (ROCm 7.2, :nightly-rocm72).
 #
 # Local testing (no push to Docker Hub):
-#   BUILDKITE_COMMIT=<commit-with-rocm-image-in-ecr> DRY_RUN=1 bash .buildkite/scripts/push-nightly-builds-rocm.sh
+#   BUILDKITE_COMMIT=<commit-with-image-in-ecr> DRY_RUN=1 \
+#     bash .buildkite/scripts/push-nightly-builds-rocm.sh docker/Dockerfile.rocm_base --default
 # Requires: AWS CLI configured (for ECR public login), Docker. For full run: Docker Hub login.
 
-set -ex
+set -euxo pipefail
 
-# Use BUILDKITE_COMMIT from env (required; set to a commit that has ROCm image in ECR for local test)
-BUILDKITE_COMMIT="${BUILDKITE_COMMIT:?Set BUILDKITE_COMMIT to the commit SHA that has the ROCm image in ECR (e.g. from a previous release pipeline run)}"
+usage() {
+  echo "Usage: $0 <base-dockerfile> [--default]" >&2
+}
+
+PUSH_DEFAULT=0
+case "$#" in
+  1) ;;
+  2)
+    if [[ "$2" != "--default" ]]; then
+      usage
+      exit 2
+    fi
+    PUSH_DEFAULT=1
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+# Use BUILDKITE_COMMIT from env (required; set to a commit that has the image in ECR for local test)
+BUILDKITE_COMMIT="${BUILDKITE_COMMIT:?Set BUILDKITE_COMMIT to the commit SHA that has the image in ECR (e.g. from a previous release pipeline run)}"
 DRY_RUN="${DRY_RUN:-0}"
 
-# Get the base image ECR tag (set by build-rocm-release-image pipeline step)
-BASE_ORIG_TAG="$(buildkite-agent meta-data get rocm-base-ecr-tag 2>/dev/null || echo "")"
-if [ -z "$BASE_ORIG_TAG" ]; then
-  echo "WARNING: rocm-base-ecr-tag metadata not found, falling back to commit-based tag"
-  BASE_ORIG_TAG="public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base"
+# shellcheck source=.buildkite/scripts/rocm/stack.sh
+source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "$1"
+DOCKERHUB_REPO="vllm/vllm-openai-rocm"
+VARIANT="$ROCM_STACK_VARIANT"
+
+BASE_TAGS=("base-nightly-${VARIANT}" "base-nightly-${VARIANT}-${BUILDKITE_COMMIT}")
+TAGS=("nightly-${VARIANT}" "nightly-${VARIANT}-${BUILDKITE_COMMIT}")
+if [[ "$PUSH_DEFAULT" == "1" ]]; then
+  BASE_TAGS+=("base-nightly" "base-nightly-${BUILDKITE_COMMIT}")
+  TAGS+=("nightly" "nightly-${BUILDKITE_COMMIT}")
 fi
 
-ORIG_TAG="${BUILDKITE_COMMIT}-rocm"
-BASE_TAG_NAME="base-nightly"
-TAG_NAME="nightly"
-BASE_TAG_NAME_COMMIT="base-nightly-${BUILDKITE_COMMIT}"
-TAG_NAME_COMMIT="nightly-${BUILDKITE_COMMIT}"
+echo "Pushing base image $ROCM_STACK_ECR_BASE as: ${BASE_TAGS[*]}"
+echo "Pushing release image $ROCM_STACK_ECR_IMAGE as: ${TAGS[*]}"
 
-echo "Pushing ROCm base image from ECR: $BASE_ORIG_TAG"
-echo "Pushing ROCm release image from ECR tag: $ORIG_TAG to Docker Hub as $TAG_NAME and $TAG_NAME_COMMIT"
-[[ "$DRY_RUN" == "1" ]] && echo "[DRY_RUN] Skipping push to Docker Hub"
-
-# Login to ECR and pull the image built by build-rocm-release-image
+# Login to ECR and pull the stack's images
 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
-docker pull "$BASE_ORIG_TAG"
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:"$ORIG_TAG"
+docker pull "$ROCM_STACK_ECR_BASE"
+docker pull "$ROCM_STACK_ECR_IMAGE"
 
-# Tag for Docker Hub (base-nightly and base-nightly-<commit>, nightly and nightly-<commit>)
-docker tag "$BASE_ORIG_TAG" vllm/vllm-openai-rocm:"$BASE_TAG_NAME"
-docker tag "$BASE_ORIG_TAG" vllm/vllm-openai-rocm:"$BASE_TAG_NAME_COMMIT"
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:"$ORIG_TAG" vllm/vllm-openai-rocm:"$TAG_NAME"
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:"$ORIG_TAG" vllm/vllm-openai-rocm:"$TAG_NAME_COMMIT"
+for tag in "${BASE_TAGS[@]}"; do docker tag "$ROCM_STACK_ECR_BASE" "$DOCKERHUB_REPO:$tag"; done
+for tag in "${TAGS[@]}"; do docker tag "$ROCM_STACK_ECR_IMAGE" "$DOCKERHUB_REPO:$tag"; done
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  echo "[DRY_RUN] Would push vllm/vllm-openai-rocm:$BASE_TAG_NAME and vllm/vllm-openai-rocm:$BASE_TAG_NAME_COMMIT"
-  echo "[DRY_RUN] Would push vllm/vllm-openai-rocm:$TAG_NAME and vllm/vllm-openai-rocm:$TAG_NAME_COMMIT"
   echo "[DRY_RUN] Local tags created. Exiting without push."
   exit 0
 fi
 
 # Push to Docker Hub (docker-login plugin runs before this step in CI)
-docker push vllm/vllm-openai-rocm:"$BASE_TAG_NAME"
-docker push vllm/vllm-openai-rocm:"$BASE_TAG_NAME_COMMIT"
-docker push vllm/vllm-openai-rocm:"$TAG_NAME"
-docker push vllm/vllm-openai-rocm:"$TAG_NAME_COMMIT"
+for tag in "${BASE_TAGS[@]}" "${TAGS[@]}"; do docker push "$DOCKERHUB_REPO:$tag"; done
+echo "Pushed $DOCKERHUB_REPO: ${BASE_TAGS[*]} ${TAGS[*]}"
 
-echo "Pushed vllm/vllm-openai-rocm:$BASE_TAG_NAME and vllm/vllm-openai-rocm:$BASE_TAG_NAME_COMMIT"
-echo "Pushed vllm/vllm-openai-rocm:$TAG_NAME and vllm/vllm-openai-rocm:$TAG_NAME_COMMIT"
+# Keep only the last 14 builds of each tag family. The plain nightly- families
+# exclude the variant ones sharing their prefix; commit SHAs never start with "rocm".
+CLEANUP=.buildkite/scripts/cleanup-nightly-builds.sh
+bash "$CLEANUP" "nightly-${VARIANT}-" "$DOCKERHUB_REPO"
+bash "$CLEANUP" "base-nightly-${VARIANT}-" "$DOCKERHUB_REPO"
+if [[ "$PUSH_DEFAULT" == "1" ]]; then
+  bash "$CLEANUP" "nightly-" "$DOCKERHUB_REPO" "nightly-rocm"
+  bash "$CLEANUP" "base-nightly-" "$DOCKERHUB_REPO" "base-nightly-rocm"
+fi

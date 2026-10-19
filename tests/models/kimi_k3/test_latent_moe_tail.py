@@ -15,6 +15,7 @@ from tests.utils import (
     multi_process_parallel,
 )
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsMonolithic,
 )
@@ -43,12 +44,11 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         hidden_dim = LATENT_SIZE
         hidden_dim_unpadded = LATENT_SIZE
         experts_per_token = 16
-        defer_moe_finalize = False
+        _defer_moe_finalize = False
         defer_moe_finalize_max_num_tokens = -1
-
-        @property
-        def use_deferred_moe_finalize(self) -> bool:
-            return self.defer_moe_finalize
+        defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
+        limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
+        use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
 
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -84,6 +84,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         SimpleNamespace(
             is_cuda=lambda: True,
             is_device_capability_family=lambda capability: capability == 100,
+            current_device=lambda: torch.device("cuda"),
         ),
     )
     monkeypatch.setattr(
@@ -98,7 +99,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.defer_moe_finalize
+    assert moe_config.use_deferred_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 
@@ -153,6 +154,57 @@ def _make_deferred_routed_output(
     )
 
 
+def _make_bf16_top16_deferred_output(
+    num_tokens: int,
+    device: torch.device,
+    *,
+    drop_last_route: bool = False,
+) -> tuple[UnfinalizedMoEOutput, torch.Tensor]:
+    top_k = 16
+    num_routes = num_tokens * top_k
+    num_permuted_rows = num_routes + 7
+    expanded_output = torch.randn(
+        num_routes,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    ).mul_(0.01)
+    expert_weights = torch.rand(
+        num_tokens,
+        top_k,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    expert_weights.div_(expert_weights.sum(dim=-1, keepdim=True))
+    expanded_idx = torch.randperm(num_permuted_rows, device=device)[:num_routes]
+    gemm2_permuted = torch.empty(
+        num_permuted_rows,
+        LATENT_SIZE,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    gemm2_permuted[expanded_idx] = expanded_output
+
+    expanded_output = expanded_output.view(num_tokens, top_k, LATENT_SIZE)
+    expanded_idx = expanded_idx.view(num_tokens, top_k)
+    if drop_last_route:
+        expanded_output[:, -1].zero_()
+        expanded_idx[:, -1] = -1
+    finalized = (
+        (expanded_output.float() * expert_weights[:, :, None].float())
+        .sum(1)
+        .to(torch.bfloat16)
+    )
+    return (
+        UnfinalizedMoEOutput(
+            gemm2_permuted=gemm2_permuted,
+            expert_weights=expert_weights,
+            expanded_idx_to_permuted_idx=expanded_idx.to(torch.int32),
+        ),
+        finalized,
+    )
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _test_latent_moe_tail_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -197,7 +249,8 @@ def _test_latent_moe_tail_worker(
     )
     cutedsl_warmup()
 
-    for iteration, num_tokens in enumerate((1, 5, 8, 16, 5)):
+    # M=65 crosses two 32-CTA token waves and reuses the first DSM slot.
+    for iteration, num_tokens in enumerate((1, 5, 8, 16, 33, 65, 5)):
         torch.manual_seed(100 * iteration + rank + 1)
         routed_output = torch.randn(
             num_tokens,
@@ -310,9 +363,17 @@ def _test_deferred_finalize_parity_worker(
         rms_eps=EPS,
         experts_per_token=TOP_K,
     )
+    bf16_deferred_op = KimiK3LatentMoETailOp.initialize(
+        hidden_size=HIDDEN_SIZE,
+        latent_size=LATENT_SIZE,
+        dtype=torch.bfloat16,
+        device=device,
+        rms_eps=EPS,
+        experts_per_token=16,
+    )
     cutedsl_warmup()
 
-    for iteration, num_tokens in enumerate((1, 5, 16)):
+    for iteration, num_tokens in enumerate((1, 5, 16, 33, 65)):
         torch.manual_seed(2000 + 100 * iteration + rank)
         deferred_output, finalized_output = _make_deferred_routed_output(
             num_tokens,
@@ -339,6 +400,51 @@ def _test_deferred_finalize_parity_worker(
         )
 
         torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+
+    for iteration, num_tokens in enumerate((1, 2, 4, 5, 16)):
+        torch.manual_seed(3000 + 100 * iteration + rank)
+        deferred_output, finalized_output = _make_bf16_top16_deferred_output(
+            num_tokens,
+            device,
+            drop_last_route=num_tokens == 5,
+        )
+        shared_output = torch.randn(
+            num_tokens,
+            HIDDEN_SIZE,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+
+        expected = finalized_op(
+            finalized_output,
+            shared_output,
+            rms_weight,
+            up_weight,
+        )
+        actual = bf16_deferred_op(
+            deferred_output,
+            shared_output,
+            rms_weight,
+            up_weight,
+        )
+
+        torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+        if num_tokens == 4:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                graph_actual = bf16_deferred_op(
+                    deferred_output,
+                    shared_output,
+                    rms_weight,
+                    up_weight,
+                )
+            graph.replay()
+            torch.testing.assert_close(
+                graph_actual,
+                expected,
+                atol=8e-2,
+                rtol=3e-2,
+            )
 
 
 def _run_deferred_finalize_parity_test(
