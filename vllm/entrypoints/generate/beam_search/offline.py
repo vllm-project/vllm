@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 from collections.abc import Callable, Sequence
 
 import torch
@@ -26,6 +27,7 @@ from .utils import (
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
+    get_beam_search_eos_token_ids,
 )
 
 logger = init_logger(__name__)
@@ -85,8 +87,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
-        eos_token_id = tokenizer.eos_token_id
-        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
         engine_inputs = self._preprocess_cmpl(prompts)
         lora_requests = self._lora_request_to_seq(lora_request, len(engine_inputs))
@@ -104,14 +104,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None = None
         structured_output_key = None
         structured_output_bitmask = None
-        if params.structured_outputs is not None:
-            (
-                structured_output_backend,
-                structured_output_key,
-                structured_output_bitmask,
-            ) = self._init_beam_search_structured_output(
-                params.structured_outputs, tokenizer
-            )
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -124,6 +116,23 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
+        params.configure_logprobs(
+            base_sampling_params, self.llm_engine.input_processor.vllm_config
+        )
+        if params.structured_outputs is not None:
+            (
+                structured_output_backend,
+                structured_output_key,
+                structured_output_bitmask,
+            ) = self._init_beam_search_structured_output(
+                params.structured_outputs, tokenizer
+            )
+
+        eos_token_ids = get_beam_search_eos_token_ids(
+            self.llm_engine.input_processor.generation_config_fields,
+            tokenizer.eos_token_id,
+        )
+        sort_beams_key = create_sort_beams_key_function(eos_token_ids, length_penalty)
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt in zip(lora_requests, engine_inputs):
@@ -164,7 +173,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     should_stop = self._beam_search_step(
                         instances_batch=instances_batch,
                         base_sampling_params=base_sampling_params,
-                        eos_token_id=eos_token_id,
+                        eos_token_ids=eos_token_ids,
                         ignore_eos=ignore_eos,
                         beam_width=beam_width,
                         sort_beams_key=sort_beams_key,
@@ -199,7 +208,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self,
         instances_batch: list[BeamSearchInstance],
         base_sampling_params: SamplingParams,
-        eos_token_id: int | None,
+        eos_token_ids: set[int],
         ignore_eos: bool,
         beam_width: int,
         sort_beams_key: Callable,
@@ -287,7 +296,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # tokens outside the grammar's allowed set. This filtering is also
         # the only grammar enforcement for beams whose allowed set exceeds
         # the engine-side allowed_token_ids cap.
-        allowed_sets: list[set[int] | None] = [None] * len(all_beams)
+        request_allowed = (
+            set(base_sampling_params.logprob_token_ids)
+            if base_sampling_params.logprob_token_ids is not None
+            else None
+        )
+        allowed_sets: list[set[int] | None] = [request_allowed] * len(all_beams)
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
@@ -316,6 +330,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
+                    if request_allowed is not None:
+                        logprobs = {
+                            token: score
+                            for token, score in sorted(
+                                logprobs.items(),
+                                key=lambda item: item[1].logprob,
+                                reverse=True,
+                            )
+                            if token in request_allowed and math.isfinite(score.logprob)
+                        }
+                        for score in logprobs.values():
+                            score.rank = None
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
                         if allowed is not None and token_id not in allowed:
@@ -328,7 +354,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                             cum_logprob=current_beam.cum_logprob + logprob_obj.logprob,
                         )
 
-                        if token_id == eos_token_id and not ignore_eos:
+                        if token_id in eos_token_ids and not ignore_eos:
                             instance.completed.append(new_beam)
                         else:
                             instance_new_beams.append(new_beam)

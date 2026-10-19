@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -25,6 +26,11 @@ class RequestError:
     code: str
     message: str
     retryable: bool = False
+
+    def to_exception(self) -> GenerationError:
+        if self.retryable:
+            return RetryableRequestError(self.message)
+        return GenerationError(self.message)
 
 
 @dataclass
@@ -277,6 +283,20 @@ STREAM_FINISHED = RequestOutput(
 _O = TypeVar("_O", default=PoolingOutput)
 
 
+@dataclass(frozen=True)
+class LateChunk:
+    token_range: tuple[int, int]
+    char_range: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class LateChunkingMetadata:
+    chunk_size: int
+    input_tokens: int
+    chunks: list[LateChunk]
+    strategy: str = "fixed_tokens"
+
+
 class PoolingRequestOutput(Generic[_O]):
     """The output data of a pooling request to the LLM.
 
@@ -287,6 +307,7 @@ class PoolingRequestOutput(Generic[_O]):
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
         error: Structured request-level error information, if the request failed.
+        late_chunking: Token and source ranges for fixed-length late chunking.
 
     """
 
@@ -299,8 +320,10 @@ class PoolingRequestOutput(Generic[_O]):
         finished: bool,
         *,
         error: RequestError | None = None,
+        late_chunking: LateChunkingMetadata | None = None,
     ):
         self.request_id = request_id
+        self.late_chunking = late_chunking
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished

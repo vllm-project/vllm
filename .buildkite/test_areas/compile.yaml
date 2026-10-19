@@ -40,7 +40,7 @@ steps:
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   source_file_dependencies:
-  - csrc/libtorch_stable/quantization/fp4/
+  - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/layers/layernorm.py

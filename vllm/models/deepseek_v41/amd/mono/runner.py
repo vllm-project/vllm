@@ -16,12 +16,13 @@ the same launches, so the ranks' epochs agree.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
+from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
 from .common.plan import BLOCKS
 from .layer import (
     EPOCH_WORDS,
@@ -34,7 +35,7 @@ from .layer import (
     scratch_bytes,
 )
 from .stages.dims import Dims as MoeDims
-from .stages.moe_shape import EXPERTS
+from .stages.moe_shape import EXPERTS, TOPK
 
 __all__ = ["BLOCKS", "MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
 
@@ -124,10 +125,10 @@ class MonoLayerWeights:
     sw2: torch.Tensor  # shared down [5120, inter] e4m3
     sw2_s: torch.Tensor
 
-    def check(self, tp: int) -> None:
-        """The MoE's tensors: 384 experts, TP-sharded intermediates (the routed
-        one padded as the loader pads it), AITER's A8W4 layout, 32 x 32 E8M0
-        blocks for the shared expert."""
+    def check(self, tp: int, experts: int = EXPERTS) -> None:
+        """The MoE's tensors: ``experts`` routed experts (384; the DSpark draft's
+        128), TP-sharded intermediates (the routed one padded as the loader pads
+        it), AITER's A8W4 layout, 32 x 32 E8M0 blocks for the shared expert."""
         d, fp4, e4m3, u8 = (
             MoeDims(tp),
             torch.float4_e2m1fn_x2,
@@ -135,12 +136,12 @@ class MonoLayerWeights:
             torch.uint8,
         )
         want = {
-            "gate_w": ((EXPERTS, HIDDEN), torch.bfloat16),
-            "bias": ((EXPERTS,), torch.float32),
-            "w13": ((EXPERTS, 2 * d.inter, HIDDEN // 2), fp4),
-            "w13_s": ((EXPERTS * 2 * d.inter, HIDDEN // 32), u8),
-            "w2": ((EXPERTS, HIDDEN, d.inter // 2), fp4),
-            "w2_s": ((EXPERTS * HIDDEN, d.down_scale_cols), u8),
+            "gate_w": ((experts, HIDDEN), torch.bfloat16),
+            "bias": ((experts,), torch.float32),
+            "w13": ((experts, 2 * d.inter, HIDDEN // 2), fp4),
+            "w13_s": ((experts * 2 * d.inter, HIDDEN // 32), u8),
+            "w2": ((experts, HIDDEN, d.inter // 2), fp4),
+            "w2_s": ((experts * HIDDEN, d.down_scale_cols), u8),
             "sgu": ((2 * d.sh_inter, HIDDEN), e4m3),
             "sgu_s": ((2 * d.sh_inter // 32, HIDDEN // 32), u8),
             "sw2": ((HIDDEN, d.sh_inter), e4m3),
@@ -153,11 +154,25 @@ class DSV41MonoLayer:
     """The mono decode runner of one TP rank (``group``: its TP group, for the
     peer-memory handle exchange; a gloo / CPU group)."""
 
-    def __init__(self, tp: int, rank: int, group, device: torch.device | str = "cuda"):
+    def __init__(
+        self,
+        tp: int,
+        rank: int,
+        group,
+        device: torch.device | str = "cuda",
+        experts: int = EXPERTS,
+        topk: int = TOPK,
+        ug_groups: int = 2,
+        swa_width: int = WINDOW,
+    ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
 
         self.tp, self.rank = tp, rank
+        # the layers it runs: the target's (384 experts, top-6, 128-wide causal SWA
+        # rows) or the DSpark draft's, which has a runner of its own
+        self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
+        self.swa_width = swa_width
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
         self._scratch: dict[int, torch.Tensor] = {}
@@ -170,6 +185,12 @@ class DSV41MonoLayer:
         self.klen = torch.zeros(2 * MAX_TOKENS, dtype=torch.int32, device=dev)
         self._dummy = torch.zeros(4, dtype=torch.int32, device=dev)
         self._zero_rec = torch.zeros(1024, dtype=torch.uint8, device=dev)
+        # the first layer's incoming pre-mix: stream 0 of the broadcast embedding
+        self._first_pre = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
+        self._first_pre[:, 0] = 1.0
+        # an index source's K1 outputs, vLLM's indexer's inputs
+        self.normed = torch.zeros(MAX_TOKENS, HIDDEN, dtype=torch.bfloat16, device=dev)
+        self.qr = torch.zeros(MAX_TOKENS, Q_RANK, dtype=torch.bfloat16, device=dev)
         # the attention seam's outputs, K1 -> K2
         self.res_mid = torch.zeros(
             MAX_TOKENS, HC, HIDDEN, dtype=torch.bfloat16, device=dev
@@ -198,19 +219,34 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp), dtype=torch.uint8, device=self.device
+                scratch_bytes(tokens, self.tp, self.experts, self.topk),
+                dtype=torch.uint8,
+                device=self.device,
             )
             self._scratch[tokens] = buf
         return buf
+
+    def first_pre_mix(self, tokens: int) -> torch.Tensor:
+        return self._first_pre[:tokens]
 
     @staticmethod
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
 
-    def kernels(self, tokens: int, ratio: int):
-        key = (tokens, ratio)
+    def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
+        key = (tokens, ratio, fold, index)
         if key not in self._kernels:
-            b = MonoBuild(tokens, self.tp, ratio)
+            b = MonoBuild(
+                tokens,
+                self.tp,
+                ratio,
+                fold=fold,
+                index=index,
+                experts=self.experts,
+                topk=self.topk,
+                ug_groups=self.ug_groups,
+                swa_width=self.swa_width,
+            )
             self._kernels[key] = (build_mono_k1(b), build_mono_k2(b))
         return self._kernels[key]
 
@@ -249,15 +285,21 @@ class DSV41MonoLayer:
         comp_cache: torch.Tensor | None = None,
         comp_block_table: torch.Tensor | None = None,
         outs: tuple | None = None,
+        fold: bool = True,
+        select: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (``outs``: buffers to write them into)."""
+        (``outs``: buffers to write them into). ``select(normed, qr)``: an index
+        source's top-k selection into ``topk_indices``, run between the
+        kernels on K1's normed input and qr."""
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn
         assert a is not None
         ratio = a.ratio
-        k1, k2 = self.kernels(M, ratio)
+        index = select is not None
+        assert not index or ratio
+        k1, k2 = self.kernels(M, ratio, fold, index)
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -266,7 +308,9 @@ class DSV41MonoLayer:
             assert t_.is_contiguous()
         assert positions.dtype == slot_mapping.dtype == torch.int64
         assert swa_indices.dtype == swa_lens.dtype == token_to_req.dtype == torch.int32
-        assert swa_indices.stride(0) == 128 and swa_cache.dtype == torch.uint8
+        assert (
+            swa_indices.stride(0) == self.swa_width and swa_cache.dtype == torch.uint8
+        )
         assert swa_cache.shape[-1] == 584 and swa_cache.stride(1) == 584
         swa_block = swa_cache.shape[1]
         if ratio:
@@ -324,11 +368,15 @@ class DSV41MonoLayer:
             token_to_req.data_ptr(),
             self.kt.data_ptr(),
             self.klen.data_ptr(),
+            self.normed.data_ptr(),
+            self.qr.data_ptr(),
             self.scratch(M).data_ptr(),
             self.epoch.data_ptr(),
             0,
             stream=st,
         )
+        if select is not None:
+            select(self.normed[:M], self.qr[:M])
         k2(
             self.q.data_ptr(),
             swa_cache.data_ptr(),
@@ -339,6 +387,13 @@ class DSV41MonoLayer:
             comp_block,
             self.kt.data_ptr(),
             self.klen.data_ptr(),
+            slot_mapping.data_ptr(),
+            swa_indices.data_ptr(),
+            swa_lens.data_ptr(),
+            token_to_req.data_ptr(),
+            topk.data_ptr(),
+            bt.data_ptr(),
+            bt_stride,
             positions.data_ptr(),
             a.attn_sink.data_ptr(),
             self._qk_scale,
