@@ -3848,8 +3848,9 @@ void paged_attention_custom_launcher_navi(
 // dtype, head size) combination, see attention_paged_attn_*.cu.
 // ---------------------------------------------------------------------------
 
-// Parameter list shared by paged_attention() and every per-TU entry point. The
-// names must match what CALL_CUSTOM_LAUNCHER* expect to find in scope.
+// Parameter list shared by paged_attention() and every entry point defined in
+// attention_paged_attn_*.cu. The names must match what CALL_CUSTOM_LAUNCHER*
+// expect to find in scope.
 #define ATTN_PARAMS                                                            \
   torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,      \
       torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,  \
@@ -3867,14 +3868,16 @@ void paged_attention_custom_launcher_navi(
       max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, block_size, \
       is_navi, use_interleaved_v_cache
 
-// Declare/define one fixed-head-size entry point. The per-TU definitions in
-// attention_paged_attn_*.cu are reachable only through ATTN_HEAD_SWITCH() in
-// attention_dispatch.cu (CMakeLists.txt fails if one is not).
+// Declare/define one fixed-head-size entry point. A definition in one of the
+// attention_paged_attn_*.cu files is reachable only if attention_dispatch.cu
+// names it in one of its ATTN_HEAD_SWITCH() calls (CMakeLists.txt fails if one
+// is missing).
 #define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
 
-// Instantiate one per-TU entry point, for every supported block size. Kept as
-// an alias of CALL_CUSTOM_LAUNCHER_BLK so the block-size switch has a single
-// definition; the head-size switch lives in attention_dispatch.cu.
+// Instantiate one entry point (one per attention_paged_attn_*.cu file), for
+// every supported block size. Kept as an alias of CALL_CUSTOM_LAUNCHER_BLK so
+// the block-size switch has a single definition; the head-size switch lives in
+// attention_dispatch.cu.
 #define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE) \
   CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)
 

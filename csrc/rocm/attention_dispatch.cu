@@ -60,7 +60,9 @@ bool is_navi_gpu() {
   return result;
 }
 
-// Each ATTN_HEAD_SWITCH below is what makes an instantiation TU reachable.
+// Each ATTN_HEAD_SWITCH() call below is a dispatch arm: it names the entry
+// point that paged_attention() calls, which is what makes the corresponding
+// attention_paged_attn_*.cu file reachable.
 #define ATTN_HEAD_SWITCH(FN64, FN128)                           \
   switch (head_size) {                                          \
     case 64:                                                    \

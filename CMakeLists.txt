@@ -1494,8 +1494,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # _rocm_C extension
   #
   # The paged attention *instantiations* are split over one translation unit
-  # per (dtype, kv-cache dtype, head size) combination: compiling them in a
-  # single TU serializes ~10 min of device code generation onto one core.
+  # per (dtype, kv-cache dtype, head size) combination: compiling them all in a
+  # single file serializes ~10 min of device code generation onto one core.
   # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
   # the kernels and launchers. A file listed here is dead weight unless
   # attention_dispatch.cu also dispatches its entry point (guarded below).
@@ -1517,9 +1517,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
     "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
 
-  # A per-variant TU that no dispatch arm reaches is still compiled and linked:
-  # it silently costs ~1 min of build time and ~12 MB of .so size, which is
-  # exactly what splitting it was meant to save. Fail at configure time instead.
+  # Each attention_paged_attn_*.cu file below instantiates one kernel set and
+  # exposes it as one entry point. That entry point is only reachable if
+  # paged_attention() in csrc/rocm/attention_dispatch.cu names it in one of its
+  # ATTN_HEAD_SWITCH() calls (the dispatch arms); otherwise the file is compiled
+  # and linked unnecessarily. Fail at configure time instead.
   file(READ "${CMAKE_SOURCE_DIR}/csrc/rocm/attention_dispatch.cu" _attn_dispatch)
   string(FIND "${_attn_dispatch}" "#define ATTN_HEAD_SWITCH" _attn_arms_pos)
   if (_attn_arms_pos EQUAL -1)
@@ -1539,8 +1541,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
         if (NOT _attn_arms MATCHES "${_attn_name}[,)]")
           message(FATAL_ERROR
             "${_attn_src} instantiates ${_attn_name}, but "
-            "csrc/rocm/attention_dispatch.cu never dispatches it: the TU would "
-            "be compiled and linked for nothing. Add it to one of the "
+            "csrc/rocm/attention_dispatch.cu never dispatches it: the file "
+            "would be compiled and linked for nothing. Add it to one of the "
             "ATTN_HEAD_SWITCH() calls in paged_attention().")
         endif()
       endforeach()
