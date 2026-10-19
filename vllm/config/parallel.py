@@ -1215,20 +1215,21 @@ def resolve_mori_all2all(
     model_config: "ModelConfig | None",
     moe_backend: str,
     lsa_spans_hosts: bool = False,
+    sdma_picks_epv1: bool = True,
 ) -> None:
     """Resolve whether the "mori" all2all backend runs MoRI EPv2 or EPv1.
 
     An unset `VLLM_MORI_EP_V2` prefers EPv2 and falls back to EPv1 where EPv2
     is unsupported, an explicit true keeps EPv2 regardless, and false selects
     EPv1. `lsa_spans_hosts` says whether a CCO-LSA team can span hosts (e.g.
-    gfx1250's UALink vPOD). Called from the ROCm platform's config hook;
-    idempotent, since VllmConfig may be post-initialized more than once.
+    gfx1250's UALink vPOD). `sdma_picks_epv1` says whether `MORI_ENABLE_SDMA=1`
+    selects EPv1; gfx1250 keeps EPv2 under SDMA.
     """
     if parallel_config.all2all_backend != "mori":
         return
     if parallel_config.mori_ep_v2 is None:
         parallel_config.mori_ep_v2 = _resolve_mori_ep_v2(
-            parallel_config, model_config, moe_backend, lsa_spans_hosts
+            parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
         )
     logger.info_once("MoRI all2all: EP%s", "v2" if parallel_config.mori_ep_v2 else "v1")
 
@@ -1238,11 +1239,12 @@ def _resolve_mori_ep_v2(
     model_config: "ModelConfig | None",
     moe_backend: str,
     lsa_spans_hosts: bool,
+    sdma_picks_epv1: bool,
 ) -> bool:
     if envs.VLLM_MORI_EP_V2 is False:
         return False
     reason = _mori_epv2_unsupported_reason(
-        parallel_config, model_config, moe_backend, lsa_spans_hosts
+        parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
     )
     if reason is None:
         return True
@@ -1266,6 +1268,7 @@ def _mori_epv2_unsupported_reason(
     model_config: "ModelConfig | None",
     moe_backend: str,
     lsa_spans_hosts: bool,
+    sdma_picks_epv1: bool,
 ) -> str | None:
     ep_size = (
         parallel_config.tensor_parallel_size
@@ -1276,7 +1279,8 @@ def _mori_epv2_unsupported_reason(
     # CCO-LSA team.
     if ep_size > 8 and not lsa_spans_hosts:
         return f"ep_size={ep_size} across hosts (EPv2 is validated within one host)"
-    if os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true"):
+    sdma = os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true")
+    if sdma and sdma_picks_epv1:
         return "MORI_ENABLE_SDMA=1 (SDMA is EPv1-only)"
     if moe_backend == "aiter_mega_moe":
         return "moe_backend=aiter_mega_moe (MegaMoE runs on MoRI EPv1 shmem)"

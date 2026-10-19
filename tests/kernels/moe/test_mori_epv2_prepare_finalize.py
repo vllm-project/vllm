@@ -298,6 +298,8 @@ def _model_config(**overrides):
         # The LSA team may span hosts (gfx1250); the manager checks it.
         ({"data_parallel_size": 16, "lsa_spans_hosts": True}, {}, "aiter", {}, True),
         ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),
+        # gfx1250 keeps EPv2 under SDMA.
+        ({"sdma_picks_epv1": False}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, True),
         ({}, {}, "aiter_mega_moe", {}, False),
         ({}, {"dtype": torch.float16}, "aiter", {}, False),
         # An explicit VLLM_MORI_EP_V2 wins over the deployment checks.
@@ -318,9 +320,11 @@ def test_mori_picks_epv2_where_supported(
         monkeypatch.setenv(name, value)
     parallel = dict(parallel)
     lsa_spans_hosts = parallel.pop("lsa_spans_hosts", False)
+    sdma_picks_epv1 = parallel.pop("sdma_picks_epv1", True)
     parallel_config = _parallel_config(**parallel)
+    model_config = _model_config(**model)
     resolve_mori_all2all(
-        parallel_config, _model_config(**model), moe_backend, lsa_spans_hosts
+        parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
     )
     assert parallel_config.mori_ep_v2 is ep_v2
 

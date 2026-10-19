@@ -1150,6 +1150,7 @@ class RocmPlatform(Platform):
                 model_config,
                 vllm_config.kernel_config.moe_backend,
                 lsa_spans_hosts=on_gfx1250(),
+                sdma_picks_epv1=not on_gfx1250(),
             )
 
     @classmethod
