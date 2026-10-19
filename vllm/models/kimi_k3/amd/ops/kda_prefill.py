@@ -150,8 +150,9 @@ def chunk_kda_prefill(
             has_initial_state=has_initial_state,
         )
 
-    # Only the fused walk addresses paged rows directly. The Triton path
-    # gathers the active rows and scatters the final state back here.
+    # Only the fused walk addresses the paged rows directly. The Triton path
+    # gathers the rows it needs and scatters the results back here, so callers
+    # pass the cache the same way for either backend.
     scatter_to: torch.Tensor | None = None
     if state_cache is not None and not fused:
         initial_state = gather_initial_states(
@@ -164,9 +165,6 @@ def chunk_kda_prefill(
         # Restated for the type checker; `fused` already implies all three.
         assert cu_seqlens is not None and lower_bound is not None
         assert g_bias is not None
-        # The dense state API remains FP32; paged caches bypass this conversion.
-        if initial_state is not None and initial_state.dtype != torch.float32:
-            initial_state = initial_state.to(torch.float32)
         logger.info_once(
             "Kimi-K3 KDA prefill: dispatching the fused ROCm chunk kernel."
         )

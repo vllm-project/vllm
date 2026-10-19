@@ -687,15 +687,19 @@ def _run_paged(inp: dict, cache, idx, warm, use_fused: bool, **kw):
 
 @pytest.mark.parametrize("use_fused", [False, True])
 @pytest.mark.parametrize("seqlens", [[512], [2048], [320, 64], [513, 64, 1]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_paged_state_matches_the_dense_pair(
-    use_fused: bool, seqlens: list[int]
+    use_fused: bool, seqlens: list[int], dtype: torch.dtype
 ) -> None:
     """A paged cache must give the same result as the dense pair."""
     _requires_kernel()
     inp = _inputs(seqlens, seed=11)
+    inp["h0"] = inp["h0"].to(dtype).float()
     n = len(seqlens)
     rows = [3 * i + 5 for i in range(n)]
-    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    cache, idx, warm = _paged_cache(
+        inp, [True] * n, rows, slots=3 * n + 12, dtype=dtype
+    )
     before = cache.clone()
 
     o_ref, ht_ref = _run(inp, use_fused=use_fused)
@@ -703,35 +707,14 @@ def test_paged_state_matches_the_dense_pair(
 
     assert ht_got is None, "the final state is in the cache, not returned"
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(
+        cache[idx.long()], ht_ref.to(dtype), rtol=5e-3, atol=5e-3
+    )
 
     untouched = torch.ones(cache.shape[0], dtype=torch.bool, device="cuda")
     untouched[idx.long()] = False
     assert torch.equal(cache[untouched], before[untouched]), (
         "a row no sequence owns was written"
-    )
-
-
-@pytest.mark.parametrize("use_fused", [False, True])
-def test_paged_bf16_state_matches_dense_pair(use_fused: bool) -> None:
-    """The FP32 walk may load and store a BF16 persistent cache."""
-    if use_fused:
-        _requires_kernel()
-    seqlens = [513, 64, 1]
-    inp = _inputs(seqlens, seed=17)
-    rows = [2, 7, 11]
-    cache, idx, warm = _paged_cache(inp, [True] * len(seqlens), rows, slots=16)
-    cache = cache.to(torch.bfloat16)
-
-    dense = dict(inp)
-    dense["h0"] = cache[idx.long()].float()
-    o_ref, ht_ref = _run(dense, use_fused=use_fused)
-    o_got, ht_got = _run_paged(inp, cache, idx, warm, use_fused=use_fused)
-
-    assert ht_got is None
-    torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(
-        cache[idx.long()], ht_ref.to(torch.bfloat16), rtol=5e-3, atol=5e-3
     )
 
 
@@ -966,6 +949,7 @@ def test_padded_cache_stride_is_honoured(use_fused: bool, dtype: torch.dtype) ->
     inp["h0"] = inp["h0"].to(dtype).float()
     n = len(seqlens)
     row = NUM_HEADS * HEAD_DIM * HEAD_DIM
+    # An odd BF16 row stride exercises unaligned vector loads and stores.
     slots, pad = 16, 513 if dtype == torch.bfloat16 else 512
     raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=dtype)
     cache = raw.as_strided(
