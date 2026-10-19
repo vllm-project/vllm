@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 
 from fastapi.responses import JSONResponse, Response
 
@@ -29,6 +30,7 @@ from .protocol import (
     ScoreResponseData,
 )
 from .typing import ScoreInput
+from ..typing import PoolingServeContext
 
 logger = init_logger(__name__)
 
@@ -192,22 +194,26 @@ class ServingScores(PoolingServing):
     ### Can significantly improve late-interaction scoring performance.
 
     async def flash_late_interaction(self, *args, **kwargs) -> Response:
+        arrival_time_ns = time.time_ns()
+
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
         await self._preprocessing_async(self.io_processor, ctx)
+        ctx.arrival_time_ns = arrival_time_ns
 
-        try:
-            # stage 1: encode queries and cache token embeddings on workers.
-            await self._flash_late_interaction_encode_queries(ctx)
-            # stage 2: encode docs and return scalar scores from workers.
-            await self._flash_late_interaction_encode_docs(ctx)
-        except BaseException:
+        async with self.maybe_tracing(ctx, self.io_processor, *args, **kwargs):
             try:
-                await self._cleanup_flash_late_interaction(ctx)
-            except Exception:
-                logger.exception("Failed to clean up late-interaction query cache.")
-            raise
+                # stage 1: encode queries and cache token embeddings on workers.
+                await self._flash_late_interaction_encode_queries(ctx)
+                # stage 2: encode docs and return scalar scores from workers.
+                await self._flash_late_interaction_encode_docs(ctx)
+            except BaseException:
+                try:
+                    await self._cleanup_flash_late_interaction(ctx)
+                except Exception:
+                    logger.exception("Failed to clean up late-interaction query cache.")
+                raise
 
-        return await self._postprocessing_async(self.io_processor, ctx)
+            return await self._postprocessing_async(self.io_processor, ctx)
 
     async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
         query_keys = ctx.late_interaction_query_keys
