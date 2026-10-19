@@ -205,7 +205,7 @@ def parse_fine_tuned_lora_name(
 
     parts = name.split(".")
     if (parts[-1] == "weight" or parts[-1] == "bias") and len(parts) >= 2:
-        if parts[-2] in ["lora_A", "lora_B"]:
+        if parts[-2] in ["lora_A", "lora_B"] and parts[-1] == "weight":
             new_name = ".".join(parts[start_index:-2])
             return new_name, parts[-2] == "lora_A"
         # For modules_to_save in classification.

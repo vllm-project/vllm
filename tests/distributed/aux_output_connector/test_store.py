@@ -251,9 +251,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(
-        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
-    )
     worker = _make_worker(1)
     worker.begin_step(
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
@@ -1282,6 +1279,33 @@ def test_store_does_not_evict_referenced_aux_outputs():
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.put([], release_keys=["first"])
+    store.close()
+
+
+def test_store_eviction_does_not_rescan_referenced_keys():
+    hashes = 0
+
+    class CountingKey(str):
+        def __hash__(self):
+            nonlocal hashes
+            hashes += 1
+            return super().__hash__()
+
+    store = _make_store(max_bytes=4 * 1000)
+    referenced = [CountingKey(f"referenced-{i}") for i in range(900)]
+    store.put([BlockObject(key, b"rrrr") for key in referenced], retain_keys=referenced)
+    old = [f"old-{i}" for i in range(100)]
+    store.put([BlockObject(key, b"oooo") for key in old])
+    hashes = 0
+
+    for i in range(100):
+        store.put([BlockObject(f"new-{i}", b"nnnn")])
+
+    assert hashes < len(referenced)
+    assert store.get_concatenated(referenced) == b"rrrr" * 900
+    for key in old:
+        with pytest.raises(BlockObjectStoreError):
+            store.get_concatenated([key])
     store.close()
 
 

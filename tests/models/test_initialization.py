@@ -14,10 +14,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import (
@@ -173,6 +171,20 @@ def can_initialize(
                 f"for FLASHMLA_SPARSE backend. Current device has compute "
                 f"capability {capability.major}.{capability.minor}"
             )
+
+    if model_arch == "Step5ForConditionalGeneration":
+        from vllm.platforms import current_platform
+        from vllm.platforms.interface import DeviceCapability
+
+        if (
+            not current_platform.is_cuda()
+            or current_platform.get_device_capability()
+            not in (
+                DeviceCapability(9, 0),
+                DeviceCapability(10, 3),
+            )
+        ):
+            pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform

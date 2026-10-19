@@ -707,6 +707,14 @@ def paged_mqa_logits_module():
     return None
 
 
+def _per_sequence_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
+    # AITER takes one length per sequence: the last column of a (B, next_n) table.
+    # TODO: remove once AITER accepts (B, next_n) context_lens (ROCm/aiter#6153).
+    if context_lens.dim() == 2 and context_lens.shape[1] > 1:
+        return context_lens[:, -1].contiguous()
+    return context_lens
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -726,8 +734,8 @@ def rocm_fp8_paged_mqa_logits(
         kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
             [num_blocks, block_size, 1, D+4], dtype `torch.uint8`.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
+        context_lens: Tensor of shape [B] or [B, next_n], dtype int32; effective
+            context length for each batch element, or for each of its Q rows.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
             block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
@@ -779,7 +787,7 @@ def rocm_fp8_paged_mqa_logits(
                 kv_cache_fp8,
                 weights,
                 out_logits,
-                context_lens,
+                _per_sequence_context_lens(context_lens),
                 block_tables,
                 max_model_len,
                 ChunkK=256,
@@ -801,7 +809,7 @@ def rocm_fp8_paged_mqa_logits(
             kv_cache_fp8,
             weights,
             out_qk,
-            context_lens,
+            _per_sequence_context_lens(context_lens),
             block_tables,
             max_model_len,
             ChunkQ=heads,
@@ -925,7 +933,9 @@ def rocm_fp8_mqa_logits(
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+        return fp8_mqa_logits(
+            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
+        )
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
@@ -1275,6 +1285,8 @@ def rocm_aiter_sparse_attn_indexer(
                 is_prefill=True,
                 compress_ratio=compress_ratio,
                 num_rows=num_rows,
+                max_valid_seq_len=chunk.max_seqlen_k,
+                topk_tokens=topk_tokens,
             ):
                 _launch_aiter_top_k_per_row_prefill(
                     logits,
@@ -1375,6 +1387,7 @@ def rocm_aiter_sparse_attn_indexer(
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+            topk_tokens=topk_tokens,
         ) and not rocm_aiter_ops.dsv4_indexer_prefers_native_top_k(
             num_rows=num_rows,
             num_columns=logits.shape[1],
