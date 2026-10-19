@@ -301,6 +301,21 @@ class JambaModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        if vllm_config.lora_config:
+            target_modules = vllm_config.lora_config.target_modules
+            if target_modules is not None:
+                unsupported_moe_targets = {"experts", "router"}
+                if any(
+                    t in unsupported_moe_targets
+                    or any(u in t for u in unsupported_moe_targets)
+                    for t in target_modules
+                ):
+                    raise ValueError(
+                        "LoRA is not currently supported on Jamba MoE expert layers "
+                        f"(found target in {target_modules}). Only non-MoE layers "
+                        "(attention, mamba, and embeddings) are supported."
+                    )
+
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -402,6 +417,15 @@ class JambaForCausalLM(
     }
 
     # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        "in_proj",
+        "embed_tokens",
+        "lm_head",
+    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
