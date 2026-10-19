@@ -23,9 +23,10 @@ M = 6
 class _Runner:
     def __init__(self):
         self.calls = []
+        self.draft = None
 
     def forward(self, *args, **kwargs):
-        self.calls.append((args, kwargs))
+        self.calls.append((args, {**kwargs, "draft_runner": self.draft}))
         return ("mono outputs",)
 
     def first_pre_mix(self, rows):
@@ -88,6 +89,7 @@ def run(monkeypatch):
         entry=None,
         layer=None,
         max_rows=md.MAX_ROWS,
+        mono=None,
         **inputs,
     ):
         # The row limit depends on the GPU (MAX_ROWS_GFX942 on gfx942), so the
@@ -102,10 +104,15 @@ def run(monkeypatch):
         runner = _Runner()
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
+
+        def pick(device, draft=None):
+            runner.draft = draft
+            return runner
+
+        monkeypatch.setattr(md, "_mono_runner", pick)
         monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
         args = {**_inputs(), **inputs}
-        mono = md.MonoDecodeLayer(ffn_only)
+        mono = mono or md.MonoDecodeLayer(ffn_only)
         if (entry or ("ffn" if ffn_only else "layer")) == "ffn":
             # x stands for wo_b's unreduced output; the first layer's attention
             # has no compressed cache
@@ -138,6 +145,49 @@ def test_first_layer_runs_mono_from_the_embedding(run):
     assert out == ("mono outputs",) and len(calls) == 1
     args, kwargs = calls[0]
     assert args[2].shape == (M, 4, 5120) and not kwargs["fold"]
+
+
+DRAFT_WIDTH = 192  # the DSpark draft's non-causal SWA rows: window 128 + 5 drafts
+
+
+def _draft(**overrides):
+    """A DSpark draft layer's mono path, and the metadata its step carries."""
+    layer = _layer(comp=None)
+    layer.attn.compress_ratio = 0
+    swa = _swa(
+        decode_swa_width=DRAFT_WIDTH,
+        decode_swa_indices=torch.zeros(64, 1, DRAFT_WIDTH, dtype=torch.int32),
+    )
+    mono = md.MonoDecodeLayer(draft=True, experts=128, topk=3, swa_width=DRAFT_WIDTH)
+    return dict(layer=layer, mono=mono, metadata={"swa": swa}, **overrides)
+
+
+def test_draft_layer_runs_mono_on_its_own_runner(run):
+    out, calls = run(**_draft())
+    assert out == ("mono outputs",) and len(calls) == 1
+    assert calls[0][0][9].stride(0) == DRAFT_WIDTH  # the non-causal SWA rows
+    assert calls[0][1]["draft_runner"] is not None  # not the target's runner
+
+
+def test_draft_first_layer_takes_the_broadcast_embedding(run):
+    """The draft hands its first layer the embedding already repeated to the
+    hc copies: K1 takes it as the settled residual."""
+    x = torch.zeros(M, 4, 5120, dtype=torch.bfloat16)
+    out, calls = run(
+        **_draft(residual=None, post_mix=None, res_mix=None, pre_mix=None, x=x)
+    )
+    assert out == ("mono outputs",)
+    args, kwargs = calls[0]
+    assert args[1].shape == (M, 5120) and args[2] is x and not kwargs["fold"]
+
+
+def test_draft_and_target_layers_take_only_their_own_swa_rows(run):
+    causal = {"swa": _swa(), "comp": SimpleNamespace(block_size=128)}
+    out, calls = run(**{**_draft(), "metadata": causal})
+    assert out is None and not calls
+    target = {"swa": _draft()["metadata"]["swa"], "comp": causal["comp"]}
+    out, calls = run(metadata=target)
+    assert out is None and not calls
 
 
 def test_index_source_selects_between_the_kernels(run):
@@ -208,7 +258,13 @@ def _linear():
     )
 
 
-def _decoder_layer(engram=None, routing=md.TARGET_ROUTING, **attn):
+# The routed experts and picks a token of the target's MoE layers and of the
+# DSpark draft's 3 layers (dspark_n_routed_experts, dspark_num_experts_per_tok).
+TARGET_ROUTING = (384, 6)
+DRAFT_ROUTING = (128, 3)
+
+
+def _decoder_layer(engram=None, routing=TARGET_ROUTING, **attn):
     attn = (
         dict(
             layer_id=21,
@@ -294,7 +350,7 @@ def test_decode_step_runs_ffn_launch(run, mode):
     out, calls = run(mode, ffn_only=True, metadata={"swa": _swa()})
     assert out == ("ffn outputs",) and len(calls) == 1
     assert calls[0][0][1].shape == (M, 5120)  # wo_b's unreduced output
-    assert calls[0][1] == {"topk": md.TARGET_ROUTING[1]}
+    assert calls[0][1] == {"topk": TARGET_ROUTING[1]}
 
 
 def test_ffn_layer_never_runs_whole(run):
@@ -326,7 +382,13 @@ def _config(monokernel=True, **parallel):
         | parallel
     )
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                num_hidden_layers=40,
+                dspark_n_routed_experts=DRAFT_ROUTING[0],
+                dspark_num_experts_per_tok=DRAFT_ROUTING[1],
+            )
+        ),
         parallel_config=SimpleNamespace(**parallel),
         kernel_config=SimpleNamespace(monokernel=monokernel),
     )
@@ -467,7 +529,7 @@ def _indexer_942():
         (_decoder_layer(compressor=object()), "ffn top 6"),
         (_decoder_layer(indexer=object()), "ffn top 6"),
         (_decoder_layer(kv_cache_dtype="auto"), "ffn top 6"),
-        (_decoder_layer(layer_id=40, routing=md.DRAFT_ROUTING), "ffn top 3"),
+        (_decoder_layer(layer_id=40, routing=DRAFT_ROUTING), "ffn top 3"),
         (_decoder_layer(layer_id=40), None),
     ],
     ids=[
@@ -513,7 +575,7 @@ def test_gfx942_takes_any_moe_backend(monkeypatch):
     [
         (_decoder_layer, ("gate_up_proj", "down_proj", *md.ATTN_LINEARS_942)),
         (
-            lambda: _decoder_layer(layer_id=40, routing=md.DRAFT_ROUTING),
+            lambda: _decoder_layer(layer_id=40, routing=DRAFT_ROUTING),
             ("gate_up_proj", "down_proj"),
         ),
     ],

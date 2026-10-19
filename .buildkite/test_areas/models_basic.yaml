@@ -11,9 +11,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/test_initialization.py
   - tests/models/registry.py
+  - tests/models/test_beam_construction.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+    # Exercise Beam construction and generation without a checkpoint download.
+    - pytest -v -s models/test_beam_construction.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Models (Initialization)"
@@ -258,6 +261,8 @@ steps:
   - tests/models/test_qwen3_5_mtp_config.py
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
+  - tests/models/test_beam_weight_mapping.py
+  - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
   - tests/models/transformers/test_dynamic_rope.py
   - tests/model_executor/layers/test_activation.py
@@ -268,7 +273,7 @@ steps:
   - tests/models/transformers/test_layer_registry.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ models/transformers/test_dynamic_rope.py model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py models/test_alice_ai.py models/test_alice_ai_config.py models/test_beam_weight_mapping.py models/test_beam_numerics.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd

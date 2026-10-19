@@ -13,9 +13,10 @@ outside that (an MXFP8 KV cache, another indexer) keeps vLLM's attention seam
 and attention and runs the rest as one launch, the FFN launch, from wo_b's
 unreduced output. A step takes the kernels when it is decode only, at most
 ``MAX_ROWS`` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
-a whole layer also needs causal SWA windows. Anything else runs the layer as
-before; the paths share every tensor at the layer boundary, so they interleave
-freely.
+a whole layer also needs its SWA rows as the kernels read them (causal windows;
+for the DSpark draft's layers, the block's non-causal rows). Anything else runs
+the layer as before; the paths share every tensor at the layer boundary, so they
+interleave freely.
 
 On CDNA3 (gfx942) the kernels compute the same layer on their own copies of
 the weights (``mono/weights942.py``), at TP 4 and on steps of up to
@@ -62,6 +63,8 @@ MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark draf
 # tiles of 36 tasks each, 288 units, and the MoE runs one unit a CTA on 256
 # CTAs. A larger step runs vLLM's path.
 MAX_ROWS_GFX942 = 42
+# FP4 groups of an ug task: the draft's 128-expert unions are small
+DRAFT_UG_GROUPS = 1
 # The kernels' ISA: CDNA4 (gfx950) scaled MFMA and MX formats, or CDNA3
 # (gfx942), where the kernels compute the same layer with FNUZ FP8 MFMAs on
 # their own copies of the weights (mono/weights942.py).
@@ -69,19 +72,37 @@ CDNA_VERSIONS = (3, 4)
 # The routed experts' intermediate width a rank at TP 4 (2304 / 4). vLLM pads
 # it to 640 on gfx942, and the gfx942 copies keep only the real columns.
 INTER_TP4 = 576
-# The routed experts and picks a token of the target's MoE layers and of the
-# DSpark draft's 3 layers (dspark_n_routed_experts, dspark_num_experts_per_tok).
-TARGET_ROUTING = (384, 6)
-DRAFT_ROUTING = (128, 3)
 
 _runner = None
+_draft_runner = None
 
 
-def _mono_runner(device: torch.device):
-    """The process's mono runner (one a TP rank, shared by every layer). Its
-    peer-memory handshake is collective over the TP group: every rank builds it
-    at the same layer of the same step."""
-    global _runner
+def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
+    """The process's mono runner (one a TP rank, shared by every layer of the
+    target; the DSpark draft's layers share one of their own, as its routing and
+    SWA rows differ). Its peer-memory handshake is collective over the TP group:
+    every rank builds it at the same layer of the same step."""
+    global _runner, _draft_runner
+    if draft is not None:
+        if _draft_runner is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "--monokernel's draft runner was first reached inside a CUDA "
+                    "graph capture, before an eager draft step."
+                )
+            from vllm.models.deepseek_v41.amd.mono.runner import DSV41MonoLayer
+
+            _draft_runner = DSV41MonoLayer(
+                get_tensor_model_parallel_world_size(),
+                get_tensor_model_parallel_rank(),
+                get_tp_group().cpu_group,
+                device,
+                experts=draft.experts,
+                topk=draft.topk,
+                ug_groups=DRAFT_UG_GROUPS,
+                swa_width=draft.swa_width,
+            )
+        return _draft_runner
     if _runner is None:
         if torch.cuda.is_current_stream_capturing():
             # its peer memory is allocated and exchanged eagerly; vLLM warms
@@ -281,9 +302,22 @@ class MonoDecodeLayer:
     launch after vLLM's attention (``ffn``). Its weights are taken from the
     layer at the first call, after loading."""
 
-    def __init__(self, ffn_only: bool = False, topk: int = TARGET_ROUTING[1]) -> None:
+    def __init__(
+        self,
+        ffn_only: bool = False,
+        draft: bool = False,
+        experts: int = 384,
+        topk: int = 6,
+        swa_width: int = SWA_WIDTH,
+    ) -> None:
         self.ffn_only = ffn_only
-        self.topk = topk
+        # a layer of the DSpark draft: its own routing and (non-causal) SWA rows
+        self.draft, self.experts, self.topk, self.swa_width = (
+            draft,
+            experts,
+            topk,
+            swa_width,
+        )
         self._weights: MonoLayerWeights | None = None
 
     @property
@@ -357,11 +391,15 @@ class MonoDecodeLayer:
             # when the model is created, so that a failed build shows at
             # startup and the hooks leave the top-k to vLLM from the first
             # step on. Later layers get the result of the first build.
-            from vllm.models.deepseek_v41.amd.ops import topk
+            from vllm.models.deepseek_v41.amd.ops import topk as topk_ops
 
-            topk.build()
+            topk_ops.build()
         draft = attn.layer_id >= config.num_hidden_layers
-        routing = DRAFT_ROUTING if draft else TARGET_ROUTING
+        # a draft layer's routing is the DSpark expert set (128 / 3 on V4.1-Flash)
+        experts, topk = 384, 6
+        if draft:
+            experts = getattr(config, "dspark_n_routed_experts", 0) or experts
+            topk = getattr(config, "dspark_num_experts_per_tok", 0) or topk
         if layer.use_sequence_parallel:
             why = "sequence-parallel layer"
         elif not layer.fuse_seam_norm and not gfx942:
@@ -371,12 +409,11 @@ class MonoDecodeLayer:
             why = "needs aiter's fused mHC seam"
         elif gfx942 and get_tensor_model_parallel_world_size() != 4:
             why = "gfx942 builds for tensor parallel size 4 only"
-        elif draft and not gfx942:
-            why = "draft layer"
         elif (
             ffn.shared_experts is None
             or ffn.gate.tid2eid is not None
-            or (ffn.n_routed_experts, ffn.n_activated_experts) != routing
+            or ffn.n_routed_experts != experts
+            or ffn.n_activated_experts != topk
             or ffn.routed_scaling_factor != 1.5
             or ffn.swiglu_limit != 10.0
             or ffn.scoring_func != "sqrtsoftplus"
@@ -384,26 +421,27 @@ class MonoDecodeLayer:
         ):
             why = (
                 "MoE routing outside the kernels' "
-                f"({routing[0]} / {routing[1]}, sqrtsoftplus, x1.5)"
+                f"({experts} / {topk}, sqrtsoftplus, x1.5)"
             )
         if why is not None:
             logger.info_once("DSv4.1 mono decode off for some layers: %s", why)
             return None
-        if draft:
-            # gfx942 only: the DSpark draft layers take the FFN launch, built
-            # for the draft's 128 / 3 routing, after vLLM's attention. The
-            # kernels' attention takes the target's causal windows only, and a
-            # draft block's tokens also see the block's later tokens. vLLM's
-            # draft MoE multiplies bf16 activations with the FP4 experts, and
-            # the FFN launch quantizes them to MXFP8 as it does for the
-            # target. That changes only how many drafts the target accepts,
-            # not the target's output.
+        if draft and gfx942:
+            # On gfx942 the DSpark draft layers take the FFN launch, built for
+            # the draft's routing, after vLLM's attention. It runs on the
+            # target's runner. The whole draft layer below, on a runner of its
+            # own with the block's non-causal SWA rows, is checked on gfx950
+            # only. vLLM's draft MoE multiplies bf16 activations with the FP4
+            # experts, and the FFN launch quantizes them to MXFP8 as it does
+            # for the target. That changes only how many drafts the target
+            # accepts, not the target's output.
             logger.info_once(
                 "DSv4.1 mono decode: the FFN launch for the DSpark draft layers "
                 "(%d / %d routing)",
-                *routing,
+                experts,
+                topk,
             )
-            return MonoDecodeLayer(ffn_only=True, topk=routing[1])
+            return MonoDecodeLayer(ffn_only=True, experts=experts, topk=topk)
         # the whole layer: the kernels' attention takes the standard layers; an
         # index source's compressor and indexer run between its two launches
         from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
@@ -420,11 +458,31 @@ class MonoDecodeLayer:
             why = f"compress ratio {attn.compress_ratio}"
         elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
             why = f"a {attn.kv_cache_dtype} KV cache"
+        elif draft and (attn.compress_ratio or attn.indexer is not None):
+            why = "a draft layer with compressed keys"
+        if why is not None and draft:
+            logger.info_once("DSv4.1 mono decode off for the draft layers: %s", why)
+            return None
         if why is not None:
             logger.info_once(
                 "DSv4.1 mono decode: the FFN launch for layers with %s", why
             )
             return MonoDecodeLayer(ffn_only=True)
+        if draft:
+            from vllm.v1.attention.backends.mla.compressor_utils import (
+                get_dspark_swa_index_width,
+            )
+
+            spec = vllm_config.speculative_config
+            logger.info_once("DSv4.1 mono decode: the DSpark draft layers")
+            return MonoDecodeLayer(
+                draft=True,
+                experts=experts,
+                topk=topk,
+                swa_width=get_dspark_swa_index_width(
+                    config.sliding_window, spec.num_speculative_tokens
+                ),
+            )
         logger.info_once("DSv4.1 mono decode: the whole standard backbone layers")
         return MonoDecodeLayer()
 
@@ -460,7 +518,7 @@ class MonoDecodeLayer:
             sw2=sh.down_proj.weight,
             sw2_s=_scale_bytes(sh.down_proj.weight_scale),
         )
-        self._weights.check(get_tensor_model_parallel_world_size())
+        self._weights.check(get_tensor_model_parallel_world_size(), self.experts)
         return self._weights
 
     def _weights_942(self, layer: "DeepseekV4DecoderLayer"):
@@ -607,7 +665,9 @@ class MonoDecodeLayer:
         if self.ffn_only:
             return None
         first = residual is None
-        if first and x.dim() != 2:
+        # the draft's first layer takes the embedding already broadcast to the
+        # hc copies ([rows, hc, dim]), the target's the 2-D embedding
+        if first and x.dim() != (3 if self.draft else 2):
             return self._skip("first layer of a pipeline stage")
         why, swa, comp = self._decode_step(layer, x.shape[0])
         attn = layer.attn
@@ -616,7 +676,7 @@ class MonoDecodeLayer:
             # the kernels' attention: causal SWA windows, the compressed cache
             if comp is None and attn.compress_ratio:
                 why = "layer metadata missing"
-            elif swa.decode_swa_width != SWA_WIDTH:
+            elif swa.decode_swa_width != self.swa_width:
                 why = f"SWA width {swa.decode_swa_width}"
             elif (
                 swa.decode_swa_indices is None
@@ -629,16 +689,20 @@ class MonoDecodeLayer:
         if why is not None:
             return self._skip(why)
         assert swa is not None
-        runner = _mono_runner(x.device)
+        runner = _mono_runner(x.device, self if self.draft else None)
         logger.info_once(
-            "DSv4.1 mono decode layer active (decode steps of <= %d rows)",
+            "DSv4.1 mono decode %slayer active (decode steps of <= %d rows)",
+            "draft " if self.draft else "",
             _max_rows(),
         )
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write
         fold = True
         if first:
-            residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
+            if self.draft:
+                residual, x = x, x[:, 0].contiguous()
+            else:
+                residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
             pre_mix = runner.first_pre_mix(x.shape[0])
             post_mix = res_mix = pre_mix  # unread without the fold
             fold = False
