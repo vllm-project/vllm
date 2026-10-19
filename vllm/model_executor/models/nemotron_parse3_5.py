@@ -673,16 +673,6 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
             raise ValueError("Parse 3.5 does not support decoder cross-attention")
         if not getattr(config, "navit_packing", False):
             raise ValueError("Parse 3.5 requires native packed image processing")
-        spec = vllm_config.speculative_config
-        if (
-            spec is not None
-            and spec.method == "mtp"
-            and not vllm_config.use_v2_model_runner
-        ):
-            raise ValueError(
-                "Nemotron Parse MTP requires Model Runner V2. "
-                "Set VLLM_USE_V2_MODEL_RUNNER=1."
-            )
         self.configure_mm_token_handling(
             vocab_size=config.decoder.vocab_size, mm_token_ids=[1]
         )
