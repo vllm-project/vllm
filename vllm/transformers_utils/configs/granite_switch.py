@@ -250,11 +250,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.switch_head_dim = switch_head_dim
         self.fused_add_norm = fused_add_norm
 
-        # Shadow Residual (SR).
-        # Pre-fusion SR checkpoints carried unfused_qkv; their weight layout is
-        # incompatible with the fused one. transformers silently keeps unknown
-        # config keys, so without this an old checkpoint would load into a
-        # fused model and quietly mismatch keys.
+        # Shadow Residual (SR). An explicit check is needed because transformers
+        # silently keeps unknown config keys, so a pre-fusion checkpoint would
+        # otherwise load into a fused model and quietly mismatch keys.
         if kwargs.get("unfused_qkv"):
             raise ValueError(
                 "This checkpoint sets unfused_qkv=True, so it carries the old "

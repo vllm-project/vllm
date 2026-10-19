@@ -1201,13 +1201,11 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
         num_adapters = getattr(hf_config, "num_adapters", 0)
 
         # 1. Every layer must be counted as an attention layer, including the
-        # two switch cache layers. The class does not declare IsHybrid, so
-        # get_num_layers_by_block_type takes its plain-transformer branch and
-        # reports num_hidden_layers. Its hybrid branch instead sums layer_types
-        # entries equal to the literal "attention", which Transformers
-        # normalizes to "full_attention" - so were this model ever routed down
-        # that branch the count would be zero, vLLM would size the KV cache for
-        # zero attention layers, and output would be wrong with no error.
+        # two switch cache layers. get_num_layers_by_block_type's hybrid branch
+        # sums layer_types entries equal to the literal "attention", which
+        # Transformers normalizes to "full_attention": were this model ever
+        # routed down that branch the count would be zero and vLLM would size
+        # the KV cache for zero attention layers, silently.
         if model_config.is_hybrid or model_config.is_attention_free:
             raise ValueError(
                 "Granite Switch is an attention-only architecture, but this "
@@ -1233,13 +1231,10 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                     f"num_hidden_layers is {num_layers}."
                 )
 
-        # 2. Triton must be available. Every projection in the model is a
-        # SwitchedLoRALinear, whose shared-MLP gate/up path runs the fused
-        # expand+SwiGLU kernel unconditionally - it is the activation, not just
-        # the adapter delta - so this holds even at num_adapters == 0. Without
-        # Triton the kernel object is an undecorated function and the first
-        # forward dies on an unindexable launch, inside a worker, after the
-        # weights are loaded.
+        # 2. Triton must be available, even at num_adapters == 0: the fused
+        # expand+SwiGLU kernel computes the shared MLP's activation, not just
+        # the adapter delta. Without it the first forward dies on an
+        # unindexable launch, inside a worker, after the weights are loaded.
         if not HAS_TRITON:
             raise ValueError(
                 "Granite Switch requires Triton. Its projections run a fused "
@@ -1296,14 +1291,10 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                     "largest tier has nowhere to go."
                 )
 
-        # 6. The counting head's dtype bound. MultiSwitch recovers a control
-        # token's write address from a 1/(1 + n) attention signal, and since
-        # both switch heads are paged-KV attention layers that signal takes the
-        # KV-cache dtype. bfloat16's 8-bit mantissa inverts 1/(1 + n) exactly
-        # only to n = 188; at 189 the reciprocal aliases onto 188's, so that
-        # token retrieves the wrong adapter. float32 is exact past n = 4095.
-        # Reported rather than rejected - it is a capacity limit, not a
-        # misconfiguration.
+        # 6. The counting head's dtype bound. Both switch heads are paged-KV
+        # attention layers, so the 1/(1 + n) counting signal takes the KV-cache
+        # dtype. bfloat16 is reported rather than rejected: it is a capacity
+        # limit, not a misconfiguration.
         cache_dtype = vllm_config.cache_config.cache_dtype
         if "fp8" in str(cache_dtype):
             raise ValueError(

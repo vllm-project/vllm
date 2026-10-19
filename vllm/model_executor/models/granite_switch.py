@@ -763,29 +763,24 @@ class SwitchedLoRALinear(nn.Module):
         ctx = self._lora_ctx
         remapped = ctx.remapped_indices if ctx is not None else None
         if remapped is not None and self._num_applicable > 0:
-            # Kernel-local indices were gathered once for all modules in
-            # prepare_and_store(); this is a stride-1 contiguous row-view into
-            # ctx.remapped_indices [num_modules, num_tokens] - no per-module
-            # gather op, no launch.
+            # A stride-1 row-view into ctx.remapped_indices, gathered once for
+            # all modules in prepare_and_store() - no per-module launch.
             #
-            # Deliberately NOT sliced to x.shape[0]. The table is built with
-            # exactly the width it is indexed at, so the slice is a no-op, and
-            # under torch.compile it is actively harmful: x.shape[0] is a
-            # computed symint for the dual-stream [2M, H] stack, which makes
-            # this getitem depend on a node in a later graph partition while
-            # the splitter reassigns the getitem itself to the partition that
-            # produced `remapped`. That is a cycle, and it fails graph
+            # Deliberately NOT sliced to x.shape[0]. The slice is a no-op (the
+            # table is built at the width it is indexed at) and under
+            # torch.compile it is harmful: x.shape[0] is a computed symint for
+            # the dual-stream [2M, H] stack, so the getitem would depend on a
+            # later graph partition while the splitter assigns the getitem to
+            # the one that produced `remapped`. That cycle fails graph
             # splitting outright at PP>1.
             adapter_indices = remapped[self._module_idx]
             self._run_expand(x_ext, adapter_indices, ctx)
 
         if self._row_parallel_reduce:
-            # base_out is a column-slice of x_ext (row stride N+shrink_cols),
-            # so it is non-contiguous; all-reduce's internal .view() requires a
-            # packed layout. Copy to contiguous before the reduce. NOTE: this
-            # copy is on the TP>1 row-parallel critical path - if it proves
-            # costly for large models, revisit fusing the base output into a
-            # standalone buffer rather than sharing x_ext.
+            # base_out is a column-slice of x_ext, so non-contiguous, and
+            # all-reduce's internal .view() requires a packed layout. This copy
+            # is on the TP>1 critical path; if it proves costly, give the base
+            # output its own buffer rather than sharing x_ext.
             base_out = tensor_model_parallel_all_reduce(base_out.contiguous())
 
         # Bias goes in after the all-reduce: a row-parallel rank holds a partial
@@ -795,12 +790,10 @@ class SwitchedLoRALinear(nn.Module):
         if self._fused_bias is not None:
             base_out = base_out + self._fused_bias
 
-        # base_out is a strided view of x_ext (shrink columns make the row
-        # stride > N_total). That is fine for every consumer in the Granite
-        # stack: qkv -> attention split+RoPE and o/down -> residual add are all
-        # stride-safe. The one consumer that assumes packed rows (SiluAndMul on
-        # the gate/up output) is handled by the fuse_swiglu path above, which
-        # never exposes a strided base. So no .contiguous() is needed here.
+        # No .contiguous() despite base_out being a strided view of x_ext: every
+        # consumer in the Granite stack is stride-safe (qkv -> attention
+        # split+RoPE, o/down -> residual add). The one that is not, SiluAndMul
+        # on gate/up, goes through the fuse_swiglu path above instead.
         return base_out, self._output_bias
 
     def _forward_swiglu(self, x: torch.Tensor, x_ext: torch.Tensor):
@@ -1118,24 +1111,13 @@ class MultiSwitch(nn.Module):
         total_tokens = input_ids.shape[0]
         device = input_ids.device
         # The KV-cache dtype, not a choice: both heads are paged-KV Attention
-        # modules, so their Q/K/V must match the cache. A bf16 cache quantizes
-        # the 1/(1+n) signal and inverts exactly only up to n = 188 (189
-        # aliases); float32 inverts exactly past n = 4095. This is a different
-        # bound from the codebook's capacity, which limits the memory head
-        # rather than the counting head.
+        # modules, so their Q/K/V must match the cache. This is what bounds the
+        # counting head's exact range (188 control tokens in bf16); see
+        # GraniteSwitchConfigVerifier, which reports it at startup.
         dtype = self.dtype
 
-        # Position-0 anchor for the 1/(1+n) counting. Derived from positions;
-        # NOT KV-hidden.
-        #
-        # ``positions`` must be the REAL per-request positions. There is
-        # deliberately no ``arange(total_tokens)`` fallback: vLLM flattens a
-        # batch into one flat tensor, so a fabricated arange places an anchor
-        # only in the first request, and every later request counts against a
-        # missing baseline, recovers a wrong write address and retrieves an
-        # arbitrary adapter. That failure is silent - routing looks plausible
-        # and only diverges once a request carries >= 3 control tokens - so a
-        # loud error here is much cheaper than the misrouting it replaces.
+        # No arange() fallback on purpose: the misrouting it would cause is
+        # silent, surfacing only once a request carries >= 3 control tokens.
         if positions is None:
             raise ValueError(
                 "MultiSwitch.forward() requires per-request `positions`: the "
@@ -1160,16 +1142,15 @@ class MultiSwitch(nn.Module):
 
         # Step 1: counting via single-head attention -> write address n.
         #
-        # The 0.0/1.0 below stay Python scalars, which `masked_fill_` and slice
-        # assignment bake directly into the kernel. Materializing them as
-        # ``torch.tensor(0.0, device=device)`` instead costs a host->device copy
-        # out of pageable memory, which blocks the forward and trips
-        # ``VLLM_GPU_SYNC_CHECK``. torch.compile constant-folds such a tensor
-        # away, so the stall appears only under ``--enforce-eager``.
+        # The 0.0/1.0 below stay Python scalars so masked_fill_ and slice
+        # assignment bake them into the kernel. As torch.tensor(0.0,
+        # device=device) they would instead cost a host->device copy out of
+        # pageable memory, blocking the forward and tripping
+        # VLLM_GPU_SYNC_CHECK - visible only under --enforce-eager, since
+        # torch.compile constant-folds such a tensor away.
 
         # Keys: masked (-1e9) by default; un-masked (0) at the anchor and at
-        # control tokens, so the one-hot query attends only to those. Shaped
-        # ops throughout, no boolean-index assignment.
+        # control tokens, so the one-hot query attends only to those.
         k_count = torch.full(
             (total_tokens, self.num_kv_heads, self.counting_head_dim),
             _NEG_INF,
@@ -2751,12 +2732,9 @@ class GraniteSwitchModel(nn.Module):
         if num_adapters > 0:
             self.switch: MultiSwitch | None = MultiSwitch(config, vllm_config)
 
-            # Control token ids, one per adapter: the switch matches these
-            # against the input sequence to decide which adapter to activate,
-            # and the position in the tensor is the adapter index. All values
-            # come from config. Stored as a buffer rather than a Parameter so
-            # they do not pollute the state_dict and stay torch.compile-friendly
-            # (no .item() needed), while still following .to(device).
+            # Control token ids, one per adapter; position in the tensor is the
+            # adapter index. A buffer rather than a Parameter so it follows
+            # .to(device) without entering the state_dict.
             token_ids = config.adapter_token_ids
             if token_ids is not None:
                 self.register_buffer(
@@ -2803,12 +2781,11 @@ class GraniteSwitchModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        # Wire the shared LoRA context onto every module that reads per-forward
-        # metadata: a single object populated once per forward and read by every
-        # layer that needs it. object.__setattr__ bypasses
-        # nn.Module.__setattr__ so the context is NOT registered as a
-        # submodule/buffer - it carries live per-forward tensors, not parameters
-        # - and the attribute stays stable for torch.compile.
+        # Wire the shared LoRA context (populated once per forward) onto every
+        # module that reads it. object.__setattr__ bypasses
+        # nn.Module.__setattr__, so the context is not registered as a
+        # submodule or buffer - it carries live per-forward tensors, not
+        # parameters - and the attribute stays stable for torch.compile.
         if num_adapters > 0:
             ctx_types = self.decoder_interface.ctx_wire_types()
             for module in self.modules():
