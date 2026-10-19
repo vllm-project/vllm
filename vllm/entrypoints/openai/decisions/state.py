@@ -34,7 +34,8 @@ def init_decisions_state(
                 default_chat_template_kwargs=default_chat_template_kwargs,
             )
         )
-    except ValueError:
+    except ValueError as e:
+        state.structured_decisions_disabled_reason = str(e)
         return None
 
     if strategy.task == "generate":

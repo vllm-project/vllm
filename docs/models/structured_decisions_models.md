@@ -52,7 +52,8 @@ log probabilities.
 3. The read returns the logprobs of that question's label tokens. Softmax over
    the labels gives the answer's probabilities.
 
-Thinking is off unless `chat_template_kwargs` turns it on.
+Thinking is always off, because the read is the reply's first token. A request
+with `"enable_thinking": true` in `chat_template_kwargs` returns 400.
 
 Probabilities can differ between identical requests. They depend on which
 requests share a batch and on whether a read hits the prefix cache. Set
@@ -246,7 +247,8 @@ reads, including prefix-cache counters.
 
 Probabilities are normalized over the supplied options. `confidence` is the
 winning label's probability over the full vocabulary; it is not calibrated
-to OpenAI's models. Thinking is disabled for these reads.
+to OpenAI's models. Thinking is disabled for these reads, so thinking-only
+checkpoints return 501. A 501 body names the reason.
 
 Image inputs, other message roles, tools, streaming, and per-question refusal
 scoring are outside this MVP. Unsupported request fields and input types are

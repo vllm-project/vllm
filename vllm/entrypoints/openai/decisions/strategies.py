@@ -88,7 +88,7 @@ class QuestionRead:
 
 class ReadPromptRequest(OpenAIBaseModel):
     """Chat options for one read, ending at the generation prompt so the label
-    is the reply's first token. Thinking is off unless the request enables it."""
+    is the reply's first token. Thinking is always off."""
 
     chat_template_kwargs: dict[str, Any] | None = None
     cache_salt: str | None = None
@@ -229,6 +229,7 @@ class NextTokenStrategy(ReadStrategy):
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
+        self._check_thinking_off()
         # Every prompt ends with the same generation prompt, so a label's token
         # is the same for every question.
         prompt = self._generation_prompt()
@@ -240,21 +241,44 @@ class NextTokenStrategy(ReadStrategy):
 
     def _generation_prompt(self) -> list[int]:
         """A chat prompt's ids up to the generation prompt, with thinking off."""
-        context, tokenizer = self.context, self._tokenizer()
-        probe = tokenizer.apply_chat_template(
-            [{"role": "user", "content": "x"}],
+        return self._tokenizer().encode(self._chat_prompt(), add_special_tokens=False)
+
+    def _chat_prompt(self, history: Sequence[dict[str, str]] = ()) -> str:
+        """The chat after ``history`` up to the generation prompt, as text."""
+        context = self.context
+        prompt = self._tokenizer().apply_chat_template(
+            [*history, {"role": "user", "content": "x"}],
             **{
                 **context.default_chat_template_kwargs,
                 "chat_template": context.chat_template,
                 "add_generation_prompt": True,
-                "tokenize": True,
-                "return_dict": False,
+                "tokenize": False,
                 "enable_thinking": False,
             },
         )
-        if isinstance(probe, str):
-            probe = tokenizer.encode(probe, add_special_tokens=False)
-        return list(probe)
+        assert isinstance(prompt, str)
+        return prompt
+
+    def _check_thinking_off(self) -> None:
+        """Raise ValueError when the reply would start inside a thought."""
+        prompt = self._chat_prompt()
+        if prompt.rfind("<think>") > prompt.rfind("</think>"):
+            raise ValueError("the chat prompt opens a thought")
+        if "</think>" in prompt:
+            return
+        thought = "<think>\nsystemone-thought\n</think>\n\nA"
+        history = [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": thought},
+        ]
+        try:
+            kept = "systemone-thought" in self._chat_prompt(history)
+        except Exception as e:
+            raise ValueError(f"the chat template fails on a thought: {e!r}") from e
+        if not kept:
+            raise ValueError(
+                "the chat template drops thoughts but does not close one in the prompt"
+            )
 
     def _sampling_params(
         self, label_ids: list[int], prompt_ids: list[int]
@@ -476,6 +500,9 @@ class LiquidStrategy(NextTokenStrategy):
     modalities = frozenset({"image"})
     # runner.py bounds every picture at 1024 x 1024 pixels before the processor.
     max_image_pixels = 1024 * 1024
+
+    def _check_thinking_off(self) -> None:
+        """d1's template drops past thoughts, but d1 answers without one."""
 
     def render_state(self, state: Any) -> str:
         if state is None:
