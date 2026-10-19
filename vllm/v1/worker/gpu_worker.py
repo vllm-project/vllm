@@ -166,6 +166,17 @@ def compute_suggested_kv_cache_memory_bytes(
     return to_requested, to_gpu
 
 
+def startup_plan_kv_cache_memory_bytes(available_kv_cache_memory_bytes: int) -> int:
+    """KV bytes to persist so the next boot repeats this allocation.
+
+    This is the budget this boot actually gave the KV cache, not the
+    printed ``--kv-cache-memory`` suggestion. The suggestion also
+    subtracts the captured CUDAGraph pool and a 150 MiB buffer, so
+    saving it shrinks the next boot's cache (#57936).
+    """
+    return int(available_kv_cache_memory_bytes)
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -911,7 +922,13 @@ class Worker(WorkerBase):
 
             logger.info(msg)
 
-            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
+            # The suggestion above is a tighter hint than the budget this
+            # boot allocated. Persisting the hint makes the next boot
+            # smaller (#57936).
+            persisted_kv_bytes = startup_plan_kv_cache_memory_bytes(
+                self.available_kv_cache_memory_bytes
+            )
+            maybe_save_startup_plan(self, persisted_kv_bytes)
 
         if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other

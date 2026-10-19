@@ -12,6 +12,7 @@ from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import (
     compute_suggested_kv_cache_memory_bytes,
     maybe_rocm_profiling_fallback,
+    startup_plan_kv_cache_memory_bytes,
 )
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -197,6 +198,31 @@ def test_kv_cache_suggestion_does_not_double_count_cudagraph():
     )
     assert bad_req < 0
     assert bad_gpu < 0
+
+
+def test_startup_plan_saves_allocated_kv_budget_not_suggestion(plan_env):
+    """The plan replays this boot's KV budget, not the printed hint.
+
+    The hint subtracts the captured CUDAGraph pool and a 150 MiB buffer.
+    Persisting it gives the next boot a smaller cache (#57936).
+    """
+    allocated = 40 * GiB_bytes
+    suggestion, _ = compute_suggested_kv_cache_memory_bytes(
+        total_consumed=20 * GiB_bytes,
+        peak_activation_memory=2 * GiB_bytes,
+        cuda_graph_memory_bytes=8 * GiB_bytes,
+        requested_memory=70 * GiB_bytes,
+        init_free_memory=80 * GiB_bytes,
+    )
+    assert suggestion != allocated
+
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, startup_plan_kv_cache_memory_bytes(allocated))
+
+    replay = _plan_worker()
+    maybe_apply_startup_plan(replay)
+    assert replay.cache_config.kv_cache_memory_bytes == allocated
+    assert replay.cache_config.kv_cache_memory_bytes != suggestion
 
 
 class _OrderedHandle:
