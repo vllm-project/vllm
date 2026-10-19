@@ -711,7 +711,7 @@ def test_batch_aware_kv_splits_fit_an_int32_safe_reservation(monkeypatch):
     monkeypatch.setattr(
         rocm_aiter_mla,
         "current_workspace_manager",
-        lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.extend(specs)),
+        lambda: SimpleNamespace(reserve=lambda *specs: reserved.extend(specs)),
     )
     rocm_aiter_mla._reserve_triton_dcp_verify_workspace(
         max_rows, heads, local_seq_len, kv_lora_rank, sm_count

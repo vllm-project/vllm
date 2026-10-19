@@ -87,7 +87,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
             current_platform.num_compute_units(),
         )
         lse_dim = self.mla_dims.kv_lora_rank + 1
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((B, q_num_heads, max_splits, lse_dim), torch.float32),
         )
 

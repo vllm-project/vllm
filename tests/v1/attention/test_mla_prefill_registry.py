@@ -272,3 +272,38 @@ def test_register_mla_prefill_backend_with_string_name_decorator():
 
     member.clear_override()
     _remove_dynamic_member(MLAPrefillBackendEnum, member)
+
+
+@pytest.mark.parametrize(
+    "backend_cls", [TrtllmRaggedPrefillBackend, FlashInferPrefillBackend]
+)
+def test_prefill_construction_reserves_unwarmed_slots(monkeypatch, backend_cls):
+    """A prefill first reached after warmup must fit in every execution slot."""
+    import vllm.v1.worker.workspace as workspace
+
+    monkeypatch.setenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", "4096")
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    init_workspace_manager(torch.device("cpu"), num_ubatches=2, num_lanes=2)
+    try:
+        backend_cls(
+            num_heads=4,
+            scale=0.5,
+            kv_lora_rank=8,
+            qk_nope_head_dim=16,
+            qk_rope_head_dim=8,
+            v_head_dim=32,
+            vllm_config=MagicMock(),
+        )
+        manager = current_workspace_manager()
+        manager.lock()
+        pointers = set()
+        for ubatch in range(2):
+            active_ubatch = ubatch
+            for lane in range(2):
+                with workspace.use_workspace_lane(lane):
+                    (buffer,) = manager.get_simultaneous(((4096,), torch.uint8))
+                    pointers.add(buffer.data_ptr())
+        assert len(pointers) == 4
+    finally:
+        reset_workspace_manager()

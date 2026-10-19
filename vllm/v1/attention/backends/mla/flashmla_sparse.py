@@ -830,7 +830,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
         # Reserve capacity without retaining views that prevent old storage
         # from being released when another layer grows the shared workspace.
-        current_workspace_manager().get_simultaneous(*self.workspace_specs)
+        current_workspace_manager().reserve(*self.workspace_specs)
 
     def _forward_bf16_kv(
         self,
