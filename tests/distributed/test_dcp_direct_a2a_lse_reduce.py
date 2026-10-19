@@ -137,7 +137,7 @@ def test_oot_collective_dispatch_preserves_cuda_fallback(
     def torch_collective(
         destination: torch.Tensor, source: torch.Tensor, *, group: Any
     ) -> None:
-        assert group is workspace.group, "Native fallback must use the workspace group"
+        assert group is workspace.group
         collective_calls.append(None)
         destination.fill_(42)
 
@@ -159,35 +159,29 @@ def test_oot_collective_dispatch_preserves_cuda_fallback(
     )
     with set_current_vllm_config(config):
         op = op_cls(group, None if workspace_state == "absent" else workspace)
-    assert type(op) is (oot_cls if use_oot else op_cls), (
-        "Collective construction must resolve the registered implementation"
-    )
+    assert type(op) is (oot_cls if use_oot else op_cls)
 
     result = op(*args)
     actual = result if isinstance(result, torch.Tensor) else output
-    assert torch.equal(actual, torch.full_like(output, 42)), (
-        "Communication must run even with custom ops off"
-    )
+    assert torch.equal(actual, torch.full_like(output, 42))
     cuda_enabled = mode != "explicit_off"
     uses_direct = cuda_enabled and (
         workspace_state == "available"
         or (op_cls is dcp.DirectDCPKVGather and workspace_state == "oversized")
     )
-    assert cuda_method.call_count == int(uses_direct), (
-        "Direct kernels must stay enabled under Inductor unless explicitly disabled"
-    )
+    assert cuda_method.call_count == int(uses_direct)
     if use_oot:
-        assert op.calls == int(cuda_enabled), "Enabled dispatch must use the OOT op"
+        assert op.calls == int(cuda_enabled)
     cuda_fallback = cuda_enabled and not uses_direct
     assert group.all_gather.call_count == int(
         cuda_fallback and op_cls is dcp.DirectDCPQGather
-    ), "CUDA query fallback must preserve GroupCoordinator's gather dispatch"
+    )
     assert a2a_fallback.call_count == int(
         cuda_fallback and op_cls is dcp.DirectDCPA2AReduce
-    ), "CUDA A2A fallback must preserve the NCCL/Triton implementation"
+    )
     assert len(collective_calls) == int(
         not cuda_enabled or (cuda_fallback and op_cls is dcp.DirectDCPKVGather)
-    ), "Native dispatch uses Torch; CUDA KV fallback preserves Torch's gather"
+    )
 
 
 @pytest.mark.parametrize(
@@ -257,23 +251,19 @@ def test_direct_dcp_platform_fallback(
         result = torch.empty(4, 2)
         op(result, torch.ones(2, 2))
         expected = torch.tensor([[1.0, 1.0]] * 2 + [[3.0, 3.0]] * 2)
-    assert torch.equal(result, expected), (
-        "Platform fallback must compute the collective"
-    )
+    assert torch.equal(result, expected)
     legacy_gpu = platform in ("cuda", "rocm", "xpu")
     assert group.all_gather.call_count == int(
         legacy_gpu and op_cls is dcp.DirectDCPQGather
-    ), "GPU query gather must retain the platform communicator"
+    )
     assert a2a_fallback.call_count == int(
         legacy_gpu and op_cls is dcp.DirectDCPA2AReduce
-    ), "Only supported GPU platforms may launch the Triton A2A fallback"
+    )
     assert len(collective_calls) == int(
         not legacy_gpu or op_cls is dcp.DirectDCPKVGather
-    ), "CPU/TPU/OOT must execute the Torch-native collective"
+    )
     if use_oot:
-        assert op.calls == int(platform in ("cuda", "rocm")), (
-            "CUDA-only plugin overrides must not run on CPU/XPU/TPU/OOT"
-        )
+        assert op.calls == int(platform in ("cuda", "rocm"))
 
 
 @pytest.mark.parametrize("backend", ["native", "cuda"])
@@ -296,9 +286,7 @@ def test_direct_dcp_a2a_fallback_checks(
     partial_output = torch.ones(2, num_heads, 4)
     partial_lse = torch.zeros(2, num_heads)
     if world_size == 1:
-        assert op(partial_output, partial_lse, True) is partial_output, (
-            "Single-rank fallback must return its input without communication"
-        )
+        assert op(partial_output, partial_lse, True) is partial_output
     else:
         with pytest.raises(ValueError, match="H=3 must be divisible.*2"):
             op(partial_output, partial_lse, True)
@@ -336,9 +324,7 @@ def _collective_test_op(
             else {}
         )
         op = op_cls(group, workspace if mode == "default" else None, **kwargs)
-    assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather)), (
-        "Every worker must resolve the registered OOT collective"
-    )
+    assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather))
     return op
 
 
@@ -529,9 +515,7 @@ def test_direct_dcp_workspace_eligibility(
     result = factory(
         _FakeGroupCoordinator(), torch.device("cpu"), *dimensions, dtype, 1
     )
-    assert result is (workspace if expected[expected_index] else None), (
-        "Workspace allocation must preserve automatic and forced env-var choices"
-    )
+    assert result is (workspace if expected[expected_index] else None)
     assert allocate.call_count == int(expected[expected_index])
     factory.cache_clear()
 
@@ -642,7 +626,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     workspace = torch.empty(96, 8)
 
     query = torch.empty(1, 2, 8)
-    assert manager.query_gather is not None, "Direct manager must bind query gather"
+    assert manager.query_gather is not None
     assert manager.query_gather(query) is query_gather.return_value
     query_gather.assert_called_once_with(query)
     manager.init_kv_gather(workspace, 64)
@@ -1023,9 +1007,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
             _assert_q_gather_matches_reference(
                 captured_output, captured_input, world_size, padded_num_heads
             )
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default"), (
-            "Distributed query gather must exercise the configured implementation"
-        )
+        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
     finally:
         # NCCL shutdown waits for captured graphs to release their communicators.
         if graph is not None:
@@ -1120,12 +1102,8 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
                 graph.replay()
                 torch.accelerator.synchronize()
                 dist.all_gather_into_tensor(expected, local_kv.contiguous())
-                assert torch.equal(gathered, expected), (
-                    "KV gather replay must observe current local rows"
-                )
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default"), (
-            "Distributed KV gather must exercise the configured implementation"
-        )
+                assert torch.equal(gathered, expected)
+        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
     finally:
         if graph is not None:
             graph.reset()
@@ -1393,9 +1371,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             outputs, lses, is_lse_base_on_e=is_lse_base_on_e
         )
         _assert_close(actual, expected, dtype)
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default"), (
-            "Distributed A2A must exercise the configured implementation"
-        )
+        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
     finally:
         if graph is not None:
             graph.reset()
