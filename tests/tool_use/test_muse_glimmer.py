@@ -413,3 +413,22 @@ def test_named_custom_tool_choice_skips_structured_outputs():
     )
     T.adjust_request(request)
     assert request.structured_outputs is None
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 100])
+def test_recipient_less_content_keeps_glimmer_behavior(chunk):
+    """The shared Muse implementation must not reclassify Glimmer content."""
+    raw = "<|message|>Hello.<|eot|>"
+    assert T.extract_tool_calls(raw, _NO_REQ).content == "Hello."
+    assert R.extract_reasoning(raw, _NO_REQ) == (None, raw)
+    content, reasoning = [], []
+    for end in range(chunk, len(raw) + chunk, chunk):
+        previous, current = raw[: max(0, end - chunk)], raw[:end]
+        delta = T.extract_tool_calls_streaming(
+            previous, current, current[len(previous) :], [], [], [], _fake_req()
+        )
+        if delta:
+            content.append(delta.content or "")
+            reasoning.append(delta.reasoning or "")
+    assert "".join(content) == "Hello."
+    assert "".join(reasoning) == ""
