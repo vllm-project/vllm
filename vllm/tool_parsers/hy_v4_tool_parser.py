@@ -361,6 +361,8 @@ class HYV4ToolExtractor:
 
     def __init__(self, vocab: dict[str, int], token_suffix: str, strict: bool):
         self._strict = strict
+        self._guided_content_len = 0
+        self._bare_tool_call = False
 
         # Kept so the wrapper can build a matching structural tag for
         # constrained decoding without re-scanning the tokenizer vocab.
@@ -379,6 +381,7 @@ class HYV4ToolExtractor:
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        self._scanned_args_len: int = 0  # end offset of last closed kv pair
 
         self.tool_calls_start_token: str = f"<tool_calls{token_suffix}>"
         self.tool_calls_end_token: str = f"</tool_calls{token_suffix}>"
@@ -572,6 +575,7 @@ class HYV4ToolExtractor:
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._scanned_args_len = 0
 
     def extract_tool_calls_streaming(
         self,
@@ -615,41 +619,42 @@ class HYV4ToolExtractor:
         tool_calls: list[StreamToolCall] = []
 
         if guided:
-            # Guided path: a structural-tag grammar constrains strings, not
-            # token ids, so the atomic ``tool_calls_start_token_id`` never
-            # appears in the token stream and an id-based check would
-            # misclassify every tool delta as plain content.
+            # Structural-tag decoding may split either start marker across tokens.
             marker = self.tool_calls_start_token
             marker_pos = current_text.find(marker)
+            bare_pos = current_text.find(self.tool_call_start_token)
+            bare_tool_call = bare_pos != -1 and (
+                marker_pos == -1 or bare_pos < marker_pos
+            )
+            if bare_tool_call:
+                self._bare_tool_call = True
+                marker = self.tool_call_start_token
+                marker_pos = bare_pos
 
             if marker_pos == -1:
-                # Marker not seen yet. The tail of ``current_text`` might still
-                # be a partial prefix of the marker split across deltas; hold
-                # that tail back and only stream the safe portion as content.
-                safe_end = len(current_text) - partial_tag_overlap(current_text, marker)
-                # Emit only the newly-arrived, safe content (delta relative to
-                # what was previously streamed).
-                content = current_text[len(previous_text) : safe_end]
+                hold = max(
+                    partial_tag_overlap(current_text, start_marker)
+                    for start_marker in (
+                        self.tool_calls_start_token,
+                        self.tool_call_start_token,
+                    )
+                )
+                safe_end = len(current_text) - hold
+                # Release withheld text once it no longer matches a marker.
+                content = current_text[self._guided_content_len : safe_end]
+                self._guided_content_len = safe_end
                 return StreamDelta(
                     content=content if content else None,
                     tool_calls=[],
                 )
 
-            # Marker present. Stream any content that precedes it (only the
-            # part we have not already emitted), then buffer the tool payload.
-            #
-            # The payload is everything after the marker in the *full* text. We
-            # keep the buffer in sync with it by only appending the portion that
-            # arrived in this delta, mirroring the incremental ``+=`` semantics
-            # while remaining correct when the marker itself was split across
-            # sub-word tokens.
-            content_end = marker_pos
-            content = current_text[len(previous_text) : content_end]
-
-            payload_start = marker_pos + len(marker)
-            # How much of the payload had already been buffered before this
-            # delta.
+            content = current_text[self._guided_content_len : marker_pos]
+            self._guided_content_len = marker_pos
+            payload_start = marker_pos if bare_tool_call else marker_pos + len(marker)
             prev_payload_len = max(len(previous_text) - payload_start, 0)
+            if bare_tool_call and len(previous_text) < marker_pos + len(marker):
+                # Include the complete bare marker, not only its newest suffix.
+                prev_payload_len = 0
             new_payload = current_text[payload_start + prev_payload_len :]
             self._buffer += new_payload
 
@@ -665,9 +670,12 @@ class HYV4ToolExtractor:
 
             if self.tool_calls_start_token in delta_text:
                 text_parts = delta_text.split(self.tool_calls_start_token)
-                self._buffer += text_parts[-1]
-                if text_parts[0]:
-                    content_delta = text_parts[0]
+                if self.tool_calls_start_token_id not in previous_token_ids:
+                    self._buffer += self.tool_calls_start_token.join(text_parts[1:])
+                    if text_parts[0]:
+                        content_delta = text_parts[0]
+                else:
+                    self._buffer += delta_text
             else:
                 self._buffer += delta_text
 
@@ -812,9 +820,10 @@ class HYV4ToolExtractor:
                 )
 
         # --- detect partial (unclosed) kv at the tail ---
-        last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
+        last_closed_end = self._scanned_args_len
+        for m in self.func_args_regex.finditer(args_text, last_closed_end):
             last_closed_end = m.end()
+        self._scanned_args_len = last_closed_end
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None
