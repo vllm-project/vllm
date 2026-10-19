@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
 )
@@ -44,6 +45,63 @@ def _run_b12x_fp8_block_scaled_mm(
         weight_scale,
         out_dtype=out_dtype,
     )
+
+
+def _use_rtx6000d_tail(config: FP8ScaledMMLinearLayerConfig) -> bool:
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is None
+        or not vllm_config.kernel_config.enable_rtx6000d_fp8_tail
+        or config.weight_shape != (3392, 4096)
+        or config.input_dtype != torch.bfloat16
+        or not current_platform.is_cuda()
+    ):
+        return False
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    return props.name == "NVIDIA RTX 6000D" and (
+        props.major,
+        props.minor,
+        props.multi_processor_count,
+    ) == (12, 0, 156)
+
+
+def _prepare_tail_weight(layer: torch.nn.Module) -> None:
+    weight = layer.weight
+    n, k = weight.shape
+    padded_shape = ((n + 127) // 128 * 128, k)
+    padded = getattr(layer, "_b12x_tail_weight", None)
+    if padded is None:
+        padded = torch.zeros(padded_shape, dtype=weight.dtype, device=weight.device)
+        layer.register_buffer("_b12x_tail_weight", padded, persistent=False)
+    elif (
+        tuple(padded.shape) != padded_shape
+        or padded.dtype != weight.dtype
+        or padded.device != weight.device
+    ):
+        raise ValueError("B12X tail weight shape, dtype or device changed on reload")
+    padded[n:].zero_()
+    if weight.data_ptr() != padded.data_ptr():
+        padded[:n].copy_(weight)
+    # Keep the logical parameter shape and its loader. Both views share one
+    # allocation; reloads update the storage already referenced by CUDA graphs.
+    weight.data = padded[:n]
+
+
+def _prepare_tail_scale(layer: torch.nn.Module, scale_attr: str) -> None:
+    scale = getattr(layer, scale_attr)
+    stable = getattr(layer, "_b12x_tail_scale", None)
+    if stable is None:
+        stable = scale.detach()
+        layer.register_buffer("_b12x_tail_scale", stable, persistent=False)
+    elif (stable.shape, stable.dtype, stable.device) != (
+        scale.shape,
+        scale.dtype,
+        scale.device,
+    ):
+        raise ValueError("B12X tail scale shape, dtype or device changed on reload")
+    elif stable.data_ptr() != scale.data_ptr():
+        stable.copy_(scale)
+    scale.data = stable
 
 
 class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
@@ -94,7 +152,9 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         out_features, in_features = config.weight_shape
         if in_features <= 0 or in_features % 128 != 0:
             return False, "Input features must be a positive multiple of 128"
-        if out_features <= 0 or out_features % 128 != 0:
+        if out_features <= 0 or (
+            out_features % 128 != 0 and not _use_rtx6000d_tail(config)
+        ):
             return False, "Output features must be a positive multiple of 128"
         return True, None
 
@@ -117,7 +177,33 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 scale_attr,
                 _upcast_e8m0_to_fp32(weight_scale).contiguous(),
             )
+        if self.config.weight_shape == (3392, 4096) and _use_rtx6000d_tail(self.config):
+            _prepare_tail_weight(layer)
+            _prepare_tail_scale(layer, scale_attr)
         layer.b12x_warmup_provider = self
+
+    def apply_weights(self, layer, x, bias=None, **kwargs) -> torch.Tensor:
+        padded = getattr(layer, "_b12x_tail_weight", None)
+        if padded is None:
+            return super().apply_weights(layer, x, bias, **kwargs)
+        params = self._get_layer_params(layer)
+        input_2d = x.reshape(-1, x.shape[-1])
+        q_input, input_scale = self.quant_fp8(
+            input_2d,
+            params.input_scale,
+            params.input_scale_ub,
+            use_triton=self.use_triton,
+        )
+        output = self.apply_block_scaled_mm(
+            A=q_input,
+            B=padded,
+            As=input_scale,
+            Bs=params.block_scale,
+        )
+        output = output[:, : self.config.weight_shape[0]].to(self.config.out_dtype)
+        if bias is not None:
+            output = output + bias
+        return output.reshape(*x.shape[:-1], self.config.weight_shape[0])
 
     def get_b12x_warmup_unit(
         self,
@@ -125,7 +211,7 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         token_counts: tuple[int, ...],
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
-        weight = layer.weight
+        weight = getattr(layer, "_b12x_tail_weight", layer.weight)
         weight_scale = getattr(layer, "weight_scale_inv", None)
         if weight_scale is None:
             weight_scale = layer.weight_scale
