@@ -35,13 +35,18 @@ class RankSegment:
         return self.global_batch_slice.stop - self.global_batch_slice.start
 
 
+@dataclass(kw_only=True)
+class PCPInputBatch(InputBatch):
+    global_batch: InputBatch
+
+
 class PCPManager:
     """MRV2 PC batch manager.
 
     The model runner keeps the global scheduled batch. This manager rewrites only
     the per-step InputBatch into rank-local DualChunkSwap rows and keeps the
-    global-batch view private to restore to the global batch shape before
-    sampling/postprocess.
+    global-batch view to prepare model-specific metadata and restore the global
+    shape before sampling/postprocess.
     """
 
     def __init__(
@@ -672,7 +677,7 @@ class PCPManager:
             )
 
         self._local_batch = replace(
-            input_batch,
+            PCPInputBatch(**vars(input_batch), global_batch=global_batch),
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
             num_reqs_after_padding=num_reqs_after_padding,

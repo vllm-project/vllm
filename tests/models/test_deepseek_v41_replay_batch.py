@@ -24,6 +24,7 @@ from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.pcp_manager import PCPInputBatch
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the replay buffers live on the GPU"
@@ -57,7 +58,7 @@ REPLAY_ROWS = [0, *range(301 - WINDOW, 301), *range(301, 401)]
 
 
 @pytest.fixture
-def state(monkeypatch):
+def state(monkeypatch, request):
     """A DeepseekV41ModelState whose attention builds are recorded, not run."""
     cfg = MagicMock()
     cfg.model_config.enable_prompt_embeds = False
@@ -66,7 +67,8 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
-    cfg.parallel_config.prefill_context_parallel_size = 1
+    cfg.parallel_config.enable_expert_parallel = False
+    cfg.parallel_config.prefill_context_parallel_size = getattr(request, "param", 1)
     cfg.aux_output_config.enable_return_routed_experts = False
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -106,6 +108,7 @@ def _input_batch(
         batch,
         num_tokens=num_tokens,
         num_tokens_after_padding=num_padded,
+        num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
         query_start_loc=torch.tensor(
             [0, *np.cumsum(device_query_lens or query_lens)],
             dtype=torch.int32,
@@ -223,6 +226,66 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
     assert build.batch.max_query_len == 300
+
+
+@pytest.mark.parametrize("state", [2], indirect=True)
+def test_pcp_replay_keeps_global_tail_after_prefix_hit(state, monkeypatch):
+    """The 128-row tail spans two owners; early segments keep no rows."""
+    import vllm.models.deepseek_v41.nvidia.model_state as module
+    from vllm.distributed.device_communicators.pynccl_wrapper import ncclDataTypeEnum
+
+    def all_gather(tensor, dim):
+        ncclDataTypeEnum.from_torch(tensor.dtype)
+        return torch.cat([tensor] * 2, dim=dim)
+
+    global_batch = _input_batch([1, 513], [400, 1537], [False, True])
+    state._replay_start_np[1] = 1024
+    for rank, query_lens, seq_lens, indices, expected_rows in (
+        (0, [1, 129, 126], [400, 1153, 1537], [0, 1, 1], [0, *range(130, 256)]),
+        (1, [129, 129], [1282, 1411], [1, 1], [256, 257]),
+    ):
+        monkeypatch.setattr(
+            module,
+            "get_pcp_group",
+            lambda rank=rank: SimpleNamespace(
+                rank_in_group=rank,
+                all_gather=all_gather,
+            ),
+        )
+        batch = _input_batch(
+            query_lens,
+            seq_lens,
+            [i == 1 for i in indices],
+            num_tokens_after_padding=258,
+        )
+        batch = PCPInputBatch(**vars(batch), global_batch=global_batch)
+        batch.idx_mapping_np = np.array(indices, dtype=np.intp)
+        slots = _slot_mappings(516)
+        state.prepare_attn(batch, CUDAGraphMode.NONE, BLOCK_TABLES, slots, [], GROUPS)
+        replay = state.decoder_replay_layers.replay_batch
+        assert replay is not None and replay.num_padded == 129
+        assert replay.rows.tolist() == expected_rows
+        build, first = state.builds[-2:]
+        assert build.replay_start.tolist() == [0 if i == 0 else 1409 for i in indices]
+        assert first.replay_start.tolist() == [0 if i == 0 else 1024 for i in indices]
+        local_slots = build.slot_mappings.chunk(2, dim=1)[rank]
+        torch.testing.assert_close(
+            local_slots[0, : len(expected_rows)], slots[0, rank * 258 + replay.rows]
+        )
+        assert (local_slots[:, len(expected_rows) :] == -1).all()
+        assert replay.forward_context.is_padding.sum() == 2 * (129 - len(expected_rows))
+        assert replay.forward_context.is_padding.dtype == torch.bool
+    state._keeps_rows_np[1] = True
+    state._prepare_replay_batch(
+        batch,
+        CUDAGraphMode.NONE,
+        BLOCK_TABLES,
+        slots,
+        [],
+        GROUPS,
+        state._replay_start[: batch.num_reqs],
+    )
+    assert state.decoder_replay_layers.replay_batch is None
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
