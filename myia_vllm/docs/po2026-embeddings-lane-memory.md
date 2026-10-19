@@ -93,3 +93,16 @@ en production. Détail technique : `embeddings-po2026-runbook.md` (même dossier
   (lead po-2025) : compteurs chaque cycle + recrutement consommateurs externes
   (baseline postée : externe hors flotte = 0). 7 erreurs sidecar transitoires
   (0,1 % trafic) — candidat : logger le type d'exception.
+
+## Passation po-2023 (2026-10-20)
+
+po-2026 est HS matériel depuis le 09/10 ; la flotte a migré l'embedder vers
+**po-2023** (déploiement Maintenance/ai-01, cutover IIS 14/10 00:50Z, GPU pin
+bi-GPU PR #118). **Nouveau siège de vigie : lane `vllm` @ myia-po-2023** (repo
+`D:\Dev\vllm`), inaugurée le 20/10 (mandat user), cron **5 h à :17** (continuité
+du mandat). Doc siège : `seats/po2023-embeddings.md`. Ce document et le runbook
+restent la référence technique (pièges v0.23, rôle vigie, recovery) — seuls les
+chemins changent : `.env` prod = `D:\Production\Embeddings\compose\.env`,
+rapports → dashboard workspace `vllm`. Gaps de migration consignés au registre
+du nouveau siège : gouverneur thermique absent, `QDRANT_API_KEY` absente,
+HF token vide dans le conteneur courant (bénin, cache local).

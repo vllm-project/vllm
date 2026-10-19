@@ -121,6 +121,7 @@ GLM-4.7-Flash (legacy) used a custom Dockerfile (`Dockerfile.glm-flash`) with `t
 | Service | GPUs | Port | Model | Profile |
 |---------|------|------|-------|---------|
 | **medium-swift15-27b** | **0,1** | **5002** | **Swift-1.5-Qwen3.8-27B W4A16 + FP8 KV** | **medium-swift15-27b.yml** |
+| **embeddings-qwen3-4b-awq** (fleet embeddings, other machine) | **po-2023 GPU 0** (3080 Ti, pinned) | 8005 (public `embeddings.myia.io` via sidecar :8004) | Qwen3-Embedding-4B W4A16-AWQ, v0.23.0 pooling runner | embeddings-qwen3-4b-awq-po2026.yml (deployed on po-2023 since 2026-10-14 after po-2026 HW failure; runbook `myia_vllm/docs/embeddings-po2026-runbook.md`, seat doc `docs/seats/po2023-embeddings.md`) |
 | medium-qwen36-moe | 0,1 | 5002 | Qwen3.6-35B-A3B-AWQ + FP8 KV | medium-qwen36-moe.yml (legacy baseline) |
 | medium-qwen36-stock-tq | 0,1 | 5002 | Qwen3.6-35B-A3B + TurboQuant k8v4 | medium-qwen36-stock-tq.yml (**armed rollback**) |
 | **GPU 2 — FULLY FREED 2026-05-01** | **2** | — | training jobs (CoursIA) | 78 MiB driver baseline only |
