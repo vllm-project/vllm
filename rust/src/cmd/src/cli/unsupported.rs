@@ -308,6 +308,17 @@ pub struct EngineUnsupportedArgs {
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
 
+    /// If `True`, LoRA support for the tower (vision encoder) and connector
+    /// of multimodal models will be enabled. This is an experimental feature
+    /// and currently only supports some MM models such as the Qwen VL series.
+    #[arg(
+        long,
+        visible_alias = "no-enable-tower-connector-lora",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tower_connector_lora: Option<Unsupported>,
+
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,

@@ -1511,11 +1511,18 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
 /// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
 #[test]
 fn unsupported_args_fail_startup() {
-    let cases = [(
-        "--custom-histogram-buckets",
-        r#"{"request_latency":[0.1,1.0]}"#,
-        "custom_histogram_buckets",
-    )];
+    let cases = [
+        (
+            "--custom-histogram-buckets",
+            r#"{"request_latency":[0.1,1.0]}"#,
+            "custom_histogram_buckets",
+        ),
+        (
+            "--enable-tower-connector-lora",
+            "true",
+            "enable_tower_connector_lora",
+        ),
+    ];
     for (flag, value, key) in cases {
         let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
             .unwrap_err()
