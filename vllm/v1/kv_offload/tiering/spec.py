@@ -76,6 +76,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
+    DEFAULT_TIER_POLL_INTERVAL_S,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
@@ -158,7 +159,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.READ_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent reading from secondary tiers into the primary "
-                "tier, in seconds, labeled by tier."
+                "tier, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here. Use "
+                "vllm:kv_offload_tiering_promotion_latency_seconds for "
+                "tier-independent promotion timing."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -172,7 +176,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.WRITE_TIME] = OffloadingCounterMetadata(
             documentation=(
                 "Total time spent writing from the primary tier to secondary "
-                "tiers, in seconds, labeled by tier."
+                "tiers, in seconds, labeled by tier. Tiers that do not report "
+                "per-job transfer time have no series here."
             ),
             labelnames=(TIER_LABEL,),
         )
@@ -242,6 +247,33 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ),
             labelnames=(TIER_LABEL,),
         )
+        metrics[TieringOffloadingMetrics.PROMOTION_LATENCY] = (
+            OffloadingHistogramMetadata(
+                documentation=(
+                    "Histogram of per-job latency for secondary-tier promotion "
+                    "attempts, measured from job creation until the tiering "
+                    "manager observes completion so that tier queueing is "
+                    "included, labeled by tier and result, in seconds. Includes "
+                    "failed attempts."
+                ),
+                labelnames=(TIER_LABEL, "result"),
+                buckets=(
+                    0.005,
+                    0.01,
+                    0.025,
+                    0.05,
+                    0.1,
+                    0.25,
+                    0.5,
+                    1,
+                    2.5,
+                    5,
+                    10,
+                    30,
+                    60,
+                ),
+            )
+        )
 
         for tier_config, tier_cls in cls._get_secondary_tiers(extra_config):
             metrics.update(tier_cls.build_metric_definitions(tier_config))
@@ -284,6 +316,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        # Pause between tier-poll rounds for tiers that need servicing
+        # between engine steps. Zero or negative disables the thread, which
+        # restores per-step servicing.
+        self.tier_poll_interval_s = float(
+            self.extra_config.get("tier_poll_interval_s", DEFAULT_TIER_POLL_INTERVAL_S)
+        )
 
         # Backpressure config is merged field-by-field in priority order
         # (highest first):
@@ -385,6 +424,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
+                    tier_poll_interval_s=self.tier_poll_interval_s,
                 )
                 self._manager = tiering_manager
             except Exception:

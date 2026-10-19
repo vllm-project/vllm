@@ -11,6 +11,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - vllm/models/deepseek_v41/quant_config.py
+  - vllm/utils/humming.py
   - tests/quantization
   commands:
   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
@@ -136,6 +137,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"
