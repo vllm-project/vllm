@@ -399,7 +399,10 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Error(Some(error)) if error.retryable => {
+            return Err(Status::unavailable(error.message.clone()));
+        }
+        FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
@@ -566,7 +569,7 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
@@ -1039,6 +1042,22 @@ mod tests {
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
+    }
+
+    #[test]
+    fn retryable_engine_error_maps_to_unavailable() {
+        let error = RequestError {
+            code: "engine_paused".to_string(),
+            message: "Generation is paused.".to_string(),
+            retryable: true,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("retryable error");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let fin = finished(FinishReason::Error(None));
+        let status = to_finish_info(&fin, &[]).expect_err("internal error");
+        assert_eq!(status.code(), tonic::Code::Internal);
     }
 
     #[test]
