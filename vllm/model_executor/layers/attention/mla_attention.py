@@ -564,6 +564,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Sparse MLA reads top-k indices from a shared buffer. Pass it
         # explicitly so backbone "skip" layers (indexer=None) still find it.
+        self.topk_buffer_width = (
+            topk_indices_buffer.shape[-1] if topk_indices_buffer is not None else None
+        )
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
             if index_group_builder is not None:
@@ -736,6 +739,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
+        )
+        # Matches the graph quant replaced by fusion; writes into the output.
+        self._aiter_output_quant = (
+            self._quant_fp8_op.use_aiter and self._quant_fp8_op.enabled()
         )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
@@ -936,6 +943,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
+            self.impl.reserve_workspace()
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1187,8 +1195,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp8_data)
+                if self._aiter_output_quant:
+                    torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                        quant_output[:quant_idx], actual, output_scale, False
+                    )
+                else:
+                    fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                    quant_output[:quant_idx].copy_(fp8_data)
             else:
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
@@ -1380,6 +1393,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
+            topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )

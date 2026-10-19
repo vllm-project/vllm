@@ -172,6 +172,20 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
+    if model_arch == "Step5ForConditionalGeneration":
+        from vllm.platforms import current_platform
+        from vllm.platforms.interface import DeviceCapability
+
+        if (
+            not current_platform.is_cuda()
+            or current_platform.get_device_capability()
+            not in (
+                DeviceCapability(9, 0),
+                DeviceCapability(10, 3),
+            )
+        ):
+            pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
+
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform
 
