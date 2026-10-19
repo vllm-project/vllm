@@ -211,6 +211,83 @@ __global__ void wait_lse_combine_kernel(
   }
 }
 
+// Four independent heads per CTA, with vectorized payload loads and FP32
+// accumulation in registers. Peer readiness and LSE loads are lane-parallel.
+template <typename scalar_t>
+__global__ void warp_lse_combine_kernel(
+    const scalar_t* received_output, const float* received_lse,
+    const uint32_t* received_signal, const int64_t* epoch_ptr,
+    scalar_t* combined_output, int64_t world_size, int64_t num_tokens,
+    int64_t max_num_tokens, int64_t heads_per_rank, bool is_lse_base_on_e) {
+  constexpr int kHeadDim = 512;
+  constexpr unsigned kWarpMask = 0xffffffff;
+  int64_t item = static_cast<int64_t>(blockIdx.x) * 4 + threadIdx.x / 32;
+  if (item >= num_tokens * heads_per_rank) return;
+  int lane = threadIdx.x % 32;
+  int64_t token_idx = item / heads_per_rank;
+  int64_t head_idx = item % heads_per_rank;
+  uint32_t epoch = static_cast<uint32_t>(epoch_ptr[0]);
+  int64_t parity = epoch & 1u;
+  float lse = -CUDART_INF_F;
+  if (lane < world_size) {
+    if (!wait_for_epoch(received_signal + parity * world_size + lane, epoch)) {
+      printf("direct DCP A2A warp timeout source=%d epoch=%u\n", lane, epoch);
+      asm volatile("trap;");
+    }
+    lse = received_lse[((parity * world_size + lane) * max_num_tokens +
+                        token_idx) *
+                           heads_per_rank +
+                       head_idx];
+    if (isnan(lse) || lse == CUDART_INF_F) lse = -CUDART_INF_F;
+    if (is_lse_base_on_e) lse *= CUDART_L2E_F;
+  }
+  __syncwarp(kWarpMask);
+  float lse_max = -CUDART_INF_F;
+  for (int source = 0; source < world_size; ++source) {
+    lse_max = fmaxf(lse_max, __shfl_sync(kWarpMask, lse, source));
+  }
+  if (lse_max == -CUDART_INF_F) lse_max = 0.0f;
+  float exponential = exp2f(lse - lse_max);
+  float lse_sum = 0.0f;
+  for (int source = 0; source < world_size; ++source) {
+    lse_sum += __shfl_sync(kWarpMask, exponential, source);
+  }
+  float inverse_lse_sum = lse_sum > 0.0f ? 1.0f / lse_sum : 0.0f;
+  float weight = exponential * inverse_lse_sum;
+  float accumulator[16] = {};
+  for (int source = 0; source < world_size; ++source) {
+    float source_weight = __shfl_sync(kWarpMask, weight, source);
+    // Empty shards may contain stale NaNs; do not read zero-weight payloads.
+    if (source_weight == 0.0f) continue;
+    int64_t source_item =
+        ((parity * world_size + source) * max_num_tokens + token_idx) *
+            heads_per_rank +
+        head_idx;
+    auto* input = reinterpret_cast<const uint4*>(received_output +
+                                                 source_item * kHeadDim);
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      uint4 packed = input[lane + j * 32];
+      auto* values = reinterpret_cast<scalar_t*>(&packed);
+#pragma unroll
+      for (int k = 0; k < 8; ++k) {
+        accumulator[j * 8 + k] += to_float(values[k]) * source_weight;
+      }
+    }
+  }
+  auto* output = reinterpret_cast<uint4*>(combined_output + item * kHeadDim);
+#pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    uint4 packed;
+    auto* values = reinterpret_cast<scalar_t*>(&packed);
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      values[k] = from_float<scalar_t>(accumulator[j * 8 + k]);
+    }
+    output[lane + j * 32] = packed;
+  }
+}
+
 void direct_dcp_a2a_lse_reduce(
     const torch::stable::Tensor& partial_output,
     const torch::stable::Tensor& partial_lse,
@@ -342,7 +419,24 @@ void direct_dcp_a2a_lse_reduce(
   check_cuda_launch("direct DCP A2A");
   int64_t combine_blocks = num_tokens * heads_per_rank;
   size_t shared_memory_bytes = world_size * sizeof(float);
+  // Each peer occupies one lane. Other layouts and unmeasured devices keep
+  // the existing consumer.
+  bool use_warp_combine =
+      head_dim == 512 && world_size <= 32 && get_device_prop()->major == 10;
   auto launch_combine = [&]<typename scalar_t>() {
+    if (use_warp_combine) {
+      warp_lse_combine_kernel<scalar_t>
+          <<<(combine_blocks + 3) / 4, kCombineThreads, 0, stream>>>(
+              reinterpret_cast<const scalar_t*>(received_output.data_ptr()),
+              received_lse.const_data_ptr<float>(),
+              reinterpret_cast<const uint32_t*>(
+                  received_signal.const_data_ptr<int32_t>()),
+              epoch.const_data_ptr<int64_t>(),
+              reinterpret_cast<scalar_t*>(combined_output.mutable_data_ptr()),
+              world_size, num_tokens, max_num_tokens, heads_per_rank,
+              is_lse_base_on_e);
+      return;
+    }
     wait_lse_combine_kernel<scalar_t>
         <<<combine_blocks, kCombineThreads, shared_memory_bytes, stream>>>(
             reinterpret_cast<const scalar_t*>(received_output.data_ptr()),
