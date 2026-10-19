@@ -254,6 +254,9 @@ class KVCacheManager:
         if not self.collect_stats:
             return None
         stats = self.prefix_cache_stats
+        assert stats is not None
+        stats.evicted_blocks = self.block_pool.num_evicted_blocks
+        self.block_pool.num_evicted_blocks = 0
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
