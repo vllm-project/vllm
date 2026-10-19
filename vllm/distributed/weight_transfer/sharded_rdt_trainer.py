@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import ray
 import torch
@@ -33,7 +33,6 @@ from torch.multiprocessing.reductions import (
     rebuild_cuda_tensor,
     reduce_tensor,
 )
-from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
     ParamMeta,

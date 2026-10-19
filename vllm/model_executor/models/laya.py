@@ -386,17 +386,7 @@ class LayaForDecision(nn.Module):
         return 1.0
 
     def _head_forward(self, x: torch.Tensor, seq_lens: list[int]) -> torch.Tensor:
-        """Run the decision head's transformer stack on a packed token batch.
-
-        ``nn.TransformerEncoder`` needs a rectangular batch, and padding a step
-        of unequal prompts costs twice: the pad rows are real compute (a c=16
-        step pads 16 prompts up to the longest one), and the resulting
-        key-padding mask drops ``F.scaled_dot_product_attention`` off the fused
-        path. The head only ever sees a batch that is already packed --
-        ``hidden_states`` is the concatenation of the step's prompts -- so the
-        same layers run on it directly with per-sequence attention: no mask, no
-        pad rows. Verified equal to the padded path to fp32 rounding.
-        """
+        """Run the head on packed tokens with attention isolated per request."""
         for layer in self.head.layers:
             attn = layer.self_attn
             tokens = x.shape[0]
@@ -518,11 +508,7 @@ class LayaForDecision(nn.Module):
             return plan
         batch = len(lengths)
         kmax = max(num_markers)
-        # Everything below is assembled with numpy and shipped in three
-        # host->device copies. Building the same values as Python lists and
-        # handing them to `torch.tensor` costs ~150 ns per element (~3.5 ms for
-        # the 23k-element index vector a c16 step needs) and a pageable copy
-        # blocks behind the encoder still running on the device.
+        # Pack host bookkeeping before copying it into reusable device buffers.
         lengths_np = np.asarray(lengths, dtype=np.int64)
         counts_np = np.asarray(num_markers, dtype=np.int64)
         rows_cnt = np.arange(batch, dtype=np.int64) * kmax
@@ -614,9 +600,7 @@ class LayaForDecision(nn.Module):
             "gather": idx_view(0, gather_off, int(gather.size)),
             "use_act": mask_view(0, valid_n, batch),
             "temperature": f_view(0, 2 * batch, batch),
-            # Reused by the head: `torch.stack` of four `[batch]` columns costs
-            # ~3.3 ms of aclnn tiling on this CANN, a preallocated buffer costs
-            # four copies into it.
+            # Reuse the per-request action features with the plan.
             "feats": torch.empty(
                 (batch, ACT_FEATURE_DIM), dtype=self.head_dtype, device=device
             ),
@@ -635,7 +619,7 @@ class LayaForDecision(nn.Module):
         prompt_token_ids: list[torch.Tensor],
         use_activation: list[bool],
     ) -> list[torch.Tensor]:
-        """Score one engine step's requests with the batched head."""
+        """Score all requests in one packed decision-head batch."""
         return self._score_requests_batched(
             hidden_states, offsets, prompt_token_ids, use_activation
         )
@@ -650,14 +634,9 @@ class LayaForDecision(nn.Module):
     ) -> list[torch.Tensor]:
         """Score every request of one engine step with a single head batch.
 
-        The obvious implementation calls the decision head once per request. On
-        Ascend that is pure launch overhead: a 96-token request costs ~40 kernel
-        launches for ~0.2 GFLOP, and a step of eight of them was measured at
-        ~350 launches inside the pooler alone, with the device idle ~60% of the
-        step. Padding the requests of a step into one ``(n, maxlen, d)`` batch
-        and masking the padding is numerically identical -- attention is masked
-        out and every other head op is per position -- and collapses those
-        launches by ~8x.
+        Pad the requests into one ``(n, maxlen, d)`` batch. The attention mask
+        excludes padded positions, and the remaining head operations apply
+        independently at each position.
         """
         if not prompt_token_ids:
             return []
@@ -715,9 +694,7 @@ class LayaForDecision(nn.Module):
         topk_vals = probs.topk(kk, dim=-1).values
         top1 = topk_vals[:, 0]
         margin = top1 - topk_vals[:, 1] if kk >= 2 else top1.clone()
-        # Four `[batch]` columns written into a buffer carried by the plan:
-        # `torch.stack` of them costs ~3.3 ms of aclnn tiling
-        # (aclnnStackGetWorkspaceSize) for a tensor this size.
+        # Populate the action features without reallocating the plan buffer.
         feats = plan["feats"]
         feats[:, 0] = top1
         feats[:, 1] = margin
@@ -725,9 +702,7 @@ class LayaForDecision(nn.Module):
         feats[:, 3] = plan["counts_scaled"]
         act = torch.softmax(
             self.act_head(
-                torch.cat(
-                    [encoded.index_select(0, plan["starts"]).float(), feats], dim=-1
-                )
+                torch.cat([encoded.index_select(0, plan["starts"]), feats], dim=-1)
             ),
             -1,
         )
@@ -788,7 +763,9 @@ class LayaForDecision(nn.Module):
                     logits.new_tensor(num_options / OPTION_COUNT_SCALE),
                 ]
             )
-            act = torch.softmax(self.act_head(torch.cat([h[0].float(), feats])), -1)
+            act = torch.softmax(
+                self.act_head(torch.cat([h[0], feats.to(self.head_dtype)])), -1
+            )
 
             if use_activation[i]:
                 answer = torch.softmax(

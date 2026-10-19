@@ -156,6 +156,21 @@ def _fake_model(
     return model
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("packed", [False, True])
+def test_action_head_accepts_configured_low_precision(dtype, packed):
+    model = _fake_model().to(dtype=dtype)
+    model.head_dtype = dtype
+    ids = [torch.tensor([99, 1, 7, 4, 7, 5])]
+    hidden = torch.randn(6, 8).to(dtype)
+    score = model.score_requests if packed else model._score_requests_scalar
+    result = score(hidden, [0, 6], ids, [True])[0]
+    assert result.shape == (4,)
+    assert result.dtype == torch.float32
+    assert torch.isfinite(result).all()
+    assert (result >= 0).all() and (result <= 1).all()
+
+
 def test_qtype_and_temperature_resolution():
     model = _fake_model(
         type_token_ids={1: 0, 11: 1, 12: 2},
