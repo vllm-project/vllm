@@ -2817,30 +2817,45 @@ def test_sleep_unregisters_and_restores_kv_caches():
 
 
 @pytest.mark.parametrize(
-    ("num_head_slots", "remote_tp_size", "rejected"),
+    ("layout", "remote_tp_size", "rejected"),
     [
-        (None, 2, False),  # packed K|V: head re-sharding is supported
-        (8, 1, False),  # separate K/V head slots, homogeneous TP
-        (8, 2, True),  # separate K/V head slots, heterogeneous TP
+        ("packed", 2, False),  # default packed K|V: re-sharding supported
+        ("split_kv_head_slots", 1, False),  # separate K/V slots, same TP
+        ("split_kv_head_slots", 2, True),  # separate K/V slots, different TP
+        # Other num_head_slots users keep today's behavior (not rejected here):
+        ("kv_planes", 2, False),  # ROCm attention / b12x: 2 slots of H*D
     ],
 )
 def test_head_resharding_rejects_separate_kv_head_slots(
-    num_head_slots, remote_tp_size, rejected
+    layout, remote_tp_size, rejected
 ):
-    """A page with separate K/V head slots is not one contiguous run of heads,
-    so Mooncake's head-sliced reads would mix K and V. Reject it like NVFP4."""
+    """An unquantized page with separate K/V head slots is not one contiguous
+    run of heads, so Mooncake's head-sliced reads would mix K and V. Reject it,
+    as for NVFP4, and only for that layout."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.use_mla = False
     worker.tp_size = 1
     worker.kv_cache_config = SimpleNamespace(has_mamba_layers=False)
     worker.transfer_topo = SimpleNamespace(total_num_kv_heads=4)
     layer = "model.layers.0.self_attn"
+    head_size, num_kv_heads, elem = 64, 4, 2
     spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.bfloat16
+        block_size=16,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.bfloat16,
     )
-    if num_head_slots is not None:
+    if layout == "split_kv_head_slots":
         spec = dataclasses.replace(
-            spec, num_head_slots=num_head_slots, state_content_bytes=64 * 2
+            spec,
+            num_head_slots=2 * num_kv_heads,
+            state_content_bytes=head_size * elem,
+        )
+    elif layout == "kv_planes":
+        spec = dataclasses.replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=num_kv_heads * head_size * elem,
         )
     worker._layer_specs = {layer: spec}
     region = TransferRegion(
@@ -2853,6 +2868,6 @@ def test_head_resharding_rejects_separate_kv_head_slots(
 
     err = worker._validate_head_resharding_layout(remote_tp_size, [region])
 
-    assert (err is not None) is rejected
+    assert (err is not None) is rejected, err
     if rejected:
         assert "separate K/V head slots" in err

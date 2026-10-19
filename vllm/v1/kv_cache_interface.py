@@ -553,6 +553,22 @@ class AttentionSpec(KVCacheSpec):
         return (self.head_size + self.head_size_v) * get_dtype_size(self.dtype)
 
     @property
+    def has_separate_kv_head_slots(self) -> bool:
+        """Unquantized K and V stored as separate per-KV-head slots.
+
+        ``num_head_slots == 2 * num_kv_heads`` with ``head_size`` elements per
+        slot: under a block-contiguous layout the first half of each page holds
+        every K head and the second half every V head. NVFP4 uses the same split
+        with packed fp4 content and is reported by ``kv_quant_mode`` instead.
+        """
+        return (
+            self.kv_quant_mode == KVQuantMode.NONE
+            and self.num_head_slots == 2 * self.num_kv_heads
+            and self.head_size == self.head_size_v
+            and self.state_content_bytes == self.head_size * get_dtype_size(self.dtype)
+        )
+
+    @property
     def unpadded_page_size_bytes(self) -> int:
         return self.num_heads * self.num_states * self.state_content_size_bytes
 

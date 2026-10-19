@@ -357,3 +357,34 @@ def test_heterogeneous_tp_slices_heads_within_each_kv_region(
             addr, length, _ = (int(x) for x in blocks[r * NUM_BLOCKS + b])
             start = remote_bases[r] + b * remote_half
             assert start <= addr and addr + length <= start + remote_half
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("num_head_slots", "content_elems", "quant", "expected"),
+    [
+        (None, None, "none", False),  # default packed K|V
+        (2 * NUM_KV_HEADS, HEAD_SIZE, "none", True),  # this layout
+        (2, NUM_KV_HEADS * HEAD_SIZE, "none", False),  # ROCm attention / b12x planes
+        (2 * NUM_KV_HEADS, HEAD_SIZE, "nvfp4", False),  # NVFP4 reports via quant mode
+    ],
+)
+def test_has_separate_kv_head_slots_matches_only_this_layout(
+    num_head_slots, content_elems, quant, expected
+):
+    import dataclasses
+
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=NUM_KV_HEADS, head_size=HEAD_SIZE, dtype=DTYPE
+    )
+    if num_head_slots is not None:
+        spec = dataclasses.replace(
+            spec,
+            num_head_slots=num_head_slots,
+            state_content_bytes=content_elems * ELEM,
+        )
+    if quant == "nvfp4":
+        spec = dataclasses.replace(spec, kv_quant_mode=KVQuantMode.NVFP4)
+    assert spec.has_separate_kv_head_slots is expected
