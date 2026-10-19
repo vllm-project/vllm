@@ -2946,6 +2946,45 @@ def test_evict():
     assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
+def test_evicted_blocks_stats():
+    """Only cached blocks reused as new blocks are counted as evictions."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 4),  # 3 usable blocks
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+    # Cache 2 full blocks; block 3 stays empty.
+    req0 = make_request("0", list(range(2 * block_size)), block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    blocks = manager.allocate_slots(req0, 2 * block_size, 0, computed_blocks)
+    assert blocks is not None and blocks.get_block_ids() == ([1, 2],)
+    manager.free(req0)
+    stats = manager.make_prefix_cache_stats()
+    assert stats is not None and stats.evicted_blocks == 0
+
+    # Invalidating a cached block (e.g. after a failed KV load) is not an
+    # eviction to make room.
+    manager.evict_blocks({1})
+
+    # Allocating all 3 blocks overwrites the one block that is still cached.
+    req1 = make_request(
+        "1", list(range(2 * block_size, 5 * block_size)), block_size, sha256
+    )
+    computed_blocks, _, _ = manager.get_computed_blocks(req1)
+    blocks = manager.allocate_slots(req1, 3 * block_size, 0, computed_blocks)
+    assert blocks is not None and sorted(blocks.get_block_ids()[0]) == [1, 2, 3]
+    stats = manager.make_prefix_cache_stats()
+    assert stats is not None and stats.evicted_blocks == 1
+
+    # The count is drained by `make_prefix_cache_stats`.
+    stats = manager.make_prefix_cache_stats()
+    assert stats is not None and stats.evicted_blocks == 0
+
+
 def test_hash_block_correct_reuse():
     """This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
