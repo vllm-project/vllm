@@ -400,10 +400,10 @@ def test_uno_refuses_request_lora_before_queueing(
 
 
 def _make_vllm_uno_config(uno_config_factory):
+    """Exercise runner selection without a model or its LoRA validation."""
     return VllmConfig(
         device_config=DeviceConfig(device="cpu"),
         speculative_config=uno_config_factory(),
-        lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
         scheduler_config=SchedulerConfig(
             max_model_len=2048,
             max_num_seqs=4,
