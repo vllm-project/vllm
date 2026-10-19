@@ -34,6 +34,11 @@ class FusedMoERouter(ABC):
     def routing_method_type(self) -> RoutingMethodType:
         raise NotImplementedError
 
+    @property
+    def kernel_routing_method_type(self) -> RoutingMethodType:
+        """Routing method executed by kernels, before any router override."""
+        return self.routing_method_type
+
     @abstractmethod
     def _select_experts(
         self,
