@@ -399,6 +399,13 @@ torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
 
 torch::Tensor greedy_argmax(const torch::Tensor& logits);
 
+void static_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, const torch::Tensor& scale,
+    const std::optional<std::vector<int64_t>>& group_shape);
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, torch::Tensor& scale,
+    const std::optional<torch::Tensor>& scale_ub);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -907,9 +914,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &cpu_attention_with_kv_cache);
 
   // placeholders
-  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+  ops.impl("static_scaled_fp8_quant", torch::kCPU, &static_scaled_fp8_quant);
   ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
-  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> ()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCPU,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // WNA16
 #if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__) || \
