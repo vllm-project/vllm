@@ -62,7 +62,7 @@ def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
     from vllm.entrypoints.common.cli_args import make_arg_parser
-    from vllm.platforms.interface import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     non_default_args = {}
 
