@@ -2885,7 +2885,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(
-                            Length,
+                            Error,
                         ),
                         stop_reason: None,
                         events: None,
@@ -2899,6 +2899,13 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        error: Some(
+                            RequestError {
+                                code: "engine_paused",
+                                message: "Generation is paused.",
+                                retryable: true,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,
