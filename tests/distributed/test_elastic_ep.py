@@ -147,7 +147,8 @@ def _scale_with_traffic(
         f"[traffic={traffic_mode}] "
         f"scale_seconds={scale_seconds:.3f} "
         f"downtime_seconds={_downtime(probe_result):.3f} "
-        f"num_503={sum(s == 503 for r in results for _, _, s in r)}"
+        f"num_503={sum(s == 503 for r in results for _, _, s in r)}",
+        flush=True,
     )
 
 
@@ -161,7 +162,8 @@ def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
     accuracy = result["accuracy"]
     print(
         f"[{stage}] GSM8K accuracy: {accuracy:.3f} "
-        f"({result['num_questions']} questions)"
+        f"({result['num_questions']} questions)",
+        flush=True,
     )
     assert accuracy >= EXPECTED_ACCURACY, (
         f"[{stage}] GSM8K accuracy {accuracy:.3f} is below "
@@ -300,7 +302,7 @@ def test_elastic_ep_scaling(
             f"  Scale down: {scale_down_accuracy:.3f} "
             f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
         )
-        print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
+        print(f"  Tolerance:  {ACCURACY_TOL:.3f}", flush=True)
 
 
 def _skip_unless_nixl_ep_v2() -> None:
