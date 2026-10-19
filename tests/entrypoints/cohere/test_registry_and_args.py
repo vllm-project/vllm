@@ -6,7 +6,7 @@ by the Cohere v2 chat API:
 * ``vllm/renderers/registry.py``: new ``"cohere"`` renderer entry.
 * ``vllm/tokenizers/registry.py``: new ``"cohere"`` tokenizer entry
   (aliased to the cached HF tokenizer).
-* ``vllm/entrypoints/openai/cli_args.py``: new
+* ``vllm/entrypoints/openai/common.py``: new
   ``cohere_is_reasoning_model`` field.
 * ``vllm/config/model.py``: ``"cohere"`` added to ``TokenizerMode``
   Literal.
