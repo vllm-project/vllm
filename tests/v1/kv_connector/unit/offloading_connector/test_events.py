@@ -272,7 +272,7 @@ def test_partial_tail_lookup_is_not_marked_as_pending_store():
 
     tracker.record_partial_lookup(req, group_config, 4, key)
 
-    assert not tracker._pending_event_metadata[key].primary_store_pending
+    assert tracker._pending_event_metadata[key].pending_primary_stores == 0
 
 
 @pytest.mark.parametrize(
@@ -528,6 +528,7 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
     req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=256)
     key = _record_chunks(tracker, req, group_config, num_chunks=2)[1]
     secondary_removal = _removed_event([key], ownership="kvcr")
+    list(tracker.take_events([_stored_event([key])]))
 
     batch = [
         _removed_event([key]),
@@ -561,6 +562,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     req = _request(block_hashes=block_hashes, token_count=8)
     group_config = _group_config(blocks_per_chunk=2)
     key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
+    list(tracker.take_events([_stored_event([key])]))
     confirmed_meta = tracker._pending_event_metadata[key]
     lookup_req = _request(
         block_hashes=block_hashes,
@@ -599,7 +601,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_cpu_secondary_store_does_not_consume_primary_store_generation():
+def test_cpu_secondary_store_does_not_consume_primary_store_pending_count():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -619,7 +621,7 @@ def test_cpu_secondary_store_does_not_consume_primary_store_generation():
     )
 
     meta = tracker._pending_event_metadata[key]
-    assert meta.primary_store_pending
+    assert meta.pending_primary_stores == 1
     assert (Medium.CPU, "kvcr") in meta.active_residencies
 
 
@@ -633,7 +635,7 @@ def test_unmatched_removal_keeps_metadata_and_emits_placeholder():
 
     assert removed.block_hashes == [_wire_hash(_hash(0))]
     assert tracker._pending_event_metadata[key].active_residencies == {
-        (Medium.CPU, None)
+        (Medium.CPU, None): 1
     }
 
 
@@ -656,13 +658,12 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
 
     getattr(tracker, record_method)(req, group_config, position, key)
 
-    generations = tracker._metadata_generations[key]
-    assert len(generations) == 2
-    assert generations[0].active_residencies == {
-        (Medium.CPU, None),
-        (Medium.STORAGE, "custom"),
+    meta = tracker._pending_event_metadata[key]
+    assert meta.active_residencies == {
+        (Medium.CPU, None): 2,
+        (Medium.STORAGE, "custom"): 1,
     }
-    assert generations[1].active_residencies == {(Medium.CPU, None)}
+    assert meta.pending_primary_stores == 1
     [removed] = tracker.take_events(
         [_removed_event([key], Medium.STORAGE, ownership="custom")]
     )
@@ -758,25 +759,6 @@ def test_take_events_preserves_payload_when_key_is_reused_before_removal(
     assert not tracker._pending_event_metadata
 
 
-def test_key_reuse_without_old_removal_retires_old_primary_generation():
-    tracker = _tracker()
-    group_config = _group_config(block_size=4, blocks_per_chunk=2)
-    old_req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
-    key = _record_chunks(tracker, old_req, group_config, num_chunks=1)[0]
-    list(tracker.take_events([_stored_event([key])]))
-
-    new_req = _request(block_hashes=[_hash(0), _hash(1)], token_count=8)
-    tracker.record_store(new_req, group_config, chunk_idx=0, offload_key=key)
-    [new_stored] = tracker.take_events([_stored_event([key])])
-
-    assert new_stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
-    assert len(tracker._metadata_generations[key]) == 1
-
-    [removed] = tracker.take_events([_removed_event([key])])
-    assert removed.block_hashes == new_stored.block_hashes
-    assert key not in tracker._metadata_generations
-
-
 def test_reset_cache_clears_side_table():
     tracker = _tracker()
     group_config = _group_config()
@@ -790,12 +772,11 @@ def test_reset_cache_clears_side_table():
     )
 
     assert tracker._pending_event_metadata
-    assert tracker._metadata_generations
+    assert tracker._pending_event_metadata[next(iter(tracker._pending_event_metadata))]
 
     tracker.reset()
 
     assert not tracker._pending_event_metadata
-    assert not tracker._metadata_generations
 
 
 def test_tiering_accepts_self_describing_kv_events():
