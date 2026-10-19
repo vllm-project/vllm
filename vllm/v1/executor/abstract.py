@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -117,6 +118,10 @@ class Executor(ABC):
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            from vllm.v1.worker.gpu.sleep_graphs import validate_graph_sleep
+
+            validate_graph_sleep(vllm_config)
         self._init_executor()
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
@@ -378,7 +383,15 @@ class Executor(ABC):
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc(
+            "sleep",
+            kwargs=dict(level=level),
+            **(
+                {"timeout": envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS
+                else {}
+            ),
+        )
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= SLEEP_TAGS
         logger.info(
@@ -397,7 +410,15 @@ class Executor(ABC):
                     )
                     return
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        self.collective_rpc(
+            "wake_up",
+            kwargs=dict(tags=tags),
+            **(
+                {"timeout": envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}
+                if envs.VLLM_SLEEP_DISCARD_GRAPHS
+                else {}
+            ),
+        )
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",

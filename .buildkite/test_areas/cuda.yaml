@@ -66,3 +66,30 @@ steps:
       - vllm/config/compilation.py
       - vllm/compilation
       - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H100) Graph-discard sleep lifecycle"
+  key: graph-discard-sleep
+  device: h100
+  num_devices: 2
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - csrc/cumem_allocator.cpp
+    - vllm/config/vllm.py
+    - tests/basic_correctness/memory/cumem/test_cumem.py
+    - vllm/device_allocator/
+    - vllm/v1/engine/
+    - vllm/v1/executor/
+    - vllm/v1/worker/
+    - vllm/distributed/device_communicators/custom_all_reduce.py
+    - vllm/distributed/parallel_state.py
+    - tests/distributed/test_custom_all_reduce.py
+    - vllm/envs.py
+    - tests/v1/cudagraph/test_sleep_graphs.py
+    - tests/v1/worker/test_sleep_mode_backend.py
+    - tests/v1/engine/test_engine_core_client_utility.py
+  commands:
+    - pytest -v -s basic_correctness/memory/cumem/test_cumem.py -k free_while_asleep
+    - pytest -v -s v1/worker/test_sleep_mode_backend.py
+    - pytest -v -s v1/engine/test_engine_core_client_utility.py
+    - pytest -v -s distributed/test_custom_all_reduce.py -k 'reset_graph_buffers_preserves_every_static_registration or repeated_graph_retirement'
+    - pytest -v -s v1/cudagraph/test_sleep_graphs.py -k 'not hybrid and not expert'

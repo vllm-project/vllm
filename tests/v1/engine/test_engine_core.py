@@ -751,7 +751,147 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._sleep_graph_pending = False
+    core._sleep_graph_traffic = False
+    core._sleep_graph_discarded = False
+    core._sleep_graph_error = None
+    core._sleep_graph_transition = False
     return core
+
+
+@pytest.mark.parametrize(
+    "sleeping,error,transition",
+    [(True, None, False), (False, "device failure", False), (False, None, True)],
+)
+def test_graph_sleep_cannot_bypass_unsafe_resume(
+    monkeypatch, sleeping, error, transition
+):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = sleeping
+    core._sleep_graph_error = error
+    core._sleep_graph_transition = transition
+    core.reject_new_requests = True
+    with pytest.raises(RuntimeError, match="Cannot resume"):
+        core.resume_scheduler()
+    assert core.reject_new_requests
+    core.scheduler.set_pause_state.assert_not_called()
+
+
+def test_graph_sleep_partial_wake_defers_capture_and_resume(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core._sleep_graph_discarded = True
+    core.model_executor.is_sleeping = True
+    assert core.wake_up(["weights"]) is False
+    assert not core._sleep_graph_pending
+    core.scheduler.set_pause_state.assert_not_called()
+    core.model_executor.is_sleeping = False
+    assert core.wake_up(["kv_cache"]) is True
+    assert core._sleep_graph_pending and not core._sleep_graph_traffic
+
+
+def test_graph_sleep_drain_cannot_be_resumed_early(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    pause: Future[None] = Future()
+    core.pause_scheduler = MagicMock(return_value=pause)
+    completed = core.sleep(level=1, mode="wait")
+    assert not completed.done()
+    for operation in (core.wake_up, core.resume_scheduler, core.sleep):
+        with pytest.raises(RuntimeError):
+            operation()
+    with pytest.raises(RuntimeError, match="already in progress"):
+        core.sleep(level=0, mode="invalid")
+    assert core._sleep_graph_transition
+    core.model_executor.sleep.assert_not_called()
+    pause.set_result(None)
+    assert completed.result() is None
+    core.model_executor.sleep.assert_called_once_with(1)
+    assert not core._sleep_graph_transition
+
+
+def test_graph_sleep_failed_idle_callback_does_not_block_requests():
+    core = _pausable_engine_core_proc()
+    core.has_work = MagicMock(return_value=False)
+    core.is_running = MagicMock(return_value=True)
+    core.input_queue = MagicMock()
+
+    def fail_sleep():
+        core._sleep_graph_error = "Graph-discard sleep failed: device failure"
+
+    core._notify_idle_state_callbacks = fail_sleep
+    with pytest.raises(RuntimeError, match="device failure"):
+        core._process_input_queue()
+    core.input_queue.get.assert_not_called()
+
+
+def test_idle_graph_capture_waits_for_traffic_and_runs_one_item():
+    from vllm import envs
+
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = True
+    core.model_executor.collective_rpc.return_value = [(False, 2)]
+    assert core._run_sleep_graph_capture() is False
+    core.model_executor.collective_rpc.assert_not_called()
+    core._sleep_graph_traffic = True
+    assert core._run_sleep_graph_capture() is True
+    core.model_executor.collective_rpc.assert_called_once_with(
+        "recapture_sleep_graph", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+    )
+    assert core._sleep_graph_pending
+    core.scheduler.has_requests.return_value = True
+    assert core._run_sleep_graph_capture() is False
+
+
+def test_idle_graph_capture_recoverable_failure_stays_eager(monkeypatch):
+    """A recoverable single-worker failure stays eager until the next wake."""
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.return_value = [(True, 0)]
+    assert core._run_sleep_graph_capture() is True
+    calls = [c.args[0] for c in core.model_executor.collective_rpc.call_args_list]
+    assert calls == ["recapture_sleep_graph", "discard_sleep_graphs"]
+    # Pending stays cleared until the next full wake re-arms it.
+    assert not core._sleep_graph_pending
+    assert core._sleep_graph_error is None
+
+
+def test_idle_graph_capture_all_done_clears_pending(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.return_value = [(False, 0), (False, 0)]
+    assert core._run_sleep_graph_capture() is True
+    calls = [c.args[0] for c in core.model_executor.collective_rpc.call_args_list]
+    assert calls == ["recapture_sleep_graph"]
+    assert not core._sleep_graph_pending
+
+
+def test_idle_graph_capture_failure_blocks_later_resume(monkeypatch):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.side_effect = RuntimeError("device failure")
+    with pytest.raises(RuntimeError, match="device failure"):
+        core._run_sleep_graph_capture()
+    assert not core._sleep_graph_pending and core._sleep_graph_error
+    core.model_executor.shutdown.assert_called_once()
+    core.scheduler.set_pause_state.assert_called_once_with(PauseState.PAUSED_ALL)
+    with pytest.raises(RuntimeError):
+        core.wake_up()
+    with pytest.raises(RuntimeError):
+        core.resume_scheduler()
 
 
 @pytest.mark.parametrize(
@@ -854,3 +994,50 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def test_idle_graph_capture_uses_executor_timeout(monkeypatch):
+    """A missing collective participant must not block the core indefinitely."""
+    monkeypatch.setattr("vllm.envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", 7)
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.UNPAUSED
+    core.model_executor.is_sleeping = False
+    core._sleep_graph_pending = core._sleep_graph_traffic = True
+    core.model_executor.collective_rpc.return_value = [(False, 0)]
+    assert core._run_sleep_graph_capture()
+    core.model_executor.collective_rpc.assert_called_once_with(
+        "recapture_sleep_graph", timeout=7
+    )
+
+
+@pytest.mark.parametrize("operation", ["sleep", "wake_up"])
+def test_graph_sleep_transition_failure_terminates_workers(monkeypatch, operation):
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = operation == "wake_up"
+    core.pause_scheduler = MagicMock(return_value=None)
+    getattr(core.model_executor, operation).side_effect = TimeoutError("peer stuck")
+    with pytest.raises(TimeoutError, match="peer stuck"):
+        getattr(core, operation)()
+    core.model_executor.shutdown.assert_called_once()
+    assert core._sleep_graph_error
+    with pytest.raises(RuntimeError):
+        core.resume_scheduler()
+
+
+@pytest.mark.parametrize("operation", ["sleep", "wake_up"])
+@pytest.mark.parametrize("discard", [False, True])
+def test_graph_sleep_executor_transition_timeout(monkeypatch, operation, discard):
+    from vllm.v1.executor.abstract import Executor
+
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_DISCARD_GRAPHS", discard)
+    monkeypatch.setattr("vllm.envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", 7)
+    executor = MagicMock()
+    executor.sleeping_tags = (
+        {"weights", "kv_cache"} if operation == "wake_up" else set()
+    )
+    executor.is_sleeping = bool(executor.sleeping_tags)
+    getattr(Executor, operation)(executor)
+    assert executor.collective_rpc.call_args.kwargs.get("timeout") == (
+        7 if discard else None
+    )

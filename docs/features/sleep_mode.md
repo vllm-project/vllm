@@ -223,4 +223,95 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 ## Limitation
 
+### Experimental graph discard and lazy recapture
+
+`VLLM_SLEEP_DISCARD_GRAPHS=1` destroys the model's CUDA graph executables
+before level-1 memory suspension. A complete wake resumes inference eagerly;
+after the first request completes, the engine captures at most one pending
+graph per idle iteration. Captured shapes become usable immediately. Other
+shapes continue eagerly. Ordinary sleep behavior is unchanged by default.
+When combined with `sleep_mode_offload_cudagraph`, graph discard takes
+precedence: graphs use a fresh ordinary graph pool after wake, with no retained
+graph-pool storage to back up. Graph-pool offloading remains unchanged when
+graph discard is disabled.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 VLLM_SLEEP_DISCARD_GRAPHS=1 \
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
+  --enable-sleep-mode --dtype float16 --max-model-len 256 \
+  --max-num-seqs 8 --max-num-batched-tokens 256 --no-async-scheduling \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL","cudagraph_capture_sizes":[1,2,4,8]}'
+```
+
+The initial prototype requires Linux/CUDA, the V2 runner in a local EngineCore
+process and the `cumem` backend. Tensor, data and pipeline parallelism are
+supported through the `uni`, `mp` and `ray` executors, and expert parallelism
+is supported for MoE models (validated on single node with `mp`/`ray` TP2,
+`mp` DP2 and PP2, and MoE TP2 with and without expert parallelism; multi-node
+Ray placement shares the same executor path but is not yet exercised). Data
+parallelism requires sleeping through the async engine path, which fans sleep
+out to every engine core. Expert parallelism combined with data parallelism is
+rejected because the all2all groups then span engine cores with independent
+idle boundaries. Context parallelism (prefill and decode) and EPLB are
+rejected: decode context parallelism would need TP larger than the model's
+KV head count, and prefill context parallelism requires an MLA sparse backend.
+Only unquantized `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM` models with FULL
+or FULL_DECODE_ONLY graphs and no `torch.compile` are covered by validation.
+Other architectures can be opted in through the comma-separated
+`VLLM_SLEEP_DISCARD_GRAPHS_EXTRA_MODELS` environment variable at the user's
+own risk (validated once on H20 with the hybrid linear-attention
+`Qwen3_5ForConditionalGeneration`, whose GDN backend resolves to
+FULL_DECODE_ONLY). Additional weight offloaders, KV transfer, microbatching,
+LoRA, encoder graphs, speculative decoding, live weight updates and communicator suspension
+are excluded. Level 0 retains its existing behavior. Level 2, selective KV
+discard and another sleep after a partial wake are rejected. Partial wake does
+not permit inference or recapture until all memory is awake.
+
+Under tensor parallelism, every rank discards and recaptures graphs in
+lockstep through the executor's collective RPCs: the graphs embed cross-rank
+collectives, so ranks must never diverge on graph availability. A capture failure in a multi-rank executor terminates the engine: peers may
+already be waiting in a collective, so one rank cannot recover independently.
+The multiprocess and Ray executors use
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` for capture, sleep and wake RPCs.
+The in-process (`uni`) executor cannot interrupt a blocked device operation.
+A recoverable single-rank allocation failure discards the graphs and serves
+eagerly until the next full wake, which re-arms recapture.
+
+Graph destruction does not guarantee that the CUDA driver returns its cached
+physical memory. vLLM does not request driver cache reclamation or explicitly
+clear global cuBLAS workspaces. PyTorch may clean up capture-stream workspaces
+when destroying a graph. This option does not release the entire CUDA context or vLLM's
+persistent workspace.
+The regression records free memory before allocator suspension, while weights
+and KV remain mapped. This interval includes graph outputs and allocator cache
+cleanup, so its entire change must not be attributed to graph executables
+(GraphExec). Physical release must be measured on the target device and driver;
+neither full GraphExec memory release nor a smaller complete-wake footprint is
+guaranteed. Snapshots after wake are retained separately from the
+before-suspension measurement.
+
+Recapture never overlaps an inference step, but a request or sleep arriving
+during capture waits for the current descriptor to finish. Continuous traffic
+can defer completion indefinitely. A recoverable single-rank capture allocation failure
+leaves the engine eager; other reported CUDA/capture failures terminate the
+engine and return an error to waiting requests. A failed destructive
+sleep or wake refuses further resume operations and requires restarting the
+engine. The main loop reports these failures through the EngineDead path,
+including failures delivered by deferred sleep callbacks, so queued requests
+do not remain waiting. Repeated completed sleep/wake calls remain supported.
+
+Idle recapture reuses its capture stream and retains the host allocator's
+cached weight-backup buffers. It still runs warmups and allocates graph memory;
+measure repeated sleep, wake and inference latency for the installed PyTorch
+version.
+
+Eager and graph execution can have different floating-point results even
+without sleep. This option does not promise cross-mode or batch-invariant
+token equality. Validate the intended model, dtype and batches before use.
+The GPU regression is `tests/v1/cudagraph/test_sleep_graphs.py`; it checks exact
+tokens for its controlled recipe, first-request eager execution and actual
+replay after idle recapture. The prototype does not implement model switching.
+
+### ROCm
+
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.

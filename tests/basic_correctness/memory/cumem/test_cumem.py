@@ -8,12 +8,31 @@ import torch
 
 import vllm.device_allocator.cumem as cumem
 from vllm import LLM, SamplingParams
-from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator import HandleType, get_mem_allocator_instance
 from vllm.platforms import current_platform
 
 from ....utils import create_new_process_for_each_test
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_free_while_asleep_reports_no_driver_errors(offload, capfd):
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag="weights"):
+        tensor = torch.ones(1024 * 1024, dtype=torch.uint8, device=DEVICE_TYPE)
+    allocator.sleep(offload_tags=("weights",) if offload else ())
+    assert allocator.pointer_to_data
+    assert all(data.is_asleep for data in allocator.pointer_to_data.values())
+    capfd.readouterr()
+    del tensor
+    gc.collect()
+    allocator.release_pools()
+    assert not allocator.pointer_to_data
+    captured = capfd.readouterr()
+    assert "CUDA Error:" not in captured.err
 
 
 def mapped_usage(allocator) -> int:
@@ -354,6 +373,37 @@ def test_runtime_state_survives_sleep(level):
     backend.resume(tags=["kv_cache"])
     kv.fill_(1)
     assert int(kv.sum()) == kv.numel()
+
+
+@pytest.mark.parametrize("offload", [False, True], ids=["discard", "offload"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_free_while_asleep(offload, monkeypatch):
+    """Freeing an asleep allocation must not unmap or remap it again."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.ones(1024, 1024, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("freed"):
+        freed = torch.ones(1024, 1024, device=DEVICE_TYPE)
+    ptr = freed.data_ptr()
+    data = allocator.pointer_to_data[ptr]
+    allocator.sleep(offload_tags=("weights", "freed") if offload else "weights")
+    assert (data.cpu_backup_tensor is not None) == offload
+
+    remaps: list[HandleType] = []
+    monkeypatch.setattr(cumem, "create_and_map", remaps.append)
+    # Release the pools as engine shutdown does, so the C++ free runs asleep.
+    del freed
+    allocator.release_pools()
+    monkeypatch.undo()
+
+    assert ptr not in allocator.pointer_to_data
+    assert data.cpu_backup_tensor is None
+    assert not remaps, "free must not map physical memory while asleep"
+    # A driver error in the C++ free stays in error_code and fails this remap.
+    allocator.wake_up()
+    assert mapped_usage(allocator) >= weights.nbytes
+    assert torch.allclose(weights, torch.ones_like(weights))
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

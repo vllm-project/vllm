@@ -696,6 +696,9 @@ class VllmConfig:
         model_config = self.model_config
         return (
             model_config is not None
+            # Graph discard retires the graphs and uses a fresh pool on wake.
+            # A persistent cuMem pool is only needed when retaining graphs.
+            and not envs.VLLM_SLEEP_DISCARD_GRAPHS
             and model_config.sleep_mode_offload_cudagraph
             and model_config.enable_sleep_mode
             and model_config.sleep_mode_backend == "cumem"

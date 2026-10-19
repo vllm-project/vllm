@@ -337,7 +337,8 @@ class CustomAllreduce:
         self._ptr = ops.init_custom_ar(
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
-        ops.register_buffer(self._ptr, self.buffer_ptrs)
+        self._registered_buffers: list[list[int]] = []
+        self._register_buffer(self.buffer_ptrs)
         self._init_mnnvl_buffer(
             max(
                 max_mnnvl_all_gather_size * world_size,
@@ -382,8 +383,8 @@ class CustomAllreduce:
             lamport_rs_offset = stage_size * 3
             lamport_ag_ptrs = [ptr + lamport_ag_offset for ptr in ptrs]
             lamport_rs_ptrs = [ptr + lamport_rs_offset for ptr in ptrs]
-            ops.register_buffer(self._ptr, lamport_ag_ptrs)
-            ops.register_buffer(self._ptr, lamport_rs_ptrs)
+            self._register_buffer(lamport_ag_ptrs)
+            self._register_buffer(lamport_rs_ptrs)
 
             buffer.view(torch.int32).fill_(-2147483648)
             epochs = torch.zeros(
@@ -495,6 +496,32 @@ class CustomAllreduce:
         handles = cast(list[list[int]], [d[0] for d in all_data])
         offsets = cast(list[list[int]], [d[1] for d in all_data])
         ops.register_graph_buffers(self._ptr, handles, offsets)
+
+    def _register_buffer(self, pointers: list[int]) -> None:
+        ops.register_buffer(self._ptr, pointers)
+        self._registered_buffers.append(pointers)
+
+    def reset_graph_buffers(self) -> None:
+        """Retire graph registrations after all users have destroyed their graphs.
+
+        The caller must synchronize every participating rank first. Keep the
+        shared buffers, but recreate the native pointer table so repeated
+        capture does not exhaust its fixed capacity or retain peer mappings.
+        No surviving graph may refer to the old registrations.
+        """
+        if self.disabled or not self._ptr:
+            return
+        replacement = ops.init_custom_ar(
+            self.meta_ptrs, self.rank_data, self.rank, self.fully_connected
+        )
+        try:
+            for pointers in self._registered_buffers:
+                ops.register_buffer(replacement, pointers)
+        except Exception:
+            ops.dispose(replacement)
+            raise
+        previous, self._ptr = self._ptr, replacement
+        ops.dispose(previous)
 
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled or self.world_size > 8:

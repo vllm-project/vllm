@@ -3,8 +3,8 @@
 import gc
 import itertools
 from collections import defaultdict
-from collections.abc import Callable, Hashable, Iterable, Sequence
-from contextlib import ExitStack
+from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import (
     BreakableCUDAGraphWrapper,
     is_breakable_cudagraph_enabled,
@@ -160,6 +161,7 @@ class CudaGraphManager:
     ):
         self.vllm_config = vllm_config
         self.device = device
+        self._sleep_capture_stream: torch.cuda.Stream | None = None
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
@@ -187,6 +189,11 @@ class CudaGraphManager:
         # captured FULL graph's memory delta for extrapolation.
         self._max_full_descs_to_capture: int | None = None
         self._capture_mem_samples: list[int] | None = None
+
+        # Set by discard_full_graphs: dispatch must skip descriptors whose
+        # graphs were destroyed and not yet recaptured. Gated so the default
+        # path (including speculative-token specialization) is unchanged.
+        self._sleep_partial = False
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
@@ -420,6 +427,31 @@ class CudaGraphManager:
             return self.ubatch_runner.capture_stream
         return current_stream()
 
+    @contextmanager
+    def _capture_graph(
+        self,
+        graph: torch.cuda.CUDAGraph,
+        pool: tuple[int, int],
+        stream: torch.cuda.Stream,
+    ) -> Iterator[None]:
+        if not self._sleep_partial:
+            with torch.cuda.graph(graph, pool, stream=stream):
+                yield
+            return
+        # torch.cuda.graph also empties the host allocator cache. During idle
+        # recapture that evicts the weight-backup buffers just freed by wake,
+        # forcing every subsequent sleep to allocate and pin them again.
+        # Use the public low-level capture API without flushing host memory.
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        with torch.cuda.stream(stream):
+            graph.capture_begin(pool=pool)
+            try:
+                yield
+            finally:
+                graph.capture_end()
+
     @torch.inference_mode()
     def capture(
         self,
@@ -437,7 +469,14 @@ class CudaGraphManager:
             progress_bar_desc: Description shown on the capture progress bar.
 
         """
-        with graph_capture(device=self.device), ExitStack() as stack:
+        # Incremental recapture must reuse its warmup stream. Creating one per
+        # descriptor retains a separate cuBLAS workspace for every stream.
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS and self._sleep_capture_stream is None:
+            self._sleep_capture_stream = torch.cuda.Stream(device=self.device)
+        with (
+            graph_capture(device=self.device, stream=self._sleep_capture_stream),
+            ExitStack() as stack,
+        ):
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
@@ -495,7 +534,7 @@ class CudaGraphManager:
                             free_before = torch.accelerator.get_memory_info()[0]
                         with (
                             capture_pool(self.pool, self.vllm_config) as pool,
-                            torch.cuda.graph(
+                            self._capture_graph(
                                 graph, pool, stream=self._capture_stream(desc)
                             ),
                         ):
@@ -534,6 +573,12 @@ class CudaGraphManager:
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
+                if (
+                    self._sleep_partial
+                    and desc.cg_mode == CUDAGraphMode.FULL
+                    and desc not in self.graphs
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
@@ -609,6 +654,26 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+
+    def discard_full_graphs(self) -> None:
+        """Release owned graphs and outputs after the worker has synchronized."""
+        if (
+            self.cudagraph_mode.decode_mode() != CUDAGraphMode.FULL
+            or self.cudagraph_mode.has_piecewise_cudagraphs()
+        ):
+            raise ValueError(
+                "Graph discard supports FULL and FULL_DECODE_ONLY modes only"
+            )
+        self._graphs_captured = False
+        self._sleep_partial = True
+        for graph in self.graphs.values():
+            graph.reset()
+        self.graphs.clear()
+        self.hidden_states = None
+        self.aux_hidden_states = []
+        self.intermediate_tensors = None
+        # The old pool cannot be reused after its final graph is released.
+        self.pool = torch.cuda.graph_pool_handle()
 
     def capture(
         self,
