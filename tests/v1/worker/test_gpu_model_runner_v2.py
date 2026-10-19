@@ -75,6 +75,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=1,
         cp_kv_cache_interleave_size=1,
+        use_ubatching=False,
     )
     runner.parallel_config = parallel_config
     runner.vllm_config = SimpleNamespace(

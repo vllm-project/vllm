@@ -4,7 +4,8 @@
 
 DBO is specifically designed for DP+EP scenarios to hide communication latency
 by overlapping computation of two batches. This test validates that DBO works
-correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
+correctly with the DeepSeek-V2-Lite model using GSM8K evaluation, on both the V1
+and V2 model runners.
 """
 
 import pytest
@@ -49,6 +50,8 @@ DEEPEP_BACKENDS = [
 
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
+# Set explicitly either way: DBO picks the V1 runner when the env var is unset.
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 @pytest.mark.xfail(
     IS_BLACKWELL,
     reason=(
@@ -56,7 +59,9 @@ DEEPEP_BACKENDS = [
         "(doesn't meet expectation of MIN_ACCURACY = 0.62)"
     ),
 )
-def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
+def test_dbo_dp_ep_gsm8k(
+    all2all_backend: str, use_v2_model_runner: bool, num_gpus_available
+):
     """Test DBO with DP+EP using GSM8K evaluation."""
     lm_eval = pytest.importorskip("lm_eval")
     required_gpus = DP_SIZE
@@ -88,6 +93,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     with RemoteOpenAIServer(
         MODEL_NAME,
         server_args,
+        env_dict={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2_model_runner))},
         max_wait_seconds=600,  # Allow time for model loading with DP+EP
     ) as remote_server:
         # Use host and port directly from RemoteOpenAIServer
@@ -114,6 +120,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         )
         assert accuracy is not None, f"gsm8k exact_match missing: {gsm8k}"
         assert accuracy >= MIN_ACCURACY, (
-            f"DBO+DP+EP accuracy too low ({all2all_backend}): "
+            f"DBO+DP+EP accuracy too low ({all2all_backend}, "
+            f"{'V2' if use_v2_model_runner else 'V1'} runner): "
             f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
         )

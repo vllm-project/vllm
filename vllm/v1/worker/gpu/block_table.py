@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -30,6 +31,7 @@ class BlockTables:
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        mirror_on_cpu: bool = False,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -50,6 +52,12 @@ class BlockTables:
             dcp_sharded = [True] * self.num_kv_cache_groups
         assert len(dcp_sharded) == self.num_kv_cache_groups
         self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
+        # Tokens covered by one block-table entry, per group. A DCP-sharded
+        # entry covers a virtual block spread across all CP ranks.
+        self.tokens_per_entry = [
+            block_size * cp_size if sharded else block_size
+            for block_size, sharded in zip(block_sizes, dcp_sharded)
+        ]
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
@@ -58,6 +66,15 @@ class BlockTables:
                 (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
             )
             self.block_tables.append(block_table)
+
+        # Host copy of the block tables, for CPU-side checks that need block
+        # ids without a device sync (microbatching).
+        self.block_tables_np: list[np.ndarray] | None = None
+        if mirror_on_cpu:
+            self.block_tables_np = [
+                np.zeros((self.max_num_reqs, max_num_blocks), dtype=np.int32)
+                for max_num_blocks in max_num_blocks_per_group
+            ]
 
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs), dtype=torch.int32
@@ -127,6 +144,8 @@ class BlockTables:
                     f"row capacity ({end} > {row_capacity})"
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
+            if self.block_tables_np is not None:
+                self.block_tables_np[i][req_index, start:end] = block_ids
             self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
