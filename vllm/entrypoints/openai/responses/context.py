@@ -714,8 +714,6 @@ class HarmonyContext(ConversationContext):
         result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count
-        if any(segment.delta and segment.is_content for segment in segments):
-            self.record_first_content_token(output.metrics)
 
         self.first_tok_of_message = output.finished
         self._update_decode_token_usage(output)
@@ -738,6 +736,10 @@ class HarmonyContext(ConversationContext):
             self._attach_logprobs(segments, output_token_ids, logprobs)
             if output.finished:
                 self._current_message_logprobs = []
+
+        if any(segment.delta and segment.is_content for segment in segments):
+            self.record_first_content_token(output.metrics)
+
         self.last_append_segments = segments
         self._messages.extend(
             segment.completed_message
