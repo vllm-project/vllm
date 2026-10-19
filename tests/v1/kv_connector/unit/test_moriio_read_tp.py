@@ -20,6 +20,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
+    MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
     ReqMeta,
@@ -30,6 +31,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    HeadLayout,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -348,6 +352,46 @@ def test_failed_read_releases_every_holder():
     assert consumer.worker._pop_done_transfers() == set()
     assert sorted(p for p, _, _ in released) == [0, 1]
     assert consumer.worker._invalid_block_ids == set(DECODE_BLOCKS["full"])
+
+
+def _mixed_layout_pair():
+    """Equal-TP GQA ranks whose layouts differ, so reads go head by head."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    (producer,), (consumer,) = _ranks("gqa", 1, 1, True, LAYOUTS[2], state)
+    return producer, consumer
+
+
+def test_head_read_rejects_peer_with_other_head_count():
+    producer, consumer = _mixed_layout_pair()
+    metadata = _metadata(producer)
+    layout = HeadLayout.from_wire(metadata.kv_head_layouts["attn0"])
+    metadata.kv_head_layouts["attn0"] = layout._replace(
+        num_heads=layout.num_heads // 2
+    ).to_wire()
+    with pytest.raises(MoRIIOError, match="KV heads per rank"):
+        consumer.worker._compute_read_attention_offsets(
+            "attn0",
+            DECODE_BLOCKS["full"],
+            PREFILL_BLOCKS["full"],
+            metadata,
+            remote_tp_size=1,
+            remote_engine_id="prefill",
+        )
+
+
+def test_head_read_rejects_more_local_than_remote_blocks():
+    producer, consumer = _mixed_layout_pair()
+    remote = PREFILL_BLOCKS["full"]
+    with pytest.raises(ValueError, match="longer than remote_block_ids"):
+        consumer.worker._compute_read_attention_offsets(
+            "attn0",
+            DECODE_BLOCKS["full"][: len(remote)] + [0],
+            remote,
+            _metadata(producer),
+            remote_tp_size=1,
+            remote_engine_id="prefill",
+        )
 
 
 @pytest.mark.parametrize(
