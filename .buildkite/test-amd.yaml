@@ -1004,11 +1004,13 @@ steps:
   - tests/entrypoints/unit_tests
   - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/rl/weight_transfer
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
   timeout_in_minutes: 50
