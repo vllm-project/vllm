@@ -36,12 +36,12 @@ backbone forward AND the sequential Markov sampling.
 from typing import Any
 
 import torch
-from flashinfer import top_k as _flashinfer_topk
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import resolve_markov_bias_topk, resolve_markov_topk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.logits_processor import _topk
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import (
@@ -123,6 +123,12 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
+        self.use_confidence_head = (
+            self.enable_adaptive_verification
+            and model.model.confidence_head is not None
+        )
+        if self.use_confidence_head:
+            self.use_acceptance_estimator = False
         self._init_markov_walk(model)
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
@@ -146,14 +152,6 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        self.use_confidence_head = (
-            self.enable_adaptive_verification
-            and model.model.confidence_head is not None
-        )
-        if self.use_confidence_head:
-            # The acceptance estimator is not needed when a trained confidence head
-            # is available.
-            self.use_acceptance_estimator = False
         return model
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
@@ -162,6 +160,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # column has to hold the "impossible" -inf fill (zero draft probability
         # outside the candidate set). fp32 keeps the published scores identical
         # to the ones the walk sampled from.
+        assert vllm_config.speculative_config is not None
         if resolve_markov_topk(vllm_config.speculative_config) > 0:
             return torch.float32, -float("inf")
         return super().draft_logits_spec(vllm_config)
@@ -177,6 +176,14 @@ class DSparkSpeculator(DFlashSpeculator):
         self._markov_walk_enabled = False
         topk = self.markov_topk
         if topk <= 0:
+            return
+        if self.use_acceptance_estimator or self.draft_watermarker is not None:
+            logger.warning_once(
+                "DSpark candidate pruning does not support the online acceptance "
+                "estimator or draft watermarking; falling back to the full-vocab "
+                "Markov projection."
+            )
+            self.markov_topk = 0
             return
         supports_walk = getattr(model, "supports_markov_candidate_walk", None)
         if supports_walk is None or not supports_walk():
@@ -213,7 +220,7 @@ class DSparkSpeculator(DFlashSpeculator):
         if bias_topk > 0:
             # Bigram side of the candidate union: the top-m rows of the dense
             # Markov projection for every possible `prev`, precomputed once from
-            # the trained weights (and disk-cached) so no step projects [r, V].
+            # the trained weights so no step projects [r, V].
             # The fp32 bias values let the walk kernel skip W1[prev]·W2[cand]
             # for static candidates, eliminating scattered W2 row reads.
             self._markov_static_ids, self._markov_static_biases = (
@@ -367,13 +374,11 @@ class DSparkSpeculator(DFlashSpeculator):
         )
         base_values = self._base_cand_values[:num_reqs]
         base_ids = self._base_cand_ids[:num_reqs]
-        # Candidate order is irrelevant (the walk re-argmaxes inside the union).
-        # flashinfer top_k is ~6x faster than torch.topk for large vocabularies
-        # but requires 2D input; reshape is zero-copy.
+        # Reuse the platform-aware FlashInfer/torch top-k dispatch.
         flat_logits = base_logits.view(-1, base_logits.shape[-1])
-        fi_vals, fi_ids = _flashinfer_topk(flat_logits, self.markov_topk)
-        base_values.copy_(fi_vals.view(num_reqs, n_spec, -1))
-        base_ids.copy_(fi_ids.view(num_reqs, n_spec, -1))
+        values, ids = _topk(flat_logits, self.markov_topk)
+        base_values.copy_(values.view(num_reqs, n_spec, -1))
+        base_ids.copy_(ids.view(num_reqs, n_spec, -1))
         static_ids = self._markov_static_ids
         union_ids = (
             self._union_cand_ids[:num_reqs]

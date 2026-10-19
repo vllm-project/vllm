@@ -309,14 +309,17 @@ def _cache_candidates_kernel(
         + req_state * draft_logits_stride_0
         + step * draft_logits_stride_1
     )
-    tl.store(logits_base + old_ids, float("-inf"), mask=mask)
+    tl.atomic_xchg(logits_base + old_ids, float("-inf"), mask=mask, sem="relaxed")
+    tl.debug_barrier()
 
     cand_base = flat * top_k
     cand = tl.load(cand_ids_ptr + cand_base + offsets, mask=mask, other=0)
     if HAS_D2T:
         cand = cand + tl.load(d2t_ptr + cand, mask=mask, other=0)
     scores = tl.load(realized_ptr + cand_base + offsets, mask=mask, other=float("-inf"))
-    tl.store(logits_base + cand, scores, mask=mask)
+    # Repeated token IDs share Gumbel noise, so sampling uses their maximum
+    # score. The online reduction and precomputed matmul can round differently.
+    tl.atomic_max(logits_base + cand, scores, mask=mask, sem="relaxed")
     tl.store(cached_ids_ptr + cache_base + offsets, cand, mask=mask)
 
 

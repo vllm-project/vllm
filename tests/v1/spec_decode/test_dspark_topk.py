@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -13,8 +15,21 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     dequantize_to_dtype,
     nvfp4_gathered_bias,
 )
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import (
+    DSparkMarkovHead,
+    Qwen3DSparkForCausalLM,
+)
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import (
+    cache_markov_candidates,
+    compute_markov_bias_top_ids,
+    markov_walk_topk,
+)
+
+requires_gpu = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
@@ -27,6 +42,190 @@ def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
     head.markov_w2._retain_weight_for_gather = False
     head.markov_w2.is_w4a16_nvfp4 = False
     return head
+
+
+@requires_gpu
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("reduced_vocab", [False, True])
+def test_candidate_walk_matches_dense_greedy_chain(dtype, reduced_vocab):
+    """Full candidates preserve the dense chain, including draft-to-target IDs."""
+    torch.manual_seed(42)
+    batch, steps, vocab, rank = 3, 4, 37, 33
+    target_vocab = 2 * vocab if reduced_vocab else vocab
+    base = torch.randn(batch, steps, vocab, device="cuda", dtype=dtype)
+    w1 = torch.randn(target_vocab, rank, device="cuda", dtype=dtype) / rank
+    w2 = torch.randn(vocab, rank, device="cuda", dtype=dtype) / rank
+    d2t = torch.arange(vocab, device="cuda") if reduced_vocab else None
+    anchor = torch.arange(batch, device="cuda")
+    values, ids = base.topk(vocab, dim=-1)
+    tokens = torch.empty(batch, steps, dtype=torch.int64, device="cuda")
+    scores = torch.empty_like(values, dtype=torch.float32)
+    markov_walk_topk(
+        num_reqs=batch,
+        cand_values=values,
+        cand_ids=ids,
+        w1=w1,
+        w2=w2,
+        scale=0.75,
+        draft_tokens=tokens,
+        input_ids=anchor,
+        anchor_indices=anchor,
+        sample_pos=torch.arange(batch * steps, device="cuda"),
+        sample_idx_mapping=anchor.repeat_interleave(steps),
+        temperature=torch.zeros(batch, device="cuda"),
+        seeds=anchor,
+        realized_scores=scores,
+        d2t=d2t,
+    )
+    prev = anchor
+    for step in range(steps):
+        logits = base[:, step].float() + 0.75 * (w1[prev].float() @ w2.float().T)
+        expected = logits.argmax(-1)
+        if d2t is not None:
+            expected += d2t[expected]
+        torch.testing.assert_close(tokens[:, step], expected)
+        torch.testing.assert_close(
+            scores[:, step], logits.gather(1, ids[:, step]), atol=1e-5, rtol=1e-5
+        )
+        prev = expected
+
+
+@requires_gpu
+@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.5])
+@pytest.mark.parametrize("reduced_vocab", [False, True])
+def test_candidate_union_samples_the_cached_distribution(temperature, reduced_vocab):
+    """Overlapping candidates use their maximum score in both sampling and cache."""
+    torch.manual_seed(7)
+    batch, steps, vocab, rank = 32, 3, 17, 8
+    target_vocab = 2 * vocab if reduced_vocab else vocab
+    base = torch.randn(batch, steps, vocab, device="cuda")
+    w1 = torch.zeros(target_vocab, rank, device="cuda")
+    w2 = torch.zeros(vocab, rank, device="cuda")
+    d2t = torch.arange(vocab, device="cuda") if reduced_vocab else None
+    values, ids = base.topk(vocab, dim=-1)
+    # Model unequal rounding in the two projections, in both directions.
+    static_ids = torch.tensor([1, 3], device="cuda").repeat(target_vocab, 1)
+    static_biases = torch.tensor([0.25, -0.25], device="cuda").repeat(target_vocab, 1)
+    union_ids = torch.empty(batch, steps, vocab + 2, dtype=torch.int64, device="cuda")
+    scores = torch.empty_like(union_ids, dtype=torch.float32)
+    tokens = torch.empty(batch, steps, dtype=torch.int64, device="cuda")
+    rows = torch.arange(batch, device="cuda")
+    mapping = rows.repeat_interleave(steps)
+    positions = torch.arange(batch * steps, device="cuda") + 1
+    temperatures = torch.full((batch,), temperature, device="cuda")
+    seeds = rows * 104729 + 7
+    markov_walk_topk(
+        num_reqs=batch,
+        cand_values=values,
+        cand_ids=ids,
+        static_ids=static_ids,
+        static_biases=static_biases,
+        base_logits=base,
+        union_ids=union_ids,
+        w1=w1,
+        w2=w2,
+        scale=1.0,
+        draft_tokens=tokens,
+        input_ids=torch.zeros(batch, dtype=torch.int64, device="cuda"),
+        anchor_indices=rows,
+        sample_pos=positions,
+        sample_idx_mapping=mapping,
+        temperature=temperatures,
+        seeds=seeds,
+        realized_scores=scores,
+        d2t=d2t,
+        probabilistic=True,
+    )
+    expected = base.clone()
+    expected[:, :, 1] += 0.25
+    reference = gumbel_sample(
+        expected.flatten(0, 1),
+        mapping,
+        temperatures,
+        seeds,
+        positions - 1,
+        apply_temperature=True,
+        is_drafting=True,
+    ).view(batch, steps)
+    if d2t is not None:
+        reference += d2t[reference]
+    torch.testing.assert_close(tokens, reference)
+
+    cache = torch.full((batch, steps, target_vocab), -float("inf"), device="cuda")
+    cache_markov_candidates(
+        draft_logits=cache,
+        cached_ids=torch.zeros_like(union_ids),
+        cand_ids=union_ids,
+        realized_scores=scores,
+        sample_idx_mapping=mapping,
+        d2t=d2t,
+    )
+    target_ids = torch.arange(vocab, device="cuda")
+    if d2t is not None:
+        target_ids += d2t
+    expected_cache = torch.full_like(cache, -float("inf"))
+    expected_cache[:, :, target_ids] = expected
+    torch.testing.assert_close(cache, expected_cache, atol=0, rtol=0)
+
+
+@requires_gpu
+@pytest.mark.parametrize("num_warps", [1, 4])
+def test_candidate_cache_rewrite_under_cuda_graph(num_warps):
+    """Replay clears stale candidates, merges duplicates and ignores padded rows."""
+    cache = torch.full((3, 2, 128), -float("inf"), device="cuda")
+    ids = torch.zeros(2, 2, 64, dtype=torch.int64, device="cuda")
+    scores = torch.arange(ids.numel(), device="cuda", dtype=torch.float32).view_as(ids)
+    cached_ids = torch.zeros(3, 2, 64, dtype=torch.int64, device="cuda")
+    mapping = torch.tensor([2, 2, -1, -1], device="cuda")
+
+    def update():
+        cache_markov_candidates(
+            draft_logits=cache,
+            cached_ids=cached_ids,
+            cand_ids=ids,
+            realized_scores=scores,
+            sample_idx_mapping=mapping,
+            num_warps=num_warps,
+        )
+
+    update()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        update()
+    for shift in (0, 8, 64, 0):
+        ids.copy_((torch.arange(64, device="cuda").flip(0) % 16 + shift).expand_as(ids))
+        graph.replay()
+        expected = torch.full_like(cache, -float("inf"))
+        expected[2].scatter_reduce_(1, ids[0], scores[0], reduce="amax")
+        torch.testing.assert_close(cache, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("scale", [1.0, -1.0])
+def test_bigram_candidates_match_dense_projection(scale):
+    torch.manual_seed(42)
+    w1 = torch.randn(19, 7)
+    w2 = torch.randn(17, 7)
+    ids, values = compute_markov_bias_top_ids(w1, w2, 3, scale, chunk=5)
+    expected = (w1 @ w2.T).topk(3, dim=-1, largest=scale >= 0)
+    torch.testing.assert_close(ids.long(), expected.indices)
+    torch.testing.assert_close(values, expected.values)
+
+
+def test_bigram_candidates_exclude_padded_vocabulary():
+    """Padded W2 rows must never index base logits or the draft-to-target map."""
+    weight = torch.arange(16, dtype=torch.float32).view(8, 2)
+    head = _markov_head(weight)
+    head.markov_w1 = nn.Embedding.from_pretrained(torch.ones(5, 2))
+    model = SimpleNamespace(
+        model=SimpleNamespace(markov_head=head),
+        logits_processor=SimpleNamespace(org_vocab_size=3, scale=1.0),
+    )
+    w1, w2, scale = Qwen3DSparkForCausalLM.markov_walk_inputs(model)
+    ids, values = compute_markov_bias_top_ids(w1, w2, 2, scale)
+    expected = (w1 @ weight[:3].T).topk(2, dim=-1)
+    torch.testing.assert_close(ids.long(), expected.indices)
+    torch.testing.assert_close(values, expected.values)
 
 
 def test_gathered_markov_bias_overwrites_dense_logits():

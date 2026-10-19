@@ -305,7 +305,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_walk_inputs(self) -> tuple[torch.Tensor, torch.Tensor, float]:
         """``(W1, W2, logit scale)`` weights consumed by the fused walk."""
         head = self.model.markov_head
-        return head.markov_w1.weight, head.markov_w2.weight, self.logits_processor.scale
+        # Match the logits processor's vocabulary truncation before selecting
+        # static candidates, which must not include ParallelLMHead padding.
+        w2 = head.markov_w2.weight[: self.logits_processor.org_vocab_size]
+        return head.markov_w1.weight, w2, self.logits_processor.scale
 
     def apply_markov_bias_gathered(
         self,
