@@ -8,7 +8,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-timeout = shutdown_by = None
+timeout: float | None = None
+shutdown_by: float | None = None
 shutdown_requested = False
 
 
@@ -17,7 +18,6 @@ def to_timeout(deadline: float | None) -> float | None:
 
 
 def signal_handler(signum, frame):
-    """Catch SIGTERM and SIGINT to allow graceful shutdown."""
     global shutdown_requested
     logger.debug("Received %d signal.", signum)
     if not shutdown_requested:
@@ -25,14 +25,18 @@ def signal_handler(signum, frame):
         raise SystemExit
 
 
-def set_signal_handler():
+def set_signal_handler() -> None:
+    global shutdown_requested, shutdown_by, timeout
+    shutdown_requested = False
+    shutdown_by = None
+    timeout = None
+
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
 
-def set_timeout(vllm_config: VllmConfig):
+def set_timeout(vllm_config: VllmConfig) -> None:
     global timeout, shutdown_by
-
     if shutdown_requested:
         timeout = vllm_config.shutdown_timeout
         shutdown_by = time.monotonic() + timeout

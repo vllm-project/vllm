@@ -4,19 +4,19 @@ import argparse
 import contextlib
 
 import vllm
-from vllm import EngineArgs, envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.utils import launch_core_engines
+from vllm.v1.engine.utils import bind_engine_zmq_listeners, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.utils import RustFrontendProcessManager, wait_for_completion_or_failure
 
 from ..cli_args import propagate_flash_late_interaction
 from ..launcher import create_server_socket, setup_server
-from ..utils import setup_utils
+from ..utils import signal_utils
 from ..utils.listen import cleanup_listen_socket
-from ..utils.setup_utils import set_signal_handler, set_timeout, to_timeout
+from ..utils.signal_utils import set_signal_handler, set_timeout, to_timeout
 
 logger = init_logger(__name__)
 
@@ -25,10 +25,9 @@ def _run_rust_frontend(
     rust_frontend_path: str,
     args: argparse.Namespace,
     vllm_config: VllmConfig,
-    engine_args: EngineArgs,
+    num_api_servers: int,
     exit_stack: contextlib.ExitStack,
-    num_api_servers: int = 1,
-):
+) -> None:
     set_signal_handler()
 
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
@@ -44,50 +43,35 @@ def _run_rust_frontend(
         exit_stack.callback(cleanup_listen_socket, grpc_sock)
 
     executor_class = Executor.get_class(vllm_config)
-    log_stats = not engine_args.disable_log_stats
+    log_stats = not args.disable_log_stats
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
     assert parallel_config.local_engines_only or dp_rank == 0
 
-    from vllm.v1.engine.utils import get_engine_zmq_addresses
+    zmq_listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers)
 
-    # Defer port allocation to the child's bind() to avoid TOCTOU, except
-    # for Rust front-end and Ray DP, which can't see the post-bind rebind
-    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
-    # so pre-allocate driver-side -- reintroducing the original race only
-    # there.
-    is_ray_dp = parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers,
-        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
-    )
-
-    engine_launch = exit_stack.enter_context(
-        launch_core_engines(vllm_config, executor_class, log_stats, addresses)
+    # Nested ExitStack so we can control exactly when
+    # `launch_core_engines.__exit__` runs: it must fire before
+    # `wait_for_completion_or_failure` because the CM performs engine-startup
+    # checks against `watched_frontend_processes` on exit. Attaching it
+    # directly to the outer stack would defer that check until after wait,
+    # changing error-detection timing.
+    engine_stack = exit_stack.enter_context(contextlib.ExitStack())
+    engine_launch = engine_stack.enter_context(
+        launch_core_engines(
+            vllm_config,
+            executor_class,
+            log_stats,
+            zmq_listeners.addresses,
+        )
     )
 
     local_engine_manager = engine_launch.engine_manager
     coordinator = engine_launch.coordinator
-    addresses = engine_launch.addresses
     stats_update_address = (
         coordinator.get_stats_publish_address() if coordinator else None
     )
-
-    if local_engine_manager:
-
-        def _local_engine_manager_shutdown():
-            local_engine_manager.shutdown(timeout=to_timeout(setup_utils.shutdown_by))
-
-        exit_stack.callback(_local_engine_manager_shutdown)
-
-    if coordinator:
-
-        def _coordinator_shutdown():
-            coordinator.shutdown(timeout=to_timeout(setup_utils.shutdown_by))
-
-        exit_stack.callback(_coordinator_shutdown)
 
     if parallel_config.local_engines_only:
         expected_engine_start_index = parallel_config.data_parallel_rank
@@ -96,28 +80,51 @@ def _run_rust_frontend(
         expected_engine_start_index = 0
         expected_engine_count = parallel_config.data_parallel_size
 
-    # Start rust front-end process.
     api_server_manager = RustFrontendProcessManager(
         binary_path=rust_frontend_path,
         sock=sock,
         grpc_sock=grpc_sock,
         args=args,
-        input_address=addresses.inputs[0],
-        output_address=addresses.outputs[0],
+        input_listener=zmq_listeners.inputs[0],
+        output_listener=zmq_listeners.outputs[0],
         engine_start_index=expected_engine_start_index,
         engine_count=expected_engine_count,
         data_parallel_size=parallel_config.data_parallel_size,
         stats_update_address=stats_update_address,
     )
-    # Set frontend processes to watch during engine startup.
-    # If any of these processes exit before the engines are up, the engine startup
-    # will be aborted with an error.
     engine_launch.watched_frontend_processes = api_server_manager.processes
 
-    def _api_server_manager_shutdown():
-        api_server_manager.shutdown(timeout=to_timeout(setup_utils.shutdown_by))
+    # Equivalent to leaving `with launch_core_engines(...)` in the original
+    # code. `engine_stack` is still attached to the outer ExitStack, so if
+    # anything above raised, it would have been cleaned up there; close() is
+    # idempotent.
+    engine_stack.close()
 
-    exit_stack.callback(_api_server_manager_shutdown)
+    def _coord_shutdown() -> None:
+        if coordinator is not None:
+            coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+
+    def _engine_shutdown() -> None:
+        if local_engine_manager is not None:
+            local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+
+    def _api_shutdown() -> None:
+        # Matches `run_multi_api_server`: API servers get the full
+        # `shutdown_timeout`, while engine / coordinator get the remaining
+        # deadline. In practice the delta is a few microseconds.
+        timeout = (
+            vllm_config.shutdown_timeout if signal_utils.shutdown_requested else None
+        )
+        api_server_manager.shutdown(timeout=timeout)
+
+    # Register callbacks in reverse of the desired LIFO execution order:
+    #   set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
+    #   -> grpc_sock cleanup -> sock cleanup
+    if coordinator:
+        exit_stack.callback(_coord_shutdown)
+    if local_engine_manager:
+        exit_stack.callback(_engine_shutdown)
+    exit_stack.callback(_api_shutdown)
 
     wait_for_completion_or_failure(
         api_server_manager=api_server_manager,
@@ -126,7 +133,7 @@ def _run_rust_frontend(
     )
 
 
-def run_rust_frontend(args: argparse.Namespace):
+def run_rust_frontend(args: argparse.Namespace) -> None:
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
     )
@@ -137,6 +144,13 @@ def run_rust_frontend(args: argparse.Namespace):
         "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
     )
     assert rust_frontend_path is not None
+
+    # Reset residual signal state from any previous invocation (tests,
+    # embedded use). A stale `shutdown_by` deadline would make
+    # `to_timeout(shutdown_by)` return 0, forcing an immediate kill.
+    signal_utils.shutdown_requested = False
+    signal_utils.shutdown_by = None
+    signal_utils.timeout = None
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     propagate_flash_late_interaction(args, engine_args)
@@ -152,14 +166,17 @@ def run_rust_frontend(args: argparse.Namespace):
                 rust_frontend_path,
                 args,
                 vllm_config,
-                engine_args,
-                exit_stack,
                 num_api_servers,
+                exit_stack,
             )
         except KeyboardInterrupt:
             logger.info_once("[shutdown] API server: interrupted by user.")
-            exit_stack.callback(set_timeout, vllm_config)
         except Exception:
             logger.exception("[shutdown] API server: unexpected error during shutdown")
-            exit_stack.callback(set_timeout, vllm_config)
             raise
+        finally:
+            # Register in `finally` so `set_timeout` also runs for the signal
+            # path (`SystemExit` raised by `set_signal_handler`, which bypasses
+            # both `except` clauses). Without it, graceful shutdown would fall
+            # back to the default 5s timeout instead of `shutdown_timeout`.
+            exit_stack.callback(set_timeout, vllm_config)
