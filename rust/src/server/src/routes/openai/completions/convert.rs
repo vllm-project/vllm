@@ -685,12 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_enables_prompt_logprobs_for_non_stream_echo() {
+    fn prepare_completion_request_enables_prompt_logprobs_for_stream_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": "hello",
             "echo": true,
-            "stream": false,
+            "stream": true,
             "logprobs": 3
         }))
         .expect("parse request");

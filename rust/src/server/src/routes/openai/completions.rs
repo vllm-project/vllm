@@ -32,7 +32,7 @@ use vllm_text::{
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
-    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
+    append_openai_logprobs, collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_end_offset, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
@@ -342,16 +342,35 @@ async fn collect_completion(
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
-    let logprobs = if requested_logprobs.is_some() && prompt_only {
-        let prompt = echo.as_deref().ok_or_else(|| {
-            server_error!("prompt-only completion response missing echoed prompt")
-        })?;
-        Some(echoed_prompt_logprobs_to_openai(
+    let logprobs = if requested_logprobs.is_some()
+        && let Some(prompt) = echo.as_deref()
+    {
+        let prompt_logprobs = echoed_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
             return_tokens_as_token_ids,
-        )?)
+        )?;
+        Some(
+            if !prompt_only && let Some(completion_logprobs) = collected.logprobs.as_ref() {
+                let completion_offset = prompt_logprobs
+                    .text_offset
+                    .last()
+                    .zip(prompt_logprobs.tokens.last())
+                    .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+                    .unwrap_or_default();
+                append_openai_logprobs(
+                    prompt_logprobs,
+                    decoded_logprobs_to_openai(
+                        completion_logprobs,
+                        completion_offset,
+                        return_tokens_as_token_ids,
+                    )?,
+                )
+            } else {
+                prompt_logprobs
+            },
+        )
     } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
             &collected,
