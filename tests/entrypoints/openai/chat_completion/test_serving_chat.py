@@ -747,39 +747,48 @@ async def test_streaming_chunks_keep_usage_and_metadata(raw):
         )
     ]
     if raw:
-        assert all(isinstance(chunk, ChatCompletionStreamResponse) for chunk in chunks)
+        responses = [
+            chunk for chunk in chunks if isinstance(chunk, ChatCompletionStreamResponse)
+        ]
+        assert len(responses) == len(chunks)
     else:
-        assert chunks[-1] == "data: [DONE]\n\n"
-        first = json.loads(chunks[0].removeprefix("data: "))
+        frames = [chunk for chunk in chunks if isinstance(chunk, str)]
+        assert len(frames) == len(chunks)
+        assert frames[-1] == "data: [DONE]\n\n"
+        first = json.loads(frames[0].removeprefix("data: "))
         assert first["choices"][0]["logprobs"] is None
-        usage = json.loads(chunks[-2].removeprefix("data: "))
+        usage = json.loads(frames[-2].removeprefix("data: "))
         assert "system_fingerprint" not in usage
         assert "prompt_tokens_details" not in usage["usage"]
-        chunks = [
+        responses = [
             ChatCompletionStreamResponse.model_validate_json(
-                chunk.removeprefix("data: ")
+                frame.removeprefix("data: ")
             )
-            for chunk in chunks[:-1]
+            for frame in frames[:-1]
         ]
-    assert len(chunks) == 3
-    assert chunks[0].choices[0].delta.role == "assistant"
-    assert chunks[1].choices[0].delta.content == "Hello"
-    assert chunks[1].choices[0].finish_reason == "stop"
-    assert chunks[2].choices == []
-    assert chunks[2].usage.prompt_tokens == 3
-    assert chunks[2].usage.completion_tokens == 2
+    assert len(responses) == 3
+    assert responses[0].choices[0].delta.role == "assistant"
+    assert responses[1].choices[0].delta.content == "Hello"
+    assert responses[1].choices[0].finish_reason == "stop"
+    assert responses[2].choices == []
+    assert responses[2].usage is not None
+    assert responses[2].usage.prompt_tokens == 3
+    assert responses[2].usage.completion_tokens == 2
+    assert metadata.final_usage_info is not None
     assert metadata.final_usage_info.total_tokens == 5
 
 
 @pytest.mark.asyncio
-async def test_streaming_serialization_failure_emits_error_and_done():
+async def test_streaming_serialization_failure_emits_error_and_done(
+    monkeypatch: pytest.MonkeyPatch,
+):
     serving = _build_minimal_metrics_serving_chat(False)
     serving.parser_cls = HarmonyParser
     parser = MagicMock()
     parser.parse_delta.return_value = DeltaMessage(
         content="Hello", extra_object=object()
     )
-    serving._make_parser = MagicMock(return_value=parser)
+    monkeypatch.setattr(serving, "_make_parser", MagicMock(return_value=parser))
     request = ChatCompletionRequest(
         model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
     )
@@ -805,7 +814,9 @@ async def test_streaming_serialization_failure_emits_error_and_done():
 @pytest.mark.parametrize(
     "failure", ["parser", "before_first", "after_content", "generation"]
 )
-async def test_streaming_errors_preserve_envelope(raw, failure):
+async def test_streaming_errors_preserve_envelope(
+    raw, failure, monkeypatch: pytest.MonkeyPatch
+):
     serving = _build_minimal_metrics_serving_chat(False)
     error = (
         GenerationError("backend failed")
@@ -814,7 +825,7 @@ async def test_streaming_errors_preserve_envelope(raw, failure):
     )
     if failure == "parser":
         serving.parser_cls = HarmonyParser
-        serving._make_parser = MagicMock(side_effect=error)
+        monkeypatch.setattr(serving, "_make_parser", MagicMock(side_effect=error))
 
     async def results():
         if failure == "after_content":
@@ -854,8 +865,10 @@ async def test_streaming_errors_preserve_envelope(raw, failure):
     else:
         assert chunks[-1] == "data: [DONE]\n\n"
         assert chunks.count("data: [DONE]\n\n") == 1
+        error_frame = chunks[-2]
+        assert isinstance(error_frame, str)
         error_response = ErrorResponse.model_validate_json(
-            chunks[-2].removeprefix("data: ")
+            error_frame.removeprefix("data: ")
         )
     assert error_response.error.message == "backend failed"
     assert error_response.error.code == (500 if failure == "generation" else 400)
@@ -1853,7 +1866,11 @@ def test_serving_chat_starts_without_tokenizer():
     [(95, 10, None, 5), (200, None, -1, 1)],
 )
 async def test_serving_chat_mistral_token_ids_prompt_is_validated(
-    prompt_length, max_tokens, truncate_prompt_tokens, expected_max_tokens
+    prompt_length,
+    max_tokens,
+    truncate_prompt_tokens,
+    expected_max_tokens,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Token-ID prompts must leave a generation budget after truncation.
 
@@ -1871,11 +1888,15 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated(
         tokenizer=mock_tokenizer,
     )
     # Exercise the renderer path that returns token IDs directly.
-    mock_renderer.render_messages_async = AsyncMock(
-        return_value=(
-            [],
-            TokensPrompt(prompt_token_ids=list(range(prompt_length))),
-        )
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(prompt_token_ids=list(range(prompt_length))),
+            )
+        ),
     )
     mock_engine.renderer = mock_renderer
 

@@ -819,6 +819,7 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
 
     response = await serving_completion.create_completion(request)
     if stream:
+        assert isinstance(response, AsyncGenerator)
         async for _ in response:
             pass
 

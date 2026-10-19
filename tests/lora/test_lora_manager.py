@@ -167,7 +167,7 @@ def test_text_only_lora_binds_to_multimodal_language_model(
     manager.supports_mm = True
     manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
 
-    def weights(name):
+    def weights(name: str) -> LoRALayerWeights:
         return LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
 
     text_lora = weights(text_name)
