@@ -109,6 +109,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.batch_invariant import (
+    BatchInvariantMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
     DeepGemmMxfp8BmmLinearKernel,
 )
@@ -956,7 +959,15 @@ def init_mxfp8_linear_kernel(
 
     platform = current_platform._enum
     possible: list[type[Mxfp8LinearKernel]]
-    if bmm_batch_size is not None:
+    from .mxfp8.batch_invariant import supports_ds41_mxfp8_bi
+
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and bmm_batch_size is None
+        and supports_ds41_mxfp8_bi()
+    ):
+        possible = [BatchInvariantMxfp8LinearKernel]
+    elif bmm_batch_size is not None:
         possible = (
             [DeepGemmMxfp8BmmLinearKernel, EmulationMxfp8LinearKernel]
             if current_platform.is_cuda()

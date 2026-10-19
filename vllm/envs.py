@@ -90,6 +90,14 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BI_MXFP8_GEMM: Literal["k32", "tensor_core"] = "k32"
+    VLLM_BI_MEGA_MHC: bool = False
+    VLLM_BI_BF16_GEMM: Literal["fixed", "tensor_core"] = "fixed"
+    VLLM_BI_MEGA_ATTN: bool = False
+    VLLM_BI_MEGA_GATE: bool = False
+    VLLM_BI_MXFP8_PREQUANT: bool = False
+    VLLM_BI_MHC_OVERLAP: bool = False
+    VLLM_BI_REPLAY_STAGE_LAYERS: int = 0
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -632,6 +640,47 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # DS4.1 MXFP8 GEMM math under batch invariance. "k32" (default) is the
+    # visible per-K32-block FP32 math shared with training; "tensor_core" uses
+    # the pinned non-split-K tensor-core GEMMs (batch invariant, much faster,
+    # but different rounding from "k32").
+    "VLLM_BI_MXFP8_GEMM": env_with_choices(
+        "VLLM_BI_MXFP8_GEMM", "k32", ["k32", "tensor_core"]
+    ),
+    # Under VLLM_BATCH_INVARIANT, run the DSV4.1 shifted mHC with DeepGEMM
+    # Mega mHC pinned to its deterministic fixed split-K (batch invariant,
+    # much faster, but different rounding from the TileLang kernels).
+    "VLLM_BI_MEGA_MHC": lambda: bool(int(os.getenv("VLLM_BI_MEGA_MHC", "0"))),
+    # Under VLLM_BATCH_INVARIANT, "tensor_core" runs the shared BF16->FP32
+    # projections (lm_head, router, DSV4.1 compressor score) on DeepGEMM with
+    # split-K pinned off: batch invariant and much faster at large M, but
+    # different rounding from the fixed K256 CuTe DSL kernel.
+    "VLLM_BI_BF16_GEMM": env_with_choices(
+        "VLLM_BI_BF16_GEMM", "fixed", ["fixed", "tensor_core"]
+    ),
+    # Allow FLASHMLA_MEGA_ATTN_DSV41 under VLLM_BATCH_INVARIANT (batch
+    # invariant per full-model gates; rounding differs from FLASHMLA_SPARSE).
+    "VLLM_BI_MEGA_ATTN": lambda: bool(int(os.getenv("VLLM_BI_MEGA_ATTN", "0"))),
+    # Under VLLM_BATCH_INVARIANT, route MegaMoE through DeepGEMM bf16_mega_gate
+    # in deterministic mode for every batch size (row invariant; rounding
+    # differs from the GateLinear + fused_topk_bias router).
+    "VLLM_BI_MEGA_GATE": lambda: bool(int(os.getenv("VLLM_BI_MEGA_GATE", "0"))),
+    # Under VLLM_BATCH_INVARIANT with VLLM_BI_MXFP8_GEMM=tensor_core, let fused
+    # per-row producers (Q/KV RMSNorm + MXFP8 quant, attention output quant)
+    # hand MXFP8 activations straight to the pinned GEMM.
+    "VLLM_BI_MXFP8_PREQUANT": lambda: bool(
+        int(os.getenv("VLLM_BI_MXFP8_PREQUANT", "0"))
+    ),
+    # Under batch invariance, run every mHC boundary on the split overlap
+    # kernels (pinned 16-way prenorm GEMM) and, inside FULL graphs, generate the
+    # coefficients on the side stream at every batch size.
+    "VLLM_BI_MHC_OVERLAP": lambda: bool(int(os.getenv("VLLM_BI_MHC_OVERLAP", "0"))),
+    # Batch-invariant exact SWA replay: run the decoder replay layers in stages
+    # of this many layers, each on only the trailing rows its layers need for
+    # the last window to come out exact (0: every replay layer on the same rows).
+    "VLLM_BI_REPLAY_STAGE_LAYERS": lambda: int(
+        os.getenv("VLLM_BI_REPLAY_STAGE_LAYERS", "0")
+    ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),

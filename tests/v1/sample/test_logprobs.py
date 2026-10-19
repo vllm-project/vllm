@@ -1600,3 +1600,67 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+def test_v2_bi_token_logprobs_use_native_reduction(monkeypatch):
+    """The production BI helper must work without invoking the Triton LP path."""
+    from vllm.model_executor.kernels.batch_invariant import native_log_softmax
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    device = "cuda" if current_platform.is_cuda() else "cpu"
+    logits = torch.arange(5 * 67, dtype=torch.float32, device=device).view(5, 67) / 128
+    tokens = torch.tensor([[0, 7, 66]], dtype=torch.int32, device=device).expand(5, -1)
+    expected = native_log_softmax(logits).gather(-1, tokens.long())
+    assert torch.equal(compute_token_logprobs(logits, tokens), expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("strided", [False, True])
+def test_v2_bi_sampler_logprobs_match_native_training(monkeypatch, dtype, strided):
+    """V2 production scores share the training LP math across batch and graph."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA sampler production path")
+    from vllm.model_executor.kernels.batch_invariant import native_log_softmax
+    from vllm.v1.worker.gpu.sample.logprob import (
+        compute_token_logprobs,
+        compute_topk_scores,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(1961)
+    rows, vocab = 17, 129280
+    storage = torch.randn(
+        rows, vocab * (2 if strided else 1), device="cuda", dtype=dtype
+    )
+    logits = storage[:, ::2] if strided else storage
+    tokens = torch.randint(vocab, (rows,), device="cuda", dtype=torch.int64)
+    requested = torch.stack([tokens, tokens // 2, tokens // 3], -1)
+    expected = native_log_softmax(logits.float()).gather(-1, requested)
+    assert torch.equal(compute_token_logprobs(logits, requested), expected)
+    for count in (1, 4):
+        assert torch.equal(
+            compute_token_logprobs(logits[:count], requested[:count]), expected[:count]
+        )
+
+    scores = compute_topk_scores(logits, 5, tokens)
+    assert torch.equal(
+        scores.logprobs,
+        native_log_softmax(logits.float()).gather(-1, scores.logprob_token_ids.long()),
+    )
+    raw = compute_topk_scores(logits, 5, tokens, logits_mode=True)
+    assert torch.equal(
+        raw.logprobs, logits.gather(-1, raw.logprob_token_ids.long()).float()
+    )
+
+    compute_token_logprobs(logits, requested)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = compute_token_logprobs(logits, requested)
+    for multiplier in (1, -1):
+        logits.mul_(multiplier)
+        expected = native_log_softmax(logits.float()).gather(-1, requested)
+        output.fill_(float("nan"))
+        graph.replay()
+        assert torch.equal(output, expected)

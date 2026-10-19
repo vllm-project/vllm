@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -29,6 +30,8 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
         current_platform.is_device_capability_family(100)

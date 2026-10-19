@@ -687,6 +687,42 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     assert ("shared_l1_weights" in launches[-1]) == fused
 
 
+def test_deep_gemm_mega_moe_symm_buffer_releases_cached_blocks(monkeypatch):
+    """The symmetric buffer is mapped outside the caching allocator, so blocks
+    the allocator caches (most of the GPU after a large profile run) must be
+    released first, or the driver allocation fails with free memory cached."""
+    reserved_at_alloc = []
+
+    def get_symm_buffer_for_mega_moe(*args, **kwargs):
+        reserved_at_alloc.append(torch.accelerator.memory_reserved())
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        lambda: SimpleNamespace(
+            get_symm_buffer_for_mega_moe=get_symm_buffer_for_mega_moe
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe.get_ep_group",
+        lambda: SimpleNamespace(device_group=object()),
+    )
+    experts = _make_experts(
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=128,
+    )
+    cached = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
+    del cached
+    reserved = torch.accelerator.memory_reserved()
+    experts.get_symm_buffer()
+
+    assert reserved_at_alloc[0] <= reserved - (256 << 20)
+
+
 @requires_sm100
 @pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
@@ -1272,3 +1308,171 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
     assert output.dtype == torch.bfloat16
     assert _calc_diff(output, expected) < 1e-3
     assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(100) and is_deep_gemm_supported()
+    ),
+    reason="DeepGEMM MegaMoE kernels require SM100 and DeepGEMM",
+)
+@pytest.mark.parametrize("hidden,inter,num_experts,top_k", [(1024, 512, 16, 6)])
+def test_deep_gemm_mega_moe_rows_ignore_batch(
+    dist_init, hidden, inter, num_experts, top_k
+):
+    """Batch-invariant serving needs each token's MegaMoE output bits to
+    depend only on that token: not on the batch size or its row position."""
+    fmt, act, max_tokens = MEGA_MOE_MXFP4, MegaMoEActivation(), 8192
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+
+    def randn(*shape, fan_in):
+        return (torch.randn(*shape, device=device) / fan_in**0.5).bfloat16()
+
+    shared_ckpt = [
+        _quantize(randn(*shape, fan_in=k), fmt.shared[0])
+        for shape, k in (((inter, hidden), hidden),) * 2 + (((hidden, inter), inter),)
+    ]
+    shared_mlp = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(
+            weight=torch.cat([shared_ckpt[0][0], shared_ckpt[1][0]]),
+            weight_scale_inv=torch.cat([shared_ckpt[0][1], shared_ckpt[1][1]]),
+        ),
+        down_proj=SimpleNamespace(
+            weight=shared_ckpt[2][0], weight_scale_inv=shared_ckpt[2][1]
+        ),
+    )
+    with torch.device(device):
+        experts = DeepGemmMegaMoEExperts(
+            vllm_config,
+            num_experts=num_experts,
+            num_local_experts=num_experts,
+            experts_start_idx=0,
+            top_k=top_k,
+            hidden_size=hidden,
+            intermediate_size=inter,
+            activation=act,
+            weight_format=fmt,
+            shared_experts=shared_mlp,
+            prefix="model.layers.0.bi",
+        )
+    assert experts.has_fused_shared_experts
+    for e in range(num_experts):
+        w13 = _quantize(randn(2 * inter, hidden, fan_in=hidden), fmt.routed)
+        w2 = _quantize(randn(hidden, inter, fan_in=inter), fmt.routed)
+        for shard_id, param, rows, (weight, scale, _, _) in (
+            ("w1", "w13", slice(0, inter), w13),
+            ("w3", "w13", slice(inter, None), w13),
+            ("w2", "w2", slice(None), w2),
+        ):
+            for suffix, tensor in (("weight", weight), ("weight_scale", scale)):
+                name = f"{param}_{suffix}"
+                assert experts.weight_loader(
+                    getattr(experts, name),
+                    tensor[rows],
+                    f"experts.{name}",
+                    shard_id=shard_id,
+                    expert_id=e,
+                    return_success=True,
+                )
+    for (weight, scale, _, _), shard in zip(shared_ckpt, ("w1", "w3", "w2")):
+        experts.load_shared_expert_weight(f"shared_experts.{shard}.weight", weight)
+        experts.load_shared_expert_weight(f"shared_experts.{shard}.weight_scale", scale)
+
+    x = torch.randn(max_tokens, hidden, device=device).bfloat16()
+    scores = torch.randn(max_tokens, num_experts, device=device)
+    weights, ids = torch.topk(scores.softmax(-1), top_k, dim=-1)
+    full = experts(x, weights, ids, None)
+    for m in (1, 7, 64, 129, 1000, 4096):
+        torch.testing.assert_close(
+            experts(x[-m:], weights[-m:], ids[-m:], None), full[-m:], rtol=0, atol=0
+        )
+    rev = torch.arange(max_tokens - 1, -1, -1, device=device)
+    torch.testing.assert_close(
+        experts(x[rev], weights[rev], ids[rev], None), full[rev], rtol=0, atol=0
+    )
+
+
+def test_mega_gate_precompile_sweeps_per_top_k_until_it_succeeds(monkeypatch):
+    """Each routing setup gets its own sweep of smaller M, and a sweep that
+    fails is not recorded as done."""
+    import vllm.models.deepseek_v4.nvidia.model as v4
+
+    calls: list[tuple[int, int]] = []
+
+    def record(x, weight, top_k, **kwargs):
+        calls.append((top_k, len(x)))
+
+    monkeypatch.setattr(v4, "_MEGA_GATE_WARMED_M", {})
+    monkeypatch.setattr(v4, "bf16_mega_gate", record)
+    x, weight = torch.zeros(4, 8), torch.zeros(16, 8)
+    gate_kwargs = dict(
+        scoring_func="sqrtsoftplus",
+        routed_scaling_factor=1.5,
+        ep_rank=0,
+        bias=None,
+        image_bias=None,
+    )
+    per_token = dict(
+        image_token_mask=None, fix_routing_mask=None, unmapped_topk_idx=None
+    )
+    v4._compile_mega_gate_configs(x, weight, 6, gate_kwargs, per_token)
+    v4._compile_mega_gate_configs(x, weight, 8, gate_kwargs, per_token)
+    v4._compile_mega_gate_configs(x, weight, 8, gate_kwargs, per_token)
+    assert calls == [(6, 1), (6, 2), (6, 3), (8, 1), (8, 2), (8, 3)]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(v4, "bf16_mega_gate", fail)
+    with pytest.raises(RuntimeError, match="compile failed"):
+        v4._compile_mega_gate_configs(x, weight, 4, gate_kwargs, per_token)
+    monkeypatch.setattr(v4, "bf16_mega_gate", record)
+    v4._compile_mega_gate_configs(x, weight, 4, gate_kwargs, per_token)
+    assert calls[-3:] == [(4, 1), (4, 2), (4, 3)]
+
+
+@requires_sm100
+def test_deep_gemm_mega_gate_rows_ignore_batch_when_deterministic():
+    """VLLM_BI_MEGA_GATE routes every batch through Mega Gate, so with
+    DeepGEMM's deterministic heuristics a token's top-k ids and weights must
+    not depend on how many or which tokens share its batch."""
+    from vllm import envs
+    from vllm.utils.deep_gemm import _import_deep_gemm, bf16_mega_gate
+
+    deep_gemm = _import_deep_gemm()
+    torch.manual_seed(0)
+    experts, hidden, tokens = 384, 5120, 4096
+    x = torch.randn(tokens, hidden, device="cuda").bfloat16()
+    weight = (torch.randn(experts, hidden, device="cuda") * hidden**-0.5).bfloat16()
+    bias = torch.randn(experts, device="cuda") * 0.1
+
+    def gate(a):
+        return bf16_mega_gate(
+            a,
+            weight,
+            6,
+            scoring_func="sqrtsoftplus",
+            routed_scaling_factor=1.5,
+            ep_rank=0,
+            bias=bias,
+        )
+
+    deep_gemm.use_deterministic_algorithms(True)
+    try:
+        full_weights, full_ids = gate(x)
+        for rows in (slice(0, 1), slice(0, 6), slice(7, 136), slice(-999, None)):
+            weights, ids = gate(x[rows].contiguous())
+            assert torch.equal(ids, full_ids[rows])
+            assert torch.equal(weights, full_weights[rows])
+        perm = torch.randperm(tokens, device="cuda")
+        weights, ids = gate(x[perm].contiguous())
+        assert torch.equal(ids, full_ids[perm])
+        assert torch.equal(weights, full_weights[perm])
+    finally:
+        # The import is cached, so restore the mode it set.
+        deep_gemm.use_deterministic_algorithms(envs.VLLM_BATCH_INVARIANT)

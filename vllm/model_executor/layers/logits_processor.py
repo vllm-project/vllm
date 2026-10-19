@@ -8,6 +8,7 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
@@ -92,8 +93,20 @@ class LogitsProcessor(PluggableLayer):
         # Dtype of the lm_head projection. Defaults to the model dtype; an
         # fp32 head (via `--hf-overrides '{"head_dtype": "float32"}'`) is
         # required for RL training-inference consistency.
-        model_config = get_current_vllm_config().model_config
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
+        # Batch invariance compiles the head's GEMM for every row count up to
+        # the largest step: one verification row per draft token per request.
+        self.max_logit_rows = 0
+        if envs.VLLM_BATCH_INVARIANT:
+            spec = vllm_config.speculative_config
+            num_spec = (spec.num_speculative_tokens or 0) if spec is not None else 0
+            scheduler = vllm_config.scheduler_config
+            self.max_logit_rows = min(
+                scheduler.max_num_seqs * (1 + num_spec),
+                scheduler.max_num_batched_tokens,
+            )
 
     def forward(
         self,
@@ -167,7 +180,31 @@ class LogitsProcessor(PluggableLayer):
             # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
             # path); other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
+            bi_sm100 = envs.VLLM_BATCH_INVARIANT and (
+                current_platform.is_device_capability_family(100)
+            )
+            if (
+                bi_sm100
+                and flat.dtype == lm_head.weight.dtype == torch.bfloat16
+                and flat.shape[-1] % 8 == 0
+            ):
+                from vllm.model_executor.kernels.linear.cute_dsl import batch_invariant
+
+                batch_invariant.compile_tensor_core_rows(
+                    lm_head.weight, self.max_logit_rows
+                )
+                logits = batch_invariant.bf16_fixed_mm(flat, lm_head.weight)
+            else:
+                if bi_sm100:
+                    logger.warning_once(
+                        "Batch invariance is not guaranteed for this lm_head "
+                        "(dtype %s, hidden size %d): only BF16 heads with a "
+                        "hidden size divisible by 8 use the fixed-reduction "
+                        "GEMM; this one stays on cuBLAS.",
+                        lm_head.weight.dtype,
+                        flat.shape[-1],
+                    )
+                logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:
                 logits = logits + embedding_bias.to(self.head_dtype)
             return logits.reshape(*hidden_states.shape[:-1], -1)

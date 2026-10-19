@@ -780,14 +780,28 @@ def dequantize_and_gather_k_cache(
     """Dequantize and gather a paged DSv4 K cache.
 
     The record is read off ``k_cache.shape[-1]``; see the module header. Only
-    the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
-    path.
+    the FP8 records have a CuteDSL gather. BI NVFP4 uses native CUDA; the
+    default NVFP4 path uses Triton.
 
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
+    from vllm import envs
+
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_cuda()
+        and k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN
+    ):
+        from vllm.model_executor.kernels.batch_invariant import dequant_gather_nvfp4
+
+        dequant_gather_nvfp4(
+            k_cache, seq_lens, gather_lens, block_table, block_size, offset, out
+        )
+        return
+
     if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
@@ -909,8 +923,11 @@ def _compute_global_topk_indices_and_lens_kernel(
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
 # flashmla/csrc/sm100/prefill/sparse/fwd/head{64,128}/phase1.cuh). B_TOPK is
 # 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
-# The extra slots stay as -1 sentinels and `combined_lens` caps the valid
-# range via `topk_length`, so padding is a no-op at kernel level.
+# The kernel still loads every slot of the last 64-slot block and masks the
+# ones past `topk_length` on only one half of its split QK^T, so a stale slot
+# pointing at a non-finite row leaks into the output. The combine kernel
+# therefore writes -1 to every slot past `combined_lens`, also in a reused
+# workspace.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
@@ -1124,6 +1141,17 @@ class CombineTopkSwaIndicesKernel(
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
+            for tail_start in tl.static_range(
+                0,
+                (TOP_K + WINDOW_SIZE + 127) // 128 * 128,
+                128,
+            ):
+                tail = tail_start + tl.arange(0, 128)
+                tl.store(
+                    combined_indices_ptr + token_idx * combined_indices_stride + tail,
+                    -1,
+                    mask=tail >= combined_len,
+                )
 
     def dispatch(  # type: ignore[override]
         self,

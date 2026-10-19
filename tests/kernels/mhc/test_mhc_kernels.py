@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
+from vllm import envs
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
@@ -50,6 +51,73 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_entry_split_order_for_decode_prefill_and_teacher_forcing(
+    monkeypatch, batch_invariant
+):
+    """Long teacher-forced batches retain single-token reduction in BI mode."""
+    from vllm import envs
+    from vllm.model_executor.kernels.mhc import warmup
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(multi_processor_count=152),
+    )
+    warmup.compute_num_split.cache_clear()
+    try:
+        actual = [
+            warmup.compute_mhc_pre_num_splits(5120, rows)
+            for rows in (1, 8, 239, 384, 4206)
+        ]
+        assert actual == ([16] * 5 if batch_invariant else [16, 16, 16, 16, 4])
+    finally:
+        warmup.compute_num_split.cache_clear()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_fused_mhc_keeps_the_same_reduction_across_dispatch_bands(
+    monkeypatch, batch_invariant
+):
+    """BI keeps the k-split and thread count (the reduction) at every size and
+    never stops fusing; only the projection tile, which groups outputs, grows."""
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    actual = [
+        mhc_fused_post_pre_split_config(rows, 5120, 4)
+        for rows in (1, 15, 16, 32, 33, 4206)
+    ]
+    assert actual == (
+        [(2, 8, 128)] * 2 + [(12, 8, 128)] * 4
+        if batch_invariant
+        else [(2, 8, 128), (2, 8, 128), (6, 8, 128), (6, 8, 128), None, None]
+    )
+    assert mhc_fused_post_pre_split_config(1, 5119, 4) is None
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_fused_mhc_warmup_inputs_dispatch_to_their_keys(monkeypatch, batch_invariant):
+    """Warming each fused-mHC key launches the kernel that key names."""
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        _MHC_FUSED_TILELANG_KERNEL as kernel,
+    )
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64)
+    )
+    keys = kernel.get_warmup_keys(config, hidden_size=5120, hc_mult=4)
+    assert len(keys) == 2
+    for key in keys:
+        rows = kernel.warmup_inputs(key)["residual_in"].shape[0]
+        assert kernel.dispatch(num_tokens=rows, hidden_size=5120, hc_mult=4) == key
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
@@ -81,7 +149,11 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
         )
     )
     monkeypatch.setattr(mhc, "get_tp_group", lambda: group)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     assert mhc.supports_mhc_all_reduce(config) is expected
+    # The fused all-reduce sums ranks in its own order.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert mhc.supports_mhc_all_reduce(config) is False
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -125,6 +197,13 @@ def test_hc_collapse_preserves_weighted_residual_sum(
     expected = (pre.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
     actual = hc_collapse_triton(x, pre)
     assert actual.is_contiguous()
+    if envs.VLLM_BATCH_INVARIANT:
+        cpu_expected = torch.zeros(num_tokens, hidden_size, dtype=torch.float32)
+        for source, coefficient in zip(x.cpu().float().unbind(1), pre.cpu().unbind(1)):
+            cpu_expected.add_(source * coefficient.unsqueeze(-1))
+        assert torch.equal(actual.cpu(), cpu_expected.bfloat16())
+        if num_tokens:
+            assert torch.equal(actual[:1], hc_collapse_triton(x[:1], pre[:1]))
     # BF16 rounding only: ptxas <13.1 contracts the FP32 mix into FFMA despite
     # enable_fp_fusion=False, so compare within a ULP and pin the exact cases below.
     torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1e-2)
@@ -137,10 +216,50 @@ def test_hc_collapse_preserves_weighted_residual_sum(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_bi_hc_collapse_executes_native_cuda_with_exact_cpu_reference(monkeypatch):
+    """Record the native CUDA entry, independently checking ordered FP32 mixing."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        require_batch_invariant_kernel,
+    )
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    require_batch_invariant_kernel()
+    assert torch._C._dispatch_has_kernel_for_dispatch_key(
+        "vllm_batch_invariant::hc_collapse", "CUDA"
+    )
+    calls = []
+    native = torch.ops.vllm_batch_invariant.hc_collapse
+
+    def traced(hidden, coefficients, output):
+        assert hidden.is_cuda and coefficients.is_cuda and output.is_cuda
+        calls.append(tuple(hidden.shape))
+        return native(hidden, coefficients, output)
+
+    monkeypatch.setattr(torch.ops.vllm_batch_invariant, "hc_collapse", traced)
+    x = torch.randn(33, 4, 10274, device=DEVICE, dtype=torch.bfloat16)[..., ::2]
+    pre = torch.rand(4, 33, device=DEVICE).t()
+    expected = torch.zeros(33, 5137, dtype=torch.float32)
+    for source, coefficient in zip(x.cpu().float().unbind(1), pre.cpu().unbind(1)):
+        expected.add_(source * coefficient.unsqueeze(-1))
+    actual = hc_collapse_triton(x, pre)
+    assert calls == [(33, 4, 5137)]
+    assert torch.equal(actual.cpu(), expected.bfloat16())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_hc_collapse_custom_op_supports_compile():
     x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
     pre = torch.rand(2, 4, device=DEVICE)
     torch.library.opcheck(torch.ops.vllm.hc_collapse_triton.default, (x, pre))
+    if envs.VLLM_BATCH_INVARIANT:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = hc_collapse_triton(x, pre)
+        x.zero_()
+        output.fill_(float("nan"))
+        graph.replay()
+        assert torch.count_nonzero(output).item() == 0
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -550,6 +669,10 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
     from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
 
+    # Under batch invariance a side stream means overlap at every M; that
+    # route has its own test.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
     num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
@@ -859,6 +982,169 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         torch.cuda.current_stream().wait_stream(stream)
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+def test_bi_mega_mhc_aux_capture_keeps_route(monkeypatch):
+    """Under batch invariance with Mega mHC, capturing aux hidden states for a
+    draft model must not move the layer to another mHC kernel: the target's
+    bits with DSpark on must equal those with it off."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import (
+        hc_stream_mean,
+        mhc_shifted_post_pre,
+    )
+
+    if not is_mega_mhc_supported(5120, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    tokens, hc_mult, hidden = 37, 4, 5120
+    x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(tokens, hc_mult, hidden, dtype=torch.bfloat16, device=DEVICE)
+    args = (
+        x,
+        residual,
+        torch.rand(tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.randn(24, hc_mult * hidden, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    kwargs = dict(
+        pre_mix=torch.rand(tokens, hc_mult, device=DEVICE),
+        norm_weight=torch.empty(hidden, dtype=torch.bfloat16, device=DEVICE).uniform_(
+            0.9, 1.1
+        ),
+        norm_eps=7e-6,
+    )
+
+    def run(capture_aux):
+        return mhc_shifted_post_pre(*args, **kwargs, capture_aux=capture_aux)
+
+    monkeypatch.setenv("VLLM_BI_MEGA_MHC", "1")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", True)
+    plain, captured = run(False), run(True)
+    for a, b in zip(plain[:5], captured[:5], strict=True):
+        assert torch.equal(a, b)
+    assert torch.equal(captured[5], hc_stream_mean(captured[0]))
+    torch.testing.assert_close(captured[5], captured[0].mean(dim=1))
+
+    # The TileLang route rounds differently, so an aux layer falling back to
+    # it would make DSpark change the target's output.
+    monkeypatch.setenv("VLLM_BI_MEGA_MHC", "0")
+    monkeypatch.setattr(envs, "VLLM_BI_MEGA_MHC", False)
+    assert not torch.equal(run(True)[3], plain[3])
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
+    reason="SM100 TileLang mHC required",
+)
+def test_bi_mhc_overlap_rows_ignore_batch_and_stream(monkeypatch):
+    """VLLM_BI_MHC_OVERLAP runs the split mHC kernels at every M, on the side
+    stream in FULL graphs and inline elsewhere: a row's outputs must not depend
+    on the batch it is in or on which stream generated the coefficients."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM required")
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    tokens, hc_mult, hidden = 2600, 4, 5120
+    x = torch.randn(tokens, hidden, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(tokens, hc_mult, hidden, dtype=torch.bfloat16, device=DEVICE)
+    post = torch.rand(tokens, hc_mult, 1, device=DEVICE)
+    comb = torch.rand(tokens, hc_mult, hc_mult, device=DEVICE)
+    pre_mix = torch.rand(tokens, hc_mult, device=DEVICE)
+    consts = (
+        torch.randn(24, hc_mult * hidden, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    weight = torch.empty(hidden, dtype=torch.bfloat16, device=DEVICE).uniform_(0.9, 1.1)
+    side = torch.cuda.Stream()
+
+    def run(rows, stream):
+        out = mhc_shifted_post_pre(
+            x[rows],
+            residual[rows],
+            post[rows],
+            comb[rows],
+            *consts,
+            pre_mix=pre_mix[rows],
+            norm_weight=weight,
+            norm_eps=7e-6,
+            capture_aux=True,
+            stream=stream,
+        )
+        torch.cuda.current_stream().wait_stream(stream)
+        return out
+
+    full = run(slice(None), torch.cuda.current_stream())
+    for m in (1, 5, 17, 96, 2541):
+        for stream in (side, torch.cuda.current_stream()):
+            for a, b in zip(run(slice(-m, None), stream), full, strict=True):
+                assert torch.equal(a, b[-m:])
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 6, 30, 300])
+def test_bi_capture_aux_keeps_target_mhc_outputs(num_tokens, monkeypatch):
+    """Drafter aux capture must not change target mHC outputs under BI."""
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_shifted_post_pre
+
+    hidden_size, hc_mult = 5120, 4
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # Other tests here leave a concrete envs attribute behind; shadow it and
+    # drop the shadow afterwards instead of restoring a stale value.
+    monkeypatch.setitem(vars(envs), "VLLM_BATCH_INVARIANT", True)
+    set_random_seed(0)
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    args = (
+        x,
+        residual,
+        torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01,
+        torch.randn(3, device=DEVICE) * 0.1,
+        torch.randn(24, device=DEVICE) * 0.1,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+    )
+    kwargs = dict(
+        pre_mix=torch.rand(num_tokens, hc_mult, device=DEVICE),
+        norm_weight=torch.empty(
+            hidden_size, dtype=torch.bfloat16, device=DEVICE
+        ).uniform_(0.9, 1.1),
+        norm_eps=7e-6,
+    )
+    *plain, _ = mhc_shifted_post_pre(*args, **kwargs, capture_aux=False)
+    *captured, aux = mhc_shifted_post_pre(*args, **kwargs, capture_aux=True)
+    for result, ref in zip(captured, plain, strict=True):
+        torch.testing.assert_close(result, ref, atol=0, rtol=0)
+    torch.testing.assert_close(aux, plain[0].mean(dim=1), atol=0, rtol=0)
+
+
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
     x = x.softmax(-1) + eps
     x = x / (x.sum(-2, keepdim=True) + eps)
@@ -938,6 +1224,63 @@ def hc_head_ref(
     pre_mix = torch.nn.functional.linear(residual_norm, fn)
     pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
     return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+def test_bi_fused_mhc_projection_tile_keeps_bits(monkeypatch):
+    """Under BI the fused post + pre-norm kernel groups outputs and tokens per
+    block by batch size; a row's outputs must be the same bits for every
+    grouping and every batch size."""
+    from vllm import envs
+    from vllm.model_executor.kernels.mhc import tilelang_kernels
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    hc, hidden, total = 4, 5120, 4101
+    n3 = hc * 2 + hc * hc
+    x = torch.randn((total, hidden), dtype=torch.bfloat16)
+    residual = torch.randn((total, hc, hidden), dtype=torch.bfloat16)
+    post = torch.randn((total, hc, 1), dtype=torch.float32)
+    comb = torch.randn((total, hc, hc), dtype=torch.float32)
+    fn = (torch.randn((n3, hc, hidden), dtype=torch.float) * 1e-4).flatten(1, 2)
+    scale = torch.randn((3,), dtype=torch.float) * 0.1
+    base = torch.randn((n3,), dtype=torch.float) * 0.1
+
+    def run(m):
+        outputs = torch.ops.vllm.mhc_fused_post_pre_tilelang(
+            x[:m],
+            residual[:m],
+            post[:m],
+            comb[:m],
+            fn,
+            scale,
+            base,
+            1e-6,
+            1e-6,
+            1e-6,
+            1.0,
+            20,
+        )
+        return [
+            t.contiguous().view(torch.int16 if t.element_size() == 2 else torch.int32)
+            for t in outputs
+        ]
+
+    def configure(tile, tok):
+        monkeypatch.setattr(tilelang_kernels, "_BI_FUSED_POST_PRE_TILE_N", tile)
+        monkeypatch.setattr(tilelang_kernels, "_BI_FUSED_POST_PRE_TOKENS", tok)
+
+    configure(2, 1)
+    reference = run(total)
+    for tile, tok in ((2, 1), (24, 1), (12, 4), (6, 8), (24, 2)):
+        configure(tile, tok)
+        for m in (1, 6, 15, 16, 17, 48, 301, total):
+            for got, want in zip(run(m), reference):
+                assert torch.equal(got, want[:m]), (tile, tok, m)
 
 
 @pytest.mark.skipif(

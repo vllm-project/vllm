@@ -235,7 +235,7 @@ class SingleTypeKVCacheManager(ABC):
             # num_required_blocks may be smaller than num_req_blocks.
             return max(num_required_blocks - num_req_blocks, 0)
 
-        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        num_skipped_tokens = self.get_num_hit_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
         # Number of whole blocks that are skipped by the attention window.
         # If nothing is skipped, this is 0.
@@ -293,7 +293,7 @@ class SingleTypeKVCacheManager(ABC):
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
-        num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
+        num_skipped_tokens = self.get_num_hit_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
             # It is possible that all new computed blocks are skipped when
@@ -348,7 +348,7 @@ class SingleTypeKVCacheManager(ABC):
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
-        num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
+        num_skipped_tokens = self.get_num_hit_skipped_tokens(num_total_computed_tokens)
         if num_skipped_tokens > 0:
             # Some external computed tokens may be skipped too.
             num_external_computed_tokens = min(
@@ -723,6 +723,11 @@ class SingleTypeKVCacheManager(ABC):
         """
         # The default behavior is to not skip any tokens.
         return 0
+
+    def get_num_hit_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """``get_num_skipped_tokens`` for a request taking its first blocks,
+        prefix hit included."""
+        return self.get_num_skipped_tokens(num_computed_tokens)
 
     def new_step_starts(self) -> None:
         return None
@@ -1170,6 +1175,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             0,
             num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
         )
+
+    def get_num_hit_skipped_tokens(self, num_computed_tokens: int) -> int:
+        """A bounded replay longer than the window rewrites the hit's last
+        ``prefix_replay_tokens`` tokens, so their blocks are needed too."""
+        num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
+        replay_tokens = self.kv_cache_spec.prefix_replay_tokens
+        if replay_tokens > self.sliding_window:
+            num_skipped_tokens = min(
+                num_skipped_tokens, max(0, num_computed_tokens - replay_tokens)
+            )
+        return num_skipped_tokens
 
 
 class CircularBufferManager(FullAttentionManager):

@@ -12,7 +12,9 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.model_executor.kernels.batch_invariant import rms_norm_cuda
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -109,11 +111,13 @@ class RMSNorm(CustomOp):
             pass_weight = (
                 self.pass_weight_add if residual is not None else self.pass_weight
             )
+            weight = self.weight.data if pass_weight else None
+            if current_platform.is_cuda() and (
+                weight is None or weight.dtype == x.dtype or x.dtype == torch.float32
+            ):
+                return rms_norm_cuda(x, weight, self.variance_epsilon, residual)
             return rms_norm_batch_invariant(
-                x,
-                self.weight.data if pass_weight else None,
-                self.variance_epsilon,
-                residual=residual,
+                x, weight, self.variance_epsilon, residual=residual
             )
 
         return self.forward_native(x, residual)

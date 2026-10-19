@@ -169,8 +169,47 @@ class AgRsAll2AllManager(All2AllManagerBase):
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            return self._ordered_combine(hidden_states, dist_group, sizes)
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
+
+    @staticmethod
+    def _ordered_combine(
+        hidden_states: torch.Tensor, dist_group: Any, sizes: list[int]
+    ) -> torch.Tensor:
+        """Reduce-scatter that adds the ranks' rows in rank order in FP32.
+
+        NCCL's reduction order for an element depends on the message layout,
+        i.e. on the batch; here each rank receives its rows from every peer
+        and sums them in a fixed order, so a row depends on its own partials.
+        """
+        comm = dist_group.device_communicator.pynccl_comm
+        rank, world = dist_group.rank_in_group, dist_group.world_size
+        if world > 1 and (comm is None or comm.disabled):
+            raise RuntimeError(
+                "The batch-invariant MoE combine sends over PyNccl; unset "
+                "VLLM_DISABLE_PYNCCL"
+            )
+        hidden_states = hidden_states.contiguous()
+        starts = [sum(sizes[:r]) for r in range(world)]
+        mine = sizes[rank]
+        parts = hidden_states.new_empty((world, mine, *hidden_states.shape[1:]))
+        comm.group_start()
+        for peer in range(world):
+            if peer == rank:
+                continue
+            if sizes[peer]:
+                rows = slice(starts[peer], starts[peer] + sizes[peer])
+                comm.send(hidden_states[rows], peer)
+            if mine:
+                comm.recv(parts[peer], peer)
+        comm.group_end()
+        parts[rank].copy_(hidden_states[starts[rank] : starts[rank] + mine])
+        out = parts[0].float()
+        for peer in range(1, world):
+            out.add_(parts[peer])
+        return out.to(hidden_states.dtype)
 
     def allocate_combine_input(
         self,
@@ -179,6 +218,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
         device: torch.device,
         is_sequence_parallel: bool = False,
     ) -> torch.Tensor | None:
+        if envs.VLLM_BATCH_INVARIANT:
+            return None  # combine() keeps the fixed-order sum
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(shape[0] // dist_group.world_size, dist_group)
         if sum(sizes) != shape[0] or any(size != sizes[0] for size in sizes):
@@ -201,6 +242,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            return output.copy_(self._ordered_combine(hidden_states, dist_group, sizes))
         return dist_group.reduce_scatterv_into_output(
             hidden_states,
             output,

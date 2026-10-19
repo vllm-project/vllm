@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -316,6 +317,12 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         # routing is done externally, so accept any routing method.
         return True
 
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        # Every tactic gives a row the same bits at any M (op-probes); opt-in
+        # because its MXFP8 activations round unlike the default DeepGEMM path.
+        return envs.VLLM_BI_MXFP8_GEMM == "tensor_core"
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -455,7 +462,11 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         # launch can leave the top-k reduction to a deferring consumer.
         M = x_quant.size(0)
         chunk_size = self._max_supported_tokens(topk, global_num_experts)
-        defer = chunk_size >= M and self.moe_config.should_defer_moe_finalize(M)
+        defer = (
+            chunk_size >= M
+            and not envs.VLLM_BATCH_INVARIANT
+            and self.moe_config.should_defer_moe_finalize(M)
+        )
         unfinalized: UnfinalizedMoEOutput | None = None
         for start in range(0, M, chunk_size):
             end = min(start + chunk_size, M)

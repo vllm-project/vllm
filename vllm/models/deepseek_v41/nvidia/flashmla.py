@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm import envs
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -22,6 +24,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV41SparseSWAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
@@ -40,11 +43,25 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuild
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        if envs.VLLM_BATCH_INVARIANT:
+            # BI decode rows (including spec-decode verify rows) have
+            # fixed-shape, device-side metadata; BI prefill rows plan chunks
+            # on the host and stay in eager breaks.
+            return AttentionCGSupport.UNIFORM_BATCH
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """SM100 proof: test_ds41_flashmla_swa_bi_batch_chunk_pd_graph."""
+        return current_platform.is_device_capability_family(100)
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
@@ -56,6 +73,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4FlashMLABackend
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
+    # Decode rows gathered per launch on the batch-invariant path.
+    BI_DECODE_CHUNK_TOKENS: ClassVar[int] = 64
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -63,6 +82,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
+
+    @property
+    def packed_kv_cache_dtype(self) -> CacheDType:
+        # BI keeps the default (mega) NVFP4 compressed-cache contract; the BI
+        # gather dequantizes it, so --kv-cache-dtype auto must not drift.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "nvfp4_ds_mla"
+        return super().packed_kv_cache_dtype
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -118,6 +145,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
                 ((self.max_num_batched_tokens,), torch.int32),
             )
+            if envs.VLLM_BATCH_INVARIANT:
+                self._bi_decode_workspace(combined_topk, q.shape[-1])
             output.zero_()
             return
 
@@ -166,7 +195,18 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
-        if num_decodes > 0:
+        # DSpark draft rows are non-causal (wider SWA width); they are proposals
+        # checked by the target, so they keep the regular decode kernel.
+        causal_decode = swa_metadata.decode_swa_width == self.window_size
+        if num_decodes > 0 and envs.VLLM_BATCH_INVARIANT and causal_decode:
+            self._forward_decode_bi(
+                q=q[:num_decode_tokens],
+                compressed_k_cache=self_kv_cache,
+                attn_metadata=flashmla_metadata,
+                swa_metadata=swa_metadata,
+                output=output[:num_decode_tokens],
+            )
+        elif num_decodes > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,
@@ -256,6 +296,88 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+
+    def _bi_decode_workspace(
+        self, width: int, head_dim: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        rows = self.BI_DECODE_CHUNK_TOKENS
+        kv, indices, lens = current_workspace_manager().get_simultaneous(
+            ((rows, width, head_dim), torch.bfloat16),
+            ((rows, width), torch.int32),
+            ((rows,), torch.int32),
+        )
+        return kv, indices, lens
+
+    def _forward_decode_bi(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,  # None for SWA-only layers
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        output: torch.Tensor,
+    ) -> None:
+        """Run decode rows through the prefill kernel with fixed shapes.
+
+        Bitwise equal to ``_forward_prefill`` for the same query: each row
+        sees the same KV rows in the same order with the same holes and
+        length; only where the rows live differs (per-token workspace instead
+        of per-request chunks), which the kernel does not observe.
+        """
+        from vllm.model_executor.kernels.batch_invariant import (
+            sparse_decode_gather,
+        )
+
+        swa_only = self.compress_ratio == 0
+        assert self.topk_indices_buffer is not None
+        top_k = 0 if swa_only else self.topk_indices_buffer.shape[-1]
+        width = round_up(top_k + self.window_size, 128)
+        compressed_table = None
+        compressed_block_size = 1
+        if not swa_only:
+            assert attn_metadata is not None and compressed_k_cache is not None
+            compressed_table = attn_metadata.block_table
+            compressed_block_size = attn_metadata.block_size // self.compress_ratio
+        assert swa_metadata.token_to_req_indices is not None
+        assert swa_metadata.is_valid_token is not None
+        assert swa_metadata.query_start_loc is not None
+        assert swa_metadata.seq_lens is not None
+        assert swa_metadata.replay_start is not None
+        num_tokens = q.shape[0]
+        rows = self.BI_DECODE_CHUNK_TOKENS
+        for start in range(0, num_tokens, rows):
+            end = min(start + rows, num_tokens)
+            kv, indices, lens = self._bi_decode_workspace(width, q.shape[-1])
+            sparse_decode_gather(
+                self.topk_indices_buffer[start:end],
+                swa_metadata.token_to_req_indices,
+                swa_metadata.is_valid_token,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                swa_metadata.replay_start,
+                compressed_k_cache,
+                compressed_table,
+                compressed_block_size,
+                self.swa_cache_layer.kv_cache,
+                swa_metadata.block_table,
+                swa_metadata.block_size,
+                start,
+                end - start,
+                self.window_size,
+                self.compress_ratio,
+                top_k,
+                kv,
+                indices,
+                lens,
+            )
+            flash_mla_sparse_fwd(
+                q=q[start:end],
+                kv=kv.view(-1, 1, q.shape[-1]),
+                indices=indices[: end - start].unsqueeze(1),
+                sm_scale=self.scale,
+                attn_sink=self.attn_sink,
+                topk_length=lens[: end - start],
+                out=output[start:end],
+            )
 
     def _forward_prefill(
         self,
