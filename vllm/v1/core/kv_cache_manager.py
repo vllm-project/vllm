@@ -261,7 +261,9 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
-    def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
+    def get_computed_blocks(
+        self, request: Request
+    ) -> tuple[KVCacheBlocks, int, tuple[int, ...]]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -272,10 +274,10 @@ class KVCacheManager:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - ``shared_prefix_boundary``: the block-aligned token position of
-                  a shared prefix that a sparse-retention group (Mamba / sliding
-                  window) has not cached yet (Marconi-style APC), or 0 if none.
-                  Pinned so sparse prefix-cache retention does not drop
+                - ``shared_prefix_boundaries``: the token positions of a shared
+                  prefix that a sparse-retention group (Mamba / sliding
+                  window) has not cached yet (Marconi-style APC), or empty if
+                  none. Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
 
         """
@@ -284,7 +286,7 @@ class KVCacheManager:
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
         if not self.prefix_cache_lookup_enabled(request):
-            return self.empty_kv_cache_blocks, 0, 0
+            return self.empty_kv_cache_blocks, 0, ()
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -293,7 +295,7 @@ class KVCacheManager:
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens, num_uncached = (
+        computed_blocks, num_new_computed_tokens, junctions = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length
             )
@@ -309,20 +311,12 @@ class KVCacheManager:
         ):
             self.coordinator.emit_cached_block_events(request, computed_blocks)
 
-        # The junction to pin is where the lagging sparse-retention group stops
-        # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
-        # the longest single-group hit. Sub-block gaps are left to the mask,
-        # which floors to the alignment boundary (a no-op there).
-        shared_prefix_boundary = (
-            num_new_computed_tokens + num_uncached if num_uncached else 0
-        )
-
         blocks = self.create_kv_cache_blocks(computed_blocks)
-        return blocks, num_new_computed_tokens, shared_prefix_boundary
+        return blocks, num_new_computed_tokens, junctions
 
     def get_computed_blocks_for_connector(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool]:
+    ) -> tuple[KVCacheBlocks, int, tuple[int, ...], bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
         Hybrid (Mamba + full-attention) models can have per-group prefix hits
@@ -339,7 +333,7 @@ class KVCacheManager:
 
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
-            tokens, shared-prefix boundary) plus ``hit_diverged``.
+            tokens, shared-prefix boundaries) plus ``hit_diverged``.
 
         """
         coordinator = self.coordinator
@@ -351,7 +345,7 @@ class KVCacheManager:
             return *self.get_computed_blocks(request), False
 
         if not self.prefix_cache_lookup_enabled(request):
-            return self.empty_kv_cache_blocks, 0, 0, False
+            return self.empty_kv_cache_blocks, 0, (), False
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
@@ -365,8 +359,8 @@ class KVCacheManager:
 
         num_local = per_group_hits[fa_group_id]
         blocks = self.create_kv_cache_blocks(computed)
-        # Per-group lookups do not detect an uncached shared prefix (boundary 0).
-        return blocks, num_local, 0, min(per_group_hits) < num_local
+        # Per-group lookups do not detect an uncached shared prefix (no junctions).
+        return blocks, num_local, (), min(per_group_hits) < num_local
 
     def allocate_slots(
         self,

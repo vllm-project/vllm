@@ -553,18 +553,22 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
         )
-        junction = request.shared_prefix_boundary
-        # Block-floored: a sub-block junction's state is not separately cacheable.
-        block_floored = start + (junction - start) // block_size * block_size
-        # Past the prompt the manager writes nothing, so fall back to the
-        # block-floored stop rather than dropping it: a resumed request replaying
-        # output tokens can still observe a junction there.
-        junction_stop = (
-            junction
-            if self.mamba_shared_prefix_checkpoint
-            and junction <= request.num_prompt_tokens
-            else block_floored
-        )
+        junction_stops = []
+        for junction in request.shared_prefix_boundaries:
+            if not start < junction < end:
+                continue
+            # Block-floored: a sub-block junction's state is not separately
+            # cacheable.
+            block_floored = start + (junction - start) // block_size * block_size
+            # Past the prompt the manager writes nothing, so fall back to the
+            # block-floored stop rather than dropping it: a resumed request
+            # replaying output tokens can still observe a junction there.
+            junction_stops.append(
+                junction
+                if self.mamba_shared_prefix_checkpoint
+                and junction <= request.num_prompt_tokens
+                else block_floored
+            )
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -577,9 +581,9 @@ class Scheduler(SchedulerInterface):
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
-            # Marconi shared-prefix junction: cache its state so sibling
+            # Marconi shared-prefix junctions: cache their state so sibling
             # requests sharing the prefix can reuse it.
-            junction_stop if start < junction < end else 0,
+            *junction_stops,
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
@@ -587,15 +591,15 @@ class Scheduler(SchedulerInterface):
 
     def _get_local_prefix_cache_hit(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool]:
+    ) -> tuple[KVCacheBlocks, int, tuple[int, ...], bool]:
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
-        blocks, num_local, shared_prefix_boundary = (
+        blocks, num_local, shared_prefix_boundaries = (
             self.kv_cache_manager.get_computed_blocks(request)
         )
-        return blocks, num_local, shared_prefix_boundary, False
+        return blocks, num_local, shared_prefix_boundaries, False
 
     def _reserve_prefill_lookahead(
         self,
@@ -1017,7 +1021,7 @@ class Scheduler(SchedulerInterface):
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
-                        request.shared_prefix_boundary,
+                        request.shared_prefix_boundaries,
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
 
@@ -1088,7 +1092,7 @@ class Scheduler(SchedulerInterface):
                             (
                                 new_computed_blocks,
                                 num_new_local_computed_tokens,
-                                request.shared_prefix_boundary,
+                                request.shared_prefix_boundaries,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
 
                         connector_prefix_cache_queries = (

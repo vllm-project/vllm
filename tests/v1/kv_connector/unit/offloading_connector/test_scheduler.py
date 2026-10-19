@@ -4269,7 +4269,7 @@ class TestEagle:
         request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(150)]
         request.all_token_ids = list(range(1200))
         request.lora_request = None
-        request.shared_prefix_boundary = 0
+        request.shared_prefix_boundaries = ()
         request.status = RequestStatus.RUNNING
         request.is_finished.return_value = False
         scheduler.on_new_request(request)
@@ -4297,6 +4297,97 @@ class TestEagle:
         assert store_job.src_spec.block_ids.tolist() == [swa_block_ids[123]]
         assert store_job.src_spec.group_sizes == [0, 1]
         assert store_job.src_spec.block_indices == [0, 123]
+
+    def test_store_jobs_admit_shared_prefix_junctions(self):
+        """Junction positions join the store's reachable boundaries.
+
+        Under sparse retention the SWA store keeps only the prompt-end replay
+        tail; a detected shared-prefix junction must also keep the window tail
+        ending at each junction position.
+        """
+
+        def stored_swa_block_ids(junctions: tuple[int, ...]) -> list[int]:
+            vllm_config = _make_vllm_config(extra_config={"offload_prompt_only": False})
+            vllm_config.kv_events_config = KVEventsConfig(
+                enable_kv_cache_events=True, publisher="null"
+            )
+            vllm_config.cache_config.prefix_cache_retention_interval = 0
+            kv_cache_config = KVCacheConfig(
+                num_blocks=0,
+                kv_cache_tensors=[],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["full"],
+                        FullAttentionSpec(
+                            block_size=16,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.float32,
+                        ),
+                    ),
+                    KVCacheGroupSpec(
+                        ["swa"],
+                        SlidingWindowSpec(
+                            block_size=16,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.float32,
+                            sliding_window=32,
+                        ),
+                    ),
+                ],
+            )
+            spec = MockOffloadingSpec(
+                build_offloading_config(vllm_config, kv_cache_config)
+            )
+            scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+            scheduler.manager.prepare_store.side_effect = (
+                lambda keys, req_context: generate_store_output(keys)
+            )
+
+            request = MagicMock()
+            request.request_id = "req"
+            request.kv_transfer_params = None
+            request.num_prompt_tokens = 160
+            request.num_tokens = 160
+            request.num_computed_tokens = 0
+            request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(10)]
+            request.all_token_ids = list(range(160))
+            request.lora_request = None
+            request.shared_prefix_boundaries = junctions
+            request.status = RequestStatus.RUNNING
+            request.is_finished.return_value = False
+            scheduler.on_new_request(request)
+
+            full_block_ids = list(range(1, 11))
+            swa_block_ids = list(range(1001, 1011))
+            output = SchedulerOutput.make_empty()
+            output.scheduled_new_reqs = [
+                SimpleNamespace(req_id="req", block_ids=(full_block_ids, swa_block_ids))
+            ]
+            output.num_scheduled_tokens = {"req": 160}
+            output.total_num_scheduled_tokens = 160
+            meta = scheduler.build_connector_meta(output)
+
+            assert len(meta.store_jobs) == 1
+            [store_job] = meta.store_jobs.values()
+            assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+            assert store_job.src_spec.group_sizes[0] == len(full_block_ids)
+            return store_job.src_spec.block_ids.tolist()[len(full_block_ids) :]
+
+        swa_block_ids = list(range(1001, 1011))
+        # No junction: only the prompt-end replay tail (window 32 -> 2 blocks;
+        # the running request's last block is not offloadable yet).
+        assert stored_swa_block_ids(()) == [swa_block_ids[7], swa_block_ids[8]]
+        # Junctions at 64 and 96: their window tails (blocks 2-3, 4-5) join.
+        assert stored_swa_block_ids((64, 96)) == [
+            swa_block_ids[2],
+            swa_block_ids[3],
+            swa_block_ids[4],
+            swa_block_ids[5],
+            swa_block_ids[7],
+            swa_block_ids[8],
+        ]
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):

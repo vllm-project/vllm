@@ -2598,30 +2598,30 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Request: 3 blocks
     prefix = [i for i in range(3) for _ in range(block_size)]
     req_0 = make_request("0", prefix, block_size, hash_fn)
-    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
-        req_0
+    computed_blocks, num_computed, shared_prefix_boundaries = (
+        manager.get_computed_blocks(req_0)
     )
     assert num_computed == 0  # nothing cached yet
-    assert shared_prefix_boundary == 0
+    assert shared_prefix_boundaries == ()
     manager.allocate_slots(req_0, 3 * block_size, 0, computed_blocks)
 
     # Request: 3 blocks (shared with above) + 7 different tokens
     req_1 = make_request("1", prefix + [100] * 7, block_size, hash_fn)
-    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
-        req_1
+    computed_blocks, num_computed, shared_prefix_boundaries = (
+        manager.get_computed_blocks(req_1)
     )
     assert num_computed == 3 * block_size  # we should observe a 3-block cache hit
-    assert shared_prefix_boundary == 0
+    assert shared_prefix_boundaries == ()
     manager.allocate_slots(req_1, 7, 3 * block_size, computed_blocks)
 
     # Request: 3 blocks, but only 2 blocks shared (replace the last token in 3rd block):
     req_2 = make_request("2", prefix[:-1] + [101], block_size, hash_fn)
-    computed_blocks, num_computed, shared_prefix_boundary = manager.get_computed_blocks(
-        req_2
+    computed_blocks, num_computed, shared_prefix_boundaries = (
+        manager.get_computed_blocks(req_2)
     )
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
     # boundary == junction: 2 shared blocks (num_computed 0 + 2 uncached blocks).
-    assert shared_prefix_boundary == 2 * block_size
+    assert shared_prefix_boundaries == (2 * block_size,)
 
     # Next, validate the align-mode Marconi split. It takes the shared-prefix
     # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
@@ -2637,13 +2637,30 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
-    req_2.shared_prefix_boundary = shared_prefix_boundary
+    req_2.shared_prefix_boundaries = shared_prefix_boundaries
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
         self=mock,
         request=req_2,
         num_new_tokens=3 * block_size,
     )
     assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
+
+    # A junction set stops at every position, earliest first.
+    req_2.shared_prefix_boundaries = (block_size, 2 * block_size)
+    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=req_2,
+        num_new_tokens=3 * block_size,
+    )
+    assert num_new_tokens_adjusted == block_size  # stop at the first junction
+    req_2.num_computed_tokens = block_size
+    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=req_2,
+        num_new_tokens=2 * block_size,
+    )
+    assert num_new_tokens_adjusted == block_size  # then at the second
+    req_2.num_computed_tokens = 0
 
     manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
     # Cleanup
@@ -5854,7 +5871,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
 
 
 def test_mamba_reachable_block_mask_pins_shared_prefix():
-    """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
+    """A Marconi-detected shared prefix (``shared_prefix_boundaries``) lands before
     ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
     pin the single state block ending on that boundary so sparse retention does
     not defeat cross-request shared-prefix reuse."""
@@ -5930,11 +5947,11 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
         # Marconi chunk, caches the junction's Mamba state.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
         cb, nc, boundary = manager.get_computed_blocks(req1)
-        assert boundary == 2 * block_size  # junction detected at 2 shared blocks
+        assert boundary == (2 * block_size,)  # junction detected at 2 shared blocks
         if pin:
-            req1.shared_prefix_boundary = boundary
+            req1.shared_prefix_boundaries = boundary
         # Simulate the Marconi chunk: schedule up to the junction (boundary - nc).
-        manager.allocate_slots(req1, boundary - nc, nc, cb)
+        manager.allocate_slots(req1, boundary[0] - nc, nc, cb)
 
         # req2 shares the same prefix: does it reuse the cached junction?
         req2 = make_request("2", shared + distinct(70), block_size, sha256)
@@ -5947,6 +5964,110 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
+
+
+def test_mamba_shared_prefix_reuse_eagle_draft_group():
+    """EAGLE variant of the Mamba junction flow: a flagged draft group with a
+    larger block size drops one of its own blocks past the candidate hit, so a
+    sibling resumes at F or F - A depending on where it diverges. The detector
+    cannot know which, so the junction set must keep both positions."""
+    block_size = 16
+    draft_block_size = 32
+    hash_block_size = 16
+    alignment = 32  # lcm(16, 32, 16)
+
+    config = KVCacheConfig(
+        num_blocks=400,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                FullAttentionSpec(
+                    block_size=draft_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+    def sibling_hits(sibling_deltas):
+        manager = make_kv_cache_manager(
+            config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=hash_block_size,
+            retention_interval=0,
+            use_eagle=True,
+        )
+        shared = 64  # F: 4 hash blocks shared with every later request
+        cover = shared + max(32, *sibling_deltas)
+
+        def allocate_chunked(req, nc, cb, ends):
+            computed = nc
+            first = True
+            for end in ends:
+                out = manager.allocate_slots(
+                    req, end - computed, nc if first else 0, cb if first else None
+                )
+                assert out is not None
+                req.num_computed_tokens = end
+                computed = end
+                first = False
+
+        # The owner primes the shared prefix (dense attention, Mamba tail only).
+        manager.coordinator.new_step_starts()
+        owner = make_request("owner", [7] * cover + [900] * 64, hash_block_size, sha256)
+        cb, nc, junctions = manager.get_computed_blocks(owner)
+        assert junctions == ()
+        allocate_chunked(owner, nc, cb, [len(owner.all_token_ids)])
+
+        # The detector shares `shared` tokens: full16 hits F, the dropping
+        # draft group lands back on the 32-grid, Mamba lags at 0.
+        manager.coordinator.new_step_starts()
+        det = make_request("det", [7] * shared + [800] * 32, hash_block_size, sha256)
+        cb, nc, junctions = manager.get_computed_blocks(det)
+        assert nc == 0
+        # Both resume positions are kept: F - A and F.
+        assert junctions == (shared - alignment, shared)
+        det.shared_prefix_boundaries = junctions
+        # Simulate the scheduler's junction stops: a chunk ends at each.
+        allocate_chunked(det, nc, cb, [*junctions, len(det.all_token_ids)])
+
+        hits = []
+        for d in sibling_deltas:
+            manager.coordinator.new_step_starts()
+            sib = make_request(
+                f"sib{d}", [7] * (shared + d) + [700 + d] * 32, hash_block_size, sha256
+            )
+            _, sib_nc, _ = manager.get_computed_blocks(sib)
+            hits.append(sib_nc)
+        return hits
+
+    # Divergence < margin (the draft group's 32-token drop unit) past F floors
+    # the sibling to F - A; divergence >= margin resumes at F.
+    assert sibling_hits([0, 16]) == [32, 32]
+    assert sibling_hits([32]) == [64]
 
 
 @pytest.mark.skip_global_cleanup
@@ -6215,9 +6336,9 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
         cb, nc, boundary = manager.get_computed_blocks(req1)
         if retention == 0:
-            assert boundary == 4 * block_size  # junction detected when SWA lags
+            assert boundary == (4 * block_size,)  # junction detected when SWA lags
         if pin and boundary:
-            req1.shared_prefix_boundary = boundary
+            req1.shared_prefix_boundaries = boundary
         manager.allocate_slots(req1, len(req1.all_token_ids), nc, cb)
 
         # req2 shares the same prefix: does its SWA window reuse the junction?
@@ -6231,6 +6352,112 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+@pytest.mark.parametrize(
+    "full_bs,swa_bs,eagle_ids,shared,det_extra,deltas,expected_junctions,expected_hits",
+    [
+        # Uniform block sizes, only the SWA draft group flagged: a sibling
+        # diverging within one block past F always resumes at F - A (the
+        # detector's peek block past F is private to it).
+        (16, 16, (1,), 64, 0, [0, 16], (48, 64), [48, 48]),
+        # Mixed block sizes (full 64, SWA 16; A=64, margin=16): divergence
+        # < margin past F resumes at F - A, >= margin at F.
+        (64, 16, (1,), 128, 48, [0, 32], (64, 128), [64, 128]),
+        # Fallback all-flagged: the junction source drops too, but that does
+        # not prove the other dropping groups' peek, so both are kept.
+        (16, 16, (), 64, 16, [0, 32], (48, 64), [48, 64]),
+        # Both flagged, mixed drop units (full 16, SWA 64; A=64): the full
+        # group's post-drop hit at F does not cover the SWA group's 64-token
+        # peek past F, so siblings resume at F - A.
+        (16, 64, (0, 1), 256, 16, [16], (192, 256), [192]),
+    ],
+    ids=[
+        "uniform-swa-flagged",
+        "mixed-swa-flagged",
+        "fallback-all-flagged",
+        "mixed-all-flagged",
+    ],
+)
+def test_swa_shared_prefix_reuse_under_zero_retention_eagle(
+    full_bs,
+    swa_bs,
+    eagle_ids,
+    shared,
+    det_extra,
+    deltas,
+    expected_junctions,
+    expected_hits,
+):
+    """EAGLE variants of the SWA junction flow: a dropping draft group makes
+    the sibling's resume position ambiguous between F and F - A, so the
+    junction set keeps both."""
+    hash_block_size = 16
+    config = KVCacheConfig(
+        num_blocks=400,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=full_bs,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=0 in eagle_ids,
+            ),
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=swa_bs,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * swa_bs,
+                ),
+                is_eagle_group=1 in eagle_ids,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        retention_interval=0,
+        use_eagle=True,
+    )
+    cover = shared + max(det_extra, *deltas)
+
+    # The owner primes the shared prefix (dense full attention; SWA keeps only
+    # its own replay window under retention 0). The suffix is sized so the
+    # owner's replay tail holds no shared content.
+    manager.coordinator.new_step_starts()
+    owner = make_request("owner", [7] * cover + [900] * 100, hash_block_size, sha256)
+    cb, nc, junctions = manager.get_computed_blocks(owner)
+    assert junctions == ()
+    manager.allocate_slots(owner, len(owner.all_token_ids), nc, cb)
+
+    # The detector shares `shared` + det_extra tokens: full attention hits,
+    # the SWA group lags at 0.
+    manager.coordinator.new_step_starts()
+    det = make_request(
+        "det", [7] * (shared + det_extra) + [800] * 80, hash_block_size, sha256
+    )
+    cb, nc, junctions = manager.get_computed_blocks(det)
+    assert nc == 0
+    assert junctions == expected_junctions
+    det.shared_prefix_boundaries = junctions
+    manager.allocate_slots(det, len(det.all_token_ids), nc, cb)
+
+    for d, expected in zip(deltas, expected_hits):
+        manager.coordinator.new_step_starts()
+        sib = make_request(
+            f"sib{d}", [7] * (shared + d) + [700 + d] * 80, hash_block_size, sha256
+        )
+        _, sib_nc, _ = manager.get_computed_blocks(sib)
+        assert sib_nc == expected
 
 
 def test_device_eviction_keeps_host_prefix():
