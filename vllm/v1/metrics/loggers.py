@@ -681,9 +681,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         counter_prefix_cache_evictions = self._counter_cls(
             name="vllm:prefix_cache_evictions",
             documentation=(
-                "Device prefix-cache blocks evicted when a cached block is "
-                "reused or explicitly dropped. Prefix-cache resets are not "
-                "counted. Use rate() for blocks evicted per second."
+                "Device prefix-cache blocks dropped because their slot was "
+                "reused for new data, or because the block was explicitly "
+                "removed. Counted in blocks, not tokens. Prefix-cache resets "
+                "are not counted. Use rate() for blocks evicted per second."
             ),
             labelnames=labelnames,
         )

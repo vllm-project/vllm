@@ -3605,7 +3605,13 @@ def test_maybe_evict_cached_block():
 def test_prefix_cache_eviction_counter_ignores_reset_and_uncached_blocks():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
 
-    assert pool._maybe_evict_cached_block(pool.blocks[0]) is False
+    # blocks[0] is popped as null_block and can never be cached. The block
+    # get_new_blocks walks is the next free block, which has no hash.
+    free_block = pool.free_block_queue.fake_free_list_head.next_free_block
+    assert free_block is not None
+    assert not free_block.is_null
+    assert free_block.block_hash is None
+    assert pool._maybe_evict_cached_block(free_block) is False
     assert pool.take_prefix_cache_evictions() == 0
 
     block_hash = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
@@ -3616,6 +3622,30 @@ def test_prefix_cache_eviction_counter_ignores_reset_and_uncached_blocks():
         pool.cached_block_hash_to_block.insert(block_hash, block)
     assert pool.reset_prefix_cache()
     assert pool.take_prefix_cache_evictions() == 0
+
+
+def test_scheduler_make_stats_drains_prefix_cache_evictions_once():
+    from .utils import create_scheduler
+
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        num_blocks=4,
+        skip_tokenizer_init=True,
+    )
+    pool = scheduler.kv_cache_manager.block_pool
+    block = pool.free_block_queue.fake_free_list_head.next_free_block
+    assert block is not None and not block.is_null
+    block_hash = make_block_hash_with_group_id(BlockHash(b"10"), 0)
+    block.set_block_hash(block_hash)
+    pool.cached_block_hash_to_block.insert(block_hash, block)
+    assert pool._maybe_evict_cached_block(block) is True
+
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.prefix_cache_evictions == 1
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.prefix_cache_evictions == 0
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

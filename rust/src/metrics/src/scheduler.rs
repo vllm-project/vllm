@@ -343,7 +343,7 @@ impl SchedulerMetrics {
         let prefix_cache_evictions = Family::default();
         registry.register(
             "vllm:prefix_cache_evictions",
-            "Device prefix-cache blocks evicted when a cached block is reused or explicitly dropped. Prefix-cache resets are not counted.",
+            "Device prefix-cache blocks dropped because their slot was reused for new data, or because the block was explicitly removed. Counted in blocks, not tokens. Prefix-cache resets are not counted.",
             prefix_cache_evictions.clone(),
         );
 

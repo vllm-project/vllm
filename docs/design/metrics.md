@@ -27,6 +27,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
+- `vllm:prefix_cache_evictions` (Counter) - Device prefix-cache blocks dropped because their slot was reused for new data, or because the block was explicitly removed. Counted in blocks, not tokens.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
@@ -448,10 +449,12 @@ To achieve this, we should record the queries and hits as counters in
 Prometheus, rather than recording the hit rate as a gauge.
 
 `vllm:prefix_cache_evictions` counts device prefix-cache blocks that were
-dropped because their slot was reused, or because they were explicitly
-removed from the cache. A block is one increment, however many hashes it
-carried. `reset_prefix_cache` clears the cache in bulk and does not
-increment the counter. Eviction rate over an interval is:
+dropped because their slot was reused for new data, or because they were
+explicitly removed from the cache. A block is one increment, however many
+hashes it carried. Unlike `vllm:prefix_cache_hits`, which counts tokens,
+this counter counts blocks, so the two must not be ratioed.
+`reset_prefix_cache` clears the cache in bulk and does not increment the
+counter. Eviction rate over an interval is:
 
 ```text
 rate(vllm:prefix_cache_evictions_total[5m])

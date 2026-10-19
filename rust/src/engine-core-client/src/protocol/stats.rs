@@ -342,7 +342,7 @@ pub struct SchedulerStats {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedTokensBySource, PrefixCacheStats};
+    use super::{CachedTokensBySource, PrefixCacheStats, SchedulerStats};
 
     #[test]
     fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
@@ -365,5 +365,18 @@ mod tests {
         let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
         assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
         assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+    }
+
+    #[test]
+    fn omitted_prefix_cache_evictions_decode_as_zero() {
+        // Engines from before this field omit it entirely.
+        let mut payload = serde_json::to_value(SchedulerStats::default()).unwrap();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("prefix_cache_evictions");
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.prefix_cache_evictions, 0);
     }
 }

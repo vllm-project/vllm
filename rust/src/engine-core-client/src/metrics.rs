@@ -521,6 +521,23 @@ mod tests {
         )]))
     }
 
+    #[test]
+    fn prefix_cache_evictions_are_recorded() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let stats = SchedulerStats {
+            prefix_cache_evictions: 3,
+            ..Default::default()
+        };
+
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        let rendered = metrics.render().unwrap();
+        assert!(rendered.contains(
+            "vllm:prefix_cache_evictions_total{model_name=\"model\",engine=\"0\"} 3"
+        ));
+    }
+
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
     #[test]
     fn kv_connector_stats_are_recorded_into_mooncake_and_nixl_metrics() {
