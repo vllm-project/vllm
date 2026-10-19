@@ -6,6 +6,7 @@
 These tests cover:
 - OutputProcessor.get_num_queued_tokens() token counting
 - AsyncLLM.check_admission() admission control logic
+- Admission rejection Prometheus samples
 - Exception classes (GracefulHTTPError, QueueOverflowError, MaxQueuedTokensError)
 - create_error_response() mapping GracefulHTTPError to HTTP 503
 - SchedulerConfig field defaults and validation
@@ -14,12 +15,15 @@ These tests cover:
 
 import argparse
 import asyncio
+import logging
 import multiprocessing
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prometheus_client import REGISTRY
 from pydantic import ValidationError
 
 from vllm.config.scheduler import SchedulerConfig
@@ -35,9 +39,14 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.metrics.loggers import StatLoggerManager
+
+_ADMISSION_METRIC_MODEL = "admission-metric-test"
+_ADMISSION_LOGGER = "vllm.v1.engine.async_llm"
 
 pytestmark = pytest.mark.cpu_test
 
@@ -68,14 +77,86 @@ def _make_async_llm(
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
+    llm.logger_manager = None
     llm.admission_stats = None
     return llm
+
+
+def _attach_prometheus_logger(
+    llm: AsyncLLM, engine_indexes: list[int] | None = None
+) -> None:
+    """Attach a real Prometheus logger manager to a lightweight AsyncLLM."""
+    vllm_config = MagicMock()
+    vllm_config.observability_config.show_hidden_metrics = False
+    vllm_config.observability_config.kv_cache_metrics = False
+    vllm_config.observability_config.custom_histogram_buckets = None
+    vllm_config.model_config.served_model_name = _ADMISSION_METRIC_MODEL
+    vllm_config.model_config.max_model_len = 2048
+    vllm_config.model_config.is_diffusion = False
+    vllm_config.speculative_config = None
+    vllm_config.kv_transfer_config = None
+    vllm_config.ec_transfer_config = None
+    vllm_config.lora_config = None
+    llm.logger_manager = StatLoggerManager(
+        vllm_config=vllm_config,
+        engine_idxs=engine_indexes,
+        enable_default_loggers=False,
+    )
+
+
+def _admission_rejection_count(reason: str) -> float:
+    """Read the Prometheus sample for one admission rejection reason."""
+    value = REGISTRY.get_sample_value(
+        "vllm:admission_rejections_total",
+        {"model_name": _ADMISSION_METRIC_MODEL, "reason": reason},
+    )
+    assert value is not None
+    return value
 
 
 def _make_output_processor(**request_states) -> OutputProcessor:
     op = OutputProcessor.__new__(OutputProcessor)
     op.request_states = request_states
     return op
+
+
+def _make_engine_request(request_id: str, n: int) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(n=n),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def _make_request_test_llm(
+    max_num_queued_reqs: int,
+    add_request_async: Callable[[EngineCoreRequest], Awaitable[None]],
+) -> AsyncLLM:
+    llm = _make_async_llm(max_num_queued_reqs=max_num_queued_reqs)
+    llm.output_processor = OutputProcessor(None, log_stats=False)
+    llm.engine_core = SimpleNamespace(
+        resources=SimpleNamespace(engine_dead=False),
+        add_request_async=AsyncMock(side_effect=add_request_async),
+        abort_requests_async=AsyncMock(),
+        shutdown=MagicMock(),
+    )
+    llm.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+    )
+    llm.output_handler = None
+    llm.log_requests = False
+    llm._run_output_handler = MagicMock()
+    llm.input_processor = MagicMock()
+    llm.input_processor.assign_request_id.side_effect = lambda request: setattr(
+        request, "external_req_id", request.request_id
+    )
+    return llm
 
 
 def _make_scheduler_config(**kwargs) -> SchedulerConfig:
@@ -116,11 +197,13 @@ def test_shared_request_snapshot_enforces_global_limit():
     server_0.set_num_requests(2)
     llm = _make_async_llm(max_num_queued_reqs=2)
     llm.admission_stats = server_1
+    _attach_prometheus_logger(llm)
 
     with pytest.raises(QueueOverflowError):
         llm.check_admission()
 
     assert server_0.get_num_requests() == 2
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +289,35 @@ def test_admission_no_limits_allows_everything():
 
 def test_admission_reqs_allows_when_under_limit():
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=5)
+    _attach_prometheus_logger(llm)
     llm.check_admission()
+    llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 0
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
-def test_admission_reqs_rejects_at_limit():
+def test_admission_reqs_rejects_at_limit(caplog):
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=10)
-    with pytest.raises(QueueOverflowError):
+    _attach_prometheus_logger(llm, engine_indexes=[0, 1, 2])
+    with (
+        caplog.at_level(logging.INFO, logger=_ADMISSION_LOGGER),
+        pytest.raises(QueueOverflowError),
+    ):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
+    assert not any(
+        "Request queue full" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_admission_reqs_rejects_with_n():
     llm = _make_async_llm(max_num_queued_reqs=10, num_unfinished=8)
+    _attach_prometheus_logger(llm)
     with pytest.raises(QueueOverflowError):
         llm.check_admission(3)
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
 def test_admission_reqs_allows_n_at_boundary():
@@ -242,8 +341,11 @@ def test_admission_tokens_allows_when_under_limit():
 
 def test_admission_tokens_rejects_at_limit():
     llm = _make_async_llm(max_num_queued_tokens=1000, num_queued_tokens=1000)
+    _attach_prometheus_logger(llm)
     with pytest.raises(MaxQueuedTokensError):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 0
+    assert _admission_rejection_count("max_num_queued_tokens") == 1
 
 
 def test_admission_tokens_rejects_over_limit():
@@ -279,8 +381,11 @@ def test_admission_req_limit_checked_before_token_limit():
         num_unfinished=10,
         num_queued_tokens=1000,
     )
+    _attach_prometheus_logger(llm)
     with pytest.raises(QueueOverflowError):
         llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
 
 
 # -- n derived from params at the add_request call site ---------------------
@@ -338,6 +443,66 @@ async def test_concurrent_single_request_admission_respects_limit():
     assert sum(result is None for result in results) == 1
     assert sum(isinstance(result, QueueOverflowError) for result in results) == 1
     assert len(request_states) == 1
+
+
+def test_admission_preflight_pass_then_reject_records_once():
+    llm = _make_async_llm(max_num_queued_reqs=1, num_unfinished=0)
+    _attach_prometheus_logger(llm)
+    llm.check_admission()
+    llm.output_processor.get_num_unfinished_requests.return_value = 1
+    with pytest.raises(QueueOverflowError):
+        llm.check_admission()
+    assert _admission_rejection_count("max_num_queued_reqs") == 1
+    assert _admission_rejection_count("max_num_queued_tokens") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_n", [1, 3])
+async def test_parallel_admission_is_all_or_nothing(first_n: int):
+    """An n>1 request reserves either all its capacity or none of it."""
+
+    async def add_request_async(_request):
+        await asyncio.sleep(0)
+
+    llm = _make_request_test_llm(3, add_request_async)
+    second_n = 3 if first_n == 1 else 1
+    first = _make_engine_request("first", first_n)
+    second = _make_engine_request("second", second_n)
+    results = await asyncio.gather(
+        llm.add_request("first", first, first.params),
+        llm.add_request("second", second, second.params),
+        return_exceptions=True,
+    )
+
+    assert not isinstance(results[0], Exception)
+    assert isinstance(results[1], QueueOverflowError)
+    assert llm.output_processor.get_num_unfinished_requests() == first_n
+    assert llm.engine_core.add_request_async.await_count == first_n
+
+
+@pytest.mark.asyncio
+async def test_parallel_admission_cancellation_cleans_up_all_children():
+    """Cancellation during core submission must release every reserved slot."""
+    first_submission_started = asyncio.Event()
+
+    async def add_request_async(_request):
+        first_submission_started.set()
+        await asyncio.Event().wait()
+
+    llm = _make_request_test_llm(3, add_request_async)
+    request = _make_engine_request("parallel", 3)
+    output = llm.generate(request, request.params, request.request_id)
+    generate_task = asyncio.create_task(anext(output))
+
+    await first_submission_started.wait()
+    generate_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await generate_task
+
+    assert llm.engine_core.add_request_async.await_count == 1
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
+    assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
 
 
 # ---------------------------------------------------------------------------

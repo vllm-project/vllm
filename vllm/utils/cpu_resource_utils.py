@@ -128,6 +128,7 @@ def check_cgroup_memory_available(
     Low headroom logs a warning, but does not reject the allocation because
     cgroup usage can include reclaimable memory. If the cgroup limit or usage
     cannot be read, the check is skipped.
+
     """
     cgroup_limit = get_cgroup_memory_limit()
     cgroup_usage = get_cgroup_memory_usage()
@@ -171,7 +172,7 @@ def get_memory_affinity(pid: int = 0) -> list[int]:
 
 
 def parse_id_list(raw_str: str) -> list[int]:
-    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]"""
+    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]."""
     result: list[int] = []
     if not raw_str:
         return result

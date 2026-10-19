@@ -23,8 +23,7 @@ class ThreadSafeHFTokenizerMixin:
 
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
-    """
-    If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
+    """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
@@ -105,8 +104,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    By default, transformers will recompute multiple tokenizer properties
+    """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
@@ -126,10 +124,11 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
+    # of vocab size, we should take the greater value. vocab_size is a
+    # count, so the largest id it implies is vocab_size - 1.
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+            max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property

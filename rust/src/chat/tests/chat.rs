@@ -227,6 +227,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -296,6 +297,7 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
             "required": ["city"],
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context = vllm_chat::ResolvedToolContext::new(
         &request.messages,

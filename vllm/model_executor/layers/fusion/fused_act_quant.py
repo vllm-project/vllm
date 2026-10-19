@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Producer side of the QuantizedActivation contract for activation layers.
+"""Producer side of the QuantizedActivation contract for activation layers.
 
 Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
@@ -64,10 +63,10 @@ def _silu_and_mul_fp8_dynamic_block(
     x: torch.Tensor, linear: LinearBase, group_size: int, quant_key: QuantKey
 ) -> QuantizedActivation:
     """SiluAndMul + FP8 dynamic per-block quantization."""
-    assert x.ndim == 2, f"Input must be 2D [batch, hidden*2], got {x.shape}"
-
+    assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
+    x = x.reshape(-1, x.shape[-1])
     num_tokens = x.shape[0]
     num_groups = d // group_size
 
@@ -103,10 +102,10 @@ def _silu_and_mul_nvfp4_dynamic(
     x: torch.Tensor, linear: LinearBase
 ) -> QuantizedActivation:
     """SiluAndMul + NVFP4 dynamic quantization."""
-    assert x.ndim == 2, f"Input must be 2D [batch, hidden*2], got {x.shape}"
-
+    assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
+    x = x.reshape(-1, x.shape[-1])
     num_tokens = x.shape[0]
 
     # NVFP4 packs 2 values into 1 byte
