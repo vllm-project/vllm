@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.distributed.parallel_state import get_dp_group, get_pcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, DPMetadata, create_forward_context
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
@@ -200,23 +200,22 @@ class DeepseekV41ModelState(DefaultModelState):
         device: torch.device,
     ):
         super().__init__(vllm_config, model, encoder_cache, device)
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_local_reqs = self.max_num_reqs * (2 if self.pcp_size > 1 else 1)
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
             # Persistent so a captured graph can read it on replay.
-            max_num_reqs = self.max_num_reqs
-            if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                max_num_reqs *= 2
             self.lookback_token_ids = torch.full(
-                (max_num_reqs, depth), -1, dtype=torch.int32, device=device
+                (max_local_reqs, depth), -1, dtype=torch.int32, device=device
             )
 
         # Per request state index; batches gather from it (see prepare_attn).
         self._replay_start_np = np.zeros(self.max_num_reqs, dtype=np.int32)
         self._replay_start = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            max_local_reqs, dtype=torch.int32, device=device
         )
-        self._replay_start_staging = UvaBufferPool(self.max_num_reqs, torch.int32)
+        self._replay_start_staging = UvaBufferPool(max_local_reqs, torch.int32)
         # The replay window and the indices of the prefix-cacheable groups, from
         # the KV cache config on first use; None until then.
         self._replay: tuple[int, torch.Tensor] | None = None
@@ -360,12 +359,17 @@ class DeepseekV41ModelState(DefaultModelState):
             replay_start = self._replay_start_staging.copy_to_gpu(
                 replay_start_np, out=self._replay_start[:num_reqs]
             )
+            local_slot_mappings = slot_mappings
+            if window and self.pcp_size > 1:
+                local_slot_mappings = slot_mappings.chunk(self.pcp_size, dim=1)[
+                    get_pcp_group().rank_in_group
+                ]
             if window and replay_start_np.any():
                 # The replayed tokens rebuild window KV only: their slots in the
                 # prefix-cacheable groups are padded so the cached KV stays as is.
                 _pad_replayed_slots_kernel[(num_reqs,)](
-                    slot_mappings,
-                    slot_mappings.stride(0),
+                    local_slot_mappings,
+                    local_slot_mappings.stride(0),
                     cacheable_groups,
                     input_batch.query_start_loc,
                     input_batch.positions,
@@ -374,6 +378,12 @@ class DeepseekV41ModelState(DefaultModelState):
                     PAD_SLOT_ID,
                     NUM_GROUPS=cacheable_groups.numel(),
                     BLOCK=1024,
+                )
+            if window and self.pcp_size > 1:
+                # Peers may have no replay rows. All ranks publish their masked
+                # cacheable slots in the same order as the gathered KV payload.
+                slot_mappings[cacheable_groups] = get_pcp_group().all_gather(
+                    local_slot_mappings[cacheable_groups], dim=1
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)

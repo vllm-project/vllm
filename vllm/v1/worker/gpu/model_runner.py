@@ -527,7 +527,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.vocab_size,
                 device=self.device,
                 mask_stride=self.decode_query_len,
-                num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
@@ -2207,6 +2206,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pending_aux_output=pending_aux_output,
         )
 
+        # Collect KV transfer results now; finalize saves after the drafter runs.
+        defer_kv_finalize = self.speculator is not None
+        model_runner_output.kv_connector_output = self.kv_connector.post_forward(
+            finished_req_ids, defer_finalize=defer_kv_finalize
+        )
+
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
         # have no cached embeddings to gather.
@@ -2288,9 +2293,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.req_states.draft_tokens, input_batch
                 )
 
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-        model_runner_output.kv_connector_output = kv_connector_output
+        if defer_kv_finalize:
+            self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output

@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 import regex as re
 
+from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
@@ -205,6 +206,21 @@ QWEN_MTP_CASE = ModelCase(
 )
 
 
+DSV2_EP_CASE = ModelCase(
+    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+    prompts=["The capital of France is"],
+    llm_kwargs=dict(
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.85,
+        enforce_eager=True,
+        max_model_len=1024,
+    ),
+    daemon_args=["--enable-expert-parallel", "--dtype", "bfloat16"],
+)
+
+
 @pytest.mark.parametrize(
     "case",
     [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
@@ -242,7 +258,17 @@ def test_ipc_cache_cold_start_and_warm_restart(
         # (envs read lazily); the daemon subprocesses spawn later and
         # inherit it.
         monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path, capfd):
+    """Same as above, with expert parallelism enabled at tp=2."""
+    run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path, capfd)
+
+
+def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
@@ -262,7 +288,7 @@ def test_ipc_cache_cold_start_and_warm_restart(
 
     with WeightCacheDaemon(
         case.model,
-        tp_size=1,
+        tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)

@@ -24,8 +24,8 @@ class GateLinear(ReplicatedLinear):
 
     1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
        any shape w/ K divisible by 8)
-    2. fp32 specialized kernel (bf16/fp32 in, fp32 out, M<=32; SM90+
-       model-specific shapes, gfx950 any shape)
+    2. fp32 specialized kernel (bf16/fp32 in, fp32 out; SM90+
+       model-specific shapes and batch limits, gfx950 any shape with M<=32)
     3. cuteDSL ll_fp32w_gemm (SM90+, M<=32, bf16/fp32 in, fp32 out,
        any shape)
     4. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
@@ -46,9 +46,14 @@ class GateLinear(ReplicatedLinear):
     split-K from the token count and skip the batch-invariant linear path.
     """
 
-    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
-    #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel.
+    FP32_SUPPORTED_SHAPES = {
+        (3072, 256),
+        (6144, 128),
+        (5120, 256),
+        (4096, 352),
+        (8192, 256),
+    }
     FP32_MAX_TOKENS = 32
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
@@ -454,9 +459,9 @@ def fp32_router_gemm_dispatch_impl(
     weight: torch.Tensor,
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
-    """Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
-    otherwise optionally run the experimental BF16x3 kernel for medium/large
-    SM100 router batches, then fall back to F.linear.
+    """Run the FP32 kernel for small batches, with shape-specific limits.
+
+    Larger SM100 BF16 batches use BF16x3; other inputs fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
@@ -473,7 +478,15 @@ def fp32_router_gemm_dispatch_impl(
         if weight.dtype == torch.bfloat16:
             return torch.mm(x, weight.T, out_dtype=torch.float32)
         return torch.nn.functional.linear(x.float(), weight)
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+    max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
+    if (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (256, 5120)
+    ):
+        # GB200: four token groups win through 48 for multiples of eight.
+        max_tokens = 48 if x.shape[0] % 8 == 0 else 16
+    if x.shape[0] <= max_tokens:
         return ops.fp32_router_gemm(x, weight)
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:

@@ -201,6 +201,30 @@ checkpoint's output format.
 !!! note
     With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
+### Beam Models (`beam`)
+
+Beam checkpoints describe their output format with `response_template` metadata, so the `beam` parser reads it like the `hf` parser does:
+
+```bash
+vllm serve <model> \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+```
+
+Unlike `hf`, the `beam` parser also constrains its output. For strict tools, required or named tool choice, and structured outputs, it derives a
+structural-tag grammar from the template. The grammar follows the template's tool call format, pins the arguments of strict tools when their
+encoding can be derived, allows a single call with `parallel_tool_calls=false`, and frames a structured output as the answer. Raw string arguments
+keep the `format` or `pattern` of their schema, as XGrammar keeps them in JSON strings, unless a match could end the value early. With
+`tool_choice="none"`, the grammar allows only reasoning and an answer, so a model that still sees the tools in its prompt cannot call them. When no
+grammar can be derived, required and named tool choice are rejected, and strict tools under `tool_choice="auto"` are left unconstrained with a
+warning.
+
+It also constrains the output of requests without strict tools, forced tool choice, or structured outputs to the template's format: tool calls with
+free arguments or an answer, or just the rest of an answer the prompt already opened. This always-on grammar needs the `xgrammar` structured
+outputs backend, the default, and is disabled with `VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT=0`. From the message start, every `beam` grammar opens with
+reasoning that holds visible text, unless `enable_thinking` is false.
+
 ### Hermes Models (`hermes`)
 
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
@@ -542,6 +566,25 @@ Supported models:
 * `swiss-ai/Apertus-70B-Instruct-2509`
 
 Flags: `--tool-call-parser apertus`
+
+### Muse Models (`muse`)
+
+The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
+Enable tool calling with `--enable-auto-tool-choice`,
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
+their original channel semantics, including recipient-less tool-parser content.
+
+The parsers route `to=self` and recipient-less messages to reasoning,
+`to=user` and `to=commentary` messages to content, and tool recipients to
+ATEM tool-call extraction. `to=developer` messages are omitted. Framing
+special tokens are preserved for parsing and removed from surfaced content.
+
+The Rust frontend also provides a Muse unified parser under `muse` and
+`musespark1x`, and selects it automatically for Muse Spark model names.
+Existing automatic parser selection for Muse Glimmer is unchanged.
+
+Parser availability alone does not enable Muse Spark model execution.
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

@@ -27,7 +27,6 @@ if(DEEPGEMM_SRC_DIR)
   set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,

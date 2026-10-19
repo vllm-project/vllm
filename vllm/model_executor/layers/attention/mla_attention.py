@@ -737,6 +737,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+        # Matches the graph quant replaced by fusion; writes into the output.
+        self._aiter_output_quant = (
+            self._quant_fp8_op.use_aiter and self._quant_fp8_op.enabled()
+        )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
@@ -936,6 +940,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
+            self.impl.reserve_workspace()
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1187,8 +1192,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp8_data)
+                if self._aiter_output_quant:
+                    torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                        quant_output[:quant_idx], actual, output_scale, False
+                    )
+                else:
+                    fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                    quant_output[:quant_idx].copy_(fp8_data)
             else:
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
@@ -2024,6 +2034,7 @@ def build_mla_chunked_context_metadata(
     dcp_local_block_size: int,
     dcp_virtual_block_size: int,
     dcp_manager: MLADCPManager | None = None,
+    align_indptr: bool = False,
 ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
     """Build chunked-context metadata for an MLA prefill.
 
@@ -2043,6 +2054,7 @@ def build_mla_chunked_context_metadata(
         dcp_local_block_size: Per-rank interleave block size for DCP.
         dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
         dcp_manager: Shared MLA DCP collective manager.
+        align_indptr: Align packed int32 indptr slices to 16 bytes for CuTe DSL.
 
     Returns:
         The chunked-context metadata, or None when no prefill has any context.
@@ -2122,6 +2134,15 @@ def build_mla_chunked_context_metadata(
         num_requests = len(plan.seq_lens)
         num_tokens = sum(plan.seq_lens)
         num_local_tokens = num_tokens
+
+        if align_indptr:
+            # CuTe DSL requires 16-byte-aligned int32 indptrs.
+            padding = -boundary_offset % 4
+            cu_seq_lens_flat.extend([0] * padding)
+            cu_seqlens_q_flat.extend([0] * padding)
+            if use_dcp:
+                padded_local_cu_seq_lens_flat.extend([0] * padding)
+            boundary_offset += padding
 
         seq_lens_flat.extend(plan.seq_lens)
         cu_seq_lens_flat.extend(itertools.accumulate(plan.seq_lens, initial=0))
@@ -2616,6 +2637,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu[reqs_start:] - query_start_loc_cpu[reqs_start]
             )
 
+            align_indptr = False
+            if (
+                self._prefill_backend.get_name() == "TRTLLM_RAGGED"
+                and self.vllm_config.attention_config.trtllm_ragged_backend
+                == "cute-dsl"
+            ):
+                align_indptr = True
+
             chunked_context_metadata = build_mla_chunked_context_metadata(
                 context_lens_cpu=context_lens_cpu,
                 prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
@@ -2628,6 +2657,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dcp_local_block_size=self.dcp_local_block_size,
                 dcp_virtual_block_size=self.dcp_virtual_block_size,
                 dcp_manager=self.dcp_manager,
+                align_indptr=align_indptr,
             )
 
             prefill_metadata = MLACommonPrefillMetadata(
