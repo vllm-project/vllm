@@ -10,9 +10,12 @@ prefill.
 Conversely, a prompt chunk of exactly decode_query_len tokens has a decode
 batch's shape, and must not be classified as a uniform decode batch.
 
-split_decodes_prefills_and_extends assumes more: that requests carrying computed
-context precede those carrying none, since it takes the first context-less
-request as the start of the prefills and does not re-check the rest.
+split_decodes_prefills_and_extends took the first context-less request as the
+start of the prefills, so it needed requests carrying computed context to
+precede those carrying none. It no longer relies on that: it clamps the prefill
+boundary past the last row with context, so the classification is correct under
+any ordering. The ordering still decides how much lands in the extend region,
+and has to be asserted on its own because the clamp hides it.
 """
 
 import ast
@@ -347,15 +350,16 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
 def test_sorted_batches_never_put_context_on_the_prefill_side():
     """Random batches through the real sort and the real splitter.
 
-    The splitter counts every request from the first context-less one onward as
-    a prefill without re-checking them, so nothing carrying context may land at
-    or after that boundary. Asserted over every threshold the splitter can be
-    called with, from 1 (cp_utils) to decode_query_len (the model runner).
+    Nothing carrying context may be classified as a prefill, at any threshold
+    the splitter can be called with, from 1 (cp_utils) to decode_query_len (the
+    model runner).
 
-    Note the boundary is the first context-less request the splitter classifies
-    as a prefill, which needs query_len > decode_threshold. A context-less
-    1-token request stays in the decode group by design, so it may precede a
-    request with context without putting it on the prefill side.
+    Since the clamp, this holds for any ordering, so what it really covers is
+    the clamp rather than the sort: it would still pass if the sort key stopped
+    reading computed context. That is deliberate -- it is the end-to-end
+    property users care about, and the sort is pinned separately by
+    test_sort_key_reads_state_slots_not_batch_positions and
+    test_gather_hands_the_request_state_to_the_sort.
     """
     rng = np.random.default_rng(0)
     for decode_query_len in (1, 2, 4, 8):
@@ -606,10 +610,21 @@ def test_padded_drafts_on_a_context_less_prompt_keep_the_prefill_region_clear():
         [num_tokens_per_req[r] for r in order],
         [int(num_computed[req_id_to_index[r]]) for r in order],
     )
-    for decode_threshold in (1, 4):
-        num_prefills = split_decodes_prefills_and_extends(metadata, decode_threshold)[2]
-        prefill_rows = order[len(order) - num_prefills :] if num_prefills else []
-        assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
-            f"threshold={decode_threshold} put a request with computed context "
-            f"in the prefill region: {prefill_rows}"
-        )
+    # Only threshold 1 exercises this. The padded row is decode_query_len long,
+    # so at threshold 4 it is decode-shaped, nothing in the batch is a prefill,
+    # and the splitter returns before it reaches the clamp -- which is why this
+    # bug belongs to the cp_utils caller alone.
+    assert split_decodes_prefills_and_extends(metadata, 4)[2] == 0
+
+    num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
+        metadata, 1
+    )
+    # Without the clamp the padded row ends the extend region at position 1,
+    # and "prefix_hit" loses its 1024 cached tokens. With it, the boundary moves
+    # past the last row with context and there is no prefill region at all.
+    assert (num_decodes, num_extends, num_prefills) == (0, 3, 0)
+    prefill_rows = order[len(order) - num_prefills :] if num_prefills else []
+    assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
+        f"threshold=1 put a request with computed context "
+        f"in the prefill region: {prefill_rows}"
+    )
