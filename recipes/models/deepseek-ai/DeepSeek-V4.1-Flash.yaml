@@ -96,6 +96,12 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,4,5],[5,24,1]]}'
+      # The B300 AgentX lanes (SemiAnalysisAI/InferenceX#4231) verify the full
+      # 5-token block, the setting their golden acceptance curve was measured with.
+      b300:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
   text_only:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
     args:
@@ -422,11 +428,38 @@ strategy_overrides:
           # KV moves over the NVLink fabric between trays.
           UCX_TLS: "cuda_copy,cuda_ipc,tcp"
           UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+      # B300: DEP8 decode per node (SemiAnalysisAI/InferenceX#4231, 4P1D c2048).
+      # The qualified prefill runs DEP2 workers, four to a node; the builder's pool
+      # is one DEP8 engine per node. EFA transport settings stay in the guide.
+      b300:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - "--kernel-config"
+          - '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+          - "--engram-config"
+          - '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}'
+          - "--enable-ep-weight-filter"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--prefill-schedule-interval"
+          - "2"
+          - "--numa-bind"
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+          VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+          UCX_MEMTYPE_CACHE: "n"
+          UCX_MEMTYPE_REG_WHOLE: "n"
+          UCX_RNDV_PIPELINE_ERROR_HANDLING: "y"
     prefill:
       nodes: 1
       parallelism:
         default: tp
         gb300: dep
+        b300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
@@ -441,6 +474,18 @@ strategy_overrides:
             - "8192"
             - "--compilation-config"
             - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"max_cudagraph_capture_size":2046}'
+        b300:
+          extra_args:
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "16384"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--prefix-cache-retention-interval"
+            - "32768"
+            - "--compilation-config"
+            - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}'
     decode:
       nodes:
         default: 1
@@ -448,6 +493,7 @@ strategy_overrides:
       parallelism:
         default: tp
         gb300: dep
+        b300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
@@ -462,6 +508,21 @@ strategy_overrides:
             - "--compilation-config"
             - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
             - "--no-enable-prefix-caching"
+        # 132 sequences per rank (4P1D c2048); the per-point values are in the guide.
+        b300:
+          extra_args:
+            - "--max-num-seqs"
+            - "132"
+            - "--max-num-batched-tokens"
+            - "1320"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":792,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432,438,444,450,456,462,468,474,480,504,528,552,576,600,624,648,672,696,720,744,768,792]}'
+            - "--no-enable-prefix-caching"
+            - "--enable-eplb"
+            - "--eplb-config"
+            - '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":true,"log_balancedness_interval":3000}'
+          extra_env:
+            VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP: "4"
 
 hardware_notes:
   dgx_station_gb300:
@@ -972,6 +1033,12 @@ guide: |
   Set the request's `model` to the served model name selected for the engine.
 
   ### B300 disaggregated: DEP2 prefill x N, DEP8 decode
+
+  In the command builder, B300 with Prefill/Decode Disaggregation renders the DEP8 decode engine
+  at the 4P1D c2048 settings (EPLB included) and a prefill pool with the same per-engine
+  settings. The builder sizes pools in whole nodes, so its prefill is one DEP8 engine per node
+  rather than four DEP2 engines. The KV connectors, EFA transport, sidecar launch and KV
+  router below are not expressible there; use this section for them.
 
   The disaggregated B300 deployment in
   [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231)
