@@ -164,6 +164,118 @@ SPARSE_BACKEND_BATCH_SPECS = {
     ]
 }
 
+
+@pytest.mark.parametrize("rows,heads", [(0, 6), (1, 6), (7, 32), (32, 64), (129, 64)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("strided", [False, True])
+def test_flashinfer_empty_shards_preserve_valid_rows_during_graph_replay(
+    rows, heads, dtype, strided
+):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        zero_empty_sparse_rows,
+    )
+
+    step = 2 if strided else 1
+    output = torch.randn(rows, heads, 512 * step, device="cuda", dtype=dtype)[
+        ..., ::step
+    ]
+    lse = torch.randn(heads, rows * step, device="cuda").T[::step]
+    original, original_lse = output.clone(), lse.clone()
+    counts = torch.ones(rows, device="cuda", dtype=torch.int32)
+    zero_empty_sparse_rows(output, lse, counts)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        zero_empty_sparse_rows(output, lse, counts)
+    for mode in (0, 1, 2):
+        counts.fill_(mode)
+        if mode == 2:
+            counts[::3] = 0
+        output.copy_(original)
+        lse.copy_(original_lse)
+        # Empty-shard kernels may leave NaN payloads. Never multiply them by zero.
+        output[::3] = float("nan")
+        expected = output.clone().masked_fill_((counts == 0)[:, None, None], 0)
+        expected_lse = lse.clone().masked_fill_((counts == 0)[:, None], -float("inf"))
+        graph.replay()
+        torch.testing.assert_close(output, expected, rtol=0, atol=0, equal_nan=True)
+        torch.testing.assert_close(lse, expected_lse, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("is_nope", [False, True])
+@pytest.mark.parametrize("return_lse", [False, True])
+def test_flashinfer_cleanup_preserves_backend_empty_row_contract(
+    monkeypatch, is_nope, return_lse
+):
+    import flashinfer.decode
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl._workspace_buffer = torch.empty(1, device="cuda")
+    impl.bmm1_scale = impl.bmm2_scale = 1.0
+    impl.qk_nope_head_dim, impl.kv_lora_rank, impl.qk_rope_head_dim = 128, 512, 64
+    impl.need_to_return_lse_for_decode = return_lse
+    impl.is_nope_mla = is_nope
+    impl.index_group = object.__new__(HiSparseMLAIndexGroup)
+    raw_output = torch.randn(3, 1, 2, 512, device="cuda", dtype=torch.bfloat16)
+    raw_output[1] = float("nan")
+    raw_lse = torch.randn(3, 2, device="cuda")
+
+    def attention(**kwargs):
+        if return_lse:
+            return raw_output.clone(), raw_lse.clone()
+        return raw_output.clone()
+
+    monkeypatch.setattr(
+        flashinfer.decode, "trtllm_batch_decode_with_kv_cache_mla", attention
+    )
+    query = torch.empty(3, 2, 576, device="cuda", dtype=torch.bfloat16)
+    cache = torch.empty(1, 64, 576, device="cuda", dtype=torch.bfloat16)
+    indices = torch.tensor(
+        [[0, -1], [-1, -1], [0, 1]], device="cuda", dtype=torch.int32
+    )
+    counts = torch.tensor([1, 0, 2], device="cuda", dtype=torch.int32)
+    output, lse = impl._run_mqa_kernel(query, cache, indices, counts)
+
+    expected = raw_output[:, 0].clone()
+    # NoPE+LSE masks only LSE; ordinary MLA without LSE leaves O untouched.
+    if is_nope != return_lse:
+        expected[1] = 0
+    torch.testing.assert_close(output, expected, rtol=0, atol=0, equal_nan=True)
+    if return_lse:
+        raw_lse[1] = -float("inf")
+        torch.testing.assert_close(lse, raw_lse, rtol=0, atol=0)
+    else:
+        assert lse is None
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("topk", [128, 2048])
+def test_dcp_valid_counts_match_empty_row_mask(world_size, topk):
+    from vllm.v1.attention.backends.mla.sparse_utils import (
+        triton_filter_and_convert_dcp_index,
+    )
+
+    requests = torch.zeros(8, device="cuda", dtype=torch.int32)
+    blocks = torch.arange(64, device="cuda", dtype=torch.int32)[None]
+    indices = torch.randint(0, 4096, (8, topk), device="cuda", dtype=torch.int32)
+    indices[0] = -1
+    indices[1] = 0  # Only rank zero owns this row.
+    indices[2, ::2] = -1
+    for rank in range(world_size):
+        physical, counts = triton_filter_and_convert_dcp_index(
+            requests,
+            blocks,
+            indices,
+            world_size,
+            rank,
+            NUM_TOPK_TOKENS=topk,
+            return_valid_counts=True,
+        )
+        torch.testing.assert_close(
+            counts, (physical != -1).sum(dim=-1).int(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(counts == 0, (physical == -1).all(dim=-1))
+
+
 SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
     seq_lens=[1024] * 2, query_lens=[256] * 2
 )

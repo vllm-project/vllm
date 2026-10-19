@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -42,6 +43,54 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _zero_empty_sparse_rows_kernel(
+    output,
+    lse,
+    valid_counts,
+    O_ROW: tl.constexpr,
+    O_HEAD: tl.constexpr,
+    O_DIM: tl.constexpr,
+    L_ROW: tl.constexpr,
+    L_HEAD: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if tl.load(valid_counts + row) == 0:
+        for start in range(0, HEADS * DIM, BLOCK):
+            x = start + tl.arange(0, BLOCK)
+            tl.store(
+                output + row * O_ROW + (x // DIM) * O_HEAD + (x % DIM) * O_DIM,
+                0,
+                x < HEADS * DIM,
+            )
+        h = tl.arange(0, triton.next_power_of_2(HEADS))
+        tl.store(lse + row * L_ROW + h * L_HEAD, -float("inf"), h < HEADS)
+
+
+def zero_empty_sparse_rows(
+    output: torch.Tensor, lse: torch.Tensor, valid_counts: torch.Tensor
+) -> None:
+    """Sanitize empty shards without reading or rewriting nonempty outputs."""
+    rows, heads, dim = output.shape
+    if rows == 0:
+        return
+    assert valid_counts.shape == (rows,) and valid_counts.is_contiguous()
+    assert lse.shape == (rows, heads)
+    _zero_empty_sparse_rows_kernel[(rows,)](
+        output,
+        lse,
+        valid_counts,
+        *output.stride(),
+        *lse.stride(),
+        heads,
+        dim,
+        1024,
+    )
 
 
 class _FlashInferMLASparseBackendBase(AttentionBackend):
@@ -671,9 +720,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             else:
                 out.masked_fill_(empty_queries[:, None, None], 0.0)
         elif lse is not None:
-            empty_rows = (topk_indices == -1).all(dim=-1)
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+            zero_empty_sparse_rows(out, lse, seq_lens)
         return out, lse
 
     @staticmethod
