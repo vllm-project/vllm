@@ -103,7 +103,7 @@ class _RecordingQuantConfig(QuantizationConfig):
 
 
 def _reference_chunk_lengths(lengths: list[int], window: int) -> list[int]:
-    """Positive-length chunking: a zero remainder is one full window."""
+    """A zero length adds no chunk. A zero remainder is one full window."""
     chunks: list[int] = []
     for length in lengths:
         full, remainder = divmod(length, window)
@@ -438,6 +438,14 @@ def test_forward_pads_to_chunk_max_and_cu_seqlens(monkeypatch):
         ([101], [13, 1]),
         ([200], [26]),
         ([1, 2, 5, 50, 100, 101], [1, 2, 3, 7, 13, 14, 1]),
+        # Zero-length rows must not overwrite another row's tail.
+        ([50, 0], [13]),
+        ([150, 0], [13, 4]),
+        ([50, 0, 30], [13, 4]),
+        ([0, 50], [13]),
+        ([100, 0], [13]),
+        ([0, 200], [26]),
+        ([0, 150, 0], [13, 1]),
     ]
     for feature_lens, aftercnn in cases:
         expect_lengths = _reference_chunk_lengths(feature_lens, WINDOW)

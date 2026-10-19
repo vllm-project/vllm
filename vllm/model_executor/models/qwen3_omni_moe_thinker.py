@@ -519,9 +519,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # One D2H for (chunk_count, pad_width). For positive lengths,
-        # clamp(max=n_window*2).amax() equals chunk_lengths.max() after the
-        # zero-tail rewrite, so the max is not read back.
+        # One D2H for (chunk_count, pad_width). clamp(max=window).amax()
+        # equals chunk_lengths.max() after the rewrite: a zero length is not
+        # a chunk, and every kept chunk is <= window.
         window = self.n_window * 2
         chunk_num = torch.ceil(feature_lens / window).long()
         if feature_lens.numel() == 0:
@@ -539,20 +539,24 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         if chunk_count == 0:
             return input_features.new_empty((0, self.proj2.output_size))
 
+        # Extra slot is a sink. A zero-length row repeats the previous tail
+        # (a leading zero is -1 and would wrap onto the last chunk). Point
+        # those rows at the sink so the scatter does not boolean-index.
         chunk_lengths = torch.full(
-            (chunk_count,),
+            (chunk_count + 1,),
             window,
             dtype=torch.long,
             device=feature_lens.device,
         )
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        # A zero remainder is a full window. Fold that in before the scatter
-        # so the tail update does not boolean-index.
+        tail_chunk_index = torch.where(chunk_num > 0, tail_chunk_index, chunk_count)
+        # A zero remainder on a positive multiple is a full last window.
         remainder = feature_lens % window
         remainder = torch.where(
             remainder == 0, remainder.new_full((), window), remainder
         )
         chunk_lengths[tail_chunk_index] = remainder
+        chunk_lengths = chunk_lengths[:-1]
 
         padded_feature = _gather_audio_chunks(input_features, chunk_lengths, pad_width)
 
