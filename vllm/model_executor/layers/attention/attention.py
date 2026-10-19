@@ -15,6 +15,10 @@ from vllm.config import (
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.kv_fake_quant import (
+    get_kv_fake_quant_format,
+    kv_cache_fake_quant,
+)
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
@@ -331,6 +335,12 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.quant_config = quant_config
         self.layer_name = prefix
+        self.kv_fake_quant_format = get_kv_fake_quant_format()
+        if self.kv_fake_quant_format is not None and kv_cache_dtype != "auto":
+            raise ValueError(
+                "KV cache fake quant expects a BF16/FP16 cache "
+                f"(--kv-cache-dtype auto), got {kv_cache_dtype!r} for layer {prefix}"
+            )
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -536,6 +546,13 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
+        if (
+            self.kv_fake_quant_format is not None
+            and key is not None
+            and value is not None
+        ):
+            key = kv_cache_fake_quant(key, self.kv_fake_quant_format)
+            value = kv_cache_fake_quant(value, self.kv_fake_quant_format)
         kv_cache_dummy_dep = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.

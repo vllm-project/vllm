@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_KV_CACHE_FAKE_QUANT: str = ""
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1265,6 +1266,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
+    # KV-cache fake quantization for accuracy studies ("mxfp4" / "nvfp4" QDQ of
+    # K/V into a BF16 cache). See
+    # vllm/model_executor/layers/attention/kv_fake_quant.py. Empty = off.
+    "VLLM_KV_CACHE_FAKE_QUANT": lambda: os.getenv("VLLM_KV_CACHE_FAKE_QUANT", ""),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),
