@@ -360,6 +360,24 @@ def test_scheduler_rejects_inconsistent_worker_namespaces(monkeypatch, no_report
             worker.shutdown()
 
 
+def test_scheduler_binds_when_ranks_share_a_report_key(monkeypatch):
+    """Without DCP, the engine keys every PCP rank's report by its TP rank."""
+    install_memory_runtime(monkeypatch)
+    vllm_config = _vllm_config(
+        {"mode": "embedded"}, prefill_context_parallel_size=2, world_size=2
+    )
+    config = _kv_cache_config()
+    scheduler = UMBPStoreConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    try:
+        scheduler.set_xfer_handshake_metadata({0: worker.get_handshake_metadata()})
+
+        assert scheduler.connector_scheduler.codec == worker.connector_worker.codec
+    finally:
+        scheduler.shutdown()
+        worker.shutdown()
+
+
 def test_layout_planner_builds_scatter_gather_ranges():
     planner = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config())
     plan = planner.plan_for_block(
@@ -1368,6 +1386,7 @@ def test_embedded_connector_core_flow(monkeypatch):
         vllm_config, KVConnectorRole.SCHEDULER, config
     )
     worker_connector = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    handshake(scheduler_connector, worker_connector)
     caches = {
         name: torch.empty_strided(
             (8, 2, 16, 8),
@@ -1641,6 +1660,7 @@ def test_embedded_tp_dcp_rank_local_store_flow(monkeypatch):
         vllm_config, KVConnectorRole.SCHEDULER, config
     )
     worker_connector = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    handshake(scheduler_connector, worker_connector)
     scheduler_connector.update_state_after_alloc(
         request,
         SimpleNamespace(get_block_ids=lambda group_ids: ([3, 4],)),
@@ -1693,6 +1713,9 @@ def test_embedded_logical_hit_requires_all_tp_dcp_objects(monkeypatch):
         world_size=2,
     )
     connector = UMBPStoreConnector(vllm_config, KVConnectorRole.SCHEDULER, config)
+    handshake(
+        connector, UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, config)
+    )
     scheduler = connector.connector_scheduler
     assert scheduler is not None
     request = SimpleNamespace(

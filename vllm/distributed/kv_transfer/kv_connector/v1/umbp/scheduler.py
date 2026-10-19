@@ -60,14 +60,18 @@ class _StoreEvent:
 
 
 class UMBPStoreConnectorScheduler:
-    """Own vLLM prefix matching while the runtime owns lookup transport."""
+    """Own vLLM prefix matching while the runtime owns lookup transport.
+
+    Without a runtime and codec the scheduler neither looks up nor stores
+    until ``bind_namespace`` supplies them.
+    """
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
-        runtime: UMBPSchedulerHandle,
-        codec: BlockIdentityCodec,
+        runtime: UMBPSchedulerHandle | None,
+        codec: BlockIdentityCodec | None,
         topology: RankTopology | None = None,
     ) -> None:
         self.block_size, resolved_hash_block_size = resolve_kv_cache_block_sizes(
@@ -113,10 +117,21 @@ class UMBPStoreConnectorScheduler:
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
 
+    def bind_namespace(
+        self, runtime: UMBPSchedulerHandle, codec: BlockIdentityCodec
+    ) -> None:
+        self.runtime = runtime
+        self.codec = codec
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         if not self.enable_lookup:
+            return 0, False
+        if self.runtime is None:
+            logger.warning_once(
+                "UMBP lookup is disabled until workers report their namespace"
+            )
             return 0, False
         hashes = request.block_hashes
         if not hashes or request.num_tokens < self.block_size:
@@ -189,6 +204,7 @@ class UMBPStoreConnectorScheduler:
     def _lookup_objects(
         self, request: Request, local_tokens: int, hashes: Sequence[bytes]
     ) -> tuple[dict[int, list[tuple[bytes, tuple[str, ...]]]], list[str]]:
+        assert self.codec is not None
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
         for group_id, unit in self._lookup_units.items():
@@ -392,6 +408,7 @@ class UMBPStoreConnectorScheduler:
         num_external_tokens: int,
     ) -> list[BlockTransferPlan]:
         """Plan the logical objects selected by the external hit window."""
+        assert self.codec is not None
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         spec = tracker.load_spec
         local_tokens = spec.local_tokens if spec is not None else 0
@@ -434,6 +451,8 @@ class UMBPStoreConnectorScheduler:
         block_ids_override: tuple[list[int], ...] | None = None,
     ) -> list[BlockTransferPlan]:
         """Describe full blocks produced by a scheduled prefill."""
+        if self.codec is None:
+            return []
         request_id = getattr(request, "request_id", None) or request.req_id
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         # Scheduled speculative tokens are not yet verified and have no block
@@ -512,7 +531,8 @@ class UMBPStoreConnectorScheduler:
             return False
         self._load_specs.clear()
         self._pending_loads.clear()
-        return self.runtime.clear()
+        return True if self.runtime is None else self.runtime.clear()
 
     def close(self) -> None:
-        self.runtime.close()
+        if self.runtime is not None:
+            self.runtime.close()

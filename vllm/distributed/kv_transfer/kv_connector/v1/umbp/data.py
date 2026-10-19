@@ -20,6 +20,7 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
@@ -132,17 +133,29 @@ class UMBPNamespace:
     value: str
 
     @classmethod
+    def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
+        """Return the explicit ``key_namespace``, or None when it is derived."""
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        configured = extra.get("key_namespace", "auto")
+        if configured == "auto":
+            return None
+        if not isinstance(configured, str) or not configured:
+            raise ValueError("key_namespace must be a non-empty string or 'auto'")
+        return cls(configured)
+
+    @classmethod
     def from_vllm_config(
         cls,
         vllm_config: Any,
         kv_cache_config: KVCacheConfig,
     ) -> UMBPNamespace:
-        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-        configured = extra.get("key_namespace", "auto")
-        if configured != "auto":
-            if not isinstance(configured, str) or not configured:
-                raise ValueError("key_namespace must be a non-empty string or 'auto'")
-            return cls(configured)
+        """Derive the namespace from a worker's per-layer KV cache config.
+
+        The scheduler's config flattens UniformTypeKVCacheSpecs groups, so the
+        scheduler adopts the namespace its workers report instead.
+        """
+        if (configured := cls.configured(vllm_config)) is not None:
+            return configured
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -186,6 +199,13 @@ class UMBPNamespace:
             fields["speculative"] = speculative
         payload = json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()
         return cls(hashlib.sha256(payload).hexdigest()[:32])
+
+
+@dataclass(frozen=True)
+class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
+    """Namespace a worker derived, reported to the scheduler at startup."""
+
+    namespace: str
 
 
 @dataclass(frozen=True)
