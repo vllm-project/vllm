@@ -49,10 +49,13 @@ repos:
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
         # --torch-backend cu132 would restrict every torch-ecosystem package to
-        # the cu132 index, where torchaudio 2.11.0 does not exist (torchaudio is
-        # no longer released, and its last build predates cu132). Point at the
-        # index directly so torchaudio falls back to its PyPI wheel.
-        --extra-index-url, "https://download.pytorch.org/whl/cu132",
+        # the stable cu132 index, which has no torchaudio 2.11.0. PyPI's
+        # torchaudio is a cu130 build that fails to import against cu132 torch,
+        # so use the test channel (which has torchaudio 2.11.0+cu132) and emit
+        # it into the lock so installs from it resolve the same way.
+        # Drop this once cu132 torchaudio is on the stable index.
+        --extra-index-url, "https://download.pytorch.org/whl/test/cu132",
+        --emit-index-url,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
