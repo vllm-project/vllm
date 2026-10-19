@@ -18,6 +18,7 @@ import requests
 from benchmarks.programmable_kv_cache.client import envelope
 from benchmarks.programmable_kv_cache.rollout import RolloutClient
 from benchmarks.programmable_kv_cache.run_rollout_matrix import (
+    install_signal_handlers,
     require_free_port,
     source_hashes,
     stop,
@@ -92,6 +93,8 @@ async def recover(args, report, restart, stop_store):
         assert fallback["token_ids"] == original["token_ids"]
         report["saved_associations"] = await client.call("associations", {})
         assert report["saved_associations"]["items"]
+        for identifier in tuple(client.background):
+            await client.drain(identifier)
         await client.http.aclose()
         restart()
         replacement = RolloutClient(base, "priority")
@@ -150,6 +153,7 @@ def main():
     parser.add_argument("--store-port", type=int, default=19151)
     parser.add_argument("--evaluation-samples", type=int, default=0)
     args = parser.parse_args()
+    install_signal_handlers()
     for port in (args.port, args.port + 1, args.store_port, args.store_port + 2):
         require_free_port(port)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,8 +254,6 @@ def main():
                 "8",
                 "--max-num-batched-tokens",
                 "2048",
-                "--kv-cache-memory-bytes",
-                str(2 << 30),
                 "--gpu-memory-utilization",
                 "0.45",
                 "--mamba-cache-mode",
@@ -294,8 +296,7 @@ def main():
             f"http://127.0.0.1:{args.port}",
             "--dataset",
             str(args.dataset),
-            "--primitive-actions",
-            "--validate-movement",
+            "--tier",
             "mooncake",
             "--output",
             str(args.output_dir / f"{label}.json"),
@@ -309,10 +310,10 @@ def main():
         master = store("store")
         source = server(args.port, "recovery-source", "source")
         destination = server(args.port + 1, "recovery-destination", "destination")
+        # The destination also hosts Store segments until the deliberate outage.
         http_check(
             "cross-engine", ["--destination-url", f"http://127.0.0.1:{args.port + 1}"]
         )
-        stop(destination)
         if args.evaluation_samples:
             http_check(
                 "model-quality", ["--evaluation-samples", str(args.evaluation_samples)]
@@ -320,6 +321,7 @@ def main():
 
         def restart():
             stop(source)
+            stop(destination)
             store("restarted-store")
             server(args.port, "recovery-source", "restarted-source")
 

@@ -17,7 +17,9 @@ from benchmarks.programmable_kv_cache.client import ACTIVE, envelope
 
 
 class RolloutClient:
-    def __init__(self, base_url: str, mode: str, *, seed: int = 0):
+    def __init__(
+        self, base_url: str, mode: str, *, seed: int = 0, trace_rpc: bool = False
+    ):
         self.http = httpx.AsyncClient(
             base_url=base_url, timeout=600, limits=httpx.Limits(max_connections=256)
         )
@@ -28,11 +30,18 @@ class RolloutClient:
         self.controls: list[dict[str, Any]] = []
         self.turns: dict[str, int] = {}
         self.targets: dict[str, dict[str, Any]] = {}
-        self.background: dict[str, asyncio.Task] = {}
+        self.background: dict[str, list[asyncio.Task]] = {}
+        self.preparations: dict[str, asyncio.Task] = {}
         self.resume_events: dict[str, asyncio.Event] = {}
         self.pending_moves: dict[str, str] = {}
         self.invocation: dict[str, str] = {}
         self.boundary = 1
+        self.rpc_stats: dict[str, dict[str, float]] = {}
+        self.trace_rpc = trace_rpc
+        self.rpc_rows: list[dict[str, Any]] = []
+
+    def _track(self, request_id: str, task: asyncio.Task) -> None:
+        self.background.setdefault(request_id, []).append(task)
 
     async def initialize(self) -> None:
         response = await self.http.get("/v1/models")
@@ -56,20 +65,45 @@ class RolloutClient:
                     if group["prefix_cacheable"]
                 )
             )
-        elif self.mode not in ("native", "noop"):
+        elif self.mode not in ("native", "idle", "noop"):
             raise ValueError("The selected arm requires programmable KV control")
 
     async def call(self, method: str, payload: dict) -> Any:
-        response = await self.http.post(
-            "/v1/kv/control",
-            json={
-                "method": method,
-                "invocation": self.invocation,
-                "payload": payload,
-            },
-        )
-        response.raise_for_status()
-        return response.json()
+        started = time.perf_counter()
+        response = None
+        try:
+            response = await self.http.post(
+                "/v1/kv/control",
+                json={
+                    "method": method,
+                    "invocation": self.invocation,
+                    "payload": payload,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+        finally:
+            elapsed = time.perf_counter() - started
+            stats = self.rpc_stats.setdefault(
+                method, {"calls": 0, "seconds": 0, "max_seconds": 0}
+            )
+            stats["calls"] += 1
+            stats["seconds"] += elapsed
+            stats["max_seconds"] = max(stats["max_seconds"], elapsed)
+            if self.trace_rpc:
+                self.rpc_rows.append(
+                    {
+                        "method": method,
+                        "started": started,
+                        "seconds": elapsed,
+                        "message_id": payload.get("message_id"),
+                        "action_id": payload.get("action_id"),
+                        "session_id": payload.get("session_id"),
+                        "status_code": response.status_code
+                        if response is not None
+                        else None,
+                    }
+                )
 
     async def wait(
         self,
@@ -78,16 +112,33 @@ class RolloutClient:
         *,
         timeout: float = 30,
         acknowledge: bool = True,
+        initial: dict | None = None,
+        await_registration: bool = False,
     ) -> dict:
         deadline = time.monotonic() + timeout
+        registration_delay = 0.01
         while time.monotonic() < deadline:
-            result = await self.call(
-                "operation",
-                {
-                    "message_id": message_id,
-                    "action_id": action_id,
-                },
-            )
+            try:
+                result = (
+                    initial
+                    if initial is not None
+                    else await self.call(
+                        "operation",
+                        {"message_id": message_id, "action_id": action_id},
+                    )
+                )
+            except httpx.HTTPStatusError as error:
+                if not (
+                    await_registration
+                    and error.response.status_code == 404
+                    and error.response.json().get("error", {}).get("code") == "missing"
+                ):
+                    raise
+                await asyncio.sleep(registration_delay)
+                registration_delay = min(0.25, registration_delay * 2)
+                continue
+            await_registration = False
+            initial = None
             if result["status"] not in ACTIVE:
                 children = [
                     await self.wait(
@@ -129,7 +180,7 @@ class RolloutClient:
                 )
                 if submitted is not None:
                     submitted.set()
-                result = await self.wait(message)
+                result = await self.wait(message, initial=receipt["results"][0])
             except (httpx.HTTPError, TimeoutError) as error:
                 self.controls.append(
                     {"status": "client_error", "error": str(error), "action_type": kind}
@@ -154,6 +205,9 @@ class RolloutClient:
                     return {"status": "failed", "reason": str(error)}
             else:
                 result["driver_seconds"] = time.perf_counter() - started
+                result["driver_started"] = started
+                result["driver_action_type"] = kind
+                result["driver_target"] = payload.get("target")
                 if kind == "signal":
                     result["driver_signal"] = payload["signal"]
                     result["driver_resume_after_seconds"] = payload.get(
@@ -179,10 +233,9 @@ class RolloutClient:
         started = time.perf_counter()
         turn = self.turns.get(request_id, 0)
         self.turns[request_id] = turn + 1
-        pending = self.background.pop(request_id, None)
-        if pending is not None:
-            self.resume_events.pop(request_id).set()
-            await pending
+        resumed = self.resume_events.pop(request_id, None)
+        if resumed is not None:
+            resumed.set()
         continuation = f"turn-{turn}"
         session = f"{self.run_id}-{request_id}"
         body: dict[str, Any] = {
@@ -210,7 +263,7 @@ class RolloutClient:
             body.pop("stop", None)
             body.pop("stop_token_ids", None)
         association = None
-        if self.mode not in ("native", "noop"):
+        if self.mode not in ("native", "idle", "noop", "quota"):
             end = len(prompt_ids) // self.boundary * self.boundary
             if end:
                 association = f"{session}-{continuation}"
@@ -227,7 +280,6 @@ class RolloutClient:
                         "target": {
                             "kind": "request",
                             "request_id": "$request",
-                            "end_token": end,
                         },
                     },
                     "1",
@@ -265,6 +317,17 @@ class RolloutClient:
             if response.is_error:
                 await response.aread()
                 response.raise_for_status()
+            if association is not None:
+                self._track(
+                    request_id,
+                    asyncio.create_task(
+                        self.wait(
+                            association,
+                            acknowledge=request_id not in self.pending_moves,
+                            await_registration=True,
+                        )
+                    ),
+                )
             async for line in response.aiter_lines():
                 if not line.startswith("data: ") or line == "data: [DONE]":
                     continue
@@ -300,23 +363,28 @@ class RolloutClient:
             "ttft": (first_token or finished) - started,
             "usage": usage,
             "finish_reason": finish,
+            "association_message_id": association,
         }
         self.rows.append(row)
-        if association is not None:
-            await self.wait(
-                association, acknowledge=request_id not in self.pending_moves
-            )
         return row
 
     async def pause(self, request_id: str, predicted_seconds: float = 0.25) -> None:
         target = self.targets.get(request_id)
         if target is None:
             return
-        resumed = asyncio.Event()
-        self.resume_events[request_id] = resumed
+        resumed = self.resume_events.setdefault(request_id, asyncio.Event())
         predicted_at = time.monotonic() + predicted_seconds
+        message = self.pending_moves.pop(request_id, None)
+        previous = self.preparations.get(request_id)
 
         async def prepare():
+            if previous is not None:
+                await previous
+            if self.mode == "retention":
+                await self.action(
+                    "signal", {"target": target, "signal": "importance"}, version="1"
+                )
+                return
             if self.mode == "priority":
                 await self.action(
                     "retain",
@@ -332,7 +400,6 @@ class RolloutClient:
                 return
             movement_target = target
             if self.mode != "policy":
-                message = self.pending_moves.pop(request_id, None)
                 if message is None:
                     return
                 saved = await self.wait(message, "move")
@@ -417,17 +484,28 @@ class RolloutClient:
                     version="1",
                 )
 
-        self.background[request_id] = asyncio.create_task(prepare())
+        task = asyncio.create_task(prepare())
+        self.preparations[request_id] = task
+        self._track(request_id, task)
+
+    async def drain(self, request_id: str) -> None:
+        resumed = self.resume_events.pop(request_id, None)
+        if resumed is not None:
+            resumed.set()
+        pending = self.background.pop(request_id, [])
+        self.preparations.pop(request_id, None)
+        if pending:
+            outcomes = await asyncio.gather(*pending, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
 
     async def finish(self, request_id: str) -> None:
-        pending = self.background.pop(request_id, None)
-        if pending is not None:
-            self.resume_events.pop(request_id).set()
-            await pending
+        await self.drain(request_id)
         move = self.pending_moves.pop(request_id, None)
         if move is not None:
             await self.wait(move, "move")
-        target = self.targets.pop(request_id, None)
+        target = self.targets.get(request_id)
         if target is None:
             return
         try:
@@ -439,10 +517,11 @@ class RolloutClient:
                 error.response.json().get("error", {}).get("code")
                 == "missing_association"
             ):
+                self.targets.pop(request_id, None)
                 return
             raise
         if snapshot["items"]:
-            await self.action(
+            result = await self.action(
                 "finish_task",
                 {
                     "session_id": target["session_id"],
@@ -452,14 +531,27 @@ class RolloutClient:
                 },
                 version="1",
             )
+            if "associations_removed" not in result.get("completed_steps", []):
+                raise RuntimeError(f"Task cleanup did not complete: {result}")
+        self.targets.pop(request_id, None)
 
     async def close(self) -> None:
         try:
             for event in self.resume_events.values():
                 event.set()
-            if self.background:
-                await asyncio.gather(*self.background.values(), return_exceptions=True)
+            outcomes = await asyncio.gather(
+                *(task for tasks in self.background.values() for task in tasks),
+                return_exceptions=True,
+            )
+            self.background.clear()
+            self.preparations.clear()
+            failure = next((r for r in outcomes if isinstance(r, BaseException)), None)
             for identifier in tuple(self.targets):
-                await self.finish(identifier)
+                try:
+                    await self.finish(identifier)
+                except Exception as error:
+                    failure = failure or error
+            if failure is not None:
+                raise failure
         finally:
             await self.http.aclose()

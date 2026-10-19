@@ -6,106 +6,13 @@ import argparse
 import json
 import random
 import time
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
-import regex as re
 
+from benchmarks.programmable_kv_cache.client import answer_number
 from vllm import LLM, SamplingParams
-from vllm.v1.kv_hints.control import ControlError
-
-
-def answer_number(text: str) -> str | None:
-    values = re.findall(r"-?\d[\d,]*(?:\.\d+)?", text.split("####")[-1])
-    if not values:
-        return None
-    try:
-        return str(Decimal(values[-1].replace(",", "")).normalize())
-    except InvalidOperation:
-        return None
-
-
-def validate_control(llm: LLM) -> dict[str, Any]:
-    capabilities = llm.get_kv_control_capabilities()
-    assert len(capabilities) == 1
-    caps = capabilities[0]
-    invocation = {key: caps[key] for key in ("engine_id", "engine_epoch", "namespace")}
-
-    def submit(name, action_type, payload):
-        return llm.kv_control(
-            "submit",
-            invocation,
-            {
-                "protocol_version": "0.1",
-                "message_id": name,
-                "actions": [
-                    {
-                        "action_id": "action",
-                        "action_type": action_type,
-                        "action_version": "1",
-                        "payload": payload,
-                    }
-                ],
-            },
-        )
-
-    associated = submit(
-        "associate",
-        "associate",
-        {
-            "session_id": "evaluation",
-            "continuation_id": "main",
-            "expected_revision": 0,
-            "target": {"kind": "hashes", "namespace": caps["namespace"], "blocks": []},
-        },
-    )
-    assert associated["results"][0]["status"] == "completed"
-    payload = {
-        "target": {
-            "kind": "session",
-            "session_id": "evaluation",
-            "continuation_id": "main",
-        },
-        "owner_id": "evaluation",
-        "declaration_id": "retain",
-        "priority": 50,
-        "ttl_seconds": 300,
-        "scope": "follow_growth",
-    }
-    retained = submit("retain", "retain", payload)
-    assert retained["results"][0]["status"] == "completed"
-    assert submit("retain", "retain", payload)["replayed"]
-    queried = llm.kv_control(
-        "operation", invocation, {"message_id": "retain", "action_id": "action"}
-    )
-    assert queried == retained["results"][0]
-    events = llm.kv_control("events", invocation, {"stream": "operation"})
-    assert events[-1] == queried
-    try:
-        llm.kv_control("associations", {**invocation, "engine_epoch": "stale"}, {})
-    except ControlError as error:
-        assert error.code == "stale_epoch"
-    else:
-        raise AssertionError("Stale epoch was accepted")
-    signal = submit(
-        "signal", "signal", {"target": payload["target"], "signal": "tool_wait"}
-    )
-    assert signal["results"][0]["status"] == "unconsumed"
-    revision = llm.kv_control("associations", invocation, {})["revision"]
-    finished = submit(
-        "finish",
-        "finish_task",
-        {"session_id": "evaluation", "expected_revision": revision},
-    )
-    assert finished["results"][0]["status"] == "completed"
-    assert llm.kv_control("associations", invocation, {})["items"] == []
-    return {
-        "capabilities": caps,
-        "request_free_lifecycle": "passed",
-        "cache_transfer_tested": False,
-    }
 
 
 def main():
@@ -124,11 +31,15 @@ def main():
     parser.add_argument("--tensor-parallel-size", type=int, default=2)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=1024)
-    parser.add_argument("--kv-cache-memory-bytes", type=int, default=4 << 30)
+    memory = parser.add_mutually_exclusive_group()
+    memory.add_argument("--kv-cache-memory-bytes", type=int)
+    memory.add_argument("--gpu-memory-utilization", type=float, default=0.5)
     parser.add_argument("--min-accuracy", type=float, default=0.8)
     parser.add_argument("--max-accuracy-drop", type=float, default=0.01)
     parser.add_argument("--enable-kv-control", action="store_true")
     args = parser.parse_args()
+    if not 0 < args.gpu_memory_utilization <= 1:
+        parser.error("gpu-memory-utilization must be in (0, 1]")
     train = pq.read_table(
         args.dataset / "main/train-00000-of-00001.parquet"
     ).to_pylist()
@@ -144,6 +55,7 @@ def main():
         "max_num_seqs": 8,
         "max_num_batched_tokens": 2048,
         "kv_cache_memory_bytes": args.kv_cache_memory_bytes,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
         "enable_prefix_caching": True,
         "mamba_cache_mode": "align",
         "enforce_eager": True,
@@ -168,8 +80,6 @@ def main():
         "runs": {},
     }
     try:
-        if args.enable_kv_control:
-            report["control"] = validate_control(llm)
         report["cache_groups"] = llm.llm_engine.engine_core.call_utility(
             "get_kv_cache_group_metadata"
         )

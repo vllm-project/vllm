@@ -13,14 +13,19 @@ import random
 import statistics
 import subprocess
 import time
+from collections import Counter
 from contextlib import suppress
 from pathlib import Path
 
 import pyarrow.parquet as pq
 from prometheus_client.parser import text_string_to_metric_families
 
-from benchmarks.programmable_kv_cache.evaluate import answer_number
+from benchmarks.programmable_kv_cache.client import answer_number
 from benchmarks.programmable_kv_cache.rollout import RolloutClient
+from benchmarks.programmable_kv_cache.run_rollout_matrix import (
+    dataset_identity,
+    source_hashes,
+)
 
 
 def arithmetic(expression: str) -> str:
@@ -62,6 +67,18 @@ def percentile(values, fraction):
     return values[round((len(values) - 1) * fraction)]
 
 
+async def run_episodes(episodes):
+    tasks = [asyncio.create_task(episode) for episode in episodes]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def summarize(report):
     rows, episodes = report["requests"], report["episodes"]
     seconds = report["seconds"]
@@ -86,6 +103,24 @@ def summarize(report):
     )
     transfer_before = report.get("control_before", {}).get("transfers", {})
     transfer_after = report.get("control_capacity", {}).get("transfers", {})
+    phases = {}
+    for phase in ("queue", "prefill", "decode", "inference"):
+        prefix = f"vllm:request_{phase}_time_seconds"
+        elapsed = after.get(prefix + "_sum", 0) - before.get(prefix + "_sum", 0)
+        count = after.get(prefix + "_count", 0) - before.get(prefix + "_count", 0)
+        phases[phase] = {
+            "seconds_sum": elapsed,
+            "count": count,
+            "mean_seconds": elapsed / count if count else None,
+        }
+    workload = sorted(
+        (row["request_id"], row["turn"], row["prompt_ids"], len(row["token_ids"]))
+        for row in rows
+    )
+    families = {}
+    for episode in episodes:
+        if "family" in episode:
+            families.setdefault(episode["family"], []).append(episode)
     return {
         "completed_rollouts": len(episodes),
         "rollouts_per_second": len(episodes) / seconds,
@@ -101,7 +136,35 @@ def summarize(report):
         "ttft_p95": percentile(ttft, 0.95),
         "ttft_p99": percentile(ttft, 0.99),
         "request_latency_p95": percentile([r["seconds"] for r in rows], 0.95),
+        "prepare_wait_p50": percentile([r["prepare_wait_seconds"] for r in rows], 0.5),
+        "prepare_wait_p99": percentile([r["prepare_wait_seconds"] for r in rows], 0.99),
+        "control_rpc": report.get("control_rpc", {}),
+        "driver_cpu_seconds": report.get("driver_cpu_seconds"),
+        "control_status_counts": dict(Counter(r["status"] for r in report["controls"])),
+        "policy_result_counts": dict(
+            Counter(
+                f"{r['origin']['policy_name']}:{r['action_type']}:{r['status']}"
+                for r in report["controls"]
+                if r.get("origin")
+            )
+        ),
+        "server_request_phases": phases,
+        "workload_sha256": hashlib.sha256(json.dumps(workload).encode()).hexdigest(),
         "rollout_latency_p95": percentile([e["seconds"] for e in episodes], 0.95),
+        "client_queue_p95": percentile(
+            [e["client_queue_seconds"] for e in episodes], 0.95
+        ),
+        "family_latency": {
+            str(family): {
+                "completed": len(items),
+                "mean_seconds": statistics.mean(e["seconds"] for e in items),
+                "p95_seconds": percentile([e["seconds"] for e in items], 0.95),
+                "max_client_queue_seconds": max(
+                    e["client_queue_seconds"] for e in items
+                ),
+            }
+            for family, items in sorted(families.items())
+        },
         "reward_mean": statistics.mean(e["reward"] for e in episodes)
         if episodes and all("reward" in e for e in episodes)
         else None,
@@ -373,8 +436,9 @@ async def live(args, client, report):
             )
 
     report["workload_started"] = time.perf_counter()
-    await asyncio.gather(
-        *(
+    report["workload_cpu_started"] = time.process_time()
+    await run_episodes(
+        (
             episode(offset, index, sample)
             for sample in range(args.samples)
             for offset, index in enumerate(indices)
@@ -386,6 +450,7 @@ async def replay(args, client, report):
     with gzip.open(args.trace, "rt") as file:
         trace = json.load(file)
     trajectories = {}
+    episode_metadata = {e["request_id"]: e for e in trace["episodes"]}
     for row in trace["requests"]:
         trajectories.setdefault(row["request_id"], []).append(row)
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -415,30 +480,48 @@ async def replay(args, client, report):
             await client.finish(identifier)
             report["episodes"].append(
                 {
+                    **{
+                        k: v
+                        for k, v in episode_metadata[identifier].items()
+                        if k in ("family", "index", "sample")
+                    },
                     "request_id": identifier,
                     "seconds": time.perf_counter() - started,
                     "client_queue_seconds": started - queued,
                     "num_turns": len(rows),
                 }
             )
+            if len(report["episodes"]) % 32 == 0:
+                print(
+                    json.dumps({"completed_rollouts": len(report["episodes"])}),
+                    flush=True,
+                )
 
     report["workload_started"] = time.perf_counter()
-    await asyncio.gather(*(episode(key, rows) for key, rows in trajectories.items()))
+    report["workload_cpu_started"] = time.process_time()
+    await run_episodes(episode(key, rows) for key, rows in trajectories.items())
 
 
 async def run(args):
-    client = RolloutClient(args.base_url, args.mode, seed=args.seed)
+    client = RolloutClient(
+        args.base_url, args.mode, seed=args.seed, trace_rpc=args.trace_control_rpc
+    )
     report = {
+        "clock": {"wall_time": time.time(), "monotonic": time.perf_counter()},
         "config": {
             k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
         },
         "requests": client.rows,
         "controls": client.controls,
+        "control_rpc": client.rpc_stats,
+        "control_rpc_requests": client.rpc_rows,
         "episodes": [],
         "passed": False,
         "source_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
+        "source_hashes": source_hashes(),
+        "dataset_identity": dataset_identity(args.dataset),
         "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "cache_salt": client.run_id,
     }
@@ -458,6 +541,9 @@ async def run(args):
         report["seconds"] = time.perf_counter() - report.get(
             "workload_started", started
         )
+        report["driver_cpu_seconds"] = (
+            time.process_time() - report["workload_cpu_started"]
+        )
         response = await client.http.get("/metrics")
         response.raise_for_status()
         report["metrics_after"] = response.text
@@ -466,6 +552,10 @@ async def run(args):
             assert not report["control_capacity"].get("policy_errors"), report[
                 "control_capacity"
             ]
+            assert not report["control_capacity"]["records"], report["control_capacity"]
+            assert not any(r["status"] == "client_error" for r in client.controls)
+            report["logical_after"] = await client.call("associations", {})
+            assert not report["logical_after"]["items"], report["logical_after"]
         report["summary"] = summarize(report)
         report["passed"] = True
         print(json.dumps(report["summary"]), flush=True)
@@ -503,7 +593,17 @@ def main():
     parser.add_argument("--trace", type=Path)
     parser.add_argument(
         "--mode",
-        choices=["native", "noop", "priority", "movement", "composed", "policy"],
+        choices=[
+            "native",
+            "idle",
+            "noop",
+            "quota",
+            "retention",
+            "priority",
+            "movement",
+            "composed",
+            "policy",
+        ],
         default="native",
     )
     parser.add_argument("--prompts", type=int, default=16)
@@ -529,6 +629,7 @@ def main():
     )
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--trace-control-rpc", action="store_true")
     args = parser.parse_args()
     if not 0 <= args.replay_pause_floor <= 60:
         parser.error("replay-pause-floor must be between zero and 60 seconds")

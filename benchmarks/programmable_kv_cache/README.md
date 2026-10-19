@@ -2,6 +2,7 @@
 
 - [分支实现与验证结果](../../docs/programmable-kvc/testing.md)
 - [已执行实验报告](../../docs/programmable-kvc/rollout-report-2026-10-12.md)
+- [控制开销与扩大工作集实验](../../docs/programmable-kvc/rollout-report-2026-10-18.md)
 - [当前与历史证据索引](../../openspec/changes/programmable-kv-cache/validation.md)
 - [原语与生命周期契约](../../vllm/v1/kv_hints/README.md)
 
@@ -42,36 +43,48 @@ PYTHONPATH=../verl \
 
 `run_rollout_matrix.py` 创建并清理本次测试的服务、Mooncake Store 和 GPU 采样进程；所需端口被占用时拒绝启动。
 它排除启动与显式预热时间，检查缓存重置成功，并记录配置、命令、源码摘要和逐轮数据。
-以下只复现已经记录的 8 GiB 容量充足点，不定义正常部署预算：
+主要性能对照默认采用 `gpu_memory_utilization=0.5`，不覆盖 KV 字节预算。
+省略 `--trace` 时，工具先运行真实在线工具循环采集轨迹；采集时间不计入后面的固定工作量回放。
+以下配置包含 256 条 rollout 和 32 个前缀家族，实际缓存压力以日志与指标为准：
 
 ```bash
 .venv/bin/python -m benchmarks.programmable_kv_cache.run_rollout_matrix \
   --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
   --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --trace benchmarks/programmable_kv_cache/results/rollout-2026-10-11/optimized-native-live.json.gz \
   --gpus 0,3 \
-  --cache-gib 8 \
-  --concurrency 16 \
-  --arms native,policy \
+  --gpu-memory-utilization 0.5 \
+  --prompts 64 --samples 4 --families 32 --fewshot 48 \
+  --concurrency 64 --max-num-seqs 64 \
+  --arms native,idle,noop,policy \
   --repeats 3 \
-  --output-dir /tmp/kv-fit-reproduce
+  --output-dir /tmp/kv-deployment-comparison
 ```
 
 | 参数/模式 | 用途 |
 | --- | --- |
-| `native` / `noop` | 原生 APC；或启用控制器和连接器，但不发送 hint |
+| `native` / `idle` / `noop` | 原生 APC；仅启用控制器；同时启用控制器和连接器。后两项不发送 hint |
 | `priority` / `movement` / `composed` | 应用端显式保留、搬运、二者组合 |
 | `policy` | 信号驱动的本地策略与调度 |
-| `--policy-components quota` | 在 `policy` 配置中仅启用配额调度 |
+| `--policy-components quota` | 仅启用配额调度；不加载搬运连接器，不发送无用关联与工具信号 |
+| `--policy-components retention` | 通过 importance 信号触发保留策略，并检查真实优先级操作；不加载搬运连接器。可同时启用 quota |
+| `--gpu-memory-utilization 0.5` | 默认主要性能预算，各对照记录实际分配出的 KV 容量 |
 | `--cache-gib 2` | 历史人工配额压力诊断；不要当作正常资源主基线 |
 | `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
 | `--trace` | 固定原输入、输出长度和暂停，重新生成；不执行工具或报告回放奖励分数 |
 | `--tool-delay` / `--replay-pause-floor` | 明确标记的人为工具等待；不能代替真实服务延迟 |
 | `--oracle` / `--prediction-seconds` | 回放预测诊断；检查实际信号及派生 COPY 覆盖 |
 | `--enforce-eager` / `--disable-custom-all-reduce` | 显式诊断选项；不与默认编译/图执行的速度混算 |
+| `--profile` | 服务预热后启用 Yappi 多线程 CPU 计时；GPU 默认跳过 128 个迭代后采集 32 个迭代，由 `--profile-delay-iterations` / `--profile-iterations` 调整。与普通计时实验分开 |
 
-矩阵当前 `--concurrency` 同时设置客户端并发与服务 `max_num_seqs`。
-扩大工作负载前，应分别设置客户端与服务并发，并按实际部署确定各对照配置共同使用的 KV 预算。
+`--concurrency` 设置客户端并发；服务并发由 `--max-num-seqs` 设置，省略时沿用客户端并发。
+CPU profiling 需要 `uv pip install yappi`。
+诊断记录包含 Python 线程的函数统计、各线程 CPU 计数和线程名；Store master 的 CPU 也单独记录。
+原生 C++ 后台线程仍需结合 CPU 计数与传输结果分析；累计函数时间存在嵌套，不能直接相加。
+GPU trace 在负载期间保存为未压缩 JSON，压缩应在服务结束后执行，避免同步压缩阻塞推理和控制进度。
+各轮记录等价工作量摘要、控制 RPC 次数与耗时、准备等待分位数，以及服务端排队、prefill、decode、inference 的计数和时间总和。
+RPC 与逐请求耗时存在并发重叠，不能相加当作整轮耗时。
+后台控制不阻塞下一轮推理；任务结束时仍收齐控制结果并清理，相关时间包含在整轮计时内。
+真实加载和缓存发布继续遵守引擎资源屏障。
 
 ## 功能测试的服务配置
 
@@ -143,31 +156,19 @@ CPU 功能检查则使用以下连接器，无需 Mooncake Store：
 
 ## 功能测试驱动
 
-请求完成时 MOVE、下次入口 COPY：
+`http_control.py` 同时检查请求完成时 MOVE、下次入口 COPY、独立 COPY/MOVE、优先级与真实缓存命中。
+原 `primitive_control.py` 已合并到此入口；协议错误、请求关联增长和重放边界由 pytest 覆盖。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,3 \
-  .venv/bin/python -m benchmarks.programmable_kv_cache.primitive_control \
+  .venv/bin/python -m benchmarks.programmable_kv_cache.http_control \
   --base-url http://127.0.0.1:18083 \
   --engine-id kv-validation \
   --dataset /home/youwei/bzh/dataset/openai/gsm8k \
   --output /tmp/kv-attached.json
 ```
 
-独立控制、真实复用与可选质量检查：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,3 \
-  .venv/bin/python -m benchmarks.programmable_kv_cache.http_control \
-  --base-url http://127.0.0.1:18083 \
-  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
-  --primitive-actions \
-  --validate-movement mooncake \
-  --validate-request-associations \
-  --output /tmp/kv-independent.json
-```
-
-使用 CPU 服务时将 `--validate-movement` 的值改成 `cpu`；该驱动在推理时禁用自动 CPU 加载。
+默认使用 Mooncake；CPU 服务使用 `--tier cpu`，该驱动在推理时禁用自动 CPU 加载。
 加 `--evaluation-samples 128` 做质量门槛，加 `--destination-url` 验证兼容目的引擎的实际命中。
 两个服务须采用相同模型、布局、Store 与并行设置，各有独立引擎 ID；同用 GPU 0/3 时两者均可采用 `--gpu-memory-utilization 0.45`，目的端口用 18084。
 
@@ -175,7 +176,7 @@ CUDA_VISIBLE_DEVICES=0,3 \
 | --- | --- |
 | `lifecycle.py` | `--base-url --trace --output`；原生控制与 Mooncake，检查共享分支、TTL、取消和恢复竞争 |
 | `weight_update.py` | `--base-url --model --trace --output`；同机 GPU、对应模型检查点、IPC 权重传输后端和 Store |
-| `evaluate.py` | `--model --dataset --output`，可加 `--enable-kv-control`；重算/APC 质量基线 |
+| `evaluate.py` | `--model --dataset --output`，可加 `--enable-kv-control`；仅运行重算/APC 质量基线，控制协议由 pytest 检查 |
 | `control_overhead.py` | `--output`；测量 CPU 元数据操作，不代表推理服务或 RL 吞吐 |
 | `run_recovery.py` | 自建服务/Store，`--model --dataset --trace --output-dir`，可加 `--evaluation-samples 128`；新组合测试驱动尚未执行 |
 
@@ -184,7 +185,7 @@ IPC 权重检查要求服务额外启用 `--weight-transfer-config '{"backend":"
 其他示例不需要这些权重更新设置。
 
 策略在启动时通过 `--kv-control-config` 配置，空 `policies` 使信号不产生策略动作。
-`primitive_control.py --policy` 的专用服务可用：
+`http_control.py --policy` 的专用服务可用：
 
 ```json
 {
@@ -206,7 +207,7 @@ IPC 权重检查要求服务额外启用 `--weight-transfer-config '{"backend":"
 ```
 
 对该服务使用 `--engine-id kv-policy --policy`。
-`http_control.py` 的协议检查使用无策略或不消费工具信号的配置。
+`--policy` 额外检查工具等待与恢复信号产生的派生搬运结果。
 `signal` 完成表示策略处理了信号；派生 COPY 等操作必须分别查询，完成后才表示缓存准备就绪。
 收集同一消息中的全部动作及派生操作结果后再 ACK。
 `residency` 返回查询时的 GPU 状态快照，历史 COPY 成功不保证之后持续驻留。

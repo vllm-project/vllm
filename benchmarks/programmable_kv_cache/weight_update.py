@@ -46,6 +46,8 @@ async def run(args):
     ).hexdigest()
 
     async def update(tensor, version):
+        for identifier in tuple(client.background):
+            await client.drain(identifier)
         response = await client.http.post(
             "/pause", params={"mode": "wait", "clear_cache": False}
         )

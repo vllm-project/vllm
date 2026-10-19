@@ -3,9 +3,22 @@
 """Small control helpers shared by the real-server examples."""
 
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import regex as re
+
 ACTIVE = {"received", "queued", "accepted", "running"}
+
+
+def answer_number(text: str) -> str | None:
+    values = re.findall(r"-?\d[\d,]*(?:\.\d+)?", text.split("####")[-1])
+    if not values:
+        return None
+    try:
+        return str(Decimal(values[-1].replace(",", "")).normalize())
+    except InvalidOperation:
+        return None
 
 
 def envelope(message_id: str, kind: str, payload: dict[str, Any], version: str = "1.0"):
