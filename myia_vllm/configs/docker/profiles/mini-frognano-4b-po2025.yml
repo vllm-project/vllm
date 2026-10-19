@@ -3,6 +3,13 @@
 # STATUT : profil CANONIQUE de production depuis le 2026-10-08 après-midi,
 # promu après essai (GO user « Go pour les tests immédiats »). Un seul
 # drapeau de différence avec la config précédente : `--kv-cache-dtype fp8`.
+#
+# BUMP v0.31.0 → v0.32.0 le 2026-10-19 soir (GO user, alignement sur la prod
+# ai-01 PR #122 même jour) : image + volume compile-cache dédié `…-v0320`
+# (l'ancien `…-v0310` est conservé pour rollback) + hygiène auth
+# `--api-key` flag → `VLLM_API_KEY` env natif (même valeur via .env).
+# Le volume `…-v0310` reste déclaré dans aucun profil actif mais persiste
+# côté Docker : rollback = réécrire la ligne image + volume vers v0310.
 # Rollback armé (un pas en arrière, retour chaud) :
 # `mini-frognano-4b-po2025-kvauto-rollback.yml` (NVFP4, KV auto/BF16).
 # Rollback profond : `…-bf16-rollback.yml` (BF16 intégral).
@@ -53,7 +60,7 @@
 # ----------------------------------------------------------------------------
 services:
   mini_frognano_4b:
-    image: vllm/vllm-openai:v0.31.0
+    image: vllm/vllm-openai:v0.32.0
     container_name: myia_vllm-mini-frognano-4b
     runtime: nvidia
     labels:
@@ -63,10 +70,14 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - OMP_NUM_THREADS=4
       - VLLM_LOGGING_LEVEL=INFO
+      # Auth via env natif vLLM (hygiène 19/10 : le flag --api-key exposait la
+      # clé dans la ligne de commande du conteneur, visible docker inspect) ;
+      # compose interpole la MÊME valeur du .env — zéro changement d'auth.
+      - VLLM_API_KEY=${VLLM_API_KEY_MINI}
 
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
-      - vllm-compile-cache-frognano-v0310:/root/.cache/vllm
+      - vllm-compile-cache-frognano-v0320:/root/.cache/vllm
 
     ports:
       - "5003:8000"
@@ -92,7 +103,6 @@ services:
       --enable-auto-tool-choice
       --reasoning-parser qwen3
       --default-chat-template-kwargs '{"enable_thinking": false}'
-      --api-key ${VLLM_API_KEY_MINI}
 
     deploy:
       resources:
@@ -120,4 +130,4 @@ services:
         max-file: "3"
 
 volumes:
-  vllm-compile-cache-frognano-v0310:
+  vllm-compile-cache-frognano-v0320:
