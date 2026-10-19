@@ -5,7 +5,7 @@ import enum
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (
     ExplicitEncoderDecoderPrompt,
     MultiModalDataDict,
+    MultiModalHashes,
     PromptType,
     TextPrompt,
 )
@@ -58,15 +59,17 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.transformers_utils.processor import (
+    cached_feature_extractor_from_config,
+    cached_processor_from_config,
+)
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backend import (
     AttentionType,
@@ -85,27 +88,19 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+from .whisper_logmel import whisper_log_mel_spectrogram
 
 logger = init_logger(__name__)
+
+# Bumps the processor-cache key when PCM replaces cached log-mel.
+WHISPER_AUDIO_IPC_SCHEMA_KEY = "audio_ipc_schema"
+WHISPER_AUDIO_IPC_SCHEMA = "whisper_pcm_f32_v1"
 
 
 class WhisperPosEmbedType(enum.Enum):
     SINUSOIDAL = "sinusoidal"
     ROPE = "rope"
     LEARNED = "learned"
-
-
-class WhisperAudioInputs(TensorSchema):
-    """Dimensions:
-    - b: Batch size
-    - nmb: Number of mel bins
-    - t: Time frames (M)
-    """
-
-    input_features: Annotated[
-        list[torch.Tensor] | None,
-        TensorShape("b", "nmb", "t"),
-    ]
 
 
 class WhisperEncoderAttention(MMEncoderAttention):
@@ -566,6 +561,8 @@ class WhisperEncoder(nn.Module):
     def forward(
         self, input_features: torch.Tensor | list[torch.Tensor]
     ) -> torch.Tensor:
+        # Log-mel in. Ultravox replaces this method and still expects mel,
+        # so the STFT stays in WhisperForConditionalGeneration.embed_multimodal.
         hidden_states = []
         input_is_batched = False
         for features in input_features:
@@ -741,6 +738,58 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         }
 
 
+def _audio_pcm_missing(audio_pcm: object) -> bool:
+    return audio_pcm is None or (
+        isinstance(audio_pcm, (list, tuple)) and len(audio_pcm) == 0
+    )
+
+
+def _cpu_f32_pcm(audio: object) -> list[torch.Tensor]:
+    """Resampled mono waveform as CPU float32, one tensor per clip."""
+    if isinstance(audio, np.ndarray):
+        if audio.ndim == 1:
+            raw: list[object] = [audio]
+        elif audio.ndim == 2:
+            raw = [audio[index] for index in range(audio.shape[0])]
+        else:
+            raise ValueError(f"Whisper audio must be mono, got shape {audio.shape}")
+    elif isinstance(audio, torch.Tensor):
+        if audio.ndim == 1:
+            raw = [audio]
+        elif audio.ndim == 2:
+            raw = [audio[index] for index in range(audio.shape[0])]
+        else:
+            raise ValueError(
+                f"Whisper audio must be mono, got shape {tuple(audio.shape)}"
+            )
+    elif isinstance(audio, (list, tuple)):
+        raw = list(audio)
+    else:
+        raise TypeError(
+            "Whisper audio must be an array or a list of clips, "
+            f"got {type(audio).__name__}"
+        )
+
+    pcm: list[torch.Tensor] = []
+    for clip in raw:
+        if clip is None:
+            raise ValueError("Whisper audio PCM is missing for a cache miss")
+        if isinstance(clip, torch.Tensor):
+            tensor = clip.detach().to(device="cpu", dtype=torch.float32)
+        else:
+            tensor = torch.as_tensor(np.asarray(clip), dtype=torch.float32)
+        if tensor.ndim == 2 and (tensor.shape[0] == 1 or tensor.shape[-1] == 1):
+            tensor = tensor.reshape(-1)
+        if tensor.ndim != 1:
+            raise ValueError(
+                f"Whisper audio PCM must be mono, got shape {tuple(tensor.shape)}"
+            )
+        pcm.append(tensor.contiguous())
+    if not pcm:
+        raise ValueError("Whisper audio PCM is empty")
+    return pcm
+
+
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -762,14 +811,20 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         hf_kwargs: Mapping[str, object],
     ) -> HFMultiModalInputs:
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if "audio" not in hf_inputs.hf_data:
+            return hf_inputs
 
-        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
-        return hf_inputs._replace(
-            hf_kwargs=dict(
-                hf_inputs.hf_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-                truncation=True,
-            )
+        # Keep PCM out of call_hf_processor. _postprocess_output casts that
+        # BatchFeature to the model dtype; passthrough is merged afterward.
+        hf_data = dict(hf_inputs.hf_data)
+        audio = hf_data.pop("audio")
+        hf_data.pop("text", None)
+        passthrough = dict(hf_inputs.passthrough_data)
+        passthrough["audio_pcm"] = _cpu_f32_pcm(audio)
+        return HFMultiModalInputs(
+            hf_data,
+            hf_inputs.hf_kwargs if hf_data else {},
+            passthrough,
         )
 
     def _get_mm_fields_config(
@@ -777,7 +832,18 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(input_features=MultiModalFieldConfig.batched("audio"))
+        # keep_on_cpu stays false so the worker can move PCM with the batch.
+        return dict(audio_pcm=MultiModalFieldConfig.batched("audio"))
+
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        # Salt a copy only. has_hash_factors then makes a bare UUID miss.
+        kwargs = dict(inputs.hf_processor_mm_kwargs)
+        kwargs[WHISPER_AUDIO_IPC_SCHEMA_KEY] = WHISPER_AUDIO_IPC_SCHEMA
+        salted = replace(inputs, hf_processor_mm_kwargs=kwargs)
+        return salted.get_mm_hashes(
+            self.info.model_id,
+            self.info.ctx.get_mm_config().mm_hasher_algorithm,
+        )
 
     def _get_prompt_updates(
         self,
@@ -965,6 +1031,7 @@ class WhisperForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.model_config = vllm_config.model_config
         self.dtype = vllm_config.model_config.dtype
 
         with self._mark_composite_model(
@@ -1001,13 +1068,66 @@ class WhisperForConditionalGeneration(
         return decoder_outputs
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        # Required as part of SupportsMultiModal interface.
-        audio_input = self._parse_and_validate_audio_input(**kwargs)
-        # Split concatenated encoder outputs into one tensor per audio input
-        enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        # STFT stays here, not on WhisperEncoder.forward. Ultravox replaces
+        # that method and still expects mel. torch.stft stays eager.
+        audio_pcm = kwargs.get("audio_pcm")
+        if _audio_pcm_missing(audio_pcm):
+            if kwargs.get("input_features") is not None:
+                raise ValueError(
+                    "Whisper received log-mel input_features without "
+                    "audio_pcm. The renderer must ship float32 PCM; log-mel "
+                    "runs on the worker."
+                )
+            raise ValueError("Whisper requires audio_pcm to embed audio.")
+        if not isinstance(audio_pcm, (torch.Tensor, list, tuple)):
+            raise TypeError(
+                "Whisper audio_pcm must be a tensor or a list of tensors, "
+                f"got {type(audio_pcm).__name__}"
+            )
+
+        extractor = self._get_whisper_feature_extractor()
+        device = self.model.encoder.conv1.weight.device
+        log_mel = whisper_log_mel_spectrogram(
+            audio_pcm,
+            n_fft=int(extractor.n_fft),
+            hop_length=int(extractor.hop_length),
+            mel_filters=self._whisper_mel_filters(extractor, device),
+            n_samples=int(extractor.n_samples),
+            padding_value=float(extractor.padding_value),
+            dither=float(extractor.dither),
+            device=device,
+        )
+        log_mel = log_mel.to(dtype=self.model.encoder.conv1.weight.dtype)
+        enc_output = self.model.get_encoder_outputs(log_mel)
         assert enc_output is not None
-        # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
+
+    def _get_whisper_feature_extractor(self) -> WhisperFeatureExtractor:
+        cached = getattr(self, "_cached_whisper_feature_extractor", None)
+        if cached is not None:
+            return cached
+        feature_extractor = cached_feature_extractor_from_config(self.model_config)
+        if not isinstance(feature_extractor, WhisperFeatureExtractor):
+            raise TypeError(
+                "Whisper log-mel expects WhisperFeatureExtractor, got "
+                f"{type(feature_extractor).__name__}"
+            )
+        self._cached_whisper_feature_extractor = feature_extractor
+        return feature_extractor
+
+    def _whisper_mel_filters(
+        self,
+        extractor: WhisperFeatureExtractor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        cached = getattr(self, "_cached_whisper_mel_filters", None)
+        if isinstance(cached, torch.Tensor) and cached.device == device:
+            return cached
+        filters = torch.from_numpy(
+            np.ascontiguousarray(extractor.mel_filters, dtype=np.float32)
+        ).to(device=device)
+        self._cached_whisper_mel_filters = filters
+        return filters
 
     def embed_input_ids(
         self,
@@ -1019,18 +1139,6 @@ class WhisperForConditionalGeneration(
         # This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens.
         return self.model.decoder.embed_input_ids(input_ids)
-
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
-        input_features = kwargs.pop("input_features", None)
-
-        def to_dtype(value: object) -> torch.Tensor:
-            assert isinstance(value, torch.Tensor)
-            return value.to(self.dtype)
-
-        if input_features is not None:
-            input_features = json_map_leaves(to_dtype, input_features)
-
-        return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.proj_out, hidden_states)
