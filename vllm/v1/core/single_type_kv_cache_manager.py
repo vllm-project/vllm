@@ -510,6 +510,13 @@ class SingleTypeKVCacheManager(ABC):
         reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
+            if self.use_eagle:
+                # A sibling that diverges right after the junction cannot use
+                # the block past it as the EAGLE peek, so its hit lands one
+                # block lower.
+                reachable_boundaries.append(
+                    request.shared_prefix_boundary - self.block_size
+                )
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
