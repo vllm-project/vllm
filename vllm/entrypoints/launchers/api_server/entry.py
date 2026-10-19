@@ -204,13 +204,12 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.entrypoints.common.setup import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
     from vllm.entrypoints.common.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
+    from vllm.entrypoints.common.setup import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI

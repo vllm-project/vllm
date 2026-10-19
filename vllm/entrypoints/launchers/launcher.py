@@ -14,6 +14,10 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.common.cli_args import (
+    init_parser_plugin,
+    validate_api_server_args,
+)
 from vllm.entrypoints.common.setup import (
     log_non_default_args,
     log_version_and_model,
@@ -25,7 +29,6 @@ from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_addr
 from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
-from vllm.entrypoints.common.cli_args import init_parser_plugin, validate_api_server_args
 from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
