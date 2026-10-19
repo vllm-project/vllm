@@ -2102,6 +2102,7 @@ def _sync_aiter_situv2_moe_env() -> None:
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
 _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
+_GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN = 32 * 1024
 
 
 class rocm_aiter_ops:
@@ -2124,7 +2125,6 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
-        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
@@ -2196,8 +2196,6 @@ class rocm_aiter_ops:
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
-    # TODO: Consolidate under _LINEAR_ENABLED
-    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
@@ -2228,7 +2226,6 @@ class rocm_aiter_ops:
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
-        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -2565,10 +2562,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
+    def is_asm_fp4_gemm_supported(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
+        return cls._AITER_ENABLED and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -2605,6 +2602,27 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls.is_linear_enabled() and on_gfx950()
+
+    @staticmethod
+    @functools.cache
+    def _kda_gluon_prefill_importable() -> bool:
+        try:
+            from aiter.ops.triton.attention.chunk_kda import chunk_kda  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_gluon_prefill_available(cls) -> bool:
+        from vllm.platforms.rocm import get_cdna_version
+
+        return (
+            cls._AITER_ENABLED
+            and get_cdna_version() >= 4
+            and cls._kda_gluon_prefill_importable()
+        )
 
     @classmethod
     def get_aiter_allreduce(cls):
@@ -2871,11 +2889,24 @@ class rocm_aiter_ops:
         compress_ratio: int,
         num_rows: int,
         max_valid_seq_len: int | None = None,
+        topk_tokens: int | None = None,
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
         this shape."""
-        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
+        if compress_ratio < 1 or not cls.is_indexer_top_k_enabled():
             return False
+
+        if compress_ratio == 1:
+            # Uncompressed DSA indexer (DeepSeek-V3.2, GLM-5) at k=2048. Decode
+            # graphs cannot see the context length; AITER's long-context win
+            # outweighs its few-us loss on short rows. Prefill only gains once
+            # rows reach 32K tokens.
+            if topk_tokens != 2048:
+                return False
+            return not is_prefill or (
+                max_valid_seq_len is not None
+                and max_valid_seq_len >= _GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN
+            )
 
         if not is_prefill:
             assert max_valid_seq_len is not None
@@ -4341,6 +4372,20 @@ class rocm_aiter_ops:
 
     @staticmethod
     @functools.cache
+    def is_asm_fp4_gemm_tuned(n: int, k_bytes: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.gemm_op_a4w4 import get_GEMM_config
+
+            return all(
+                get_GEMM_config(m, n, 2 * k_bytes) is not None for m in (1024, 8192)
+            )
+        except ImportError:
+            return False
+
+    @staticmethod
+    @functools.cache
     def is_shuffled_per_token_w8a8_gemm_tuned(
         N: int, K: int, q_dtype_w: torch.dtype
     ) -> bool:
@@ -5109,6 +5154,50 @@ class rocm_aiter_ops:
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
             layer_input.view(*outer_shape, hidden_size),
+        )
+
+    @staticmethod
+    def kda_chunk_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor | None,
+        lower_bound: float | None,
+        cu_seqlens: torch.Tensor | None,
+        chunk_indices: torch.Tensor | None,
+        chunk_offsets: torch.Tensor | None,
+        scale: float,
+        out: torch.Tensor | None,
+        initial_state: torch.Tensor | None,
+        output_final_state: bool,
+        state_cache: torch.Tensor | None,
+        state_indices: torch.Tensor | None,
+        has_initial_state: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from aiter.ops.triton.attention.chunk_kda import chunk_kda
+
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            out=out,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
         )
 
 
