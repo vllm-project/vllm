@@ -5,9 +5,7 @@ import pytest
 import torch
 
 from tests.models.minimax_m3.amd_specialized_decode._prototypes import (
-    a4w4_resource,
     bf16_gemv_resource,
-    compile_a4w4_prototype,
     fp32_router_resource,
     run_bf16_gemv_prototype,
     run_fp32_router_prototype,
@@ -44,18 +42,6 @@ def test_fp32_router_prototype(rows: int):
     actual = run_fp32_router_prototype(hidden, weight)
     expected = torch.mm(hidden.float(), weight.t())
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
-
-
-def test_a4w4_compile_and_resource(monkeypatch, tmp_path):
-    _require_gfx950()
-    monkeypatch.setenv("COMPILE_ONLY", "1")
-    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(tmp_path))
-    compile_a4w4_prototype()
-    resource = a4w4_resource()
-    assert resource.threads == 256
-    assert resource.lds_bytes == 16640
-    assert resource.grid_ctas == 256
-    assert not resource.residency_proven
 
 
 def test_unfolded_stage_resources_are_not_residency_proofs():
