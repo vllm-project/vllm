@@ -18,6 +18,7 @@ Currently monitors:
 - Triton ``@triton.jit`` first-time compilations
   (via ``knobs.runtime.jit_post_compile_hook``)
 - TileLang ``@tilelang.jit`` first-time compilations
+- FlyDSL ``MlirCompiler.compile`` calls
 """
 
 import contextlib
@@ -39,6 +40,7 @@ _active: bool = False
 _mode: JitMonitorMode = "warn"
 _verbose: bool = False
 _cutedsl_hook_installed: bool = False
+_flydsl_hook_installed: bool = False
 _tilelang_hook_installed: bool = False
 _tilelang_jitimpl_compile_depth: int = 0
 
@@ -74,6 +76,7 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     _setup_triton_autotuning_print()
     _setup_triton_jit_hook()
     _setup_cutedsl_jit_hook()
+    _setup_flydsl_jit_hook()
 
     # Refer to #51159. tilelang ships broken symbols
     # on rocm.
@@ -322,6 +325,49 @@ def _setup_cutedsl_jit_hook() -> None:
 
     cute.compile = _MonitoredCuteCompile(cute.compile)
     _cutedsl_hook_installed = True
+
+
+# ------------------------------------------------------------------
+# FlyDSL JIT compilation hook
+# ------------------------------------------------------------------
+
+
+def _log_flydsl_jit_compile(fn_name: str) -> None:
+    _handle_jit_event(
+        backend="FlyDSL",
+        event="JIT compilation",
+        fn_name=fn_name,
+    )
+
+
+def _setup_flydsl_jit_hook() -> None:
+    """Wrap ``MlirCompiler.compile`` to warn on compilation."""
+    global _flydsl_hook_installed
+    if _flydsl_hook_installed:
+        return
+
+    try:
+        jit_function = importlib.import_module("flydsl.compiler.jit_function")
+    except Exception:
+        logger.debug("FlyDSL is not available; skipping FlyDSL JIT monitor.")
+        return
+
+    compiler_cls = getattr(jit_function, "MlirCompiler", None)
+    if compiler_cls is None:
+        logger.debug("FlyDSL MlirCompiler is unavailable; skipping FlyDSL JIT monitor.")
+        return
+
+    # `jit_function` only reaches `MlirCompiler.compile` on a cache miss, so
+    # wrapping it leaves cache hits on the hot path untouched.
+    original_compile = compiler_cls.compile
+
+    @functools.wraps(original_compile)
+    def _compile_with_monitor(cls, *args, **kwargs):
+        _log_flydsl_jit_compile(str(kwargs.get("func_name") or "<unknown>"))
+        return original_compile(*args, **kwargs)
+
+    compiler_cls.compile = classmethod(_compile_with_monitor)
+    _flydsl_hook_installed = True
 
 
 # ------------------------------------------------------------------
