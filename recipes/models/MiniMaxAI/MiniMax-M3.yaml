@@ -4,16 +4,20 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3 vision-language MoE (427B total / 26B active) for frontier coding, agent toolchains, and 1M-token reasoning via MSA sparse attention — native multimodal (image + video + computer use); BF16 plus MXFP8, NVIDIA Blackwell NVFP4, and AMD MI355X MXFP4 variants. Runs on NVIDIA (Hopper/Blackwell) and AMD CDNA4/CDNA3."
   date_added: 2026-06-12
-  date_updated: 2026-10-06
+  date_updated: 2026-10-19
   tasks:
     - text
     - multimodal
   performance_headline: "Frontier coding and agent (SWE-Bench Pro 59.0, Terminal-Bench 2.1 66.0); MSA sparse attention; 1M context"
   related_recipes: []
+  default_variant:
+    gb200: nvfp4
   hardware:
     h200: verified
     b200: verified
     b300: verified
+    # GB200: NVFP4 AgentX lane (InferenceX #4281, run 39150937290).
+    gb200: verified
     mi300x: verified
     mi355x: verified
 
@@ -79,6 +83,12 @@ features:
           - "--speculative-config"
           - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3-GQA", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}'
         hardware_overrides:
+          # GB200 AgentX lane (InferenceX #4281): FlashInfer draft attention
+          # with local argmax reduction across TP ranks.
+          gb200:
+            args:
+              - "--speculative-config"
+              - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3-GQA", "num_speculative_tokens": 3, "attention_backend": "FLASHINFER", "use_local_argmax_reduction": true}'
           amd:
             args:
               - "--speculative-config"
@@ -224,6 +234,25 @@ variants:
     extra_env:
       VLLM_FLOAT32_MATMUL_PRECISION: "high"
       VLLM_FLASHINFER_ALLREDUCE_BACKEND: "trtllm"
+    hardware_overrides:
+      # GB200 AgentX lane (InferenceX #4281, run 39150937290): one tray per TP4
+      # worker, two trays for TP8. Per-concurrency --max-num-seqs and CUDA
+      # graph sizes are in the guide.
+      gb200:
+        docker_image: "vllm/vllm-openai:nightly-5555a2d8f7116b2b4877f66516f4128176cf722a"
+        extra_args:
+          - "--enable-prefix-caching"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--no-enable-flashinfer-autotune"
+          - "--stream-interval"
+          - "20"
+        extra_env:
+          NCCL_CUMEM_ENABLE: "1"
+          NCCL_MNNVL_ENABLE: "1"
+          NCCL_NVLS_ENABLE: "1"
   mxfp4:
     model_id: "amd/MiniMax-M3-MXFP4"
     precision: mxfp4
@@ -275,6 +304,12 @@ hardware_overrides:
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
 
 strategy_overrides:
+  multi_node_tp:
+    hardware_overrides:
+      # TP8 across two GB200 trays all-reduces over MNNVL.
+      gb200:
+        extra_env:
+          VLLM_FLASHINFER_ALLREDUCE_BACKEND: "mnnvl"
   pd_cluster:
     hardware_overrides:
       blackwell:
@@ -742,6 +777,8 @@ guide: |
   ## GB200: InferenceX AgentX aggregated (Dynamo + vLLM)
 
   The GB200 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm3-fp4-gb200-dynamo-vllm-agentic-agg-mtp`, [SemiAnalysisAI/InferenceX#4281](https://github.com/SemiAnalysisAI/InferenceX/pull/4281)) serves the NVFP4 checkpoint with the GQA EAGLE3 draft (three speculative tokens) as one aggregated vLLM worker behind the Dynamo frontend's KV-aware router. TP4 runs on one 4-GPU GB200 tray; TP8 spans two trays. Image `vllm/vllm-openai:nightly-5555a2d8f7116b2b4877f66516f4128176cf722a`, Dynamo `1.6.0.dev20261016` (`pip install ai-dynamo==1.6.0.dev20261016`).
+
+  In the command builder, pick **GB200** (it defaults to the NVFP4 variant), turn on **Spec Decoding → GQA**, and use **Single-node TP** for TP4 or **Multi-node TP** with 2 nodes for TP8; that renders the worker flags and environment below. For the host-KV-offload points, the **KV Offload → Simple** pill adds the SimpleCPUOffloadConnector with its default per-rank budget; the qualified sizes are in the command further down. The per-concurrency settings in this table, the Dynamo KV-router frontend and its services stay in this guide.
 
   | Clients | TP | `--max-num-seqs` | Host KV offload | CUDA graph capture sizes |
   |---:|---:|---:|---|---|
