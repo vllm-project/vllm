@@ -112,11 +112,14 @@ class GPUWatermarkSampler(Sampler):
         )
         sampled = output.token_ids
         output_logits = output.logits
-        sampled = torch.where(
-            temperatures == 0,
-            processed_logits.argmax(dim=-1),
-            sampled,
-        )
+        # Expanded rows repeat idx_mapping rows, so the CPU temperatures
+        # cover them all without a GPU sync.
+        if self.sampling_states.any_greedy(idx_mapping_np):
+            sampled = torch.where(
+                temperatures == 0,
+                processed_logits.argmax(dim=-1),
+                sampled,
+            )
         return sampled, output_logits
 
     def _get_repeated_contexts(
