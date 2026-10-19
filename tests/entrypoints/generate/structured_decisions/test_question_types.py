@@ -59,6 +59,15 @@ def test_choice_prompt():
     )
 
 
+def test_prompt_keeps_instructions_as_given():
+    q = noul(instructions="Reply within the hour?\n\n")
+    assert q.type.prompt(q).startswith("Question: Reply within the hour?\n\n\nyes\n")
+    assert q.type.prompt(q, 2).startswith("Question 2: Reply within the hour?\n\n\n")
+    empty = noul(instructions="")
+    assert empty.type.prompt(empty) == "yes\nno\nAnswer with yes or no only."
+    assert empty.type.prompt(empty, 1).startswith("Question 1:\nyes\n")
+
+
 def test_choice_answer_shape():
     q = choice()
     answer = q.type.answer(q, [0.2, 0.7, 0.1], 0.5)

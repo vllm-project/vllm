@@ -62,9 +62,12 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
-    def prompt(self, question: Question) -> str:
+    def prompt(self, question: Question, number: int | None = None) -> str:
         """The question as the model reads it, after the state."""
-        lines = [f"Question: {question.instructions}"] if question.instructions else []
+        head = "Question" if number is None else f"Question {number}"
+        lines = [f"{head}: {question.instructions}"] if question.instructions else []
+        if not lines and number is not None:
+            lines = [f"{head}:"]
         for label, o in zip(question.labels, question.options):
             lines.append(self.reply_line(label, o))
         lines.append(self.reply_instruction)

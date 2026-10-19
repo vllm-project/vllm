@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.datastructures import State
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
@@ -33,10 +33,12 @@ from vllm.entrypoints.generate.structured_decisions.serving import (
     parse_questions,
 )
 from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_router
+from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
     StructuredDecisionError,
     build_question,
+    label_softmax,
 )
 from vllm.entrypoints.openai.decisions.serving import OpenAIServingDecisions
 from vllm.entrypoints.openai.decisions.state import init_decisions_state
@@ -1089,3 +1091,271 @@ def test_prompts_retain_question_order(decision_server):
     assert response.status_code == 200, response.text
     for i, prompt in enumerate(server.engine.generated):
         assert f"Question {i}" in server.tokenizer.decode(prompt["prompt_token_ids"])
+
+
+DGEMMA = "google/diffusiongemma-26B-A4B-it"
+
+
+def label_logprob(token_id: int) -> float:
+    return -0.1 - (token_id % 7) / 2
+
+
+async def canvas_generate(prompt, params, request_id, **kwargs):
+    """Every position returns each label's logprob from label_logprob."""
+    ids = params.logprob_token_ids
+    width = params.max_tokens
+    logprobs = {i: Logprob(label_logprob(i)) for i in ids}
+    yield RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=prompt["prompt_token_ids"],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[max(ids, key=label_logprob)] * width,
+                cumulative_logprob=None,
+                logprobs=[logprobs] * width,
+                finish_reason="length",
+            )
+        ],
+        finished=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def dgemma_renderer():
+    from vllm.tokenizers import get_tokenizer
+
+    vllm_config = VllmConfig(model_config=ModelConfig(model=DGEMMA, dtype="float32"))
+    renderer = HfRenderer(vllm_config, get_tokenizer(DGEMMA))
+    yield vllm_config, renderer
+    renderer.shutdown()
+
+
+@pytest.fixture
+def dgemma(dgemma_renderer):
+    vllm_config, renderer = dgemma_renderer
+    engine = MagicMock(spec=EngineClient)
+    engine.errored = False
+    engine.model_config = vllm_config.model_config
+    engine.vllm_config = vllm_config
+    engine.renderer = renderer
+    engine.input_processor = MagicMock()
+    engine.generate.side_effect = canvas_generate
+    online_renderer = OnlineRenderer(
+        vllm_config.model_config,
+        renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    strategy = DiffusionGemmaCanvasStrategy(
+        ReadContext(engine, online_renderer, None, "auto", {})
+    )
+    assert strategy.joint_reads and strategy.served == 256
+    return serving(engine, strategy), engine, strategy
+
+
+JOINT_PROMPT_END = """Charged twice, please refund.
+
+Question 1:
+yes: a refund is due
+no
+Answer with yes or no only.
+
+Question 2: Which team?
+A: billing - pay
+B: ship
+Answer with the letter of one option only.
+
+Question 3: How urgent?
+0: low
+1: medium
+2: high
+Answer with the number of one level only.
+
+Reply with one line per question, in order, formatted as "number: answer".\
+<turn|>
+<|turn>model
+<|channel>thought
+<channel|>"""
+
+
+def joint_request(**kwargs) -> StructuredDecisionRequest:
+    return StructuredDecisionRequest(
+        state="Charged twice, please refund.",
+        questions={
+            "refund": {"type": "noul", "criteria": {"true": "a refund is due"}},
+            "team": {
+                "type": "choice",
+                "instructions": "Which team?",
+                "criteria": {"billing": "pay", "ship": None},
+            },
+            "urgency": {
+                "type": "score",
+                "instructions": "How urgent?",
+                "criteria": ["low", "medium", "high"],
+            },
+        },
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_joint_read_answers_every_question_from_one_canvas(dgemma):
+    serving, engine, strategy = dgemma
+    tokenizer = strategy._tokenizer()
+    response = await serving.create_decision(joint_request(joint=True))
+    assert isinstance(response, StructuredDecisionResponse)
+    engine.check_admission.assert_called_once_with(1)
+    engine.generate.assert_called_once()
+    prompt, params = engine.generate.call_args.args[:2]
+    assert tokenizer.decode(prompt["prompt_token_ids"]).endswith(JOINT_PROMPT_END)
+
+    canvas = params.extra_args["diffusion_seed_canvas"]
+    assert params.extra_args["diffusion_canvas_length"] == len(canvas) == 16
+    assert params.extra_args["diffusion_read_only"]
+    # Unconstrained, so label_mass stays a full-vocabulary probability at any TP.
+    assert "diffusion_constrained" not in params.extra_args
+    assert response.joint is not None
+    (read,) = response.joint.canvases
+    assert read.questions == ["refund", "team", "urgency"]
+    slots = read.slots
+    assert params.max_tokens == slots[-1] + 1
+    template = [canvas[i] for i in range(slots[-1] + 3) if i not in slots]
+    assert tokenizer.decode(template) == "1:\n2:\n3: \n<turn|>"
+    # A label counts with and without its leading space.
+    assert strategy.slot_label_ids["A"] != strategy.label_ids["A"]
+    labels = {"refund": "yes no", "team": "A B", "urgency": "0 1 2"}
+    for qid, slot in zip(labels, slots):
+        assert canvas[slot] not in params.logprob_token_ids
+        groups = [
+            {strategy.slot_label_ids[x], strategy.label_ids[x]}
+            for x in labels[qid].split()
+        ]
+        ids = set().union(*groups)
+        assert ids <= set(params.logprob_token_ids)
+        logprobs = [max(label_logprob(i) for i in g) for g in groups]
+        probs = list(response.answers[qid]["probabilities"].values())
+        assert probs == pytest.approx(label_softmax(logprobs))
+        mass = sum(math.exp(label_logprob(i)) for i in ids)
+        assert response.diagnostics[qid].label_mass == pytest.approx(mass)
+        assert response.answers[qid]["confidence"] == pytest.approx(max(probs) * mass)
+
+    # The same request reads the same canvas again.
+    await serving.create_decision(joint_request(joint=True))
+    again = engine.generate.call_args.args[1]
+    assert again.extra_args == params.extra_args
+
+    thinking = joint_request(joint=True, chat_template_kwargs={"enable_thinking": True})
+    response = await serving.create_decision(thinking)
+    assert isinstance(response, ErrorResponse) and response.error.code == 400
+    assert engine.generate.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "served,count,canvases", [(256, 40, 1), (64, 40, 4), (32, 40, 7), (16, 64, 31)]
+)
+async def test_joint_read_splits_by_the_served_canvas(dgemma, served, count, canvases):
+    serving, engine, strategy = dgemma
+    strategy.served = served
+    request = StructuredDecisionRequest(
+        state="x",
+        questions={
+            f"q{i}": {"type": "noul", "instructions": f"Is {i} even?"}
+            for i in range(count)
+        },
+        joint=True,
+    )
+    response = await serving.create_decision(request)
+    assert isinstance(response, StructuredDecisionResponse)
+    engine.check_admission.assert_called_once_with(canvases)
+    assert response.joint is not None
+    split = response.joint.canvases
+    calls = engine.generate.call_args_list
+    assert len(calls) == len(split) == canvases
+    assert [q for c in split for q in c.questions] == list(request.questions)
+    sizes = [len(c.questions) for c in split]
+    assert max(sizes) - min(sizes) <= 1
+    tokenizer = strategy._tokenizer()
+    number = 1
+    for call, read in zip(calls, split):
+        # Numbering runs on across canvases.
+        prompt = tokenizer.decode(call.args[0]["prompt_token_ids"])
+        assert f"Question {number}: Is {number - 1} even?" in prompt
+        assert f"Question {number - 1}:" not in prompt
+        canvas = call.args[1].extra_args["diffusion_seed_canvas"]
+        assert tokenizer.decode(canvas[: read.slots[0]]) == f"{number}:"
+        assert len(canvas) <= served and len(canvas) % 16 == 0
+        assert canvas[-1] == strategy.pad
+        number += len(read.questions)
+    # Usage counts each canvas once, output up to its last slot.
+    assert response.usage.input_tokens == sum(
+        len(call.args[0]["prompt_token_ids"]) for call in calls
+    )
+    assert response.usage.output_tokens == sum(
+        call.args[1].max_tokens for call in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_joint_keeps_the_question_limit(dgemma):
+    serving, engine, _ = dgemma
+    questions = {f"q{i}": {"type": "noul", "instructions": "?"} for i in range(65)}
+    response = await serving.create_decision(
+        StructuredDecisionRequest(state="x", questions=questions, joint=True)
+    )
+    assert isinstance(response, ErrorResponse)
+    assert "at most 64" in response.error.message
+    engine.check_admission.assert_not_called()
+
+
+def test_joint_lines_put_each_label_in_one_slot(dgemma):
+    _, _, strategy = dgemma
+    tokenizer = strategy._tokenizer()
+    for (k, label_set), prefix in strategy.line_prefix.items():
+        for label in label_set:
+            line = [*prefix, strategy.slot_label_ids[label]]
+            assert tokenizer.decode(line) == f"{k}: {label}"
+    assert len(set(strategy.slot_label_ids.values())) == len(strategy.slot_label_ids)
+
+
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+@pytest.mark.parametrize(
+    "field,value,error",
+    [("samples", 4, "samples"), ("joint", "true", "boolean"), ("joint", True, "joint")],
+)
+def test_bad_top_level_fields_are_a_400(decision_server, endpoint, field, value, error):
+    server = decision_server
+    body = {**decision_body(endpoint), field: value}
+    response = server.client.post(f"/v1/{endpoint}", json=body)
+    assert response.status_code == 400, response.text
+    assert error in response.json()["error"]["message"]
+    assert not server.engine.admitted and not server.engine.generated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
+async def test_joint_reads_on_both_endpoints(dgemma, endpoint):
+    serving, engine, strategy = dgemma
+    create = serving.create_decision
+    request_type = StructuredDecisionRequest
+    if endpoint == "decisions":
+        create = OpenAIServingDecisions(serving.models, strategy).create_decisions
+        request_type = DecisionRequest
+
+    async def decide(count, joint):
+        body = dict(decision_body(endpoint, count), model=DGEMMA, joint=joint)
+        return await create(request_type(**body))
+
+    # One question reads on its own, as without joint.
+    alone, joint = [await decide(1, flag) for flag in (False, True)]
+    exclude = {"id", "created"}
+    assert joint.model_dump(exclude=exclude) == alone.model_dump(exclude=exclude)
+    response = await decide(3, True)
+    assert [c.args[0] for c in engine.check_admission.call_args_list] == [1, 1, 1]
+    assert engine.generate.call_count == 3
+    assert response.usage.output_tokens == engine.generate.call_args.args[1].max_tokens
