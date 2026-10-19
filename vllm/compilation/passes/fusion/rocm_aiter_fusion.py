@@ -1439,6 +1439,12 @@ class RocmAiterGemmAddRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_gemm_add_rmsnorm_fusion_pass")
 
+        if not rocm_aiter_ops.is_fused_reduce_add_rmsnorm_supported():
+            logger.warning_once(
+                "GEMM + add RMSNorm fusion disabled: the installed AITER has no "
+                "fused_reduce_add_rmsnorm."
+            )
+            return
         for epsilon, gemma_norm in product([1e-5, 1e-6], [False, True]):
             self.register(AiterGemmAddRMSNormPattern(epsilon, gemma_norm))
 

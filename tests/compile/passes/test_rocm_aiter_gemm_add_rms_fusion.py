@@ -6,7 +6,7 @@ import torch
 
 import vllm.config
 from tests.compile.backend import TestBackend
-from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -19,7 +19,6 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
-from vllm.platforms import current_platform
 
 
 class TestModel(torch.nn.Module):
@@ -52,16 +51,22 @@ class TestModel(torch.nn.Module):
         return [rocm_aiter_ops.get_gemm_add_rmsnorm_op()]
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_rocm() and IS_AITER_FOUND),
-    reason="Only test on ROCm with AITER installed",
-)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_layers", [3])
 @pytest.mark.parametrize("gemma_norm", [False, True])
+@pytest.mark.parametrize("fused_op_available", [True, False])
 @pytest.mark.parametrize("num_tokens", [16])
 # AITER's gfx950 Triton config for N=256, K=7168 splits K at M <= 16.
 @pytest.mark.parametrize("hidden_size, k", [(256, 7168)])
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
 def test_fuse_gemm_add_rms(
+    dtype: torch.dtype,
+    num_layers: int,
     gemma_norm: bool,
+    fused_op_available: bool,
     num_tokens: int,
     hidden_size: int,
     k: int,
@@ -72,8 +77,6 @@ def test_fuse_gemm_add_rms(
     if not on_gfx950():
         pytest.skip("The AITER tuned GEMM dispatch is gfx950-only")
 
-    num_layers = 3
-    dtype = torch.bfloat16
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
@@ -97,6 +100,10 @@ def test_fuse_gemm_add_rms(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
         rocm_aiter_ops.refresh_env_variables()
+        if not fused_op_available:
+            m.setattr(
+                rocm_aiter_ops, "is_fused_reduce_add_rmsnorm_supported", lambda: False
+            )
         # Route the GEMM through the AITER Triton kernel whatever the tuned CSV says.
         m.setattr(
             "vllm.model_executor.layers.utils._aiter_tuned_gemm_libtype",
@@ -131,6 +138,12 @@ def test_fuse_gemm_add_rms(
 
         # atol: one bf16 ulp at |residual| 4-8; only unfused rounds before the add.
         torch.testing.assert_close(outputs_unfused, outputs_fused, atol=6e-2, rtol=2e-2)
+
+        if not fused_op_available:
+            # Without the AITER op the pass registers nothing; the graph stays unfused.
+            assert fusion_pass.matched_count == 0 and not input_ranks
+            backend.check_after_ops(model.ops_in_model_before())
+            return
 
         assert fusion_pass.matched_count == num_layers
         assert input_ranks and all(rank == 3 for rank in input_ranks)

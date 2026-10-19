@@ -3374,6 +3374,15 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
 
     @staticmethod
+    @functools.cache
+    def is_fused_reduce_add_rmsnorm_supported() -> bool:
+        try:
+            import aiter.ops.triton.normalization.fused_reduce_add_rmsnorm  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @staticmethod
     def get_gemm_add_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_gemm_add_rmsnorm.default
 
