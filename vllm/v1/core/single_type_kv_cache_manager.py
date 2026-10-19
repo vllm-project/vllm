@@ -1996,24 +1996,32 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
                 block = blocks[idx]
-                # Skip null blocks (align-mode skipped states) and blocks that
-                # were not cached this step — with sparse retention
-                # (reachable_block_mask) the intermediate state snapshots carry
-                # no hash and must not be recorded as cached-this-step.
-                if block.is_null or block.block_hash is None:
+                if block.is_null:
                     continue
-                self.cached_blocks_this_step.add(block.block_hash)
+                boundary_tokens = block.block_hash_num_tokens
+                if block.block_hash is not None:
+                    self.cached_blocks_this_step.add(block.block_hash)
+                elif (
+                    self.mamba_cache_mode == "align"
+                    and idx == len(blocks) - self.num_speculative_blocks - 1
+                    and request.num_computed_tokens
+                    < (idx + 1) * self.block_size
+                    < request.num_prompt_tokens
+                ):
+                    # A full prefill chunk's running state stays valid for
+                    # offload even when GPU retention omits its hash. Internal
+                    # checkpoints and partial running blocks are not positional.
+                    boundary_tokens = (idx + 1) * self.block_size
+                else:
+                    continue
                 if self.mamba_cache_mode == "align":
-                    assert block.block_hash_num_tokens is not None
-                    # Offer every retained boundary with its exact block.
-                    # The connector filters against its save window, which may
-                    # extend past the original prompt during resumed prefill.
+                    assert boundary_tokens is not None
                     self._pending_boundary_state_offloads.append(
                         (
                             request.request_id,
                             self.kv_cache_group_id,
                             block,
-                            block.block_hash_num_tokens,
+                            boundary_tokens,
                         )
                     )
 
