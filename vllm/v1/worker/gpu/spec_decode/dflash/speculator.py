@@ -643,8 +643,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 )
                 pcp_group.broadcast(draft_logits, src=0)
                 self.draft_logits.index_copy_(0, input_batch.idx_mapping, draft_logits)
-            if self.enable_adaptive_verification:
-                pcp_group.broadcast(self.draft_token_confidence_probs[:num_reqs], src=0)
 
         return self.draft_tokens[:num_reqs]
 
