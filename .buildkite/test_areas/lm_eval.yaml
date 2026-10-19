@@ -12,12 +12,12 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.yaml
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval Small Models"
+      label: ":amd: (MI300) LM Eval Small Models"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -173,7 +173,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-small.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.yaml
 
 - label: ":nvidia: (B200) LM Eval Small Models Distributed"
   key: lm-eval-small-models-distributed-2xb200
@@ -186,7 +186,7 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.yaml
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
@@ -214,9 +214,7 @@ steps:
       - vllm/v1/attention/ops/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
-      # Dense MLA PCP-only accuracy; DP1/DCP1.
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp-mi355.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.yaml
 
 - label: ":nvidia: (B200) LM Eval HiSparse Nightly"
   key: lm-eval-hisparse-nightly-4xb200
