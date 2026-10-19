@@ -57,6 +57,40 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     assert layer.shared_head.head is None
 
 
+@pytest.mark.parametrize("class_name", ["Qwen3_5MTP", "Qwen3_5MoeMTP"])
+def test_qwen3_5_mtp_get_top_tokens_accepts_spec_step_idx(class_name):
+    # Multi-layer Qwen3.5 MTP routes to MultiModuleMTPSpeculator, which calls
+    # get_top_tokens(hidden_states, spec_step_idx=...). Qwen3.5 inherits
+    # LocalArgmaxMixin.get_top_tokens (hidden_states only), so without an
+    # override the use_local_argmax_reduction path raises TypeError. The override
+    # must accept and ignore spec_step_idx (the lm_head is shared across MTP
+    # modules, same as compute_logits) and delegate to the mixin.
+    from vllm.model_executor.models import qwen3_5_mtp
+
+    cls = getattr(qwen3_5_mtp, class_name)
+    model = object.__new__(cls)
+
+    sentinel = torch.tensor([1, 2, 3])
+    captured = {}
+
+    class _FakeLogitsProcessor:
+        def get_top_tokens(self, lm_head, hidden_states):
+            captured["lm_head"] = lm_head
+            captured["hidden_states"] = hidden_states
+            return sentinel
+
+    model.logits_processor = _FakeLogitsProcessor()
+    model.lm_head = "LM_HEAD"
+
+    hidden = torch.randn(3, 4)
+    # Must accept spec_step_idx without TypeError and ignore it (delegating to
+    # LocalArgmaxMixin.get_top_tokens, which takes only hidden_states).
+    out = model.get_top_tokens(hidden, spec_step_idx=3)
+    assert out is sentinel
+    assert captured["lm_head"] == "LM_HEAD"
+    assert captured["hidden_states"] is hidden
+
+
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(

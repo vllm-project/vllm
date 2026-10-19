@@ -305,6 +305,16 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def get_top_tokens(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Single shared lm_head across MTP modules, so spec_step_idx is ignored
+        # (mirrors compute_logits). The multi-module speculator passes it, but
+        # the inherited LocalArgmaxMixin.get_top_tokens does not accept it.
+        return super().get_top_tokens(hidden_states)
+
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return not name.startswith("mtp.") and not any(
             key in name for key in ["embed_tokens", "lm_head"]
