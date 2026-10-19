@@ -1096,10 +1096,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         swa_metadata = cast(
-            "DeepseekSparseSWAMetadata | None",
-            attn_metadata.get(self.swa_cache_layer.prefix),
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
         # The fused insert ops require int64 position_ids; the runner's positions
