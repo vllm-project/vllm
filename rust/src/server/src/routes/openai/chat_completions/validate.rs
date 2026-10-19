@@ -81,8 +81,9 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
+    // Python's default is 1.0, which SDKs may send explicitly.
     reject_non_default(
-        request.length_penalty.as_ref(),
+        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
         "length_penalty",
         "length_penalty is not supported.",
     )?;
@@ -254,6 +255,22 @@ mod tests {
             ..base_request()
         };
 
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+        let request = ChatCompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("the default length_penalty should be accepted");
+
+        let request = ChatCompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
