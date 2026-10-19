@@ -737,6 +737,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+        # Matches the graph quant replaced by fusion; writes into the output.
+        self._aiter_output_quant = (
+            self._quant_fp8_op.use_aiter and self._quant_fp8_op.enabled()
+        )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
@@ -936,6 +940,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
+            self.impl.reserve_workspace()
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -1187,8 +1192,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp8_data)
+                if self._aiter_output_quant:
+                    torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                        quant_output[:quant_idx], actual, output_scale, False
+                    )
+                else:
+                    fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                    quant_output[:quant_idx].copy_(fp8_data)
             else:
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
