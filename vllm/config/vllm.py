@@ -2132,6 +2132,12 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        fpm_port = self.observability_config.forward_pass_metrics_port
+        if fpm_port and fpm_port + self.parallel_config.data_parallel_size - 1 > 65535:
+            raise ValueError(
+                "forward-pass-metrics-port plus data-parallel size exceeds 65535"
+            )
+
         if self.observability_config.enable_iteration_workload_metrics and (
             reason := self._iteration_timing_unsupported_reason()
         ):

@@ -60,8 +60,10 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
         return {}
 
     outputs: queue.Queue[tuple[int, EngineCoreOutputs]] = queue.Queue()
+    published: list[SchedulerIterationDetails] = []
     core = SimpleNamespace(
         iteration_metrics=collector,
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
         scheduler=scheduler,
         vllm_config=SimpleNamespace(
             observability_config=SimpleNamespace(enable_iteration_workload_metrics=True)
@@ -79,6 +81,7 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
     EngineCoreProc._process_input_queue(core)
     if blocker is not None:
         assert outputs.empty()
+        assert not published
     else:
         owner, output = outputs.get_nowait()
         assert owner == 0
@@ -86,6 +89,7 @@ def test_idle_iteration_records_require_quiescence_and_drained_timing(blocker):
         (record,) = output.scheduler_stats.iteration_records
         assert record.is_idle and not record.is_dummy
         assert record.elapsed_ms == 0
+        assert published == [record]
 
 
 def test_iteration_stats_repr():
@@ -263,9 +267,11 @@ def test_iteration_records_preserve_scheduler_stats_owner(stats_owner):
     if stats_owner is not None:
         outputs[0] = EngineCoreOutputs()
         outputs[stats_owner] = EngineCoreOutputs(scheduler_stats=stats)
+    published: list[SchedulerIterationDetails] = []
     core = SimpleNamespace(
         iteration_metrics=collector,
         scheduler=SimpleNamespace(make_stats=lambda: stats),
+        forward_pass_metrics_exporter=SimpleNamespace(record=published.extend),
     )
     EngineCore._attach_iteration_records(core, outputs)
     owner = 0 if stats_owner is None else stats_owner
@@ -275,6 +281,7 @@ def test_iteration_records_preserve_scheduler_stats_owner(stats_owner):
     assert [record.iteration_index for record in stats.iteration_records] == [index]
     EngineCore._attach_iteration_records(core, outputs)
     assert len(stats.iteration_records) == 1
+    assert published == stats.iteration_records
 
     frontends = {
         i: SimpleNamespace(lora_states=LoRARequestStates(log_stats=True))
