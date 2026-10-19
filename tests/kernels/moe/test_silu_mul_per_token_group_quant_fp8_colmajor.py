@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     silu_mul_per_token_group_quant_fp8_colmajor,
     silu_mul_quant_fp8_packed_triton,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
@@ -36,9 +37,7 @@ def reference_quant(x: torch.Tensor, use_ue8m0: bool):
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
 
-    finfo = torch.finfo(FLOAT8_DTYPE)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     _per_token_group_quant_fp8_colmajor[(M,)](
         x,

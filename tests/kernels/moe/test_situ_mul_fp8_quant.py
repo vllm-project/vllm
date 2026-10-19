@@ -18,12 +18,13 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import situ_and_mul_quant
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 fp8_dtype = current_platform.fp8_dtype()
 DEVICE = current_platform.device_type
-FP8_MAX = torch.finfo(fp8_dtype).max
+_, FP8_MAX = get_fp8_min_max()
 
 # On CUDA the kernel uses fp8 e4m3 conversion and needs SM89+ (Ada/Hopper).
 pytestmark = pytest.mark.skipif(

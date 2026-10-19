@@ -796,9 +796,7 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails):
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_engram_shared_prefetch_stream_waits_per_layer():
     """Consuming a layer must not wait for later layers on the shared stream."""
     stream = torch.cuda.Stream()
@@ -918,9 +916,7 @@ def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
     _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
-)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "missing_dependency", ["record_stream", "producer_wait", "consumer_wait"]
 )

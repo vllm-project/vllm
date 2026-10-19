@@ -1691,6 +1691,25 @@ def _run_backend_correctness(
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
+    if (
+        is_spec_decode_test
+        and kv_cache_dtype == "auto"
+        and max(batch_spec.query_lens) > 4
+        and current_platform.is_rocm()
+    ):
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            # AITER has no bf16 persistent MLA decode kernel past qlen 4 here.
+            backends_to_test = [
+                b
+                for b in backends_to_test
+                if b
+                not in (
+                    AttentionBackendEnum.ROCM_AITER_MLA,
+                    AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+                )
+            ]
     unique_block_sizes = sorted(set(BACKEND_BLOCK_SIZES[b] for b in backends_to_test))
     default_block_size = unique_block_sizes[0]
     required_blocks = sum(
@@ -2050,6 +2069,13 @@ def _run_backend_correctness(
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
+    if (
+        current_platform.is_rocm()
+        and chunked_prefill_workspace_size is not None
+        and kv_cache_dtype == "auto"
+    ):
+        # Each context chunk's partial output is rounded to bf16 before merging.
+        atol = 4e-2
     failures = []
     for backend_idx, backend_name in enumerate(backends_to_test):
         # Skip backends that don't support spec decode for spec decode tests
