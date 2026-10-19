@@ -1671,6 +1671,47 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("extra", [1, 2, 3, 4])
+@pytest.mark.parametrize("num_finite", [0, 100])
+@pytest.mark.parametrize("fill", [float("-inf"), -1e30])
+@torch.inference_mode()
+def test_persistent_topk_masked_row_tail(
+    top_k: int, extra: int, num_finite: int, fill: float
+) -> None:
+    """Rows with fewer than k scores above the -inf bin put the 2048-bin
+    threshold in the -inf bin. The float4 tail lanes past a row whose length
+    is not a multiple of 4 must not be selected."""
+    set_random_seed(0)
+    num_rows = 4
+    seq_len = top_k + extra
+    stride = seq_len + 8
+    # Finite padding past each row; it must never be read or selected.
+    logits = torch.zeros(num_rows, stride, dtype=torch.float32, device="cuda")
+    logits[:, :seq_len] = fill
+    finite_cols = torch.stack(
+        [torch.randperm(seq_len, device="cuda")[:num_finite] for _ in range(num_rows)]
+    )
+    if num_finite:
+        logits.scatter_(
+            1, finite_cols, torch.randn(num_rows, num_finite, device="cuda")
+        )
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
+    _run_topk_backend("persistent_topk", logits, lengths, indices, top_k, stride)
+    torch.accelerator.synchronize()
+
+    for row in range(num_rows):
+        selected = indices[row].cpu().tolist()
+        assert all(0 <= i < seq_len for i in selected), (
+            f"row {row}: indices outside [0, {seq_len}): "
+            f"{sorted(i for i in selected if not 0 <= i < seq_len)}"
+        )
+        assert len(set(selected)) == top_k
+        assert set(finite_cols[row].cpu().tolist()) <= set(selected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
