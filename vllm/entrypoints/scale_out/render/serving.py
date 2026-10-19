@@ -78,10 +78,6 @@ class ServingRender(BaseServing):
         self.online_renderer = online_renderer
         self.tool_server = tool_server
 
-        self._merge_inline_system = (
-            AnthropicServingMessages._should_merge_inline_system(online_renderer)
-        )
-
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
         self._placeholder_metadata_parser_failed = False
 
@@ -197,7 +193,7 @@ class ServingRender(BaseServing):
         render_chat_request so the rendered tokens match the server exactly.
         """
         chat_req = AnthropicServingMessages.to_chat_completion_request(
-            request, merge_inline_system=self._merge_inline_system
+            request
         )
         chat_req.mm_payload = request.mm_payload
         return await self.render_chat_request(chat_req, raw_request)

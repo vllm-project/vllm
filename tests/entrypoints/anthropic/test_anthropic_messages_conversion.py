@@ -1005,6 +1005,27 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[1]["role"] == "system"
         assert result.messages[1]["content"] == "Real system content."
 
+    def test_inline_system_uses_shared_merge_policy(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Q"},
+                {"role": "system", "content": "LATESYS"},
+                {"role": "user", "content": "Q2"},
+            ],
+            system="S",
+        )
+        result = _convert(request)
+        serving = MagicMock(spec=AnthropicServingMessages)
+        serving.inline_system_messages = "merge"
+
+        AnthropicServingMessages._normalize_inline_system_messages(serving, result)
+
+        assert result.messages == [
+            {"role": "system", "content": "SLATESYS"},
+            {"role": "user", "content": "Q"},
+            {"role": "user", "content": "Q2"},
+        ]
+
 
 # ======================================================================
 # Streaming conversion: message_stream_converter
@@ -1402,86 +1423,6 @@ class TestStreamingCacheUsageSemantics:
         assert "cache_creation_input_tokens" not in start_usage
         assert "cache_read_input_tokens" not in delta_usage
         assert "cache_creation_input_tokens" not in delta_usage
-
-
-# ======================================================================
-# Auto-detection of system-first template requirement
-# ======================================================================
-
-
-Q35_TEMPLATE = (
-    "{%- for message in messages %}"
-    "{%- if message.role == 'system' %}"
-    "{%- if not loop.first %}"
-    "{{- raise_exception('System message must be at the beginning.') }}"
-    "{%- endif %}"
-    "{%- endif %}"
-    "{%- endfor %}"
-)
-
-PERMISSIVE_TEMPLATE = (
-    "{%- for message in messages %}{{- message.role }}: {{ message.content }}\n"
-    "{%- endfor %}"
-)
-
-
-class TestDetectMergeInlineSystem:
-    """Verify _detect_merge_inline_system auto-detection.
-
-    Tests three scenarios:
-    1. Template with system-first guard (e.g. Qwen) → merge needed
-    2. Template without restrictions → no merge, cache-friendly
-    3. No template provided → safe default: merge
-    """
-
-    def test_qwen_template_requires_merge(self):
-        """Template with loop.first guard rejects mid-conversation system."""
-        assert (
-            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
-        )
-
-    def test_no_restriction_no_merge(self):
-        """Template without restriction accepts mid-conversation system."""
-        assert (
-            AnthropicServingMessages._detect_merge_inline_system(PERMISSIVE_TEMPLATE)
-            is False
-        )
-
-    def test_no_template_defaults_merge(self):
-        """No chat_template → conservative default: merge."""
-        assert AnthropicServingMessages._detect_merge_inline_system(None) is True
-
-    @pytest.mark.parametrize(
-        ("resolved", "expected"),
-        [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
-    )
-    def test_probes_resolved_template_without_cli_override(
-        self, monkeypatch, resolved, expected
-    ):
-        """Without --chat-template, probe the tokenizer's template (#58727).
-
-        Merging defeats prefix caching, so it is warned about at startup.
-        """
-        import vllm.entrypoints.anthropic.serving as serving_mod
-        from vllm.renderers.hf import HfRenderer
-
-        monkeypatch.setattr(
-            serving_mod, "resolve_chat_template", lambda *a, **kw: resolved
-        )
-        mock_logger = MagicMock()
-        monkeypatch.setattr(serving_mod, "logger", mock_logger)
-        renderer = MagicMock(spec=HfRenderer)
-        renderer.tokenizer = MagicMock()
-        online_renderer = SimpleNamespace(
-            renderer=renderer,
-            chat_template=None,
-            model_config=None,
-        )
-        assert (
-            AnthropicServingMessages._should_merge_inline_system(online_renderer)
-            is expected
-        )
-        assert mock_logger.warning_once.called is expected
 
 
 # ======================================================================
