@@ -1493,11 +1493,28 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
+  # The paged attention *instantiations* are split over one translation unit
+  # per (dtype, kv-cache dtype, head size) combination: compiling them in a
+  # single TU serializes ~10 min of device code generation onto one core.
+  # attention.cu only holds the runtime dispatch, attention_kernels.cuh the
+  # kernels and launchers.
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu")
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_auto.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_f16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16.cu"
+    "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
+    "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
