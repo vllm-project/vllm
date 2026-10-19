@@ -2558,12 +2558,16 @@ def sort_batch_req_ids(
         drafts = draft_tokens.get(r)
         return (
             not drafts,
-            # Single-token requests stay with the decodes and drafted requests are
-            # pinned ahead of everything by the term above, so neither needs the
-            # lookup. `not` keeps the numpy scalar out of the tuple: sorting
-            # compares tuples O(n log n) times, and numpy scalars compare far
-            # slower.
-            num > 1
+            # Requests that fit in a decode chunk stay with the decodes, and
+            # drafted requests are pinned ahead of everything by the term above,
+            # so neither needs the lookup. The scheduler only pads a 1-token
+            # prompt with drafts, so a fresh 2..decode_query_len prompt is
+            # undrafted: sorting it behind the extends would make it a
+            # zero-context extend, which costs a context chunk it has no use for
+            # and raises num_extends for the requests that do. `not` keeps the
+            # numpy scalar out of the tuple: sorting compares tuples O(n log n)
+            # times, and numpy scalars compare far slower.
+            num > decode_query_len
             and not drafts
             and num_computed_tokens is not None
             and req_id_to_index is not None
