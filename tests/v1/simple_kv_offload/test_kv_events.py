@@ -10,6 +10,8 @@ is unset.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
     BLOCK_SIZE,
@@ -23,7 +25,9 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     _make_cp_request,
     _make_kv_cache_config,
     _make_scratch_kv_cache_config,
+    _make_shared_schedulers,
     _make_vllm_config,
+    _store_shared_request,
     make_request,
     make_scheduler_output,
     simulate_store_completion,
@@ -33,6 +37,7 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_STORAGE,
+    AllBlocksCleared,
     BlockRemoved,
     BlockStored,
 )
@@ -220,6 +225,84 @@ def _do_eager_store(
     assert meta.store_event >= 0
     simulate_store_completion(sched, meta.store_event)
     return meta, req
+
+
+@pytest.fixture(params=[False, True], ids=["events_disabled", "events_enabled"])
+def shared_events_schedulers(tmp_path, request):
+    fixtures = _make_shared_schedulers(tmp_path, enable_events=request.param)
+    try:
+        yield fixtures
+    finally:
+        for fix in fixtures:
+            fix.scheduler.shutdown()
+
+
+def test_shared_reset_preserves_peer_cache_and_events(shared_events_schedulers):
+    """Peer residency survives an owner's reset and is withdrawn on peer eviction."""
+    writer, peer = shared_events_schedulers
+    enabled = writer.scheduler.enable_kv_cache_events
+    requests = []
+    for fix in (writer, peer):
+        _, request = _do_eager_store(fix)
+        requests.append(request)
+        events = list(fix.scheduler.take_events())
+        assert len(events) == (2 if enabled else 0)
+        assert all(
+            isinstance(e, BlockStored) and e.medium == MEDIUM_CPU for e in events
+        )
+
+    assert (
+        writer.scheduler.get_num_new_matched_tokens(requests[1], 0)[0] == 2 * BLOCK_SIZE
+    )
+    writer.scheduler.request_finished(requests[1], [])
+    assert (
+        peer.scheduler.get_num_new_matched_tokens(requests[0], 0)[0] == 2 * BLOCK_SIZE
+    )
+    peer.scheduler.request_finished(requests[0], [])
+
+    assert writer.scheduler.reset()
+    events = list(writer.scheduler.take_events())
+    assert len(events) == (1 if enabled else 0)
+    assert all(isinstance(e, AllBlocksCleared) for e in events)
+    for fix in (writer, peer):
+        assert fix.scheduler.get_num_new_matched_tokens(requests[0], 0) == (0, False)
+        assert fix.scheduler.get_num_new_matched_tokens(requests[1], 0) == (
+            2 * BLOCK_SIZE,
+            True,
+        )
+        fix.scheduler.request_finished(requests[1], [])
+        assert list(fix.scheduler.take_events()) == []
+
+    # Fill the peer's partition again: its previous announcements must be withdrawn.
+    _do_eager_store(peer)
+    events = list(peer.scheduler.take_events())
+    removed = [e for e in events if isinstance(e, BlockRemoved)]
+    assert {h for e in removed for h in e.block_hashes} == (
+        {maybe_convert_block_hash(h) for h in requests[1].block_hashes}
+        if enabled
+        else set()
+    )
+    assert all(e.medium == MEDIUM_CPU and e.locality == "LOCAL" for e in removed)
+    assert list(peer.scheduler.take_events()) == []
+
+
+def test_shared_reset_preserves_peer_copy_of_same_prefix(shared_events_schedulers):
+    """A reset owner can still load another owner's independently stored copy."""
+    writer, peer = shared_events_schedulers
+    request = make_request()
+    stores = [_store_shared_request(fix, request) for fix in (writer, peer)]
+    for fix, meta in zip((writer, peer), stores):
+        simulate_store_completion(fix.scheduler, meta.store_event)
+        list(fix.scheduler.take_events())
+
+    assert writer.scheduler.reset()
+    for fix in (writer, peer):
+        assert fix.scheduler.get_num_new_matched_tokens(request, 0) == (
+            2 * BLOCK_SIZE,
+            True,
+        )
+        fix.scheduler.request_finished(request, [])
+    assert list(peer.scheduler.take_events()) == []
 
 
 # ---------------------------------------------------------------------------
