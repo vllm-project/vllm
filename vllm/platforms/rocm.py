@@ -405,6 +405,12 @@ if (
 ):
     os.environ["HIP_ONLINE_TUNING"] = "1"
 
+# RCCL 2.30's RAS thread can abort the process at exit ("terminate called
+# without an active exception") when its shutdown notification fails.
+# https://github.com/ROCm/rocm-systems/issues/13572
+if torch.version.hip:
+    os.environ.setdefault("NCCL_RAS_ENABLE", "0")
+
 
 @cache
 def use_rocm_custom_paged_attention(
