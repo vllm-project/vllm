@@ -68,7 +68,6 @@ def test_preserves_text_after_tool_call(
     streaming: bool,
 ) -> None:
     """PR 59589 regression test"""
-
     # Note(arpera):
     # This is basically copypaste of the same test
     # test_preserves_text_after_tool_call for DSv3 parser
@@ -78,7 +77,7 @@ def test_preserves_text_after_tool_call(
     model_output = (
         "let me check the weather."
         "<｜tool▁calls▁begin｜>"
-        '<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>'
+        "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>"
         '{"city":"Paris"}'
         "<｜tool▁call▁end｜>"
         "<｜tool▁calls▁end｜>"
