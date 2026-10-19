@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import faulthandler
 import gc
+import glob
 import os
+import time
 
 import torch
 
@@ -20,6 +23,19 @@ from vllm.v1.worker.xpu_model_runner import (
 from .utils import request_memory
 
 logger = init_logger(__name__)
+
+
+def _xccl_diag(rank: int, msg: str) -> None:
+    """Temporary diagnostics for intermittent TP=2 XCCL startup hangs."""
+    logger.info(
+        "[xccl-diag] rank=%d pid=%d fds=%d shm=%d tmp_dist=%d: %s",
+        rank,
+        os.getpid(),
+        len(os.listdir("/proc/self/fd")),
+        len(glob.glob("/dev/shm/*")),
+        len(glob.glob("/tmp/vllm_dist_*")),
+        msg,
+    )
 
 
 class XPUWorker(Worker):
@@ -177,12 +193,20 @@ class XPUWorker(Worker):
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)
 
+        _xccl_diag(self.rank, "init_worker_distributed_environment start")
+        t0 = time.monotonic()
+        faulthandler.dump_traceback_later(60, repeat=True)
         init_worker_distributed_environment(
             self.vllm_config,
             self.rank,
             self.distributed_init_method,
             self.local_rank,
             current_platform.dist_backend,
+        )
+        faulthandler.cancel_dump_traceback_later()
+        _xccl_diag(
+            self.rank,
+            f"init_worker_distributed_environment done in {time.monotonic() - t0:.2f}s",
         )
 
         # oneCCL warm-up; only meaningful for multi-device runs. Requiring it
@@ -192,7 +216,16 @@ class XPUWorker(Worker):
             self.parallel_config.world_size > 1
             and torch.distributed.is_xccl_available()
         ):
+            _xccl_diag(self.rank, "warm-up all_reduce start")
+            t0 = time.monotonic()
+            faulthandler.dump_traceback_later(60, repeat=True)
             torch.distributed.all_reduce(torch.zeros(1).xpu())
+            torch.accelerator.synchronize()
+            faulthandler.cancel_dump_traceback_later()
+            _xccl_diag(
+                self.rank,
+                f"warm-up all_reduce done in {time.monotonic() - t0:.2f}s",
+            )
 
         if self.use_v2_model_runner:
             logger.info_once("Using V2 Model Runner")
