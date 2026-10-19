@@ -30,6 +30,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
     format_socket_role_suffix,
@@ -47,10 +48,6 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
-# Host-side artifacts are configuration tables (the FlashInfer autotune table
-# is JSON in the kilobyte range), so cap them far below MAX_MSG_SIZE: unlike
-# the weights they are copied into the daemon's host memory and kept there.
-MAX_ARTIFACT_SIZE = 64 << 20
 # A remote peer is authenticated before any payload is decoded, so the control
 # plane it speaks must not be pickle: recv_msg would deserialize
 # attacker-controlled bytes before the token is ever compared. JSON carries
@@ -242,12 +239,17 @@ def verify_peer_is_owner(conn: socket.socket) -> None:
         raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
-def _hash_quant_config(quant_config: Any) -> str:
-    if quant_config is None:
-        return ""
+def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> str:
     if hasattr(quant_config, "to_dict"):
         quant_config = quant_config.to_dict()
-    payload = json.dumps(quant_config, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "checkpoint": quant_config,
+            "runtime": normalize_value(runtime_quant_config),
+        },
+        sort_keys=True,
+        default=str,
+    )
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
@@ -310,6 +312,8 @@ class WeightCacheKey:
     """Daemon group the weights come from; False is the target model."""
     dp_size: int = 1
     dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -323,6 +327,8 @@ class WeightCacheKey:
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -348,12 +354,17 @@ class WeightCacheKey:
             pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
-            quant_config_hash=_hash_quant_config(quant_config),
+            quant_config_hash=_hash_quant_config(
+                quant_config=quant_config,
+                runtime_quant_config=model_config.quantization_config,
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -362,26 +373,6 @@ class WeightCacheKey:
             for f in fields(self)
             if getattr(self, f.name) != getattr(other, f.name)
         ]
-
-
-@dataclass(frozen=True)
-class ArtifactCacheKey:
-    """Identifies a host-side artifact the daemon caches for engines.
-
-    Unlike the weights, these artifacts are plain bytes rather than GPU
-    allocations, so the daemon can hand one to any local process that reaches
-    its socket instead of only to the engine that owns the GPU.
-
-    The daemon treats the key as opaque and only ever returns bytes stored
-    under the exact key requested, so the producer must fold everything the
-    contents depend on into ``content_hash``.
-    """
-
-    kind: str
-    """Artifact type, e.g. "flashinfer_autotune"."""
-    content_hash: str
-    """Hash of every input the artifact's contents depend on."""
-    vllm_version: str = vllm.version.__version__
 
 
 @dataclass

@@ -75,7 +75,7 @@ def _builder(
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
-    return KimiK3ROCmKDAMetadataBuilder(
+    builder = KimiK3ROCmKDAMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=block_size,
             shapes=((16, 64),),
@@ -91,6 +91,11 @@ def _builder(
         vllm_config=vllm_config,
         device=torch.device("cuda"),
     )
+    vllm_config.cache_config.hash_block_size = prefix_match_unit or block_size
+    vllm_config.cache_config.cache_hit_alignment_tokens = (
+        prefix_match_unit or block_size
+    )
+    return builder
 
 
 def _build(batch: BatchSpec, block_size: int = BLOCK_SIZE, **kw):
@@ -477,7 +482,7 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
-        use_fused_chunk=True,
+        kda_prefill_backend="fused",
         num_spec=0,
         use_safe_gate=True,
     ).items():
@@ -501,7 +506,8 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     "attr,value",
     [
         ("use_prefill_checkpoint", False),
-        ("use_fused_chunk", False),
+        ("kda_prefill_backend", "triton"),
+        ("kda_prefill_backend", "gluon"),
         ("use_safe_gate", False),
     ],
 )

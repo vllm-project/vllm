@@ -7,7 +7,6 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
-import argparse
 import contextlib
 import shutil
 import socket
@@ -15,13 +14,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import regex as re
 
+from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
@@ -84,6 +86,21 @@ class WeightCacheDaemon:
                 f"Weight cache daemon is not ready: HTTP {error.code}"
             ) from error
 
+    def wait_until_ready(self, timeout_s: float = 900) -> None:
+        """Poll until READY (which covers the autotune tuners) or the preload
+        process dies."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                self.check_health()
+                return
+            except (AssertionError, urllib.error.URLError):
+                if time.monotonic() > deadline:
+                    raise
+                if self._proc is not None and self._proc.poll() is not None:
+                    raise AssertionError("vllm preload exited before ready") from None
+                time.sleep(2)
+
     def _stop(self) -> None:
         assert self._proc is not None
         self._proc.terminate()
@@ -102,6 +119,10 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    # Additionally assert the daemons tune in place before serving and write
+    # the on-disk FlashInfer autotune cache, and the restart engine reuses it
+    # (needs SM90+/FlashInfer).
+    check_flashinfer_cache: bool = False
 
 
 def generate(
@@ -160,6 +181,9 @@ K3_CASE = ModelCase(
         max_model_len=4096,
     ),
     daemon_args=["--trust-remote-code"],
+    # Kimi K3 has tunable FlashInfer ops (a dense model like Qwen2.5 tunes
+    # nothing and upstream never writes the cache file for it).
+    check_flashinfer_cache=True,
 )
 
 # Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
@@ -184,24 +208,69 @@ QWEN_MTP_CASE = ModelCase(
 )
 
 
+DSV2_EP_CASE = ModelCase(
+    model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+    prompts=["The capital of France is"],
+    llm_kwargs=dict(
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.85,
+        enforce_eager=True,
+        max_model_len=1024,
+    ),
+    daemon_args=["--enable-expert-parallel", "--dtype", "bfloat16"],
+)
+
+
 @pytest.mark.parametrize(
     "case",
     [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
     ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
 )
-def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
+def test_ipc_cache_cold_start_and_warm_restart(
+    vllm_runner, case: ModelCase, tmp_path, monkeypatch, capfd
+):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
+
+    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    autotune (default-on with `--enable-flashinfer-autotune`): each daemon
+    tunes before binding its socket and must write the on-disk FlashInfer
+    autotune cache, and the restart engine must load tactics from it instead
+    of re-profiling. The daemon's cache file is keyed with the
+    OPENAI_API_SERVER batch defaults while these engines run under LLM_CLASS,
+    so they never hit the daemon's file by design; reuse is proven against
+    the file the earlier in-process engines wrote.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    if case.check_flashinfer_cache:
+        from vllm.utils.flashinfer import has_flashinfer
 
+        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+            pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+        # Isolate the on-disk autotune cache. The engines are in-process
+        # (envs read lazily); the daemon subprocesses spawn later and
+        # inherit it.
+        monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path, capfd):
+    """Same as above, with expert parallelism enabled at tp=2."""
+    run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path, capfd)
+
+
+def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
@@ -215,15 +284,40 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
+    if case.check_flashinfer_cache:
+        # The baseline engine already wrote its own (LLM_CLASS-keyed) table.
+        engine_cache_files = set(tmp_path.rglob("autotune_configs*.json"))
+
     with WeightCacheDaemon(
         case.model,
-        tp_size=1,
+        tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-        d.check_health()
+        d.wait_until_ready()
+        if case.check_flashinfer_cache:
+            # Each daemon tunes before its ready report; exactly one new file
+            # (their OPENAI_API_SERVER-keyed table) must appear.
+            tuner_files = set(tmp_path.rglob("autotune_configs*.json"))
+            tuner_files -= engine_cache_files
+            assert len(tuner_files) == 1, (
+                f"expected the tuner's tuned table, got {tuner_files}"
+            )
         # Warm restart: a second engine lifetime against the same daemon.
+        if case.check_flashinfer_cache:
+            capfd.readouterr()  # drain: the assertion reads the increment
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        if case.check_flashinfer_cache:
+            # The restart's EngineCore subprocess inherits pytest's fds; the
+            # flashinfer autotuner logs "[Autotuner]: Loaded N configs from
+            # <path>" (INFO, not once-deduplicated) on a disk cache hit.
+            out = capfd.readouterr()
+            m = re.search(
+                r"\[Autotuner\]: Loaded (\d+) configs from", out.out + out.err
+            )
+            assert m and int(m.group(1)) > 0, (
+                "restart engine did not load the on-disk autotune cache"
+            )
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
@@ -359,6 +453,52 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
 
 
+@pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
+def test_weight_cache_key_distinguishes_nvfp4_activation_override(
+    tmp_path, hf_quant_config
+):
+    """Cache keys isolate activation modes and reject ambiguous legacy hashes."""
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.utils.hashing import safe_hash
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(
+            architectures=["NemotronHForCausalLM"],
+            quantization_config=hf_quant_config,
+        ),
+    )
+    static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    model_config.quantization_config = QuantizationConfigArgs(
+        moe={"activation": "nvfp4_per_token"}
+    )
+    per_token_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
+
+    legacy_hash = (
+        ""
+        if hf_quant_config is None
+        else safe_hash(
+            json.dumps(hf_quant_config, sort_keys=True).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    assert static_key.mismatched_fields(
+        replace(static_key, quant_config_hash=legacy_hash)
+    ) == ["quant_config_hash"]
+
+
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     """Copy mode clones the weights into the engine, so nothing is external
     (vllm_config is never touched)."""
@@ -372,186 +512,6 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
-
-
-@contextlib.contextmanager
-def _artifact_daemon(tmp_path):
-    """Serve the daemon's real artifact handlers on a throwaway socket.
-
-    Only those handlers are exercised, so __init__ (which loads a model onto a
-    GPU) is skipped and just the state they touch is provided.
-    """
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        ArtifactStore,
-    )
-    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-
-    daemon = WeightCacheDaemon.__new__(WeightCacheDaemon)
-    daemon.artifacts = ArtifactStore()
-    daemon.role = "target"
-    daemon.global_rank = 0
-
-    socket_path = str(tmp_path / "daemon.sock")
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(socket_path)
-    server.listen()
-
-    def _serve():
-        while True:
-            try:
-                conn, _ = server.accept()
-            except OSError:
-                return
-            with conn:
-                daemon._handle_connection(conn)
-
-    thread = threading.Thread(target=_serve, daemon=True)
-    thread.start()
-    try:
-        yield socket_path
-    finally:
-        server.close()
-        thread.join(timeout=5)
-
-
-def test_daemon_artifact_round_trip_serves_only_the_exact_key(tmp_path):
-    """The client and the daemon's handlers must agree on the wire format, and
-    an artifact must never be handed to a key it was not produced for: the
-    key is the only evidence that reusing it is safe."""
-    from dataclasses import replace
-
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        DaemonArtifactCache,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
-
-    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
-    with _artifact_daemon(tmp_path) as socket_path:
-        cache = DaemonArtifactCache(socket_path=socket_path)
-        assert cache.get(key) is None
-        assert cache.put(key, b"tuned")
-        assert cache.get(key) == b"tuned"
-        assert cache.get(replace(key, content_hash="def")) is None
-        assert cache.get(replace(key, vllm_version="other")) is None
-
-
-def test_daemon_artifact_cache_misses_without_a_daemon(tmp_path):
-    """An engine must start even when there is no daemon to fetch from, so
-    both directions degrade to a miss instead of raising."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        DaemonArtifactCache,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
-
-    cache = DaemonArtifactCache(socket_path=str(tmp_path / "absent.sock"))
-    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
-    assert cache.get(key) is None
-    assert not cache.put(key, b"tuned")
-
-
-def test_artifact_store_evicts_oldest_past_its_cap():
-    """A client whose key keeps changing must not grow the daemon's store
-    without bound."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        ArtifactStore,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
-
-    store = ArtifactStore(max_entries=2)
-    keys = [ArtifactCacheKey(kind="k", content_hash=h) for h in "abc"]
-    for i, key in enumerate(keys):
-        store.put(key, str(i).encode())
-
-    assert len(store) == 2
-    assert store.get(keys[0]) is None
-    assert store.get(keys[1]) == b"1"
-    assert store.get(keys[2]) == b"2"
-
-
-def test_seed_skips_a_peer_artifact_it_cannot_key():
-    """Artifacts from a seed peer are untrusted caches: one whose key would be
-    unhashable is skipped instead of failing the whole seed."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        ArtifactStore,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
-
-    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
-    peer = ArtifactStore()
-    peer.put(key, b"tuned")
-    payload = peer.to_json()
-    unhashable = {"key": {"kind": ["k"], "content_hash": "abc"}, "data": "eA=="}
-
-    store = ArtifactStore()
-    assert store.merge_json([unhashable, *payload]) == 1
-    assert store.get(key) == b"tuned"
-
-
-def test_seed_response_keeps_artifacts_within_budget():
-    """A seed response must fit the JSON plane's message cap, so artifacts
-    past the budget are left out rather than failing the seed."""
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        ArtifactStore,
-    )
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
-
-    store = ArtifactStore()
-    for content_hash in "ab":
-        store.put(ArtifactCacheKey(kind="k", content_hash=content_hash), b"x" * 30)
-
-    # 30 bytes encode to 40 base64 characters, so only the first fits.
-    rendered = store.to_json(max_bytes=60)
-    assert [item["key"]["content_hash"] for item in rendered] == ["a"]
-
-
-def _boot_warmup_engine(monkeypatch, **preload_engine_args):
-    """Run the --preload-autotune engine entrypoint without booting an engine.
-
-    Returns:
-        The EngineArgs it would boot with and the from_engine_args kwargs.
-
-    """
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.entrypoints.cli.preload import _run_warmup_engine
-    from vllm.v1.engine.llm_engine import LLMEngine
-
-    booted: dict[str, Any] = {}
-
-    def from_engine_args(cls, engine_args, **kwargs):
-        booted.update(engine_args=engine_args, **kwargs)
-
-    monkeypatch.setattr(
-        EngineArgs,
-        "from_cli_args",
-        classmethod(lambda cls, args: EngineArgs(model="m", **preload_engine_args)),
-    )
-    monkeypatch.setattr(LLMEngine, "from_engine_args", classmethod(from_engine_args))
-    _run_warmup_engine(argparse.Namespace(), socket_dir="/run/vllm")
-    return booted.pop("engine_args"), booted
-
-
-def test_preload_warmup_engine_resolves_defaults_like_vllm_serve(monkeypatch):
-    """The warmup engine's table is keyed by the config hash, which covers the
-    batch defaults that depend on the usage context; booted under a different
-    context than `vllm serve`, its table would never be hit."""
-    from vllm.usage.usage_lib import UsageContext
-
-    _, kwargs = _boot_warmup_engine(monkeypatch)
-    assert kwargs["usage_context"] == UsageContext.OPENAI_API_SERVER
-
-
-def test_preload_warmup_engine_drops_the_daemon_loader_config(monkeypatch):
-    """Preload's loader config is for the daemons' disk loader; handed to the
-    warmup engine's IPC loader, its unknown keys would fail the warmup."""
-    engine_args, _ = _boot_warmup_engine(
-        monkeypatch, model_loader_extra_config={"enable_multithread_load": True}
-    )
-    assert engine_args.load_format == "ipc_cache"
-    assert engine_args.model_loader_extra_config == {
-        "socket_dir": "/run/vllm",
-        "mode": "zero_copy",
-        "fallback": False,
-    }
 
 
 def _mla_like_tensors():
@@ -757,14 +717,9 @@ def _remote_seed_daemon(token):
 
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-        ArtifactStore,
-    )
     from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
-    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
 
     daemon = WeightCacheDaemon.__new__(WeightCacheDaemon)
-    daemon.artifacts = ArtifactStore()
     daemon.seed_token = token
     daemon.model = None
     daemon.mirror = None
@@ -772,8 +727,6 @@ def _remote_seed_daemon(token):
     daemon.global_rank = 0
     daemon.device_index = 0
     daemon._state_lock = threading.Lock()
-    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
-    daemon.artifacts.put(key, b"tuned")
 
     server = socket.create_server(("127.0.0.1", 0))
     with patch.object(torch.accelerator, "set_device_index"):
@@ -806,22 +759,30 @@ def test_remote_seed_plane_requires_the_shared_token():
     """The listener authenticates before serving anything, and it speaks JSON
     rather than pickle so an unauthenticated peer's bytes are never
     deserialized into objects."""
-    import pybase64 as base64
-
     with _remote_seed_daemon("s3cret") as port:
-        assert _ask_remote(port, {"cmd": "fetch_artifacts"})["status"] == "error"
-        wrong = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "guess"})
+        assert _ask_remote(port, {"cmd": "fetch_manifest"})["status"] == "error"
+        wrong = _ask_remote(port, {"cmd": "fetch_manifest", "token": "guess"})
         assert wrong["status"] == "error"
-        served = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "s3cret"})
-        assert served["status"] == "ok"
-        assert base64.b64decode(served["artifacts"][0]["data"]) == b"tuned"
+        # Authenticated, the request is dispatched; this daemon holds no
+        # weights, so the handler itself refuses.
+        served = _ask_remote(port, {"cmd": "fetch_manifest", "token": "s3cret"})
+        assert served["status"] == "error"
+        assert "released" in served["message"]
 
 
 def test_remote_seed_plane_refuses_local_only_commands():
     """Exporting IPC handles and releasing weights stay on the
-    owner-verified Unix socket even for an authenticated peer."""
+    owner-verified Unix socket even for an authenticated peer; commands the
+    daemon no longer serves, like the artifact cache's fetch_artifacts, get
+    the same refusal."""
     with _remote_seed_daemon("s3cret") as port:
-        for cmd in ("get_state", "release", "put_artifact", "get_memory"):
+        for cmd in (
+            "get_state",
+            "release",
+            "put_artifact",
+            "get_memory",
+            "fetch_artifacts",
+        ):
             response = _ask_remote(port, {"cmd": cmd, "token": "s3cret"})
             assert response["status"] == "error"
             assert "served locally" in response["message"]
@@ -837,8 +798,217 @@ def test_remote_seed_plane_drops_a_stalled_peer(monkeypatch):
         _remote_seed_daemon("s3cret") as port,
         socket.create_connection(("127.0.0.1", port)),
     ):
-        served = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "s3cret"})
-    assert served["status"] == "ok"
+        served = _ask_remote(port, {"cmd": "fetch_manifest", "token": "s3cret"})
+    # No weights here, but the stalled peer did not hold up the listener.
+    assert served["status"] == "error"
+    assert "released" in served["message"]
+
+
+def _bare_daemon(tmp_path, monkeypatch):
+    """A daemon skipped past __init__'s model load, with its per-rank
+    autotune cache path and cache root pointed under tmp_path."""
+    from vllm.model_executor.model_loader.weight_cache import daemon as daemon_module
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    daemon = WeightCacheDaemon.__new__(WeightCacheDaemon)
+    daemon.role = "target"
+    daemon.global_rank = 0
+    monkeypatch.setattr(
+        daemon_module, "resolve_flashinfer_autotune_root", lambda: tmp_path
+    )
+    daemon._autotune_cache_path = (
+        lambda: tmp_path / "hash0" / "autotune_configs_dp0_rank0.json"
+    )
+    return daemon
+
+
+def test_read_autotune_cache_is_none_without_a_file(tmp_path, monkeypatch):
+    """A daemon that never wrote a table (autotune disabled, or the
+    single-GPU managed store) seeds None, and the mirror's first engine
+    tunes for itself, as without seeding."""
+    assert _bare_daemon(tmp_path, monkeypatch)._read_autotune_cache() is None
+
+
+def test_read_autotune_cache_encodes_this_ranks_file(tmp_path, monkeypatch):
+    """The tuned table rides base64-encoded inside the seed response, with
+    its cache-root-relative location: the mirror cannot recompute the
+    directory, because warmup finalizes the config the hash is keyed on and
+    a mirror never warms up."""
+    import pybase64 as base64
+
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    path = daemon._autotune_cache_path()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"op": 1}')
+    payload = daemon._read_autotune_cache()
+    assert payload is not None
+    assert payload["rel"] == "hash0/autotune_configs_dp0_rank0.json"
+    assert base64.b64decode(payload["data"]) == b'{"op": 1}'
+
+
+def test_read_autotune_cache_drops_an_over_budget_file(tmp_path, monkeypatch, caplog):
+    """The table shares the seed response's size budget, so an oversized file
+    is skipped with a warning rather than failing the seed."""
+    import logging
+
+    from vllm.model_executor.model_loader.weight_cache import daemon as daemon_module
+
+    monkeypatch.setattr(daemon_module, "_MAX_SEED_AUTOTUNE_BYTES", 4)
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    path = daemon._autotune_cache_path()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x" * 8)
+    with caplog.at_level(logging.WARNING):
+        assert daemon._read_autotune_cache() is None
+    assert "seed budget" in caplog.text
+
+
+def test_adopt_seeded_autotune_cache_writes_the_decoded_file(tmp_path, monkeypatch):
+    """The mirror lands the source's table at the source's root-relative
+    location under its own cache root, where its engines hit it through the
+    ordinary autotune cache lookup."""
+    import pybase64 as base64
+
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    daemon._adopt_seeded_autotune_cache(
+        {
+            "rel": "hash0/autotune_configs_dp0_rank0.json",
+            "data": base64.b64encode(b"tuned").decode(),
+        }
+    )
+    assert (tmp_path / "hash0" / "autotune_configs_dp0_rank0.json").read_bytes() == (
+        b"tuned"
+    )
+
+
+def test_adopt_seeded_autotune_cache_ignores_a_missing_payload(tmp_path, monkeypatch):
+    """A source without a table seeds None; the seed must not fail and no
+    file is written."""
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    daemon._adopt_seeded_autotune_cache(None)
+    assert not list(tmp_path.rglob("autotune_configs*"))
+
+
+def test_adopt_seeded_autotune_cache_rejects_a_malformed_location(
+    tmp_path, monkeypatch, caplog
+):
+    """The source's cache location is authenticated but still validated
+    before it touches the filesystem."""
+    import logging
+
+    import pybase64 as base64
+
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    data = base64.b64encode(b"x").decode()
+    with caplog.at_level(logging.WARNING):
+        for rel in (
+            "../escape/autotune_configs.json",
+            "/abs/path/autotune_configs.json",
+            "autotune_configs.json",
+            "hash0/not_the_table.json",
+        ):
+            daemon._adopt_seeded_autotune_cache({"rel": rel, "data": data})
+    assert "malformed" in caplog.text
+    assert not list(tmp_path.rglob("*.json"))
+
+
+def test_adopt_seeded_autotune_cache_ignores_an_unreadable_payload(
+    tmp_path, monkeypatch, caplog
+):
+    """Garbage from a peer costs the mirror's engines a full autotune pass;
+    it must not fail the seed nor write a file."""
+    import logging
+
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        daemon._adopt_seeded_autotune_cache(
+            {"rel": "hash0/autotune_configs_dp0_rank0.json", "data": "not b64!!!"}
+        )
+    assert "unreadable" in caplog.text
+    assert not list(tmp_path.rglob("autotune_configs*"))
+
+
+@contextlib.contextmanager
+def _seed_daemon(tmp_path, monkeypatch):
+    """Serve the daemon's local fetch_manifest handler on a throwaway socket.
+
+    Only that handler is exercised, so __init__ (which loads a model onto a
+    GPU) is skipped and just the state it touches is provided.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import daemon as daemon_module
+    from vllm.model_executor.model_loader.weight_cache.daemon import MirrorState
+
+    daemon = _bare_daemon(tmp_path, monkeypatch)
+    daemon.model = None
+    daemon.mirror = MirrorState(
+        tensors={"weight": torch.zeros(2)}, kinds={"weight": "param"}
+    )
+    daemon.model_config = SimpleNamespace(model="m")
+    daemon.cache_config = None
+    daemon._seed_sources = {}
+
+    socket_path = str(tmp_path / "daemon.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen()
+
+    def _serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                daemon._handle_connection(conn)
+
+    with (
+        patch.object(torch.accelerator, "current_device_index", return_value=0),
+        patch.object(daemon_module, "get_current_device_uuid", return_value=None),
+    ):
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            yield daemon, socket_path
+        finally:
+            server.close()
+            thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("contents", [None, b"tuned"])
+def test_fetch_manifest_response_carries_the_autotune_cache(
+    tmp_path, monkeypatch, contents
+):
+    """Every seed response carries the source rank's on-disk autotune cache
+    (or None when it never wrote one), so a seeded mirror's engines skip the
+    autotune pass."""
+    import pybase64 as base64
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    with _seed_daemon(tmp_path, monkeypatch) as (daemon, socket_path):
+        if contents is not None:
+            path = daemon._autotune_cache_path()
+            path.parent.mkdir(parents=True)
+            path.write_bytes(contents)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(socket_path)
+            send_msg(sock, {"cmd": "fetch_manifest"})
+            response = recv_msg(sock)
+    assert response["status"] == "ok"
+    payload = response["autotune_cache"]
+    if contents is None:
+        assert payload is None
+    else:
+        assert payload["rel"] == "hash0/autotune_configs_dp0_rank0.json"
+        assert base64.b64decode(payload["data"]) == contents
 
 
 def test_draft_seed_dials_the_draft_listeners():

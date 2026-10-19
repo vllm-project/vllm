@@ -1,10 +1,9 @@
 # Preload
 
-vLLM's preload feature keeps model artifacts resident across engine restarts,
-so a restarting engine reuses them instead of rebuilding them from scratch. The
-design is extensible to different kinds of artifacts; it currently supports
-**model weights**, which the weight cache daemon holds in GPU memory, and the
-**FlashInfer autotune table**, which it holds in host memory.
+vLLM's preload feature keeps model artifacts resident in GPU memory across
+engine restarts, so a restarting engine reuses them instead of rebuilding them
+from scratch. The design is extensible to different kinds of artifacts; it
+currently supports **model weights** via the weight cache daemon.
 
 With weight preloading, a daemon process per GPU holds its rank's
 post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
@@ -51,63 +50,36 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 The daemon itself must load from disk; passing `--load-format ipc_cache` to
 `vllm preload` is an error.
 
-## Preloading the FlashInfer autotune table
+## Preloading the FlashInfer autotune cache
 
 FlashInfer has several implementations of each operation and chooses between
-them by benchmarking. That pass runs during kernel warmup on every engine
-start, and on a large MoE model it dominates what is left of the startup time
-once the weights come from the daemon.
+them by benchmarking. vLLM runs that pass during kernel warmup and persists the
+result per rank in the on-disk FlashInfer autotune cache (under
+`VLLM_CACHE_ROOT`, or `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR`), so a later engine
+with the same configuration loads the tuned configs instead of profiling again.
+Normally the first serving engine pays for the pass, and on a large MoE model it
+dominates what is left of the startup time once the weights come from the
+daemon.
 
-The daemons therefore also cache the tuned table. An engine that finds one
-loads it and skips the autotune pass outright; an engine that has to tune hands
-its table back, so only the first engine on a given GPU pays for it:
-
-```bash
-vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
-# INFO ... Handed the FlashInfer autotune table (22841 bytes) to the weight
-#          cache daemon; engine restarts will skip the autotune pass.
-```
-
-```bash
-# after a restart
-vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
-# INFO ... Adopted the preloaded FlashInfer autotune table from the weight
-#          cache daemon (22841 bytes); skipping the autotune pass.
-```
-
-To pay that cost at preload time instead, so even the first engine starts warm,
-pass `--preload-autotune`. Once every daemon is serving, `vllm preload` runs one
-throwaway engine against them that autotunes and JIT-compiles, then exits,
-leaving the table on the daemons:
+Unless FlashInfer autotune is disabled (`--disable-flashinfer-autotune`),
+`vllm preload` pays it at preload time: each daemon runs the autotune pass in
+place — profiling dummy runs against the shard it already holds — after
+loading and before binding its socket, then writes the cache:
 
 ```bash
-vllm preload --model /path/to/model --tensor-parallel-size 4 --preload-autotune
+vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
-
-That engine is an ordinary engine, so it needs the GPU memory budget a real one
-does and takes as long as a cold start. Give `vllm preload` the same engine
-flags you give `vllm serve`: the table is keyed to the computation graph it was
-measured on, and an engine whose flags differ recomputes it. A failed warmup is
-reported but not fatal, since the daemons keep serving the weights they hold.
-
-The key covers the engine's configuration hash, the FlashInfer build that
-measured the tactics, and the set of ops the pass skipped, so an engine never
-adopts a table that was not tuned for exactly what it runs. `--load-format` and
-`--gpu-memory-utilization` are not part of it, which is why the daemon and the
-engine match despite differing there.
-
-!!! note
-    Skipping the pass also skips the JIT loading it did incidentally, so the
-    ops it exercised are loaded from the on-disk FlashInfer JIT cache on their
-    first real use instead. The chosen tactics are unaffected.
 
 ## Seeding a replica from another
 
 A second replica's daemons can fill their shards from a replica that is
 already loaded, instead of reading the checkpoint again. The weights travel
-directly between the daemons, and the source's FlashInfer autotune table
-travels with them, so the new replica's first engine also skips the autotune
-pass.
+directly between the daemons, and the source rank's on-disk autotune cache
+file travels with them into the mirror's on-disk cache, so the new replica's
+first engine also skips the autotune pass. A mirror never loads from disk,
+so it does not tune in place the way other daemons do; if the source has no
+cache to send (autotune disabled, or the single-GPU managed store), the
+mirror's first engine tunes and fills its local cache instead.
 
 Two movers are available. `peer_ipc` (the default) copies through CUDA IPC on
 one host:
@@ -115,7 +87,7 @@ one host:
 ```bash
 # source replica on GPUs 0-3, already serving
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
-    --weight-cache-socket-dir /run/vllm-a --preload-autotune
+    --weight-cache-socket-dir /run/vllm-a
 
 # mirror replica on GPUs 4-7, filled from the source
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
@@ -151,8 +123,7 @@ sides need the same shared token:
 ```bash
 # source host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
-    --weight-cache-listen 0.0.0.0:29700 --weight-cache-seed-token "$TOKEN" \
-    --preload-autotune
+    --weight-cache-listen 0.0.0.0:29700 --weight-cache-seed-token "$TOKEN"
 
 # mirror host
 vllm preload --model /path/to/model --tensor-parallel-size 8 \
@@ -292,19 +263,19 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert and data parallelism are supported;
-  launching the daemon with pipeline parallelism is rejected.
-- **Autotune preloading**: `--preload-autotune` runs one local engine, so it
-  supports neither `--nnodes > 1` nor `--data-parallel-size > 1`; those
-  deployments let their first engine tune and publish instead. It cannot be
-  combined with `--weight-cache-device-offset` either, but a seeded mirror
-  already adopts its source's table. The table lives
-  only in the daemons' memory, so restarting them drops it — the engine's own
-  on-disk autotune cache still saves the profiling work in that case.
+- **Parallelism**: tensor, expert, pipeline and data parallelism are
+  supported, including across nodes.
+- **Autotune preloading**: tuning runs across the daemon's world group,
+  including across nodes and DP ranks. With model-based speculative decoding
+  both daemon groups skip it (the target cannot run the drafter's dummy
+  passes, and a table tuned on the draft model would key on the draft's
+  config, which no engine looks up), so those deployments' first engine
+  tunes and fills the cache instead.
 - **Seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC handle is
   node-local; `rdma` requires Mooncake on both sides. A mirror copies the
   weights into its own memory, so it does not depend on the source staying
-  alive afterwards.
+  alive afterwards. Mirror daemons do not tune in place; they rely on the
+  source's autotune cache file carried by the seed.
 - **Autotuning cannot overlap the load**: autotuning picks a tactic by timing
   candidates, so running it while a daemon is still copying weights onto the
   same GPU would measure the wrong thing and cache the wrong choice. To pay

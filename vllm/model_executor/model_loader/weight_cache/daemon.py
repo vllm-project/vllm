@@ -87,9 +87,11 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import torch
+from pybase64 import b64decode, b64encode
 
 from vllm.config import (
     ParallelConfig,
@@ -104,13 +106,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
-    MAX_SEED_ARTIFACT_BYTES,
-    ArtifactStore,
-)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    MAX_ARTIFACT_SIZE,
-    ArtifactCacheKey,
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
@@ -136,11 +132,20 @@ from vllm.model_executor.model_loader.weight_cache.seed import (
     get_seed_source,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    autotune_file_with_rank,
+    resolve_flashinfer_autotune_dir,
+    resolve_flashinfer_autotune_root,
+    write_flashinfer_autotune_cache,
+)
+from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -148,14 +153,17 @@ from vllm.v1.worker.workspace import init_workspace_manager
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 # Everything else mutates or exports GPU state and stays on the owner-verified
-# Unix socket; these two only read what this rank already holds.
-REMOTE_COMMANDS = frozenset({"fetch_manifest", "fetch_artifacts"})
+# Unix socket; this only reads what this rank already holds.
+REMOTE_COMMANDS = frozenset({"fetch_manifest"})
 
 _SEED_TIMEOUT_S = 300.0
 # A remote peer is untrusted until it presents the token, so it gets only this
 # long, and this many bytes, to send its request (a command and a token).
 _REMOTE_REQUEST_TIMEOUT_S = 10.0
 _MAX_REMOTE_REQUEST_SIZE = 64 << 10
+# The tuned table rides inside the seed response, so it shares that message's
+# size budget; kilobytes in practice.
+_MAX_SEED_AUTOTUNE_BYTES = 16 << 20
 
 
 @dataclass
@@ -278,6 +286,8 @@ class WeightCacheDaemon:
         device_offset: int = 0,
     ):
         parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_eplb:
+            raise ValueError("The weight cache daemon does not support EPLB.")
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -323,10 +333,6 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
-        # Host-side artifacts an engine computed once and handed back, e.g.
-        # the FlashInfer autotune table. They outlive every engine restart
-        # like the weights do, but cost only host memory.
-        self.artifacts = ArtifactStore()
         self.seed_addr = seed_addr
         self.seed_backend = seed_backend
         self.listen_addr = listen_addr
@@ -349,7 +355,44 @@ class WeightCacheDaemon:
             dp_size=self.dp_size,
             dp_rank=dp_rank,
             is_draft=is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
+
+    def warmup(self) -> None:
+        """Run the FlashInfer autotune pass against the cached model."""
+        vllm_config = self.vllm_config
+        # Mirrors the gate in the engine's kernel warmup.
+        if (
+            vllm_config.kernel_config.enable_flashinfer_autotune is False
+            or not has_flashinfer()
+            or not current_platform.has_device_capability(90)
+            or is_draft_model_cacheable(vllm_config.speculative_config)
+        ):
+            return
+        try:
+            current_platform.update_block_size_for_backend(vllm_config)
+            runner = build_warmup_runner(
+                vllm_config,
+                self.local_rank,
+                is_draft=self.is_draft,
+                model_config=self.model_config,
+            )
+            assert self.model is not None, "warmup ran before load_model"
+            runner.load_model(model=self.model)
+            # The V2 runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            logger.info(
+                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
+                "configs are in the on-disk autotune cache",
+                self.role,
+                self.global_rank,
+            )
+        finally:
+            # Free the runner and the dummy-run activations; the daemon's
+            # weights are untouched.
+            gc.collect()
+            torch.accelerator.empty_cache()
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.device_index)
@@ -453,15 +496,98 @@ class WeightCacheDaemon:
             aliases=dict(response.get("aliases") or {}),
             attrs=dict(response.get("attrs") or {}),
         )
-        adopted = self.artifacts.merge_json(response.get("artifacts") or [])
-        if adopted:
-            logger.info(
-                "Weight cache %s daemon rank %d adopted %d artifact(s) from %s",
-                self.role,
-                self.global_rank,
-                adopted,
-                self.seed_addr,
+        self._adopt_seeded_autotune_cache(response.get("autotune_cache"))
+
+    def _autotune_cache_path(self) -> Path:
+        """This rank's on-disk FlashInfer autotune cache file.
+
+        The daemon's world group spans the same ranks the engine's does, so
+        both derive the same per-rank file (see ``autotune_file_with_rank``).
+        Resolved on this daemon's own config object, which warmup has
+        finalized (e.g. hybrid block-size alignment) by the time seeds are
+        served — the same finalization an engine applies before its lookup.
+        """
+        base = (
+            resolve_flashinfer_autotune_dir(self.vllm_config) / "autotune_configs.json"
+        )
+        return autotune_file_with_rank(
+            base,
+            self.vllm_config.parallel_config.data_parallel_rank,
+            self.global_rank,
+        )
+
+    def _read_autotune_cache(self) -> dict[str, str] | None:
+        """This rank's tuned table and its cache-root-relative location.
+
+        The location travels with the bytes because a mirror cannot recompute
+        the cache directory: warmup finalizes the config the hash is keyed on
+        and a mirror never warms up. ``None`` when this daemon never wrote a
+        table (autotune disabled, or the single-GPU managed store, which has
+        no v1 file to carry); the mirror's first engine then tunes, as
+        without seeding.
+        """
+        try:
+            path = self._autotune_cache_path()
+            data = path.read_bytes() if path.is_file() else None
+            rel = str(path.relative_to(resolve_flashinfer_autotune_root()))
+        except (OSError, ValueError):
+            logger.exception("Failed to read the FlashInfer autotune cache")
+            return None
+        if data is None:
+            return None
+        if len(data) > _MAX_SEED_AUTOTUNE_BYTES:
+            logger.warning(
+                "FlashInfer autotune cache is %d bytes, over the %d byte seed "
+                "budget; the mirror's first engine will tune instead",
+                len(data),
+                _MAX_SEED_AUTOTUNE_BYTES,
             )
+            return None
+        return {
+            "rel": rel,
+            "data": b64encode(data).decode("ascii"),
+        }
+
+    def _adopt_seeded_autotune_cache(self, payload: Any) -> None:
+        """Land the source's tuned table where this rank's engines look.
+
+        The relative location comes from the source (see
+        ``_read_autotune_cache``) but is validated before it touches the
+        filesystem; a missing or malformed payload only costs the engines a
+        full autotune pass.
+        """
+        if not isinstance(payload, dict):
+            return
+        rel, encoded = payload.get("rel"), payload.get("data")
+        if not isinstance(rel, str) or not isinstance(encoded, str):
+            return
+        parts = Path(rel).parts
+        if (
+            len(parts) != 2
+            or parts[0] in ("", ".", "..")
+            or not parts[1].startswith("autotune_configs")
+        ):
+            logger.warning(
+                "Seed daemon sent a malformed autotune cache location %r", rel
+            )
+            return
+        try:
+            data = b64decode(encoded, validate=True)
+        except ValueError:
+            logger.warning(
+                "Seed daemon sent an unreadable FlashInfer autotune cache; "
+                "engines will tune for themselves"
+            )
+            return
+        target = resolve_flashinfer_autotune_root() / parts[0] / parts[1]
+        write_flashinfer_autotune_cache(target, data)
+        logger.info(
+            "Weight cache %s daemon rank %d adopted the source's FlashInfer "
+            "autotune cache (%d bytes)",
+            self.role,
+            self.global_rank,
+            len(data),
+        )
 
     def _request_seed(self, target: str | tuple[str, int]) -> dict:
         """Ask the source daemon for this rank's manifest and transfer seed.
@@ -675,7 +801,7 @@ class WeightCacheDaemon:
             "seed": seed,
             # Kilobytes next to the weights, and it saves the mirror's first
             # engine the autotune pass, so every plane carries it.
-            "artifacts": self.artifacts.to_json(MAX_SEED_ARTIFACT_BYTES),
+            "autotune_cache": self._read_autotune_cache(),
         }
 
     def _handle_fetch_manifest(self, conn: socket.socket, request: dict) -> None:
@@ -753,11 +879,6 @@ class WeightCacheDaemon:
         send_json(conn, response)
 
     def _remote_response(self, cmd: str, request: dict) -> dict[str, Any]:
-        if cmd == "fetch_artifacts":
-            return {
-                "status": "ok",
-                "artifacts": self.artifacts.to_json(MAX_SEED_ARTIFACT_BYTES),
-            }
         if not self.has_weights:
             return {"status": "error", "message": "Weights were released"}
         backend = request.get("seed_backend", RDMA_SEED_SOURCE)
@@ -791,12 +912,6 @@ class WeightCacheDaemon:
             )
         elif cmd == "fetch_manifest":
             self._handle_fetch_manifest(conn, request)
-        elif cmd == "fetch_artifacts":
-            send_msg(conn, {"status": "ok", "artifacts": self.artifacts.to_json()})
-        elif cmd == "get_artifact":
-            self._handle_get_artifact(conn, request)
-        elif cmd == "put_artifact":
-            self._handle_put_artifact(conn, request)
         elif cmd == "release":
             self._handle_release(conn)
         else:
@@ -832,53 +947,6 @@ class WeightCacheDaemon:
             self.global_rank,
             len(entries),
             len(aliases),
-        )
-
-    def _handle_get_artifact(self, conn: socket.socket, request: dict) -> None:
-        key = request.get("key")
-        if not isinstance(key, ArtifactCacheKey):
-            send_msg(conn, {"status": "error", "message": "Missing artifact key"})
-            return
-        data = self.artifacts.get(key)
-        if data is None:
-            send_msg(conn, {"status": "miss"})
-            return
-        send_msg(conn, {"status": "ok", "data": data})
-        logger.info_once(
-            "Weight cache %s daemon rank %d served %r artifact (%d bytes)",
-            self.role,
-            self.global_rank,
-            key.kind,
-            len(data),
-        )
-
-    def _handle_put_artifact(self, conn: socket.socket, request: dict) -> None:
-        key = request.get("key")
-        data = request.get("data")
-        if not isinstance(key, ArtifactCacheKey) or not isinstance(data, bytes):
-            send_msg(
-                conn,
-                {"status": "error", "message": "Missing artifact key or data"},
-            )
-            return
-        if len(data) > MAX_ARTIFACT_SIZE:
-            send_msg(
-                conn,
-                {
-                    "status": "error",
-                    "message": f"Artifact of {len(data)} bytes exceeds the "
-                    f"{MAX_ARTIFACT_SIZE} byte limit",
-                },
-            )
-            return
-        self.artifacts.put(key, data)
-        send_msg(conn, {"status": "ok"})
-        logger.info(
-            "Weight cache %s daemon rank %d cached %r artifact (%d bytes)",
-            self.role,
-            self.global_rank,
-            key.kind,
-            len(data),
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
@@ -928,6 +996,10 @@ def _run_daemon(
         device_offset,
     )
     daemon.load_model()
+    if seed_addr is None:
+        # A mirror never built a world group, so it cannot tune in place; it
+        # adopts the source's on-disk autotune cache during seeding instead.
+        daemon.warmup()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )

@@ -5,14 +5,13 @@
 import hashlib
 import os
 import tempfile
-from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -20,107 +19,111 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FLASHINFER_AUTOTUNE_ARTIFACT = "flashinfer_autotune"
-"""Artifact kind the weight cache daemon caches the tuned table under."""
+
+def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
+    """Normalize cache config for hashing"""
+    if cache_config.mamba_block_size is None and cache_config.kv_cache_layout is None:
+        return cache_config
+    normalized = replace(cache_config, mamba_block_size=None)
+    assert normalized.kv_cache_layout is None
+    return normalized
 
 
-def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
-    config_hash = runner.vllm_config.compute_hash(include_version=False)
+def flashinfer_autotune_cache_hash(vllm_config: VllmConfig) -> str:
+    cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
+    if cache_config is not vllm_config.cache_config:
+        vllm_config = replace(vllm_config, cache_config=cache_config)
+    config_hash = vllm_config.compute_hash(include_version=False)
     return hashlib.sha256(config_hash.encode()).hexdigest()
 
 
-def _flashinfer_workspace_id() -> str:
-    """Identity of the FlashInfer build the tuned tactics belong to."""
-    import flashinfer
-    from flashinfer.jit import env as flashinfer_jit_env
-
-    workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
-    return f"{workspace.parent.name}/{workspace.name}@{flashinfer.__version__}"
-
-
-def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+def resolve_flashinfer_autotune_root() -> Path:
+    """The root every per-config autotune cache directory lives under."""
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     if override_dir:
-        root = Path(override_dir).expanduser()
-    else:
-        from flashinfer.jit import env as flashinfer_jit_env
+        return Path(override_dir).expanduser()
+    from flashinfer.jit import env as flashinfer_jit_env
 
-        flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
-        root = (
-            Path(envs.VLLM_CACHE_ROOT)
-            / "flashinfer_autotune_cache"
-            / flashinfer_workspace.parent.name
-            / flashinfer_workspace.name
-        )
-
-    output_dir = root / flashinfer_autotune_cache_hash(runner)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / "autotune_configs.json"
-
-
-def flashinfer_autotune_artifact_key(
-    runner: "GPUModelRunner",
-    skip_ops: Iterable[str] | None = None,
-    pp_rank: int = 0,
-) -> ArtifactCacheKey:
-    """Key the tuned table is cached under on the weight cache daemon.
-
-    A hit means every tactic this engine would profile is already chosen, so
-    the whole autotune pass can be skipped. That is only true when the table
-    was produced for the same computation graph and pipeline stage, by the
-    same FlashInfer build, and without skipping any op this engine does tune,
-    so all of these go into the hash. The vLLM version is carried by
-    ``ArtifactCacheKey`` itself.
-    """
-    parts = [
-        flashinfer_autotune_cache_hash(runner),
-        _flashinfer_workspace_id(),
-        ",".join(sorted(skip_ops or ())),
-        str(pp_rank),
-    ]
-    return ArtifactCacheKey(
-        kind=FLASHINFER_AUTOTUNE_ARTIFACT,
-        content_hash=hashlib.sha256("\x00".join(parts).encode()).hexdigest(),
+    flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    return (
+        Path(envs.VLLM_CACHE_ROOT)
+        / "flashinfer_autotune_cache"
+        / flashinfer_workspace.parent.name
+        / flashinfer_workspace.name
     )
 
 
-def dump_flashinfer_autotune_configs() -> bytes:
-    """Serialize the process-wide tuned tactics.
+def resolve_flashinfer_autotune_dir(vllm_config: VllmConfig) -> Path:
+    output_dir = resolve_flashinfer_autotune_root() / flashinfer_autotune_cache_hash(
+        vllm_config
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
-    ``AutoTuner`` only exposes file-based serialization, so the table is
-    written to a temporary file and read back.
+
+def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    return resolve_flashinfer_autotune_dir(runner.vllm_config) / "autotune_configs.json"
+
+
+def autotune_file_with_rank(cache_path: Path, dp_rank: int, world_rank: int) -> Path:
+    """The per-rank variant of the autotune cache file.
+
+    FlashInfer keys MoE entries by tp/ep rank
+    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on
+    that rank and every rank keeps its own file. Weight cache daemons use
+    this to carry the tuned table to a seeded replica: source and mirror
+    hold the same (dp rank, world rank) shard, hence the same file name.
     """
-    from flashinfer.autotuner import AutoTuner
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        path = Path(temp_dir) / "autotune_configs.json"
-        AutoTuner.get().save_configs(str(path))
-        return path.read_bytes()
+    return cache_path.with_name(
+        f"{cache_path.stem}_dp{dp_rank}_rank{world_rank}{cache_path.suffix}"
+    )
 
 
-def load_flashinfer_autotune_configs(configs: bytes) -> bool:
-    """Load serialized tactics into the process-wide ``AutoTuner``."""
-    from flashinfer.autotuner import AutoTuner
+def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
+    from vllm.distributed.parallel_state import get_node_count, get_world_group
+    from vllm.utils.flashinfer import has_flashinfer_autotune_v2
 
-    with tempfile.NamedTemporaryFile() as f:
-        f.write(configs)
-        f.flush()
-        return bool(AutoTuner.get().load_configs(f.name))
-
-
-def try_load_flashinfer_autotune_configs(configs: bytes) -> bool:
-    """Load serialized tactics, reporting an unusable table as a miss.
-
-    ``AutoTuner.load_configs`` returns False before populating anything when
-    the table records a different environment (FlashInfer, CUDA, cuBLAS or
-    cuDNN version, or GPU), so a rejected table leaves the tuner untouched
-    and the caller can safely fall back to a full autotune pass.
-    """
-    try:
-        return load_flashinfer_autotune_configs(configs)
-    except Exception:
-        logger.exception("Discarding an unreadable FlashInfer autotune table")
+    # Elastic EP transfers tuning state to joining workers with v1
+    # save_configs/load_configs, which do not export managed-store winners.
+    if runner.vllm_config.parallel_config.enable_elastic_ep:
         return False
+    # PP stages profile independently. Keep their group-scoped v1 files until
+    # managed-cache reads and publishes can be isolated across tuning groups.
+    if runner.vllm_config.parallel_config.pipeline_parallel_size > 1:
+        return False
+    if not has_flashinfer_autotune_v2():
+        return False
+    # Use the initialized topology: Ray may span nodes with config.nnodes=1.
+    # A cache hit skips profiling collectives, so node-local stores with
+    # different contents cannot safely participate in synchronized tuning.
+    if get_node_count() != 1:
+        logger.info_once(
+            "Using legacy FlashInfer autotune cache synchronization for "
+            "multi-node deployments; managed-cache synchronization is "
+            "currently supported only within one node."
+        )
+        return False
+    # Lift this gate after pinning a release with the fix below and validating
+    # distributed managed-cache tuning: https://github.com/flashinfer-ai/flashinfer/pull/6185
+    if get_world_group().world_size > 1:
+        logger.info_once(
+            "Using legacy FlashInfer autotune cache synchronization for "
+            "multi-rank deployments until FlashInfer coordinates cache hits."
+        )
+        return False
+    return True
+
+
+def resolve_flashinfer_autotune_v2_root() -> Path | None:
+    """Placement root for FlashInfer's managed autotune store.
+
+    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    (config hash, flashinfer version, arch) is folded into the path: the
+    managed store keys entries per op and hashes the software/hardware
+    environment itself. ``None`` selects FlashInfer's default root.
+    """
+    override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+    return Path(override_dir).expanduser() if override_dir else None
 
 
 def sync_flashinfer_autotune_cache(
@@ -137,7 +140,12 @@ def sync_flashinfer_autotune_cache(
             from vllm.utils.flashinfer import has_flashinfer
 
             if has_flashinfer() and current_platform.has_device_capability(90):
-                cache = dump_flashinfer_autotune_configs()
+                from flashinfer.autotuner import AutoTuner
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    path = Path(temp_dir) / "autotune_configs.json"
+                    AutoTuner.get().save_configs(str(path))
+                    cache = path.read_bytes()
         except Exception as exc:
             cache = f"{type(exc).__name__}: {exc}"
 
@@ -147,8 +155,13 @@ def sync_flashinfer_autotune_cache(
     if cache is None or group.rank_in_group == 0:
         return
 
-    if not load_flashinfer_autotune_configs(cache):
-        raise RuntimeError("FlashInfer autotune cache is incompatible")
+    from flashinfer.autotuner import AutoTuner
+
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(cache)
+        f.flush()
+        if not AutoTuner.get().load_configs(f.name):
+            raise RuntimeError("FlashInfer autotune cache is incompatible")
 
 
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:
