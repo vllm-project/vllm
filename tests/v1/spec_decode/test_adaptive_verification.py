@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -306,3 +307,34 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_warmup_compiles_every_budget_kernel_specialization():
+    """Trimmed steps must not compile the budget kernel mid-serving."""
+    max_num_reqs, num_steps = 8, 7
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager.num_speculative_steps = num_steps
+    manager.req_states = SimpleNamespace(max_num_reqs=max_num_reqs)
+    manager._confidence_probs = torch.empty(max_num_reqs, num_steps, device="cuda")
+    manager._batch_draft_capacity = torch.empty(
+        max_num_reqs, dtype=torch.int32, device="cuda"
+    )
+    torch._dynamo.reset()
+    with torch.inference_mode():
+        manager.warmup()
+        manager._confidence_probs.uniform_()
+        with torch.compiler.set_stance("fail_on_recompile"):
+            for num_reqs in (1, 2, 5, max_num_reqs):
+                idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device="cuda")
+                for draft_budget in (1, 2, 3):
+                    capacities = manager._batch_draft_capacity[:num_reqs]
+                    capacities.fill_(num_steps)
+                    adaptive_module._assign_draft_token_budget_compiled(
+                        manager._confidence_probs,
+                        idx_mapping,
+                        capacities,
+                        draft_budget,
+                        num_steps,
+                    )
+                    assert int(capacities.sum()) == draft_budget

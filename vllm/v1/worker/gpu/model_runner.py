@@ -1132,6 +1132,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             ):
                                 self._dummy_run(**batch)
                         self.adaptive_verification.set_initial_cost_curves(timings)
+                        # Profiling buffers are torn down; compile on the real ones.
+                        if not profile_only:
+                            self.adaptive_verification.warmup()
                         # Release the profiling runs' activations, or the
                         # allocator cache is counted as graph memory below.
                         torch.accelerator.empty_cache()
