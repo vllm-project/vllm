@@ -194,6 +194,7 @@ def test_piecewise_graphs_only_warn(on_mi355x):
 
 
 def test_cache_refusal_names_the_cache():
+    pytest.importorskip("flydsl")
     conv = torch.zeros(2, 4, 3, dtype=torch.float32)
     rstate = torch.zeros(2, 12, 128, 128, dtype=torch.bfloat16)
     reasons = cache_reasons({"layers.5.attn": (conv, rstate)})
