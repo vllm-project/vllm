@@ -1,4 +1,4 @@
-// RDNA3.5 prefill attention for one sequence of M query tokens after a cached
+// RDNA prefill attention for one sequence of M query tokens after a cached
 // prefix, or a batch through plan_prefill's work list, causal and optionally
 // windowed, over the paged KV cache
 // (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM), as a template on one
@@ -23,12 +23,20 @@
 #include <algorithm>
 #include <cmath>
 #include <type_traits>
+#include <utility>
 
 #include "rdna_attn_common.cuh"
 #include "rdna_attn_launch.h"
 #include "rdna_prefill_configs.h"
 
 namespace rdna {
+
+// An RDNA WGP has 4 SIMDs and 128 KiB of LDS (64 KiB at most for one
+// workgroup). A SIMD lane has 1536 VGPRs or 1024, depending on the arch.
+constexpr int kSimdsPerWgp = 4;
+constexpr int kWgpLdsBytes = 128 * 1024;
+constexpr int kBigLaneVgprs = 1536;
+constexpr int kSmallLaneVgprs = 1024;
 
 // The largest divisor of n up to cap.
 constexpr int largest_divisor_up_to(int n, int cap) {
@@ -181,26 +189,44 @@ struct Prefill {
       (kDimParts > 1 ? kWaves * kWaveSubTiles * 256 * 4 : 0) +
       (kKeyWaves > 1 ? (2 * kKeyWaves * kBlockRows + kWaves * kWaveSize * 8) * 4
                      : 0);
-  static constexpr int kSimdWaves = kWaves >= 4 ? kWaves / 4 : 1;
+  // A workgroup's waves on each SIMD.
+  static constexpr int kSimdWaves =
+      kWaves >= kSimdsPerWgp ? kWaves / kSimdsPerWgp : 1;
+  // With 1536 VGPRs: 6 waves a SIMD (256 VGPRs each, the most a wave
+  // addresses), 8 for 16-wave workgroups, fewer if the LDS holds fewer
+  // workgroups; in whole workgroups.
   static constexpr int kWavesPerSimd =
-      std::min(kWaves >= 16 ? 8 : 6, 131072 / kLdsBytes * kWaves / 4) /
+      std::min(kWaves >= 16 ? 8 : 6,
+               kWgpLdsBytes / kLdsBytes * kWaves / kSimdsPerWgp) /
       kSimdWaves * kSimdWaves;
+  // With 1024 VGPRs, the waves that keep each wave the VGPRs it has with
+  // 1536, in whole workgroups.
+  static constexpr int kSmallVgprWaves =
+      kWavesPerSimd * kSmallLaneVgprs / kBigLaneVgprs;
+  static constexpr int kSmallVgprWavesPerSimd =
+      std::max(kSimdWaves, kSmallVgprWaves / kSimdWaves * kSimdWaves);
+  // The archs with 1024 VGPRs.
+#if defined(__gfx1102__) || defined(__gfx1103__) || defined(__gfx1150__) || \
+    defined(__gfx1152__) || defined(__gfx1153__)
+  static constexpr int kTargetWavesPerSimd = kSmallVgprWavesPerSimd;
+#else
+  static constexpr int kTargetWavesPerSimd = kWavesPerSimd;
+#endif
 
   // kBatch: a batch through the work list, apart so that the one-sequence
   // kernel keeps its registers.
   template <bool kBatch>
-  static __global__ void __launch_bounds__(kThreads)
-      __attribute__((amdgpu_waves_per_eu(kWavesPerSimd > 1 ? kWavesPerSimd
-                                                           : 1)))
-      prefill_attn(const elem_t* __restrict__ q, const elem_t* __restrict__ kv,
-                   const int* __restrict__ blockTable, elem_t* __restrict__ out,
-                   const int* __restrict__ seqLens, int numTokens, float scale,
-                   float* __restrict__ partialO, float* __restrict__ partialML,
-                   int* __restrict__ counters, int numSegments, int firstRound,
-                   const int* __restrict__ mmRanges, int numMmRanges,
-                   const int4* __restrict__ plan,
-                   const int* __restrict__ queryStart, int numEntries,
-                   int blockTableStride, int headGroup) {
+  static __global__ void __launch_bounds__(kThreads) __attribute__((
+      amdgpu_waves_per_eu(kTargetWavesPerSimd > 1 ? kTargetWavesPerSimd : 1)))
+  prefill_attn(const elem_t* __restrict__ q, const elem_t* __restrict__ kv,
+               const int* __restrict__ blockTable, elem_t* __restrict__ out,
+               const int* __restrict__ seqLens, int numTokens, float scale,
+               float* __restrict__ partialO, float* __restrict__ partialML,
+               int* __restrict__ counters, int numSegments, int firstRound,
+               const int* __restrict__ mmRanges, int numMmRanges,
+               const int4* __restrict__ plan,
+               const int* __restrict__ queryStart, int numEntries,
+               int blockTableStride, int headGroup) {
     __shared__ __attribute__((
         aligned(16))) elem_t kTile[kBuffers][kKeyTile][kRowPitch];
     __shared__ __attribute__((aligned(16))) elem_t
@@ -882,15 +908,23 @@ template <PrefillConfig C>
 void launch_prefill(const PrefillArgs& a) {
   using P = Prefill<C>;
   using elem_t = typename P::elem_t;
-  static const int numWgps = [] {
-    int device, n = 0;
+  // The WGPs, and the workgroups resident in each: as many as its LDS and its
+  // SIMDs' waves allow, with the waves the kernel was built for. A WGP with
+  // fewer VGPRs than 4 SIMDs x 32 lanes x 1536 is a 1024-VGPR one.
+  static const auto [numWgps, wgpWorkgroups] = [] {
+    int device, n = 0, regs = 0;
     (void)hipGetDevice(&device);
     (void)hipDeviceGetAttribute(&n, hipDeviceAttributeMultiprocessorCount,
                                 device);
-    return std::max(1, n);
+    (void)hipDeviceGetAttribute(
+        &regs, hipDeviceAttributeMaxRegistersPerMultiprocessor, device);
+    const bool smallVgprs =
+        regs > 0 && regs < kSimdsPerWgp * P::kWaveSize * kBigLaneVgprs;
+    const int waves = smallVgprs ? P::kSmallVgprWavesPerSimd : P::kWavesPerSimd;
+    const int resident =
+        std::min(kWgpLdsBytes / P::kLdsBytes, waves * kSimdsPerWgp / P::kWaves);
+    return std::pair{std::max(1, n), std::max(1, resident)};
   }();
-  constexpr int kWgpWorkgroups = std::max(
-      1, std::min(131072 / P::kLdsBytes, P::kWavesPerSimd * 4 / P::kWaves));
   if (a.plan) {
     const int headGroup = a.head_group ? a.head_group : P::kHeadGroup;
     hipLaunchKernelGGL(
@@ -898,12 +932,13 @@ void launch_prefill(const PrefillArgs& a) {
         dim3(P::kThreads), 0, a.stream, static_cast<const elem_t*>(a.q),
         static_cast<const elem_t*>(a.kv), a.bt, static_cast<elem_t*>(a.out),
         a.seq_lens, 0, a.scale, a.partial_o, a.partial_ml, a.counters, 1,
-        kWgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges,
+        wgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges,
         reinterpret_cast<const int4*>(a.plan), a.query_start, a.num_entries,
         a.bt_stride, headGroup);
     return;
   }
-  const int targetWorkgroups = 4 * numWgps;
+  // A workgroup per SIMD.
+  const int targetWorkgroups = kSimdsPerWgp * numWgps;
   const int numTiles =
       (a.num_tokens * P::kG + P::kBlockRows - 1) / P::kBlockRows;
   const int groups = numTiles * P::kNumKvHeads;
@@ -924,7 +959,7 @@ void launch_prefill(const PrefillArgs& a) {
       dim3(P::kThreads), 0, a.stream, static_cast<const elem_t*>(a.q),
       static_cast<const elem_t*>(a.kv), a.bt, static_cast<elem_t*>(a.out),
       a.seq_lens, a.num_tokens, a.scale, a.partial_o, a.partial_ml, a.counters,
-      segments, kWgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges, nullptr,
+      segments, wgpWorkgroups * numWgps, a.mm_ranges, a.num_mm_ranges, nullptr,
       nullptr, 0, 0, P::kHeadGroup);
 }
 
