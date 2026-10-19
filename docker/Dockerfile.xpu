@@ -170,7 +170,7 @@ FROM vllm-base AS ucx-nixl-build
 # Keep UCX_VERSION aligned with the UCX that NIXL itself builds against for this
 # NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
 # same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
-ARG UCX_VERSION=main
+ARG UCX_VERSION=master
 ARG NIXL_VERSION=v1.5.0
 
 # Build-time only: compiler, autotools, and verbs dev headers
