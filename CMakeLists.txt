@@ -1497,7 +1497,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # per (dtype, kv-cache dtype, head size) combination: compiling them in a
   # single TU serializes ~10 min of device code generation onto one core.
   # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
-  # the kernels and launchers.
+  # the kernels and launchers. A file listed here is dead weight unless
+  # attention_dispatch.cu also dispatches its entry point (guarded below).
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
@@ -1515,6 +1516,36 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/attention_paged_attn_h128_bf16_fp8_f16.cu"
     "csrc/rocm/attention_paged_attn_h64_bf16_fp8_fp8.cu"
     "csrc/rocm/attention_paged_attn_h128_bf16_fp8_fp8.cu")
+
+  # A per-variant TU that no dispatch arm reaches is still compiled and linked:
+  # it silently costs ~1 min of build time and ~12 MB of .so size, which is
+  # exactly what splitting it was meant to save. Fail at configure time instead.
+  file(READ "${CMAKE_SOURCE_DIR}/csrc/rocm/attention_dispatch.cu" _attn_dispatch)
+  string(FIND "${_attn_dispatch}" "#define ATTN_HEAD_SWITCH" _attn_arms_pos)
+  if (_attn_arms_pos EQUAL -1)
+    message(FATAL_ERROR
+      "csrc/rocm/attention_dispatch.cu no longer defines ATTN_HEAD_SWITCH; "
+      "update the instantiation guard in CMakeLists.txt accordingly.")
+  endif()
+  string(SUBSTRING "${_attn_dispatch}" ${_attn_arms_pos} -1 _attn_arms)
+  foreach (_attn_src ${VLLM_ROCM_EXT_SRC})
+    if (_attn_src MATCHES "^csrc/rocm/attention_paged_attn_.*\\.cu$")
+      file(READ "${CMAKE_SOURCE_DIR}/${_attn_src}" _attn_tu)
+      string(REGEX MATCHALL "ATTN_ENTRY\\([A-Za-z0-9_]+\\)" _attn_entries
+        "${_attn_tu}")
+      foreach (_attn_entry ${_attn_entries})
+        string(REGEX REPLACE "ATTN_ENTRY\\((.*)\\)" "\\1" _attn_name
+          "${_attn_entry}")
+        if (NOT _attn_arms MATCHES "${_attn_name}[,)]")
+          message(FATAL_ERROR
+            "${_attn_src} instantiates ${_attn_name}, but "
+            "csrc/rocm/attention_dispatch.cu never dispatches it: the TU would "
+            "be compiled and linked for nothing. Add it to one of the "
+            "ATTN_HEAD_SWITCH() calls in paged_attention().")
+        endif()
+      endforeach()
+    endif()
+  endforeach()
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS})
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy

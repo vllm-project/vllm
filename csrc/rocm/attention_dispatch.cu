@@ -26,6 +26,8 @@
 #include "attention_kernels.cuh"
 #include "ops.h"
 
+// One prototype per entry point. Adding one here is useless unless
+// paged_attention() below also dispatches it (checked by CMakeLists.txt).
 ATTN_ENTRY(paged_attention_h64_f16_auto);
 ATTN_ENTRY(paged_attention_h128_f16_auto);
 ATTN_ENTRY(paged_attention_h64_bf16_auto);
@@ -58,6 +60,7 @@ bool is_navi_gpu() {
   return result;
 }
 
+// Each ATTN_HEAD_SWITCH below is what makes an instantiation TU reachable.
 #define ATTN_HEAD_SWITCH(FN64, FN128)                           \
   switch (head_size) {                                          \
     case 64:                                                    \

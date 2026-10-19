@@ -3867,7 +3867,9 @@ void paged_attention_custom_launcher_navi(
       max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, block_size, \
       is_navi, use_interleaved_v_cache
 
-// Declare/define one fixed-head-size entry point.
+// Declare/define one fixed-head-size entry point. The per-TU definitions in
+// attention_paged_attn_*.cu are reachable only through ATTN_HEAD_SWITCH() in
+// attention_dispatch.cu (CMakeLists.txt fails if one is not).
 #define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
 
 // Instantiate one per-TU entry point, for every supported block size. Kept as
