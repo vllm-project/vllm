@@ -42,12 +42,6 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
-from vllm.v1.kv_offload.config import (
-    OffloadingCacheConfig,
-    OffloadingConfig,
-    OffloadingModelConfig,
-    OffloadingParallelConfig,
-)
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -70,41 +64,6 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
-
-# Constants for FS-tier integration tests.  Small block size so tests are fast
-# and don't require O_DIRECT alignment; the FS tier gracefully falls back to
-# buffered I/O when O_DIRECT is unavailable.
-_FS_N_CHUNKS = 8
-_FS_BLOCK_BYTES = 64
-
-_FS_OFFLOADING_SPEC = MagicMock()
-_FS_OFFLOADING_SPEC.config = OffloadingConfig(
-    groups=(),
-    worker_kv_bytes_per_block=0,
-    enable_kv_cache_events=False,
-    extra_config={},
-    engine_id="test-engine",
-    model=OffloadingModelConfig(name="test-model", dtype="float32"),
-    cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
-    parallel=OffloadingParallelConfig(
-        rank=0,
-        world_size=1,
-        tp_size=1,
-        pp_size=1,
-        pcp_size=1,
-        dcp_size=1,
-        data_parallel_index=0,
-        data_parallel_size=1,
-        data_parallel_rank_local=None,
-        is_parallelism_agnostic=True,
-    ),
-    replicated_layout=False,
-)
-_FS_OFFLOADING_SPEC.blocks_per_chunk = 1
-_FS_OFFLOADING_SPEC.kv_events_config = OffloadingKVEventsConfig(
-    enable_kv_cache_events=False,
-    self_describing_kv_events=False,
-)
 
 
 def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
@@ -1874,207 +1833,6 @@ def test_parse_tier_filter_skips_bad_entries():
     )
 
 
-# ---------------------------------------------------------------------------
-# FS-tier integration tests
-# ---------------------------------------------------------------------------
-
-
-def _make_fs_tier(mmap_region, root_dir: str) -> FileSystemTierManager:
-    """Construct a FileSystemTierManager wired to the given mmap region."""
-    return FileSystemTierManager(
-        offloading_spec=_FS_OFFLOADING_SPEC,
-        primary_kv_view=mmap_region.create_kv_memoryview(),
-        tier_type="fs",
-        root_dir=root_dir,
-        n_read_threads=4,
-        n_write_threads=4,
-    )
-
-
-@pytest.fixture
-def fs_manager_setup(tmp_path):
-    """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
-    mmap = _mock_mmap_region(_FS_N_CHUNKS, _FS_BLOCK_BYTES)
-    primary_tier = CPUPrimaryTierOffloadingManager(
-        num_chunks=_FS_N_CHUNKS, mmap_region=mmap
-    )
-    fs_tier = _make_fs_tier(mmap, str(tmp_path))
-    manager = TieringOffloadingManager(
-        primary_tier=primary_tier,
-        secondary_tiers=[fs_tier],
-    )
-    yield manager, primary_tier, fs_tier
-    manager.reset_cache()
-    fs_tier.shutdown()
-
-
-def _wait_lookup_workers(
-    *fs_tiers: FileSystemTierManager, timeout: float = 2.0
-) -> None:
-    """Block until the lookup worker thread has delivered results for all
-    in-flight probes.
-    """
-    deadline = time.monotonic() + timeout
-    for tier in fs_tiers:
-        while time.monotonic() < deadline:
-            if not tier._lookup_manager._pending_results.empty():
-                break
-            time.sleep(0.005)
-        else:
-            raise TimeoutError(
-                f"Lookup worker did not produce results within {timeout}s"
-            )
-
-
-def _drain_fs_results(
-    manager: TieringOffloadingManager, *fs_tiers: FileSystemTierManager
-) -> None:
-    """Deterministically drain all in-flight FS work and promotion jobs."""
-    ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
-    manager.on_schedule_end(ctx)  # flush pending lookups to thread pool
-    for tier in fs_tiers:
-        tier.drain_jobs()
-
-
-def _write_keys_to_fs(fs_tier: FileSystemTierManager, keys) -> None:
-    """Create key files directly in the FS tier's backing directory, bypassing
-    the store-job mechanism."""
-    for k in keys:
-        path = fs_tier.file_mapper.get_file_name(k)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(bytes(_FS_BLOCK_BYTES))
-
-
-class TestTieringOffloadingManagerWithFsTier:
-    """Integration tests for TieringOffloadingManager backed by a real FS tier."""
-
-    def test_locked_primary_tier_wrapping(self, fs_manager_setup):
-        """When any secondary tier supports deferred allocation the primary tier is
-        wrapped in _LockedPrimaryTier."""
-        manager, _, _ = fs_manager_setup
-        assert isinstance(manager.primary_tier, _LockedPrimaryTier), (
-            "primary_tier must be a _LockedPrimaryTier when FS (deferred)",
-            " tier is present",
-        )
-
-    def test_one_fs_tier_promotion(self, fs_manager_setup):
-        """Store keys in FS, verify all lookups return HIT_PENDING, wait for
-        promotion to finish (with a timeout), then verify all keys are loaded."""
-        manager, _, fs_tier = fs_manager_setup
-        keys = to_keys(range(4))
-        _write_keys_to_fs(fs_tier, keys)
-
-        req_ctx = ReqContext(req_id="r1")
-        for k in keys:
-            r = manager.lookup(k, req_ctx)
-            assert r == LookupResult.RETRY, "Lookups are submit now"
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
-        )
-        _wait_lookup_workers(fs_tier)
-
-        for k in keys:
-            r = manager.lookup(k, req_ctx)
-            assert r == LookupResult.HIT_PENDING
-
-        _drain_fs_results(manager, fs_tier)
-
-        for k in keys:
-            r = manager.lookup(k, req_ctx)
-            assert r == LookupResult.HIT, (
-                f"key {k} expected HIT after promotion, got {r!r}"
-            )
-
-    def test_two_fs_tier_promotions_different_keys(self, tmp_path):
-        """Two FS tiers each hold different keys; promotions go to correct tier."""
-        mmap = _mock_mmap_region(_FS_N_CHUNKS, _FS_BLOCK_BYTES)
-        primary_tier = CPUPrimaryTierOffloadingManager(
-            num_chunks=_FS_N_CHUNKS, mmap_region=mmap
-        )
-        path0, path1 = tmp_path / "tier0", tmp_path / "tier1"
-        path0.mkdir()
-        path1.mkdir()
-
-        fs_tier0 = _make_fs_tier(mmap, str(path0))
-        fs_tier1 = _make_fs_tier(mmap, str(path1))
-        manager = TieringOffloadingManager(
-            primary_tier=primary_tier,
-            secondary_tiers=[fs_tier0, fs_tier1],
-        )
-
-        keys0 = to_keys(range(2))
-        keys1 = to_keys(range(2, 4))
-        _write_keys_to_fs(fs_tier0, keys0)
-        _write_keys_to_fs(fs_tier1, keys1)
-
-        req_ctx = ReqContext(req_id="r2")
-        for k in keys0 + keys1:
-            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
-                "Lookups submit now"
-            )
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=["r2"], preempted_req_ids=[])
-        )
-        _wait_lookup_workers(fs_tier0)
-        _wait_lookup_workers(fs_tier1)
-
-        for k in keys0 + keys1:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
-                "Promotions initiate here"
-            )
-
-        _drain_fs_results(manager, fs_tier0, fs_tier1)
-
-        for k in keys0 + keys1:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT
-
-        manager._metrics.assert_idle()
-
-        fs_tier0.shutdown()
-        fs_tier1.shutdown()
-
-    def test_deferred_promotion_chunk_counts_return_to_zero(self, fs_manager_setup):
-        """A deferred promotion's chunk count nets to zero once the job
-        finishes: the worker buffers the allocation increment via
-        safe_counter_update, and on_job_finished drains it before applying
-        the matching decrement, so assert_idle holds.
-        """
-        manager, _, fs_tier = fs_manager_setup
-        keys = to_keys(range(3))
-        _write_keys_to_fs(fs_tier, keys)
-
-        req_ctx = ReqContext(req_id="r_order")
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
-                "Lookups submit here"
-            )
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=["r_order"], preempted_req_ids=[])
-        )
-        _wait_lookup_workers(fs_tier)
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
-                "Promotions initiate here"
-            )
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
-        )
-
-        _drain_fs_results(manager, fs_tier)
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT
-
-        manager._metrics.assert_idle()
-
-
 class TestPromotionAllocation:
     """Unit tests for TieringOffloadingManager._promotion_allocation."""
 
@@ -2193,11 +1951,6 @@ class TestLockedPrimaryTier:
         assert not isinstance(manager.primary_tier, _LockedPrimaryTier), (
             "primary_tier must NOT be wrapped when all secondary tiers are eager"
         )
-
-    def test_wrapped_when_deferred_tier_present(self, fs_manager_setup):
-        """With a deferred FS secondary tier, primary_tier IS wrapped."""
-        manager, _, _ = fs_manager_setup
-        assert isinstance(manager.primary_tier, _LockedPrimaryTier)
 
 
 class TestProtectedLookupKeys:
@@ -2440,3 +2193,214 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+# ---------------------------------------------------------------------------
+# FS-tier integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestTieringOffloadingManagerWithFsTier:
+    """Integration tests for TieringOffloadingManager backed by a real FS tier."""
+
+    @staticmethod
+    def _make_fs_tier(mmap_region, root_dir: str) -> FileSystemTierManager:
+        """Construct a FileSystemTierManager wired to the given mmap region."""
+        # The FS tier reads only blocks_per_chunk and the KV events config;
+        # kv_events_config must be real or MagicMock's auto-attribute turns
+        # events on.
+        offloading_spec = MagicMock()
+        offloading_spec.blocks_per_chunk = 1
+        offloading_spec.kv_events_config = OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        )
+        return FileSystemTierManager(
+            offloading_spec=offloading_spec,
+            primary_kv_view=mmap_region.create_kv_memoryview(),
+            tier_type="fs",
+            root_dir=root_dir,
+            n_read_threads=4,
+            n_write_threads=4,
+        )
+
+    @pytest.fixture
+    def fs_manager_setup(self, tmp_path):
+        """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
+        # Small block size so tests are fast and don't require O_DIRECT
+        # alignment; the FS tier gracefully falls back to buffered I/O when
+        # O_DIRECT is unavailable.
+        n_chunks, block_bytes = 8, 64
+        mmap = _mock_mmap_region(n_chunks, block_bytes)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=n_chunks, mmap_region=mmap
+        )
+        fs_tier = self._make_fs_tier(mmap, str(tmp_path))
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier],
+        )
+        yield manager, primary_tier, fs_tier
+        manager.reset_cache()
+        fs_tier.shutdown()
+
+    @staticmethod
+    def _wait_lookup_workers(
+        *fs_tiers: FileSystemTierManager, timeout: float = 2.0
+    ) -> None:
+        """Block until the lookup worker thread has delivered results for all
+        in-flight probes.
+        """
+        deadline = time.monotonic() + timeout
+        for tier in fs_tiers:
+            while time.monotonic() < deadline:
+                if not tier._lookup_manager._pending_results.empty():
+                    break
+                time.sleep(0.005)
+            else:
+                raise TimeoutError(
+                    f"Lookup worker did not produce results within {timeout}s"
+                )
+
+    @staticmethod
+    def _drain_fs_results(
+        manager: TieringOffloadingManager, *fs_tiers: FileSystemTierManager
+    ) -> None:
+        """Deterministically drain all in-flight FS work and promotion jobs."""
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        manager.on_schedule_end(ctx)  # flush pending lookups to thread pool
+        for tier in fs_tiers:
+            tier.drain_jobs()
+
+    @staticmethod
+    def _write_keys_to_fs(fs_tier: FileSystemTierManager, keys) -> None:
+        """Create key files directly in the FS tier's backing directory, bypassing
+        the store-job mechanism."""
+        for k in keys:
+            path = fs_tier.file_mapper.get_file_name(k)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(bytes(64))
+
+    def test_locked_primary_tier_wrapping(self, fs_manager_setup):
+        """When any secondary tier supports deferred allocation the primary tier is
+        wrapped in _LockedPrimaryTier."""
+        manager, _, _ = fs_manager_setup
+        assert isinstance(manager.primary_tier, _LockedPrimaryTier), (
+            "primary_tier must be a _LockedPrimaryTier when FS (deferred)",
+            " tier is present",
+        )
+
+    def test_one_fs_tier_promotion(self, fs_manager_setup):
+        """Store keys in FS, verify all lookups return HIT_PENDING, wait for
+        promotion to finish (with a timeout), then verify all keys are loaded."""
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(4))
+        self._write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r1")
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.RETRY, "Lookups are submit now"
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r1"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT_PENDING
+
+        self._drain_fs_results(manager, fs_tier)
+
+        for k in keys:
+            r = manager.lookup(k, req_ctx)
+            assert r == LookupResult.HIT, (
+                f"key {k} expected HIT after promotion, got {r!r}"
+            )
+
+    def test_two_fs_tier_promotions_different_keys(self, tmp_path):
+        """Two FS tiers each hold different keys; promotions go to correct tier."""
+        mmap = _mock_mmap_region(8, 64)
+        primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
+        path0, path1 = tmp_path / "tier0", tmp_path / "tier1"
+        path0.mkdir()
+        path1.mkdir()
+
+        fs_tier0 = self._make_fs_tier(mmap, str(path0))
+        fs_tier1 = self._make_fs_tier(mmap, str(path1))
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[fs_tier0, fs_tier1],
+        )
+
+        keys0 = to_keys(range(2))
+        keys1 = to_keys(range(2, 4))
+        self._write_keys_to_fs(fs_tier0, keys0)
+        self._write_keys_to_fs(fs_tier1, keys1)
+
+        req_ctx = ReqContext(req_id="r2")
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
+                "Lookups submit now"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r2"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier0)
+        self._wait_lookup_workers(fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
+                "Promotions initiate here"
+            )
+
+        self._drain_fs_results(manager, fs_tier0, fs_tier1)
+
+        for k in keys0 + keys1:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT
+
+        manager._metrics.assert_idle()
+
+        fs_tier0.shutdown()
+        fs_tier1.shutdown()
+
+    def test_deferred_promotion_chunk_counts_return_to_zero(self, fs_manager_setup):
+        """A deferred promotion's chunk count nets to zero once the job
+        finishes: the worker buffers the allocation increment via
+        safe_counter_update, and on_job_finished drains it before applying
+        the matching decrement, so assert_idle holds.
+        """
+        manager, _, fs_tier = fs_manager_setup
+        keys = to_keys(range(3))
+        self._write_keys_to_fs(fs_tier, keys)
+
+        req_ctx = ReqContext(req_id="r_order")
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
+                "Lookups submit here"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["r_order"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
+                "Promotions initiate here"
+            )
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+        )
+
+        self._drain_fs_results(manager, fs_tier)
+
+        for k in keys:
+            assert manager.lookup(k, req_ctx) == LookupResult.HIT
+
+        manager._metrics.assert_idle()
