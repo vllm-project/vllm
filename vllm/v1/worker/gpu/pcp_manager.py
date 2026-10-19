@@ -194,7 +194,7 @@ class PCPManager:
         ):
             raise NotImplementedError(
                 "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5. Set -cc.cudagraph_mode=NONE."
+                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
