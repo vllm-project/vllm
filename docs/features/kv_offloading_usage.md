@@ -130,14 +130,22 @@ Cross-node KV movement requires a network-capable connector or tier.
 Independent non-MoE replicas and separately launched deployments with their own
 distributed groups do not join this pool.
 
-A successful prefix-cache reset clears all local partitions. Reset returns
-`false` while shared transfer references remain. Each launch creates a fresh
-namespace; cached data is not reused after restart. The KV and index files are
-unlinked after their workers or schedulers attach. Their open file descriptors
-retain the mappings and metadata lock until process termination. A crash before
-attachment finishes can leave a named mmap for cleanup after the deployment
-stops. A live peer retains a crashed engine's transfer references because its
-worker may still be using the slots.
+CPU KV events describe the writer's partition: blocks are announced and withdrawn
+only by the DP rank that wrote them, even though peers can load them.
+
+A successful connector cache reset clears only the calling DP rank's partition.
+It returns `false` while that partition has outstanding read or write references,
+including reads by peers. Other partitions remain available for prefix reuse.
+To clear the entire shared cache, stop admitting requests, drain transfers and
+reset every participating DP rank with `reset_external=true`, checking that each
+reset succeeds.
+
+Each launch creates a fresh namespace; cached data is not reused after restart.
+The KV and index files are unlinked after their workers or schedulers attach.
+Their open file descriptors retain the mappings and metadata lock until process
+termination. A crash before attachment finishes can leave a named mmap for cleanup
+after the deployment stops. A live peer retains a crashed engine's transfer
+references because its worker may still be using the slots.
 
 ## Multi-Tier Setup
 
