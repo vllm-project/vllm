@@ -59,6 +59,20 @@ pub struct HfUnifiedParser {
     emitted_tool_count: usize,
 }
 
+/// Where the parser is in the response; see [`HfUnifiedParser::position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HfPosition {
+    /// Nothing parsed since the start anchor, or since the start of the stream
+    /// when there is none.
+    ResponseStart,
+    /// Inside an open reasoning field.
+    Reasoning,
+    /// Inside an open content field.
+    Content,
+    /// Anywhere else.
+    Other,
+}
+
 /// Parser mode: the region currently receiving text.
 enum HfMode {
     /// No implicit field is declared: text outside regions is discarded.
@@ -154,6 +168,36 @@ impl HfUnifiedParser {
         };
         parser.reset_to_implicit();
         parser
+    }
+
+    /// Where the parser is in the response. Between
+    /// [`UnifiedParser::initialize`] and the first generated text, this is where
+    /// the prompt leaves the response.
+    ///
+    /// Text outside every region, which a template without an implicit field
+    /// discards, leaves no state behind and so does not move the parser from
+    /// [`HfPosition::ResponseStart`].
+    pub fn position(&self) -> HfPosition {
+        if !self.buffer.text.is_empty() {
+            return HfPosition::Other;
+        }
+        match &self.mode {
+            HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) if occurrence.opened => {
+                match &self.template.regions[occurrence.region].kind {
+                    RegionKind::Text(TextRegion {
+                        role: TextRole::Reasoning,
+                        ..
+                    }) => HfPosition::Reasoning,
+                    RegionKind::Text(TextRegion {
+                        role: TextRole::Content,
+                        ..
+                    }) => HfPosition::Content,
+                    _ => HfPosition::Other,
+                }
+            }
+            _ if self.closed.contains(&true) || self.emitted_tool_count > 0 => HfPosition::Other,
+            _ => HfPosition::ResponseStart,
+        }
     }
 
     /// Clear all per-stream state.
@@ -599,7 +643,7 @@ fn parse_next_event(
     match safe_text_len_mul(input, &markers) {
         Ok(_) => return Ok(HfEvent::Text),
         // A marker, complete or partial, starts here (or the input is empty).
-        Err(ErrMode::Incomplete(_)) => {}
+        Err(ErrMode::Backtrack(_) | ErrMode::Incomplete(_)) => {}
         Err(error) => return Err(error),
     }
 

@@ -5,6 +5,9 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.router import (
+    rocm_fp32_router_gemm as rocm_router,
+)
 from vllm.model_executor.layers.fused_moe.router.gate_linear import (
     fp32_router_gemm_dispatch_impl,
 )
@@ -19,6 +22,11 @@ SHAPES = [
     (4096, 192),
     (6144, 128),
     (6144, 256),
+    (2560, 512),
+    (2880, 128),
+    (5120, 16),
+    (7168, 384),
+    (1000, 100),
 ]
 MAX_TOKENS = 32
 ATOL = 5e-4
@@ -80,7 +88,7 @@ def test_rocm_fp32_router_gemm_preserves_topk(
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
 
-    top_k = 2 if (hidden_size, num_experts) == (4096, 8) else 8
+    top_k = 2 if num_experts <= 16 else 8
     actual = rocm_fp32_router_gemm(x, weight).topk(top_k, dim=-1).indices
     reference = _reference(x, weight)
     reference_values, expected = reference.topk(top_k, dim=-1)
@@ -113,15 +121,22 @@ def test_rocm_fp32_router_gemm_rejects_invalid_inputs() -> None:
             weight,
         )
 
-    with pytest.raises(ValueError, match="shape"):
-        rocm_fp32_router_gemm(x[:, :2048].contiguous(), weight[:, :2048].contiguous())
+    with pytest.raises(ValueError, match="hidden sizes"):
+        rocm_fp32_router_gemm(x, weight[:, :2048].contiguous())
+
+    with pytest.raises(ValueError, match="num_experts"):
+        big_weight = torch.empty(1024, 7168, dtype=torch.float32, device=device)
+        rocm_fp32_router_gemm(
+            torch.empty(MAX_TOKENS, 7168, dtype=torch.bfloat16, device=device),
+            big_weight,
+        )
 
     with pytest.raises(ValueError, match="contiguous"):
         wide_x = torch.randn(4, hidden_size * 2, dtype=torch.bfloat16, device=device)
         rocm_fp32_router_gemm(wide_x[:, ::2], weight)
 
-    with pytest.raises(ValueError, match="float32"):
-        rocm_fp32_router_gemm(x, weight.to(torch.bfloat16))
+    with pytest.raises(ValueError, match="float32 or bfloat16"):
+        rocm_fp32_router_gemm(x, weight.to(torch.float16))
 
     with pytest.raises(ValueError, match="bfloat16 or float32"):
         rocm_fp32_router_gemm(x.to(torch.float16), weight)
@@ -226,3 +241,154 @@ def test_rocm_fp32_router_gemm_dynamic_compile_dispatch() -> None:
         )
         output = compiled_dispatch(x)
         torch.testing.assert_close(output, _reference(x, weight), atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.parametrize("hidden_size", [64, 100, 513, 1000, 2049, 3000])
+@pytest.mark.parametrize("num_tokens", [1, 5, 32])
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_any_hidden_size(num_tokens: int, hidden_size: int):
+    """Hidden sizes that do not divide the K tile exercise the masked tail."""
+    torch.manual_seed(6100 + num_tokens + hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(64, hidden_size, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(
+        rocm_fp32_router_gemm(x, weight), _reference(x, weight), atol=ATOL, rtol=RTOL
+    )
+
+
+@pytest.mark.parametrize("case", ["large", "near_zero", "zero_input", "ones"])
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_special_values(case: str) -> None:
+    torch.manual_seed(7100)
+    x = torch.randn(4, 5120, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(128, 5120, dtype=torch.float32, device="cuda")
+    if case in ("large", "near_zero"):
+        scale = 100.0 if case == "large" else 1e-4
+        x = (x * scale).to(torch.bfloat16)
+        weight *= scale
+    elif case == "zero_input":
+        x.zero_()
+    else:
+        x.fill_(1.0)
+    output = rocm_fp32_router_gemm(x, weight)
+    expected = _reference(x, weight)
+    assert torch.isfinite(output).all()
+    if case == "zero_input":
+        assert torch.equal(output, torch.zeros_like(output))
+    else:
+        assert ((output - expected).norm() / expected.norm()).item() < 1e-5
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4, 16, 32])
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_deterministic(num_tokens: int) -> None:
+    torch.manual_seed(8100 + num_tokens)
+    x = torch.randn(num_tokens, 7168, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(384, 7168, dtype=torch.float32, device="cuda")
+    first = rocm_fp32_router_gemm(x, weight)
+    assert torch.equal(first, rocm_fp32_router_gemm(x, weight))
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4, 16, 32])
+@pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_bf16_weight(
+    num_tokens: int, hidden_size: int, num_experts: int
+) -> None:
+    torch.manual_seed(9100 + num_tokens + hidden_size + num_experts)
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(num_experts, hidden_size, dtype=torch.bfloat16, device="cuda")
+    # Past this size hipBLASLt beats the kernel for BF16 weights on MI355.
+    eligible = num_tokens * num_experts <= 8192
+    assert rocm_router.can_use_rocm_fp32_router_gemm(x, weight) == eligible
+    if eligible:
+        torch.testing.assert_close(
+            rocm_fp32_router_gemm(x, weight),
+            _reference(x.float(), weight.float()),
+            atol=ATOL,
+            rtol=RTOL,
+        )
+
+
+def _make_gate_linear(
+    monkeypatch: pytest.MonkeyPatch,
+    input_size,
+    output_size,
+    params_dtype=torch.float32,
+):
+    for module in ("layers.linear", "parameter"):
+        monkeypatch.setattr(
+            f"vllm.model_executor.{module}.get_tensor_model_parallel_rank", lambda: 0
+        )
+        monkeypatch.setattr(
+            f"vllm.model_executor.{module}.get_tensor_model_parallel_world_size",
+            lambda: 1,
+        )
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    gate = GateLinear(
+        input_size=input_size,
+        output_size=output_size,
+        bias=False,
+        out_dtype=torch.float32,
+        params_dtype=params_dtype,
+    ).cuda()
+    with torch.no_grad():
+        gate.weight.normal_()
+    gate.quant_method.process_weights_after_loading(gate)
+    return gate
+
+
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_tokens", [1, 32, 33])
+@torch.inference_mode()
+def test_gate_linear_uses_rocm_fp32_router_gemm(
+    monkeypatch: pytest.MonkeyPatch, num_tokens: int, x_dtype: torch.dtype
+) -> None:
+    """A router shape outside the old tuned list takes the fast path for M<=32."""
+    gate = _make_gate_linear(monkeypatch, 2560, 512)
+    assert gate.allow_fp32_router_gemm
+    calls = []
+    kernel = rocm_router.rocm_fp32_router_gemm
+
+    def spy(hidden_states, router_weight):
+        calls.append(hidden_states.shape[0])
+        return kernel(hidden_states, router_weight)
+
+    monkeypatch.setattr(rocm_router, "rocm_fp32_router_gemm", spy)
+    x = torch.randn(num_tokens, 2560, dtype=x_dtype, device="cuda")
+    output, bias = gate(x)
+
+    assert bias is None
+    assert calls == ([num_tokens] if num_tokens <= MAX_TOKENS else [])
+    torch.testing.assert_close(output, _reference(x, gate.weight), atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "num_experts", "uses_kernel"),
+    [(1, 256, True), (32, 256, True), (33, 256, False), (32, 512, False)],
+)
+@torch.inference_mode()
+def test_gate_linear_bf16_weight_uses_rocm_router_gemm(
+    monkeypatch: pytest.MonkeyPatch, num_tokens, num_experts, uses_kernel
+) -> None:
+    """BF16-weight gates with FP32 logits use the kernel only where it beats
+    hipBLASLt; everything else keeps the torch.mm path."""
+    gate = _make_gate_linear(monkeypatch, 7168, num_experts, torch.bfloat16)
+    assert gate.allow_cublas_router_gemm
+    calls = []
+    kernel = rocm_router.rocm_fp32_router_gemm
+
+    def spy(hidden_states, router_weight):
+        calls.append(hidden_states.shape[0])
+        return kernel(hidden_states, router_weight)
+
+    monkeypatch.setattr(rocm_router, "rocm_fp32_router_gemm", spy)
+    x = torch.randn(num_tokens, 7168, dtype=torch.bfloat16, device="cuda")
+    output, _ = gate(x)
+
+    assert output.dtype == torch.float32
+    assert calls == ([num_tokens] if uses_kernel else [])
+    torch.testing.assert_close(
+        output, _reference(x.float(), gate.weight.float()), atol=ATOL, rtol=RTOL
+    )
