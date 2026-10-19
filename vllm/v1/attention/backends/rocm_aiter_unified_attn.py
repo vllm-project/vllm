@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+import inspect
 from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
@@ -15,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.platforms.rocm import on_gfx1250
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
@@ -56,6 +58,11 @@ class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
         # query_start_loc, which unified attention consumes during replay.
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
+
+
+# Longest per-sequence query (decode / speculative verification widths) that
+# takes the Triton backend on gfx950 when no backend is forced.
+_TRITON_MAX_QUERY_LEN = 16
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
@@ -189,6 +196,19 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         from vllm.platforms.rocm import on_gfx11
 
         self.unified_attention = unified_attention
+        # AITER defaults to its gfx950 Gluon kernel, whose KV split leaves
+        # long-context decode with a few queries per sequence (e.g. an EAGLE
+        # draft, including its first step over the accepted tokens) on too few
+        # workgroups; the Triton kernels spread it out. Prefill-sized batches
+        # keep AITER's choice. VLLM_ROCM_AITER_UNIFIED_ATTN_BACKEND forces
+        # either backend.
+        supports_backend = "backend" in inspect.signature(unified_attention).parameters
+        self._ua_backend_override = (
+            envs.VLLM_ROCM_AITER_UNIFIED_ATTN_BACKEND or None
+            if supports_backend
+            else None
+        )
+        self._ua_decode_backend = "triton" if supports_backend and on_gfx950() else None
         # RDNA3 has no low precision MMA, preserve query precision
         self.supports_quant_query_input = not on_gfx11()
 
@@ -301,6 +321,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        backend = self._ua_backend_override
+        if backend is None and max_seqlen_q <= _TRITON_MAX_QUERY_LEN:
+            backend = self._ua_decode_backend
+        backend_kwargs = {} if backend is None else {"backend": backend}
+
         if attn_metadata.causal:
             self.unified_attention(
                 q=query[:num_actual_tokens],
@@ -323,6 +348,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 sinks=self.sinks,
                 output_scale=output_scale,
                 shuffled_kv_cache=self._use_shuffle_kv,
+                **backend_kwargs,
             )
         else:
             # The aiter kernel is causal-only. Non-causal cross-attention
