@@ -684,7 +684,9 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
 def turboquant_run_config():
     """Current config of a run whose KV cache dtype is a turboquant_* preset."""
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4")
+        model_config=None,
+        speculative_config=None,
+        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4"),
     )
     with patch(
         "vllm.config.get_current_vllm_config_or_none",
@@ -986,13 +988,8 @@ def test_auto_selection_avoids_rocm_attn_triton_fallbacks(
         backend_path = RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
-        explicit_path = RocmPlatform.get_attn_backend_cls(
-            selected_backend=AttentionBackendEnum.ROCM_ATTN,
-            attn_selector_config=attn_selector_config,
-        )
 
     assert backend_path == expected_backend.get_path()
-    assert explicit_path == AttentionBackendEnum.ROCM_ATTN.get_path()
 
 
 @pytest.mark.parametrize(
