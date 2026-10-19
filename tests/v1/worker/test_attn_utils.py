@@ -261,16 +261,24 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     assert unsupported([[target, never]], config, 1) == ("_DraftBackend", None)
 
 
+@pytest.mark.parametrize(
+    "backend_qualname",
+    [
+        "flashinfer_mla_sparse.FlashInferMLASparseTRTLLMBackend",
+        "flashinfer_mla_sparse_sm90.FlashInferMLASparseSM90Backend",
+    ],
+)
 @pytest.mark.parametrize("num_speculative_tokens", [0, 7])
 def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     num_speculative_tokens,
+    backend_qualname,
 ):
     """Prefill must fall back without disabling adaptive verification graphs."""
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseTRTLLMBackend,
-    )
+    from vllm.utils.import_utils import resolve_obj_by_qualname
 
-    backend = FlashInferMLASparseTRTLLMBackend
+    backend = resolve_obj_by_qualname(
+        f"vllm.v1.attention.backends.mla.{backend_qualname}"
+    )
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
