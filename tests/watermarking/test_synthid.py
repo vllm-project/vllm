@@ -106,7 +106,7 @@ def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
-@pytest.mark.parametrize("depth", [1, 32])
+@pytest.mark.parametrize("depth", [1, 3, 4, 5, 8, 32])
 def test_synthid_accelerator_matches_cpu(depth):
     logits = torch.randn(4, 3000, generator=torch.Generator().manual_seed(0))
     logits[0] *= 30  # peaked row
@@ -122,6 +122,26 @@ def test_synthid_accelerator_matches_cpu(depth):
     torch.testing.assert_close(
         actual.exp().double(), expected.exp().double(), rtol=1e-5, atol=1e-7
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_synthid_accelerator_peaked_row_keeps_only_input_inf():
+    # Underflowed in-support tokens are clamped; only the input's -inf stay -inf.
+    logits = torch.randn(2, 5000, generator=torch.Generator().manual_seed(2))
+    logits[0] *= 60
+    logits[0, 4000:] = float("-inf")
+    logits[1, :10] = 200.0
+    logits[1, 10:] = 0.0
+    logits[1, -1] = float("-inf")
+    contexts = torch.tensor([[-1, -1, 7], [11, 12, 13]])
+    actual = SynthIDWatermarker(42, context_width=3, depth=32).watermark_logits(
+        logits.cuda(), contexts.cuda()
+    )
+
+    assert torch.equal(actual.isneginf().cpu(), logits.isneginf())
+    assert (actual == torch.finfo(torch.float32).min).any()
 
 
 @pytest.mark.parametrize(
