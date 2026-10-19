@@ -1507,6 +1507,44 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
     "#]].assert_eq(&actual);
 }
 
+/// Frontend-read Python args that Rust recognizes but does not support yet must
+/// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
+#[test]
+fn unsupported_args_fail_startup() {
+    let cases = [(
+        "--custom-histogram-buckets",
+        r#"{"request_latency":[0.1,1.0]}"#,
+        "custom_histogram_buckets",
+    )];
+    for (flag, value, key) in cases {
+        let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("argument is not implemented in Rust frontend yet"),
+            "{flag}: {error}"
+        );
+
+        let args_json =
+            serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: value }).to_string();
+        let error = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            &args_json,
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("- {key}\n")), "{key}: {error}");
+    }
+}
+
 #[test]
 fn frontend_args_json_rejects_malformed_json() {
     let error = Cli::try_parse_from([
