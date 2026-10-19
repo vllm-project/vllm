@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -29,8 +30,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
+from vllm.entrypoints.serve.engine.packed_logprobs import PackedTopK
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
+from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -240,6 +243,11 @@ class GenerateRequest(BaseModel):
             "In streaming mode, this metadata is included only in the first chunk."
         ),
     )
+    return_top_k_logprobs: bool | None = None
+    """Return the top-k candidates of every generated position as the packed
+    block ``logprobs.top_k`` (see ``PackedTopK``) instead of per-token
+    ``logprobs.content`` entries (``content`` is ``None``). Non-streaming,
+    ``output_mode="tokens"`` and ``sampling_params.logprobs >= 1`` only."""
 
     output_mode: OutputMode = Field(
         default="tokens",
@@ -328,6 +336,22 @@ class GenerateRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_return_top_k_logprobs(self) -> "GenerateRequest":
+        if not self.return_top_k_logprobs:
+            return self
+        if self.stream:
+            raise ValueError("return_top_k_logprobs is not supported with stream=true")
+        if self.output_mode != "tokens":
+            raise ValueError("return_top_k_logprobs requires output_mode='tokens'")
+        logprobs = self.sampling_params.logprobs
+        if logprobs is None or logprobs < 1:
+            raise ValueError(
+                "return_top_k_logprobs requires sampling_params.logprobs >= 1, "
+                f"got {logprobs}"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
         if self.features is None:
             return self
@@ -391,6 +415,10 @@ class GenerateLogProbs(BaseModel):
     """
 
     content: list[GenerateLogProbsContent] | None = None
+    top_k: PackedTopK | None = Field(default=None, exclude_if=lambda v: v is None)
+    """The packed top-k candidates, set only for ``return_top_k_logprobs``
+    requests (where ``content`` is ``None``), and omitted from the output
+    otherwise."""
 
 
 class GenerateChoiceBase(BaseModel):
@@ -399,6 +427,9 @@ class GenerateChoiceBase(BaseModel):
     index: int
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     # Per-token expert routing decisions, base64-encoded `.npy` bytes
     # (numpy serialization). Shape after decode:
@@ -411,6 +442,8 @@ class GenerateChoiceBase(BaseModel):
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Contiguous weight version spans over output-token indexes.
+    weight_versions: list[WeightVersionSpan] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -440,9 +473,14 @@ class GenerateStreamChoiceBase(BaseModel):
 
     index: int
     finish_reason: str | None = None
+    # Stop string or token id that ended generation (repetition detection
+    # sets it too); None on EOS, length and abort.
+    stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
@@ -519,6 +557,14 @@ class GenerateTokensResponse(GenerateResponseBase):
 class GenerateTextResponse(GenerateResponseBase):
     output_mode: Literal["text"] = "text"
     choices: list[GenerateTextChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """A non-streaming generate response already rendered to its JSON body:
+    the bytes ``JSONResponse`` gives for the equivalent ``GenerateResponse``."""
+
+    body: bytes
 
 
 def output_mode_or_tokens(value: Any) -> Any:

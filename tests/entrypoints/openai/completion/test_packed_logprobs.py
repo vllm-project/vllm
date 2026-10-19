@@ -3,7 +3,8 @@
 """The packed wire path preserves engine scores without candidate objects/text."""
 
 import json
-from unittest.mock import Mock, patch
+from contextlib import ExitStack
+from unittest.mock import Mock, PropertyMock, patch
 
 import numpy as np
 import pybase64
@@ -19,6 +20,10 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.scale_out.token_in_token_out.logprobs_render import (
+    render_top_k_logprobs,
+)
+from vllm.exceptions import GenerationError
 from vllm.logprobs import FlatLogprobs, append_logprobs_for_next_position
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -40,7 +45,19 @@ def test_packed_head_tail_ties_and_infinity_without_materialization():
         ([2, 2, 3], [0.0, 0.0, -np.inf], 1),
     ]:
         append_logprobs_for_next_position(scores, ids, values, [None] * 3, rank, 2)
-    with patch.object(FlatLogprobs, "__getitem__", side_effect=AssertionError):
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(FlatLogprobs, "__getitem__", side_effect=AssertionError)
+        )
+        for name in ("token_ids", "logprobs", "start_indices", "end_indices"):
+            stack.enter_context(
+                patch.object(
+                    FlatLogprobs,
+                    name,
+                    new_callable=PropertyMock,
+                    side_effect=AssertionError,
+                )
+            )
         result = create_packed_completion_logprobs([9, 2, 9, 2], scores, 2)
     packed = result.top_k
     ids = np.frombuffer(pybase64.b64decode(packed.token_ids), "<i4").reshape(4, 2)
@@ -53,11 +70,15 @@ def test_packed_head_tail_ties_and_infinity_without_materialization():
     assert result.top_logprobs == []
     assert "Infinity" not in result.model_dump_json()
     assert "top_k" not in CompletionLogProbs().model_dump()
+    generate = json.loads(b"".join(render_top_k_logprobs(scores, 4, 2)))
+    assert generate["top_k"] == packed.model_dump()
 
-    scores.logprobs[0] = -np.inf
+    scores = FlatLogprobs()
+    append_logprobs_for_next_position(
+        scores, [9, 2, 3], [-np.inf, -0.5, -1.5], [None] * 3, 3, 2
+    )
     assert (
-        create_packed_completion_logprobs([9, 2, 9, 2], scores, 2).token_logprobs[0]
-        == -9999.0
+        create_packed_completion_logprobs([9], scores, 2).token_logprobs[0] == -9999.0
     )
 
 
@@ -66,6 +87,24 @@ def test_empty_packed_completion():
     assert (result.top_k.num_positions, result.top_k.k) == (0, 2)
     assert result.top_k.token_ids == ""
     assert result.text_offset == []
+
+
+@pytest.mark.parametrize(
+    "ids, values, sampled",
+    [
+        ([9, 2], [-4.0, -0.5], [9]),  # Wrong candidate count.
+        ([9, 2, 2**40], [-4.0, -0.5, -1.5], [9]),  # No int32 wraparound.
+        ([9, 2, 3], [-4.0, -0.5, -0.1], [9]),  # No silent float64 narrowing.
+        ([9, 2, 3], [-4.0, -0.5, -1.5], [9, 9]),  # Wrong position count.
+    ],
+)
+def test_packed_completion_rejects_unrepresentable_rows(ids, values, sampled):
+    scores = FlatLogprobs()
+    append_logprobs_for_next_position(
+        scores, ids, values, [None] * len(ids), 3, len(ids) - 1
+    )
+    with pytest.raises(GenerationError):
+        create_packed_completion_logprobs(sampled, scores, 2)
 
 
 @pytest.mark.parametrize(

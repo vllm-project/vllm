@@ -419,7 +419,8 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
-    # Disable sample-logprob decoding for numeric output; keep prompt decoding.
+    # Set False by the generate endpoint in tokens mode: sample logprobs keep
+    # no decoded token strings.
     _detokenize_logprobs: bool = True
 
     skip_reading_prefix_cache: bool | None = None

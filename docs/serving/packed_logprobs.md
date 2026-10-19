@@ -6,7 +6,7 @@ For RL and distillation clients that consume numeric candidate scores, set
 are supported. Echo, beam search and `logprob_token_ids` are rejected.
 Requests without this flag retain their existing response schema.
 
-`choices[i].logprobs.top_k` uses the packed format proposed for
+`choices[i].logprobs.top_k` shares its schema and encoder with
 `/inference/v1/generate` in [#60915](https://github.com/vllm-project/vllm/pull/60915):
 `num_positions`, `k`, `token_ids` and `logprobs`. Each base64 string contains raw
 little-endian, row-major int32/float32 bytes with shape `[num_positions, k]`,
@@ -52,8 +52,10 @@ score even when it is outside the head. Candidate arrays preserve negative
 infinity. The server's configured logprobs mode still determines whether
 scores are raw or processed; this flag does not change sampling.
 
-This Python path uses upstream's existing list-backed `FlatLogprobs` container,
-skips output-candidate detokenization, and packs its primitive columns without
-reconstructing candidate `Logprob` objects. Packing allocates CPU arrays
-proportional to positions × k. Prompt scores keep their existing representation
+This Python path uses the NumPy-backed `FlatLogprobs` container from
+[#60542](https://github.com/vllm-project/vllm/pull/60542), skips output-candidate
+detokenization, and packs engine row views without rebuilding Python lists or
+candidate `Logprob` objects. The shared encoder allocates contiguous CPU arrays
+proportional to positions × k. Malformed rows are rejected instead of narrowing
+values or emitting a different packed shape. Prompt scores keep their existing representation
 on the wire and decoding. No native extensions or GPU kernels are added.

@@ -45,7 +45,6 @@ from fastapi import Request
 from pydantic import BaseModel
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource as InternalCitationSource,
 )
@@ -91,6 +90,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
     POSITION_TO_SOURCE_KEY,
@@ -509,7 +509,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # ``TextToolContent`` and ``DocumentToolContent``. The latter
         # produces ``{"type": "document", "document": {...}}`` blocks,
         # which vLLM's shared ``_parse_chat_message_content_parts`` in
-        # ``vllm/entrypoints/chat_utils.py`` rejects because the OpenAI
+        # ``vllm/renderers/chat_utils.py`` rejects because the OpenAI
         # ``ChatCompletionContentPartParam`` union only knows text /
         # image / audio / etc. Emitting them anyway triggers a Pydantic
         # ``ValidatorIterator`` failure at chat-parsing time, so we

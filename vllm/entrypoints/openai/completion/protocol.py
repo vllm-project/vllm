@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.packed_logprobs import PackedTopK
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -647,20 +648,6 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         return data
-
-
-class PackedTopK(OpenAIBaseModel):
-    """Engine top-k slots as base64 little-endian int32/float32 arrays.
-
-    Both arrays have shape [num_positions, k], in engine candidate order.
-    Candidate scores are not clamped or renormalized; sampled-token scores
-    remain in CompletionLogProbs.token_logprobs, even outside the top-k.
-    """
-
-    num_positions: int
-    k: int
-    token_ids: str
-    logprobs: str
 
 
 class CompletionLogProbs(OpenAIBaseModel):
