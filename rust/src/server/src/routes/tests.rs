@@ -762,6 +762,55 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Assert that `method uri` hits the 501 placeholder for the Python route
+/// `route`.
+async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "{method} {uri}"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(
+        error["error"]["type"], "NotImplementedError",
+        "{method} {uri}"
+    );
+    assert_eq!(
+        error["error"]["message"],
+        format!(
+            "{method} {route} is not supported by the Rust frontend yet. \
+             Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend."
+        ),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_python_routes_return_not_implemented() {
+    let app = test_app().await;
+
+    for (method, uri) in [
+        ("POST", "/v1/messages"),
+        ("POST", "/v1/messages/count_tokens"),
+    ] {
+        assert_route_not_supported(&app, method, uri, uri).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_generate_route_is_disabled_by_default() {

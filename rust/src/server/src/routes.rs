@@ -25,7 +25,8 @@ mod world_size;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
+use axum::extract::MatchedPath;
+use axum::http::{Method, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -49,6 +50,27 @@ async fn disabled_scale_out() -> (StatusCode, Json<ErrorResponse>) {
                 error_type: "PermissionDeniedError".to_string(),
                 param: None,
                 code: Some("403".to_string()),
+            },
+        }),
+    )
+}
+
+/// Placeholder for a route the Python frontend registers but the Rust frontend
+/// does not implement yet. Returning 501 instead of 404 tells clients that the
+/// endpoint exists in vLLM and how to reach it.
+async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ErrorResponse {
+            error: ErrorDetail {
+                message: format!(
+                    "{method} {} is not supported by the Rust frontend yet. \
+                     Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend.",
+                    path.as_str()
+                ),
+                error_type: "NotImplementedError".to_string(),
+                param: None,
+                code: Some("501".to_string()),
             },
         }),
     )
@@ -117,6 +139,9 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        // TODO: implement the Anthropic Messages API.
+        .route("/v1/messages", post(not_supported))
+        .route("/v1/messages/count_tokens", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
