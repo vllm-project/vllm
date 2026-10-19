@@ -375,6 +375,36 @@ class ElasticEPScalingExecutor:
             total_bytes / 2**30,
         )
 
+    def _probe_bootstrap_if_requested(
+        self,
+        new_dp_size: int,
+        new_world_size_across_dp: int,
+        master_ip: str,
+        coord_store_port: int,
+    ) -> None:
+        """Spend one stateless-group bootstrap before the real one.
+
+        Diagnostic only. See probe_stateless_bootstrap for what this answers.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_PROBE_BOOTSTRAP") != "1":
+            return
+        from vllm.distributed.elastic_ep.standby_state import (
+            probe_stateless_bootstrap,
+        )
+
+        self._dump_group_pressure("before throwaway bootstrap")
+        started = time.perf_counter()
+        probe_stateless_bootstrap(
+            new_dp_size=new_dp_size,
+            new_world_size_across_dp=new_world_size_across_dp,
+            master_ip=master_ip,
+            coord_store_port=coord_store_port,
+        )
+        logger.warning(
+            "[EEP-DEBUG] throwaway stateless group built and destroyed in %.3f s",
+            time.perf_counter() - started,
+        )
+
     def _drain_reshuffle_if_requested(self) -> None:
         """Wait for the previous reshuffle before touching the groups again.
 
@@ -428,6 +458,12 @@ class ElasticEPScalingExecutor:
                 enable_eplb=parallel_config.enable_eplb,
             )
         self._dump_group_pressure(f"after standby groups for dp={new_dp_size}")
+        self._probe_bootstrap_if_requested(
+            new_dp_size=new_dp_size,
+            new_world_size_across_dp=new_world_size_across_dp,
+            master_ip=reconfig_request.new_data_parallel_master_ip,
+            coord_store_port=reconfig_request.coord_store_port,
+        )
         standby_ep_group = get_standby_ep_group()
         assert standby_ep_group is not None
         if current_platform.is_rocm():

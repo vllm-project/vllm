@@ -178,6 +178,121 @@ def _pointer_facts(ptr: ctypes.c_void_p) -> str:
     return ", ".join(facts)
 
 
+def device_mappings(min_anon_bytes: int = 16 << 20) -> dict[int, tuple[int, str]]:
+    """Every device backed virtual address range this process holds.
+
+    A memory fault names an address and nothing else, and so far there has
+    been no way to say which mapping that address belongs to. Everything this
+    file publishes is in the owning rank's own space, and the rank that dies
+    is also importing from its peers, so the address can just as well sit in a
+    mapping UCX made when it opened a peer's memory. Those mappings are not
+    visible from Python at all, but the kernel lists them: device memory is
+    reserved through /dev/dri, so a snapshot of the range table places any
+    address, no matter who created the range.
+
+    Returns base -> (end, what backs it). Anonymous ranges below
+    min_anon_bytes are dropped, they are ordinary heap and only noise here.
+    """
+    found: dict[int, tuple[int, str]] = {}
+    try:
+        with open("/proc/self/maps") as f:
+            lines = f.readlines()
+    except OSError as e:
+        logger.warning("[EEP-DEBUG] cannot read /proc/self/maps: %s", e)
+        return found
+
+    for line in lines:
+        parts = line.split(maxsplit=5)
+        if len(parts) < 5:
+            continue
+        span = parts[0].split("-")
+        if len(span) != 2:
+            continue
+        try:
+            base = int(span[0], 16)
+            end = int(span[1], 16)
+        except ValueError:
+            continue
+        path = parts[5].strip() if len(parts) > 5 else ""
+        if not path:
+            if end - base < min_anon_bytes:
+                continue
+            path = "anon"
+        elif "/dev/" not in path:
+            continue
+        found[base] = (end, path)
+    return found
+
+
+def log_new_device_mappings(
+    tag: str, before: dict[int, tuple[int, str]]
+) -> dict[int, tuple[int, str]]:
+    """Log the ranges that appeared since *before* and return a fresh snapshot.
+
+    Called once the transfers are issued and before the wait that the fault
+    cuts short, so a mapping UCX made for a peer's memory is on the record by
+    the time the address shows up in the fault.
+    """
+    after = device_mappings()
+    new = sorted(k for k in after if k not in before)
+    gone = sorted(k for k in before if k not in after)
+    if not new and not gone:
+        return after
+    logger.warning(
+        "[EEP-DEBUG] %s: %d new and %d dropped device mapping(s), %d total",
+        tag,
+        len(new),
+        len(gone),
+        len(after),
+    )
+    for base in new:
+        end, path = after[base]
+        logger.warning(
+            "[EEP-DEBUG] %s: new mapping 0x%x-0x%x (%.1f MiB) %s",
+            tag,
+            base,
+            end,
+            (end - base) / (1 << 20),
+            path,
+        )
+    for base in gone:
+        end, path = before[base]
+        logger.warning(
+            "[EEP-DEBUG] %s: dropped mapping 0x%x-0x%x (%.1f MiB) %s",
+            tag,
+            base,
+            end,
+            (end - base) / (1 << 20),
+            path,
+        )
+    return after
+
+
+def allocation_extent(ptr: int) -> tuple[int, int] | None:
+    """Return the base and size of the allocation *ptr* falls inside.
+
+    IPC exports whole allocations, not the tensor handed to them, so a tensor
+    that the torch caching allocator cut out of a large pool segment is
+    exported together with every unrelated tensor sharing that segment. Those
+    neighbours are written by the owning rank while peers hold the segment
+    mapped read only, which is a fault on the owner at an address belonging to
+    no registered region. That is the shape of what the log shows, so the
+    extent of the real allocation is the measurement that decides it.
+
+    Returns None when HIP cannot answer, which is itself worth printing.
+    """
+    hip = _lib()
+    base = ctypes.c_void_p()
+    psize = ctypes.c_size_t()
+    rc = hip.hipMemGetAddressRange(
+        ctypes.byref(base), ctypes.byref(psize), ctypes.c_void_p(ptr)
+    )
+    hip.hipGetLastError()
+    if rc != 0:
+        return None
+    return int(base.value or 0), int(psize.value)
+
+
 _CHILD_EXPORT = r"""
 import ctypes, sys
 
