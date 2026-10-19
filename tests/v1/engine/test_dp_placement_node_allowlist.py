@@ -150,3 +150,26 @@ def test_scale_up_follows_allowlist_order(monkeypatch):
         if "GPU" in bundle
     )
     assert local_ranks == list(range(8))
+
+
+def test_scale_up_waits_for_freed_gpus(monkeypatch):
+    # Right after a scale-down Ray may still count the removed groups' GPUs.
+    monkeypatch.delenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", raising=False)
+    total = _resources({"10.0.0.1": 4})
+    busy = _resources({"10.0.0.1": 0})
+    freed = _resources({"10.0.0.1": 2})
+    cfg = _vllm_config(dp_size=2, dp_local=2, master_ip="10.0.0.1")
+
+    with (
+        patch(
+            "ray._private.state.available_resources_per_node",
+            side_effect=[busy, freed],
+        ),
+        patch("ray._private.state.total_resources_per_node", return_value=total),
+        patch.object(utils, "current_platform", SimpleNamespace(ray_device_key="GPU")),
+        patch("ray.util.placement_group", return_value=object()),
+    ):
+        pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(cfg, 4)
+
+    assert len(pgs) == 2
+    assert local_ranks == [2, 3]

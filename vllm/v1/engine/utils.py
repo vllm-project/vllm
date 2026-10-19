@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -847,18 +848,32 @@ class CoreEngineActorManager:
         dp_master_ip = old_vllm_config.parallel_config.data_parallel_master_ip
         world_size = old_vllm_config.parallel_config.world_size
 
-        # Both maps are keyed by node id and only contain live nodes.
-        available_resources = available_resources_per_node()
+        device_str = current_platform.ray_device_key
+        # Ray frees a removed placement group's devices asynchronously, so a
+        # scale-up right after a scale-down can still see them in use.
+        deadline = time.monotonic() + 60
+        while True:
+            # Both maps are keyed by node id and only contain live nodes.
+            available_resources = available_resources_per_node()
+            nodes = _order_by_allowlist(
+                _dp_nodes_master_first(available_resources, dp_master_ip), dp_master_ip
+            )
+            num_free = sum(int(r.get(device_str, 0)) // world_size for _, r in nodes)
+            if num_free >= num_pg_to_create:
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"Scale-up needs {num_pg_to_create} more engine(s) of "
+                    f"{world_size} {device_str}(s), but the free resources fit "
+                    f"{num_free} after 60 s"
+                )
+            time.sleep(0.5)
         total_resources = total_resources_per_node()
-        nodes = _order_by_allowlist(
-            _dp_nodes_master_first(available_resources, dp_master_ip), dp_master_ip
-        )
 
         placement_groups = []
         local_dp_ranks = []
         num_pg_created = 0
 
-        device_str = current_platform.ray_device_key
         for node_id, node_resources in nodes:
             if num_pg_created >= num_pg_to_create:
                 break
