@@ -66,7 +66,7 @@
 
 services:
   vllm-medium-swift15-27b:
-    image: ${VLLM_IMAGE_SWIFT15:-vllm/vllm-openai:v0.31.0}
+    image: ${VLLM_IMAGE_SWIFT15:-vllm/vllm-openai:v0.32.0}
     container_name: myia_vllm-medium-swift15-27b
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -157,7 +157,7 @@ services:
         target: /root/.cache/huggingface
         bind:
           create_host_path: false
-      - vllm-compile-cache-swift15-27b-v0310:/root/.cache/vllm
+      - vllm-compile-cache-swift15-27b-v0320:/root/.cache/vllm
       - ${VLLM_LOG_PATH:-./../../../logs}:/logs
       - ./../../../middleware:/middleware:ro
     ports:
@@ -330,5 +330,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  vllm-compile-cache-swift15-27b-v0310:
+  vllm-compile-cache-swift15-27b-v0320:
+  vllm-compile-cache-swift15-27b-v0310: # kept: rollback volume for v0.31.0
   vllm-compile-cache-swift15-27b-v1: # kept: rollback volume for v0.30.0

@@ -1,0 +1,62 @@
+{
+  "ts": 1792441610,
+  "pass": 10,
+  "total": 11,
+  "results": [
+    {
+      "gate": "smoke",
+      "ok": false,
+      "detail": "0.48s \u2192 ''"
+    },
+    {
+      "gate": "vision",
+      "ok": true,
+      "detail": "4/4 colors in 0.6s \u2192 'Red\\nGreen\\nBlue\\nYellow'"
+    },
+    {
+      "gate": "tool-calling",
+      "ok": true,
+      "detail": "0.9s \u2192 {\"city\": \"Lyon\"}"
+    },
+    {
+      "gate": "thinking",
+      "ok": true,
+      "detail": "154 chars reasoning, finish=stop"
+    },
+    {
+      "gate": "preserve_thinking",
+      "ok": true,
+      "detail": "0.3s \u2192 '17'"
+    },
+    {
+      "gate": "prefill-30k",
+      "ok": true,
+      "detail": "27580 tok in 14.3s \u2192 1931 tok/s; survival=True"
+    },
+    {
+      "gate": "prefill-95k",
+      "ok": true,
+      "detail": "89268 tok in 37.0s \u2192 2414 tok/s; survival=True"
+    },
+    {
+      "gate": "prefill-235k",
+      "ok": true,
+      "detail": "221830 tok in 102.0s \u2192 2176 tok/s; survival=True"
+    },
+    {
+      "gate": "concurrent-N16",
+      "ok": true,
+      "detail": "1229 tokens in 3.5s \u2192 355 tok/s aggregate"
+    },
+    {
+      "gate": "concurrent-N16-repeat",
+      "ok": true,
+      "detail": "1234 tokens in 2.8s \u2192 438 tok/s aggregate"
+    },
+    {
+      "gate": "FORCING",
+      "ok": true,
+      "detail": "6\u00d7(\u22484618 tok) = 24348 tok in 2.9s, all-200=True"
+    }
+  ]
+}
