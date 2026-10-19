@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.parser_manager import ParserManager
 from vllm.parser.plamo3 import (
     BEGIN_TOOL_ARGUMENTS,
     BEGIN_TOOL_NAME,
@@ -1989,6 +1990,34 @@ def test_glm47_operator_level_overrides_parser_default(
         "content"
     ]
     assert content["json_schema"] == sample_tools[0].function.parameters
+
+
+@pytest.mark.parametrize(
+    ("tool_strict_level", "constrained"), [(None, True), ("auto", False)]
+)
+def test_glm47_default_level_applies_only_when_the_level_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    tool_strict_level: str | None,
+    constrained: bool,
+):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="glm47",
+        enable_auto_tools=True,
+        tool_strict_level=tool_strict_level,
+    )
+    assert parser_cls is not None
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice="auto",
+    )
+
+    out = parser_cls(MagicMock(), tools=sample_tools).adjust_request(request)
+
+    assert (out.structured_outputs is not None) is constrained
 
 
 def test_glm47_required_with_non_strict_tools_attaches_shallow_tag(

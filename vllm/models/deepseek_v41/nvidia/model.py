@@ -14,8 +14,10 @@ from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import (
@@ -203,6 +205,17 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        if backend not in (
+            None,
+            AttentionBackendEnum.FLASHMLA_SPARSE,
+            AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+            AttentionBackendEnum.FLASHMLA_SPARSE_DSV41,
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 PCP requires FlashMLA sparse attention."
+            )
+        return DeepseekV4FlashMLAAttention
     device_capability = current_platform.get_device_capability()
     if backend in (
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
@@ -252,6 +265,21 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
         and (moe_needs_token_sharded_input or parallel_config.data_parallel_size > 1)
+    )
+
+
+def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
+    """Whether large batches shard fused_wqa_wkv by token and all-gather the output."""
+    ca_comm = getattr(get_tp_group().device_communicator, "ca_comm", None)
+    return (
+        current_platform.is_device_capability(90)
+        and not _use_sequence_parallel(vllm_config)
+        and vllm_config.lora_config is None
+        and not vllm_config.parallel_config.use_ubatching
+        and not envs.VLLM_BATCH_INVARIANT
+        and ca_comm is not None
+        and not ca_comm.disabled
+        and ca_comm.fully_connected
     )
 
 
@@ -329,6 +357,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # Binds only when wo_b's kernel and shape qualify; otherwise
                 # forward keeps the separate reduce-scatter below.
                 self.attn.bind_gemm_rs()
+        self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -513,6 +542,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                if self.engram is not None and engram_hashes is not None:
+                    residual = self.engram(
+                        residual,
+                        engram_hashes[:, self.engram.layer_hash_index],
+                        engram_mask,
+                    )
                 post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
@@ -667,6 +702,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        if self.parallel_config.prefill_context_parallel_size > 1 and (
+            self.parallel_config.pipeline_parallel_size != 1
+            or self.parallel_config.data_parallel_size != 1
+            or self.parallel_config.decode_context_parallel_size != 1
+            or self.parallel_config.use_ubatching
+            or vllm_config.speculative_config is not None
+            or vllm_config.kv_transfer_config is not None
+            or (
+                vllm_config.cache_config.enable_prefix_caching
+                and not vllm_config.cache_config.swa_bounded_replay
+            )
+            or vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 PCP currently requires PP=DP=DCP=1, with no "
+                "microbatching, speculative decoding, KV transfer, or MegaMoE. "
+                "Prefix caching requires SWA bounded replay."
+            )
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
@@ -1001,6 +1054,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
+
+        if (
+            input_ids is not None
+            and self.parallel_config.prefill_context_parallel_size > 1
+            and not self.parallel_config.enable_expert_parallel
+        ):
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
 
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
