@@ -90,7 +90,7 @@ impl<T: TextOutputStream> T {
                                 prompt_logprobs: prompt_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                finish_reason: FinishReason::Error,
+                                finish_reason: FinishReason::Error(None),
                                 usage: vllm_llm::TokenUsage::default(),
                                 timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
