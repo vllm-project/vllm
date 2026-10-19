@@ -141,6 +141,7 @@ class TestNCCLWeightTransferUpdateInfoValidation:
         assert info.names == ["layer.weight", "layer.bias"]
         assert info.dtype_names == ["float32", "float32"]
         assert info.shapes == [[10, 10], [10]]
+        assert info.src == 0
 
     def test_mismatched_dtype_names_raises(self):
         with pytest.raises(ValueError, match="dtype_names"):
@@ -279,12 +280,14 @@ class TestNCCLEngineParsing:
                 "names": ["w1", "w2"],
                 "dtype_names": ["float32", "bfloat16"],
                 "shapes": [[100, 100], [50]],
+                "src": 1,
             }
         )
         assert isinstance(update_info, NCCLWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
+        assert update_info.src == 1
 
 
 # --- Unit Tests: Engine Registry ---
@@ -1742,6 +1745,83 @@ def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
     assert engine.packed is True
     assert engine.packed_buffer_size_bytes == 2048
     assert engine.packed_num_buffers == 4
+
+
+def _initialized_nccl_worker(monkeypatch, *, packed: bool):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    group = MagicMock()
+    monkeypatch.setattr(
+        nccl_engine_mod, "worker_init_process_group", lambda info, pc: group
+    )
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        create_mock_vllm_config(),
+        torch.device("cpu"),
+        MagicMock(),
+    )
+    engine.init_transfer_engine(
+        NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            rank_offset=2,
+            world_size=3,
+            packed=packed,
+        )
+    )
+    return engine, group
+
+
+def test_nccl_worker_packed_receive_uses_each_update_source(monkeypatch):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    consumer = MagicMock()
+    monkeypatch.setattr(nccl_engine_mod, "packed_nccl_broadcast_consumer", consumer)
+    engine, _ = _initialized_nccl_worker(monkeypatch, packed=True)
+
+    for name, src in (("first.weight", 1), ("second.weight", 0)):
+        engine.receive_weights(
+            NCCLWeightTransferUpdateInfo(
+                names=[name],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=src,
+            )
+        )
+
+    assert [call.kwargs["src"] for call in consumer.call_args_list] == [1, 0]
+
+
+def test_nccl_worker_unpacked_receive_uses_update_source(monkeypatch):
+    engine, group = _initialized_nccl_worker(monkeypatch, packed=False)
+    stream = MagicMock()
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+
+    engine.receive_weights(
+        NCCLWeightTransferUpdateInfo(
+            names=["weight"],
+            dtype_names=["float32"],
+            shapes=[[4]],
+            src=1,
+        )
+    )
+
+    assert group.broadcast.call_args.kwargs == {"src": 1, "stream": stream}
+
+
+@pytest.mark.parametrize("src", [-1, 2, True, 0.5])
+def test_nccl_worker_rejects_invalid_source(monkeypatch, src):
+    engine, _ = _initialized_nccl_worker(monkeypatch, packed=False)
+
+    with pytest.raises(ValueError, match="source rank"):
+        engine.receive_weights(
+            NCCLWeightTransferUpdateInfo(
+                names=["weight"],
+                dtype_names=["float32"],
+                shapes=[[4]],
+                src=src,
+            )
+        )
 
 
 def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():

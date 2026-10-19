@@ -86,13 +86,14 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 
     Whether the transfer is packed (and the buffer geometry) is a must-agree
     wire param carried on the init info (`NCCLTrainerInitInfo` /
-    `NCCLWeightTransferInitInfo`), not here; this carries only the per-round
-    parameter metadata.
+    `NCCLWeightTransferInitInfo`), not here; this carries the per-round
+    parameter metadata and source rank.
     """
 
     names: list[str]
     dtype_names: list[str]
     shapes: list[list[int]]
+    src: int = 0
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -115,8 +116,8 @@ class NCCLWeightTransferEngine(
     """Weight transfer engine using NCCL for communication between trainer and workers.
 
     This implementation uses NCCL broadcast operations to transfer dense
-    checkpoint-format weights from the trainer (rank 0) to all inference workers
-    in a process group. Received weights are loaded via the model's
+    checkpoint-format weights from a selected trainer rank to all inference
+    workers in a process group. Received weights are loaded via the model's
     `load_weights` using the layerwise reload lifecycle.
     """
 
@@ -133,6 +134,7 @@ class NCCLWeightTransferEngine(
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
+        self.rank_offset: int | None = None
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.packed = False
@@ -149,6 +151,7 @@ class NCCLWeightTransferEngine(
                       rank offset, world size, and the packed wire params
 
         """
+        self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
@@ -182,13 +185,22 @@ class NCCLWeightTransferEngine(
 
         Args:
             update_info: NCCL update info containing parameter names, dtypes,
-                        and shapes
+                        shapes, and the source rank
 
         """
-        if self.model_update_group is None:
+        if self.model_update_group is None or self.rank_offset is None:
             raise RuntimeError(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
+            )
+        if (
+            not isinstance(update_info.src, int)
+            or isinstance(update_info.src, bool)
+            or not 0 <= update_info.src < self.rank_offset
+        ):
+            raise ValueError(
+                f"NCCL source rank must be an integer in [0, {self.rank_offset}), "
+                f"got {update_info.src!r}."
             )
 
         from vllm.model_executor.model_loader.mtp_validation import (
@@ -208,7 +220,7 @@ class NCCLWeightTransferEngine(
                 packed_nccl_broadcast_consumer(
                     iterator=state_dict_info_iterator(),
                     group=self.model_update_group,
-                    src=0,
+                    src=update_info.src,
                     post_unpack_func=self.model.load_weights,
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
@@ -222,7 +234,9 @@ class NCCLWeightTransferEngine(
                     dtype = getattr(torch, dtype_name)
                     weight = torch.empty(shape, dtype=dtype, device=self.device)
                     self.model_update_group.broadcast(
-                        weight, src=0, stream=torch.cuda.current_stream()
+                        weight,
+                        src=update_info.src,
+                        stream=torch.cuda.current_stream(),
                     )
                     self.model.load_weights([(name, weight)])
                     del weight

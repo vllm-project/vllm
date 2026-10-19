@@ -156,10 +156,12 @@ rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_
   before any other collective.
 
 Each sync: `POST /start_weight_update`, then `POST /update_weights` with
-`{"update_info": {"names", "dtype_names", "shapes"}}` **in the background**
-while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
-`dtype_names` are `torch` attribute names (`"bfloat16"`); `shapes` are full
-checkpoint shapes.
+`{"update_info": {"names", "dtype_names", "shapes", "src"}}` **in the
+background** while the selected source broadcasts in `names` order, then
+`POST /finish_weight_update`. `src` is optional and defaults to `0`; it must
+identify a source rank below `rank_offset`. Separate update calls within one
+start/finish lifecycle can select different sources. `dtype_names` are `torch`
+attribute names (`"bfloat16"`); `shapes` are full checkpoint shapes.
 
 - Unpacked: one broadcast per tensor.
 - Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
