@@ -19,18 +19,27 @@ from tests.utils import (
     init_test_distributed_environment,
     multi_gpu_test,
 )
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import get_tp_group
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
 )
 from vllm.models.kimi_k3.amd import sp
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
+from vllm.models.kimi_k3.amd.linear import (
+    KimiDecoderLayer,
+    KimiMoE,
+    KimiRoutedOutputTransform,
+)
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.worker.workspace import init_workspace_manager
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -208,10 +217,65 @@ def _check_padded_gather_scatter(
             torch.testing.assert_close(got.scale, scale[:expected_rows], atol=0, rtol=0)
 
 
+def _check_shard_routed_moe(device: torch.device, tp_world: int, rank: int) -> None:
+    """A small latent KimiMoE routed on the token shard returns this rank's
+    rows of the unsharded layer, with the gathered top-k replacing routing."""
+    init_workspace_manager(device)
+    config = KimiLinearConfig(
+        hidden_size=512,
+        hidden_act="silu",
+        rms_norm_eps=EPS,
+        # At least the 256 per rank that KimiMoE would otherwise pad up to.
+        moe_intermediate_size=256 * tp_world,
+        num_experts=32,
+        num_experts_per_token=4,
+        num_shared_experts=1,
+        routed_expert_hidden_size=256,
+        latent_moe_use_norm=True,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+    )
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.static_forward_context = {}
+    torch.set_default_dtype(DTYPE)
+    with set_current_vllm_config(vllm_config), torch.device(device):
+        moe = KimiMoE(config, prefix="model.layers.1.mlp", layer_idx=1)
+    assert moe.experts.token_shardable
+
+    # Same seed on every rank: replicated weights match across ranks, and each
+    # rank's TP shard is just a slice of some consistent full weight.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for param in moe.parameters():
+            if param.dim() == 1:
+                param.copy_(1 + 0.1 * torch.randn_like(param))
+            else:
+                param.copy_(torch.randn_like(param) / param.size(-1) ** 0.5)
+    for module in moe.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            quant_method.process_weights_after_loading(module)
+
+    rows = 6
+    num_tokens = tp_world * rows
+    torch.manual_seed(1)
+    hidden = torch.randn(num_tokens, config.hidden_size, device=device, dtype=DTYPE)
+    mine = slice(rank * rows, (rank + 1) * rows)
+    layer = SimpleNamespace(mlp=moe)
+    with set_forward_context(None, vllm_config, num_tokens=num_tokens):
+        expected = moe(hidden)
+        actual = KimiDecoderLayer._run_moe_sp_shard_routed(layer, hidden[mine])
+
+    assert actual.shape == (rows, config.hidden_size)
+    torch.testing.assert_close(actual, expected[mine], atol=8e-2, rtol=3e-2)
+
+
 _CHECKS = {
     "sharded_tail": _check_sharded_tail,
     "routing_gather": _check_routing_gather,
     "padded_gather_scatter": _check_padded_gather_scatter,
+    "shard_routed_moe": _check_shard_routed_moe,
 }
 
 
@@ -254,6 +318,30 @@ def test_padded_gather_scatter_tp8() -> None:
     _run_ranks("padded_gather_scatter", 8)
 
 
+def _run_shard_routed_moe(
+    tp_size: int, use_aiter: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", str(int(use_aiter)))
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", str(int(use_aiter)))
+    _run_ranks("shard_routed_moe", tp_size)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("use_aiter", [False, True])
+def test_shard_routed_moe_tp4_matches_unsharded_rows(
+    use_aiter: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run_shard_routed_moe(4, use_aiter, monkeypatch)
+
+
+@multi_gpu_test(num_gpus=8)
+@pytest.mark.parametrize("use_aiter", [False, True])
+def test_shard_routed_moe_tp8_matches_unsharded_rows(
+    use_aiter: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run_shard_routed_moe(8, use_aiter, monkeypatch)
+
+
 class _Router(torch.nn.Module):
     def select_experts(self, hidden_states, router_logits, **kwargs):
         return "routed"
@@ -270,6 +358,15 @@ def test_pre_routed_overrides_then_restores() -> None:
 
     with pytest.raises(RuntimeError), sp.pre_routed(router, topk):
         raise RuntimeError
+    assert router.select_experts(None, None) == "routed"
+
+
+@pytest.mark.parametrize("calls", [0, 2])
+def test_pre_routed_requires_exactly_one_route(calls: int) -> None:
+    router = _Router()
+    with pytest.raises(AssertionError), sp.pre_routed(router, ("w", "i")):
+        for _ in range(calls):
+            router.select_experts(None, None)
     assert router.select_experts(None, None) == "routed"
 
 

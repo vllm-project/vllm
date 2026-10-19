@@ -105,9 +105,18 @@ def all_gather_routing(
 
 @contextlib.contextmanager
 def pre_routed(router: Any, topk: tuple[torch.Tensor, torch.Tensor]) -> Iterator[None]:
-    """Make ``router.select_experts`` return ``topk`` for the duration."""
+    """Make ``router.select_experts`` return ``topk`` for the duration. The
+    body must route exactly once, so the caller's placeholder router logits
+    are never read."""
+    calls = 0
+
+    def select_experts(*args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal calls
+        calls += 1
+        return topk
+
     shadowed = router.__dict__.get("select_experts")
-    router.select_experts = lambda *args, **kwargs: topk
+    router.select_experts = select_experts
     try:
         yield
     finally:
@@ -115,3 +124,4 @@ def pre_routed(router: Any, topk: tuple[torch.Tensor, torch.Tensor]) -> Iterator
             del router.select_experts
         else:
             router.select_experts = shadowed
+    assert calls == 1, f"expected one select_experts call, got {calls}"

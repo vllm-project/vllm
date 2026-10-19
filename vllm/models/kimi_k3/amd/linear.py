@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
 import torch
@@ -643,21 +643,16 @@ class KimiDecoderLayer(nn.Module):
             positions=positions,
         )
 
+    @staticmethod
     @contextlib.contextmanager
-    def _output_unreduced(self, module: nn.Module):
+    def _output_unreduced(proj: RowParallelLinear) -> Iterator[None]:
         # Row-parallel outputs stay partial so the caller can reduce-scatter.
-        rows = [
-            m
-            for m in module.modules()
-            if isinstance(m, RowParallelLinear) and m.reduce_results
-        ]
-        for m in rows:
-            m.reduce_results = False
+        assert isinstance(proj, RowParallelLinear) and proj.reduce_results
+        proj.reduce_results = False
         try:
             yield
         finally:
-            for m in rows:
-                m.reduce_results = True
+            proj.reduce_results = True
 
     def _run_self_attn_sp(
         self,
@@ -666,7 +661,7 @@ class KimiDecoderLayer(nn.Module):
         num_tokens: int,
     ) -> torch.Tensor:
         hidden_states = sp.gather_activation(hidden_shard, num_tokens)
-        with self._output_unreduced(self.self_attn):
+        with self._output_unreduced(self.self_attn.o_proj):
             out = self._run_self_attn(positions, hidden_states)
         return sp.scatter_tokens(out)
 
@@ -704,7 +699,7 @@ class KimiDecoderLayer(nn.Module):
             shard = hidden_shard.size(0)
             return out.narrow(0, get_tensor_model_parallel_rank() * shard, shard)
         hidden_states = sp.gather_activation(hidden_shard)
-        with self._output_unreduced(self.mlp):
+        with self._output_unreduced(self.mlp.down_proj):
             out = self.mlp(hidden_states)
         return tensor_model_parallel_reduce_scatter(out, dim=0)
 
