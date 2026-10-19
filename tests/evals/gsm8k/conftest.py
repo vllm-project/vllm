@@ -3,14 +3,28 @@
 
 from pathlib import Path
 
+import yaml
+
+from vllm.platforms import current_platform
+
 
 def pytest_addoption(parser):
     """Add custom command line options."""
     parser.addoption(
         "--config-list-file",
-        default="configs/models-small.txt",
+        default="configs/models-small.yaml",
         help="File containing list of config files to test",
     )
+
+
+def _config_names(config_list_path: Path) -> list[str]:
+    """Config file names from a .txt list, or from a .yaml list's ``common``
+    entries followed by the entries under the current platform's device name."""
+    if config_list_path.suffix in (".yaml", ".yml"):
+        lists = yaml.safe_load(config_list_path.read_text()) or {}
+        return [*lists.get("common", []), *lists.get(current_platform.device_name, [])]
+    lines = (line.strip() for line in config_list_path.read_text().splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def pytest_generate_tests(metafunc):
@@ -36,17 +50,14 @@ def pytest_generate_tests(metafunc):
             # Determine config directory (same directory as the list file)
             config_dir = config_list_path.parent
 
-            with open(config_list_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        config_path = config_dir / line
-                        print(f"Checking config file: {config_path}")
-                        if config_path.exists():
-                            config_files.append(config_path)
-                            print(f"  ✓ Found: {config_path}")
-                        else:
-                            print(f"  ✗ Missing: {config_path}")
+            for name in _config_names(config_list_path):
+                config_path = config_dir / name
+                print(f"Checking config file: {config_path}")
+                if config_path.exists():
+                    config_files.append(config_path)
+                    print(f"  ✓ Found: {config_path}")
+                else:
+                    print(f"  ✗ Missing: {config_path}")
         else:
             print(f"Config list file not found: {config_list_path}")
 
