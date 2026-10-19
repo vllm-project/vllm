@@ -1963,10 +1963,10 @@ def test_routed_expert_message_packing_preserves_missing_and_empty_rows():
     )
     pack_routed_experts(outputs)
     header = (
-        "9a0094dc0012a57265712d30920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
-        "dc0012a57265712d31920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
-        "dc0012a57265712d32920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
-        "dc0012a57265712d33920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0"
+        "9a0094dc0013a57265712d30920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0c0"
+        "dc0013a57265712d31920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0c0"
+        "dc0013a57265712d32920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0c0"
+        "dc0013a57265712d33920708c0c0c001c0c0c0c0c0c0c000c0c0c0c0c0"
         "c0cb3ff0000000000000c0c0c0c0a27637"
     )
     fixtures = (
