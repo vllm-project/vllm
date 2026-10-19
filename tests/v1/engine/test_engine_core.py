@@ -25,7 +25,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
@@ -687,6 +687,54 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     assert synced == [1]
     assert core.ignore_start_dp_wave
     assert not core.pending_pause
+
+
+@pytest.mark.parametrize(
+    "request_wave,engines_running,pause_state,announces",
+    [
+        pytest.param(3, False, PauseState.UNPAUSED, True, id="current-wave"),
+        pytest.param(2, False, PauseState.UNPAUSED, True, id="stale-wave"),
+        pytest.param(4, False, PauseState.UNPAUSED, True, id="newer-wave"),
+        pytest.param(3, True, PauseState.UNPAUSED, False, id="running"),
+        pytest.param(3, False, PauseState.PAUSED_ALL, False, id="paused"),
+    ],
+)
+def test_idle_dp_rank_announces_wave_for_new_work(
+    request_wave, engines_running, pause_state, announces
+):
+    """An idle rank handed work announces the wave itself, since only engines
+    start waves; a paused rank waits for resume."""
+    core = object.__new__(DPEngineCoreProc)
+    core.has_coordinator = True
+    core.current_wave = 3
+    core.engines_running = engines_running
+    core.scheduler = MagicMock(pause_state=pause_state)
+    core.output_queue = MagicMock()
+
+    with patch.object(EngineCore, "add_request"):
+        core.add_request(MagicMock(), request_wave)
+
+    if announces:
+        assert core.engines_running
+        _, outputs = core.output_queue.put_nowait.call_args.args[0]
+        assert outputs.start_wave == max(request_wave, 3)
+    else:
+        core.output_queue.put_nowait.assert_not_called()
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_paused_dp_rank_ignores_start_wave(paused):
+    """A START_DP_WAVE still in flight when the pause completes must not wake
+    the paused rank."""
+    core = object.__new__(DPEngineCoreProc)
+    core.ignore_start_dp_wave = paused
+    core.engine_index = 0
+    core.current_wave = 3
+    core.engines_running = False
+
+    core._handle_client_request(EngineCoreRequestType.START_DP_WAVE, (3, 1))
+
+    assert core.engines_running != paused
 
 
 def _pausable_engine_core_proc() -> EngineCoreProc:
