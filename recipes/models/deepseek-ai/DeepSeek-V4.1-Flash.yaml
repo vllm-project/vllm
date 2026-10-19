@@ -400,6 +400,7 @@ strategy_overrides:
   pd_cluster:
     # Verified 1P1D on GB200 NVL4: one tray per role, TP4 each, NIXL transfer.
     # GB300: DEP4 prefill + DEP16 decode (SemiAnalysisAI/InferenceX#3941).
+    # B300: DEP2 prefill engines + one DEP8 decode node over EFA (SemiAnalysisAI/InferenceX#4231).
     env:
       VLLM_DEEP_GEMM_WARMUP: "skip"
     hardware_overrides:
@@ -422,11 +423,40 @@ strategy_overrides:
           # KV moves over the NVLink fabric between trays.
           UCX_TLS: "cuda_copy,cuda_ipc,tcp"
           UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+      b300:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-config"
+          - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - "--kernel-config"
+          - '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+          - "--engram-config"
+          - '{"cpu_offload":true,"embedding_across_dp":true}'
+          - "--enable-ep-weight-filter"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--numa-bind"
+          # The EFA libfabric provider cannot register VMM-backed KV memory.
+          - "--no-enable-cumem-allocator"
+          # Engram shards are mmapped by one rank behind a gloo barrier; 1800 s is too short on a cold page cache.
+          - "--cpu-distributed-timeout-seconds"
+          - "7200"
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          # KV moves over EFA through NIXL's LIBFABRIC backend; UCX stays for control traffic.
+          FI_PROVIDER: "efa"
+          FI_EFA_USE_DEVICE_RDMA: "1"
+          FI_EFA_FORK_SAFE: "1"
+          UCX_TLS: "cuda_copy,cuda_ipc,srd,tcp"
+          # SGL put needs rc_mlx5, which EFA lacks.
+          NIXL_UCX_SGL_ENABLE: "0"
     prefill:
       nodes: 1
       parallelism:
         default: tp
         gb300: dep
+        b300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
@@ -441,6 +471,21 @@ strategy_overrides:
             - "8192"
             - "--compilation-config"
             - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"max_cudagraph_capture_size":2046}'
+        # One DEP2 engine per GPU pair, up to four per node; prefills admitted every second step.
+        b300:
+          extra_args:
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "16384"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--prefill-schedule-interval"
+            - "2"
+            - "--prefix-cache-retention-interval"
+            - "32768"
+            - "--compilation-config"
+            - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"max_cudagraph_capture_size":2046}'
     decode:
       nodes:
         default: 1
@@ -448,6 +493,7 @@ strategy_overrides:
       parallelism:
         default: tp
         gb300: dep
+        b300: dep
       vllm_args:
         - "--max-num-seqs"
         - "32"
@@ -462,6 +508,21 @@ strategy_overrides:
             - "--compilation-config"
             - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
             - "--no-enable-prefix-caching"
+        # One DEP8 node; max-num-seqs scales with the prefill count (18 at 2P, 40 at 2P/c768, 72 at 3P, 132 at 4P, 168 at 5P).
+        b300:
+          extra_args:
+            - "--max-num-seqs"
+            - "40"
+            - "--max-num-batched-tokens"
+            - "400"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
+            - "--no-enable-prefix-caching"
+            - "--enable-eplb"
+            - "--eplb-config"
+            - '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":true,"log_balancedness_interval":3000}'
+          extra_env:
+            VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP: "4"
 
 hardware_notes:
   dgx_station_gb300:
@@ -954,11 +1015,37 @@ guide: |
   uv run --no-project python -m dynamo.frontend --http-port 8000 --router-mode kv
   ```
 
-  For disaggregated serving, follow Dynamo's launch examples to configure
-  the prefill and decode engines, NIXL KV transfer and the host's transport.
-  Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
-  and `--disaggregation-mode decode` to decode sidecars. Allocate distinct
-  gRPC and KV-event ports when running several engines on the same host.
+  ### Disaggregated serving on B300
+
+  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231) runs
+  the **Prefill/Decode Disaggregation** strategy on 8-GPU B300 nodes with EFA: N
+  two-GPU DEP2 prefill engines (four per node, each a `vllm serve` with
+  `--data-parallel-size 2 --enable-expert-parallel` and its own gRPC and KV-event
+  ports) and one DEP8 decode node. Select B300 in the builder; its `pd_cluster`
+  overrides carry the engine flags. Beyond those:
+
+  - **KV transfer.** Both roles use the `push_as_nixl` connector on NIXL's
+    `LIBFABRIC` backend. Prefill wraps it in a `MultiConnector` with
+    `SimpleCPUOffloadConnector` so each rank keeps up to 70 GiB of KV in host memory:
+
+    ```json
+    {"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[
+      {"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}},
+      {"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":75161927680,"lazy_offload":true}}]}}
+    ```
+
+    Decode passes the `NixlConnector` entry alone with `"kv_role":"kv_consumer"`.
+    The image ships the LIBFABRIC plugin without libfabric: install Amazon's
+    libfabric and rdma-core from the EFA installer plus a CUDA 12 runtime for the
+    plugin, and keep the cumem allocator off (the recipe's B300 override does).
+  - **Decode.** `--enable-eplb` with 16 redundant experts over `symm_mem`, prefix
+    caching off, `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4`, and `--max-num-seqs` sized
+    to the prefill count (18 to 168 for two to five prefill engines).
+  - **Sidecars.** Add `--disaggregation-mode prefill --component prefill` to
+    prefill sidecars and `--disaggregation-mode decode` to decode sidecars, and run
+    the frontend with `--router-mode kv` and
+    `--active-decode-blocks-threshold None --active-prefill-tokens-threshold None`
+    so every request prefills on a prefill engine.
 
   Check the frontend after the workers register:
 
