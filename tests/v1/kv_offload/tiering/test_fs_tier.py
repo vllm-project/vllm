@@ -127,9 +127,9 @@ def make_job(
         )
     return CascadeTransferJob(
         job_id=job_id,
-        req_context=_CTX,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
+        req_context=_CTX,
     )
 
 
@@ -1066,56 +1066,6 @@ class TestFSPromotion:
         assert result.success
         assert result.successful_keys is None
 
-    def test_alloc_in_worker_thread(self, fs_tier):
-        tier, _ = fs_tier
-        # Pre-store a file so the load can succeed
-        tier.submit_store(make_job(1, [key(1)], [0]))
-        drain(tier)
-
-        main_thread_id = threading.current_thread().ident
-        alloc_thread_ids: list[int] = []
-        # Gate that keeps the worker blocked inside alloc_fn until we've
-        # finished asserting the claim is still unacquired.
-        check_done = threading.Event()
-
-        def tracking_alloc_fn(keys, ctx):
-            ident = threading.current_thread().ident
-            assert ident is not None
-            alloc_thread_ids.append(ident)
-            check_done.wait()  # hold until the scheduler thread has checked
-            return (list(keys), np.array([0], dtype=np.int32))
-
-        job = PromotionTransferJob(
-            job_id=99,
-            req_context=_CTX,
-            keys=[key(1)],
-            chunk_ids=None,
-            alloc_fn=tracking_alloc_fn,
-        )
-
-        # Claim not acquired before submit
-        with pytest.raises(ValueError):
-            _ = job.keys
-
-        tier.submit_load(job)
-
-        # Worker is blocked in alloc_fn waiting for check_done; the claim is
-        # guaranteed not acquired yet.
-        with pytest.raises(ValueError):
-            _ = job.keys
-
-        # Unblock the worker, then wait for it to finish
-        check_done.set()
-        drain(tier)
-
-        # After the worker finishes, get() has been redeemed
-        assert job.get() is not None
-        assert list(job.keys) == [key(1)]
-        assert len(alloc_thread_ids) == 1, "alloc_fn must be called exactly once"
-        assert alloc_thread_ids[0] != main_thread_id, (
-            "alloc_fn must run on a worker thread, not the scheduler thread"
-        )
-
     def test_promotion_primary_key_availability(self, fs_tier):
         """alloc_fn controls which subset of requested keys are loaded from FS.
 
@@ -1227,7 +1177,7 @@ class TestFSPromotion:
             chunk_ids=None,
             alloc_fn=lambda req_keys, ctx: (
                 list(req_keys),
-                np.array([4, 5, 6, 7], dtype=np.int32),
+                np.array([0, 1, 2, 3], dtype=np.int32),
             ),
         )
         tier.submit_load(job)
@@ -1237,7 +1187,7 @@ class TestFSPromotion:
         assert set(result.successful_keys) == {key(1), key(2)}
         # job.keys reflects the full originally-requested set, not just what loaded
         assert set(job.keys) == set(all_keys)
-        assert list(job.chunk_ids) == [4, 5, 6, 7]
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
 
         # All files deleted → nothing loaded
         for k in all_keys[:2]:

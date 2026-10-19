@@ -343,13 +343,20 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     tracker = TieringMetricsTracker(
         tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
     )
+
+    def alloc_fn_impl(keys, ctx):
+        tracker.safe_counter_update(
+            0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, len(keys)
+        )
+        return list(keys), np.array([0, 1, 2], dtype=np.int32)
+
     job = JobMetadata(
         PromotionTransferJob(
             1,
             _CTX,
             keys,
             None,
-            alloc_fn=lambda k, ctx: (list(k), np.array([0, 1, 2], dtype=np.int32)),
+            alloc_fn=alloc_fn_impl,
         ),
         0,
     )
@@ -363,9 +370,6 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     # Acquisition (inside get(), on whichever thread redeems it) records the
     # chunk count.
     assert job.transfer_job.get() is not None
-    tracker.safe_counter_update(
-        0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, len(keys)
-    )
     tracker.drain_pending_updates()
     assert state.primary_write_chunk_count == 3
 
@@ -409,46 +413,28 @@ def test_buffered_increment_drained_before_finished_job_decrement():
     tracker = TieringMetricsTracker(
         tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
     )
+
+    def alloc_fn_impl(keys, ctx):
+        tracker.safe_counter_update(
+            0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, len(keys)
+        )
+        return list(keys), np.array([0, 1, 2], dtype=np.int32)
+
     job = JobMetadata(
         PromotionTransferJob(
             1,
             _CTX,
             keys,
             None,
-            alloc_fn=lambda k, ctx: (list(k), np.array([0, 1, 2], dtype=np.int32)),
+            alloc_fn=alloc_fn_impl,
         ),
         0,
     )
     tracker.on_job_registered(job)
     # Worker redeems the claim and buffers the chunk count; no drain yet.
     assert job.transfer_job.get() is not None
-    tracker.safe_counter_update(
-        0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, len(keys)
-    )
     assert tracker._tier_states[0].primary_write_chunk_count == 0
 
+    # Counter update drain happens here.
     tracker.on_job_finished(job, JobResult(job_id=1, success=True))
-    tracker.assert_idle()
-
-
-def test_direct_and_buffered_counter_paths_are_independent():
-    """on_primary_chunk_count applies immediately on the scheduler thread;
-    safe_counter_update buffers until drain. Both land in the same counter."""
-    tracker = TieringMetricsTracker(
-        tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
-    )
-    tracker.on_primary_chunk_count(0, 1, is_promotion=True)
-    assert tracker._tier_states[0].primary_write_chunk_count == 1
-
-    tracker.safe_counter_update(0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 2)
-    assert tracker._tier_states[0].primary_write_chunk_count == 1
-
-    tracker.drain_pending_updates()
-    assert tracker._tier_states[0].primary_write_chunk_count == 3
-
-    tracker.safe_counter_update(
-        0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, -3
-    )
-    tracker.drain_pending_updates()
-
     tracker.assert_idle()

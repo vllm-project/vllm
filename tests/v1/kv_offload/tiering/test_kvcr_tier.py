@@ -165,9 +165,9 @@ def _job(
 ) -> TransferJob:
     return PromotionTransferJob(
         job_id=job_id,
-        req_context=req_context,
         keys=[key if key is not None else OffloadKey(b"k0")],
         chunk_ids=np.array([chunk_id], dtype=np.int32),
+        req_context=req_context,
     )
 
 
@@ -440,11 +440,9 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
         def create_store_job(self, requested_keys, req_context):
             return PromotionTransferJob(
                 job_id=11,
-                req_context=req_context,
                 keys=requested_keys,
-                chunk_ids=np.array(
-                    [chunk_ids[key] for key in requested_keys], dtype=np.int32
-                ),
+                chunk_ids=np.array([chunk_ids[key] for key in requested_keys]),
+                req_context=req_context,
             )
 
         def on_request_finished(self, req_context):
@@ -605,9 +603,9 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch):
     tier.submit_load(
         PromotionTransferJob(
             job_id=13,
-            req_context=ReqContext(req_id="req"),
             keys=keys,
-            chunk_ids=np.array([0, 1], dtype=np.int32),
+            chunk_ids=np.array([0, 1], dtype=np.int64),
+            req_context=ReqContext(req_id="req"),
         )
     )
 

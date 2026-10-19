@@ -316,9 +316,9 @@ class FakeParent:
         self._next_job_id += 1
         return CascadeTransferJob(
             job_id=job_id,
-            req_context=ctx,
             keys=keys_list,
             chunk_ids=chunk_ids,
+            req_context=ctx,
         )
 
     def on_request_finished(self, ctx: ReqContext) -> None:

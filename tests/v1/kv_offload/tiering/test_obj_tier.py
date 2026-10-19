@@ -112,9 +112,9 @@ def make_job(
         chunk_ids = list(range(len(keys)))
     return CascadeTransferJob(
         job_id=job_id,
-        req_context=_CTX,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
+        req_context=_CTX,
     )
 
 
