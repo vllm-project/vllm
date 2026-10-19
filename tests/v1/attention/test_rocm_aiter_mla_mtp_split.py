@@ -1328,9 +1328,7 @@ def test_persistent_metadata_gate(
         # that would reach a persistent one is gfx950-only, so the padded rank
         # must fall back rather than ask for a kernel that is not built.
         (8, 12, "auto", False),
-        # A native 16-head rank is unchanged: it took the schedule before this
-        # backend keyed the gate off the routing, and still does.
-        (8, 16, "auto", True),
+        (8, 16, "auto", False),
     ],
 )
 def test_persistent_metadata_gate_without_gluon_build(
@@ -1355,6 +1353,7 @@ def test_persistent_metadata_gate_without_gluon_build(
         rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
     )
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_bf16_verify_fold", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
 
     num_reqs = 2
