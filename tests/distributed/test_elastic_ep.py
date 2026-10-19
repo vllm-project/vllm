@@ -301,6 +301,50 @@ def test_elastic_ep_scaling(
         print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
 
 
+def _skip_unless_nixl_ep_v2() -> None:
+    from vllm.distributed.eplb.eplb_communicator import has_nixl
+    from vllm.utils.import_utils import has_nixl_ep_v2
+
+    if not has_nixl():
+        pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
+    if not has_nixl_ep_v2():
+        pytest.skip("nixl.runtime.ep is not installed")
+
+
+@multi_gpu_test(num_gpus=4)
+def test_elastic_ep_scaling_sequence():
+    """nixl_ep_v2 through the sizes in VLLM_TEST_ELASTIC_EP_SIZES (the first
+    is the initial size) under heavy traffic, with GSM8K after each scale.
+
+    VLLM_TEST_ELASTIC_EP_MAX_DP is separate from the sizes: with the domain
+    size unset it is the nixl_ep_v2 domain size, so 2,3,2,3 under max 4
+    runs a partial first domain.
+    """
+    _skip_unless_nixl_ep_v2()
+    sizes = [
+        int(size)
+        for size in os.getenv("VLLM_TEST_ELASTIC_EP_SIZES", "2,3,2,3").split(",")
+    ]
+    max_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_MAX_DP", "4"))
+    assert len(sizes) >= 2 and max(sizes) <= max_dp_size, (sizes, max_dp_size)
+    assert all(a != b for a, b in zip(sizes, sizes[1:])), sizes
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        _base_serve_args(sizes[0], max_dp_size, all2all_backend="nixl_ep_v2"),
+        max_wait_seconds=1200,
+    ) as server:
+        initial_accuracy = _run_gsm8k_eval(server, "Initial")
+        for source_dp_size, new_dp_size in zip(sizes, sizes[1:]):
+            _scale_with_traffic(server, source_dp_size, new_dp_size, "heavy")
+            stage = f"After {source_dp_size}->{new_dp_size}"
+            accuracy = _run_gsm8k_eval(server, stage)
+            assert accuracy >= initial_accuracy - ACCURACY_TOL, (
+                f"[{stage}] accuracy {accuracy:.3f} dropped more than "
+                f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
+            )
+
+
 @multi_gpu_test(num_gpus=2)
 def test_elastic_ep_rejects_invalid_size():
     """nixl_ep_v2 refuses a size that is not whole NVLink domains or inside
