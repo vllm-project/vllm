@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup_triton_helper import triton_warmup_launcher
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    WarmupTensor,
+    triton_warmup_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -34,7 +37,14 @@ def _scatter_states_kernel(
     tl.store(state_ptr + state_idx * stride_state_batch + offsets, values, mask=mask)
 
 
-@triton_warmup_launcher()
+@triton_warmup_launcher(
+    # Only per-row shape matters; src rows may differ in dtype from the state.
+    lambda state_shape, state_dtype, src_dtype: dict(
+        state=WarmupTensor((1, *state_shape), state_dtype),
+        src=WarmupTensor((1, *state_shape), src_dtype),
+        indices=WarmupTensor((1,), torch.int32),
+    )
+)
 def scatter_states(
     state: torch.Tensor,
     src: torch.Tensor,

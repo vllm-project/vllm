@@ -43,7 +43,6 @@ from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import WarmupTensor
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -225,14 +224,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
 
-        _, recurrent_state_shape = self.get_state_shape()
-        _, recurrent_state_dtype = self.get_state_dtype()
-        scatter_states.register_warmup(
-            state=WarmupTensor((1, *recurrent_state_shape), recurrent_state_dtype),
-            src=WarmupTensor((1, *recurrent_state_shape), recurrent_state_dtype),
-            indices=WarmupTensor((1,), torch.int32),
-        )
-
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
         # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
@@ -348,6 +339,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.head_dim,
             vllm_config.model_config.dtype,
             self.kda_lower_bound,
+        )
+        _, recurrent_state_shape = self.get_state_shape()
+        _, recurrent_state_dtype = self.get_state_dtype()
+        scatter_states.register_warmup(
+            state_shape=recurrent_state_shape,
+            state_dtype=recurrent_state_dtype,
+            # The chunk kernels return an fp32 final state; FlashKDA's matches
+            # the cache dtype.
+            src_dtype=(
+                recurrent_state_dtype
+                if self.kda_prefill_backend == "flashkda"
+                else torch.float32
+            ),
         )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
