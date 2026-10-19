@@ -447,7 +447,9 @@ A classification head stored as float32 is converted to the runtime head dtype w
 
 vLLM supports PEFT token-classification LoRA adapters for `BertForTokenClassification`, including LoRA on the backbone and classification head. The classification head can use LoRA A/B weights or a complete linear head saved through `modules_to_save=["classifier"]`.
 
-The adapter's classification head must have the same `num_labels` as the base model. Use a base checkpoint with the `BertForTokenClassification` architecture and matching label count:
+Adapters that save a complete classification head can have different `num_labels`. Set `max_lora_cls_labels` to the largest adapter label count, as for sequence classification; each request returns its adapter's number of labels. LoRA A/B weights on the classification head must match the base head's output size.
+
+Use a base checkpoint with the `BertForTokenClassification` architecture:
 
 ```python
 from vllm import LLM
@@ -457,6 +459,7 @@ llm = LLM(
     model="/path/to/bert-token-classifier",
     runner="pooling",
     enable_lora=True,
+    max_lora_cls_labels=16,
 )
 
 (output,) = llm.encode(

@@ -42,6 +42,10 @@ class BaseClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         )
         # Zero marks an unused slot; positive values are unpadded label counts.
         self.full_module_num_labels = [0] * max_loras
+        self._output_lora_indices: tuple[int, ...] = ()
+
+    def set_output_mapping(self, slot_indices: tuple[int, ...]) -> None:
+        self._output_lora_indices = slot_indices
 
     def reset_module_to_save(self, index: int) -> None:
         self.full_weight_stacked[index].zero_()
@@ -65,18 +69,6 @@ class BaseClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
 
 
 class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
-    def create_lora_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: PreTrainedConfig | None = None,
-    ) -> None:
-        super().create_lora_weights(max_loras, lora_config, model_config)
-        self._output_lora_indices: tuple[int, ...] = ()
-
-    def set_output_mapping(self, slot_indices: tuple[int, ...]) -> None:
-        self._output_lora_indices = slot_indices
-
     def forward(self, input_: torch.Tensor) -> torch.Tensor | list[torch.Tensor]:
         # TODO base_result maybe don't need compute truly.
         base_result = super().forward(input_)
@@ -138,9 +130,19 @@ class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
 
 
 class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
+    def get_output_num_labels(self) -> list[int]:
+        return [
+            (self.full_module_num_labels[index] or self.output_size)
+            if index >= 0
+            else self.output_size
+            for index in self._output_lora_indices
+        ]
+
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        output = super().forward(input_)
-        output = output[0] if isinstance(output, tuple) else output
+        base_result = super().forward(input_)
+        base_result = base_result[0] if isinstance(base_result, tuple) else base_result
+        output = base_result.new_zeros(base_result.size(0), self.padded_num_labels)
+        output[:, : self.output_size].copy_(base_result)
         adapter_output = torch.zeros(
             (1, output.size(0), self.padded_num_labels),
             dtype=torch.float32,
@@ -161,9 +163,9 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
             indices = torch.nn.functional.pad(indices, (0, padding), value=-1)
         safe_indices = indices.clamp_min(0)
         use_full = (indices >= 0) & self.full_module_enabled[safe_indices]
-        adapter_output = adapter_output[0, :, : self.output_size].to(
-            output.dtype
-        ) + self.full_bias_stacked[safe_indices, : self.output_size].to(output.dtype)
+        adapter_output = adapter_output[0].to(output.dtype) + self.full_bias_stacked[
+            safe_indices
+        ].to(output.dtype)
         return torch.where(use_full.unsqueeze(-1), adapter_output, output)
 
     def _apply_lora_to_output(

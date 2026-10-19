@@ -181,6 +181,11 @@ class LoRAModelManager:
                     f"{len(classification_heads)}."
                 )
                 self._classification_head = classification_heads[0]
+                _, classification_head = self._classification_head
+                if isinstance(classification_head, TokenClassificationHeadWithLoRA):
+                    self.model.pooler.pooling.output_sizes_fn = (
+                        classification_head.get_output_num_labels
+                    )
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
@@ -452,10 +457,7 @@ class LoRAModelManager:
 
         if self._classification_head is not None:
             _, classification_head = self._classification_head
-            if (
-                isinstance(classification_head, ClassificationHeadWithLoRA)
-                and classification_head.punica_wrapper is punica_wrapper
-            ):
+            if classification_head.punica_wrapper is punica_wrapper:
                 classification_head.set_output_mapping(
                     tuple(
                         self.lora_index_to_id.index(lora_id) if lora_id > 0 else -1
@@ -1327,15 +1329,6 @@ class LoRAModelManager:
                 "an incompatible weight shape: expected "
                 f"(1..{wrapper.max_lora_cls_labels}, {wrapper.input_size}), "
                 f"received {received_weight_shape}."
-            )
-
-        if (
-            isinstance(wrapper, TokenClassificationHeadWithLoRA)
-            and full_module.weight.size(0) != wrapper.output_size
-        ):
-            raise ValueError(
-                "Token classification heads require the same number of labels "
-                f"as the base model ({wrapper.output_size})."
             )
 
         if full_module.bias is None:
