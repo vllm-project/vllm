@@ -3863,38 +3863,38 @@ void paged_attention_custom_launcher_navi(
 
 // Parameter list shared by paged_attention() and every per-TU entry point. The
 // names must match what CALL_CUSTOM_LAUNCHER* expect to find in scope.
-#define ATTN_PARAMS                                                          \
-  torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,    \
-      torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,\
-      torch::Tensor& value_cache, const int num_kv_heads, float scale,       \
-      torch::Tensor& block_tables, torch::Tensor& seq_lens,                  \
-      const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,  \
-      const std::optional<torch::Tensor>& alibi_slopes,                      \
-      torch::Tensor& k_scale, torch::Tensor& v_scale,                        \
-      const std::optional<torch::Tensor>& fp8_out_scale, int block_size,     \
+#define ATTN_PARAMS                                                            \
+  torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,      \
+      torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,  \
+      torch::Tensor &value_cache, const int num_kv_heads, float scale,         \
+      torch::Tensor &block_tables, torch::Tensor &seq_lens,                    \
+      const std::optional<torch::Tensor>&query_start_loc, int max_seq_len,     \
+      const std::optional<torch::Tensor>&alibi_slopes, torch::Tensor &k_scale, \
+      torch::Tensor &v_scale,                                                  \
+      const std::optional<torch::Tensor>&fp8_out_scale, int block_size,        \
       bool is_navi, bool use_interleaved_v_cache
 
-#define ATTN_FWD                                                          \
-  out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
-      num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale,         \
-      block_size, is_navi, use_interleaved_v_cache
+#define ATTN_FWD                                                              \
+  out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,          \
+      num_kv_heads, scale, block_tables, seq_lens, query_start_loc,           \
+      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, block_size, \
+      is_navi, use_interleaved_v_cache
 
 // Declare/define one fixed-head-size entry point.
 #define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
 
 // Instantiate every block size for one compile-time head size.
-#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)                   \
-  switch (block_size) {                                                       \
-    case 16:                                                                  \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE, MFMA_TYPE);    \
-      break;                                                                  \
-    case 32:                                                                  \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE, MFMA_TYPE);    \
-      break;                                                                  \
-    default:                                                                  \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);             \
-      break;                                                                  \
+#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)                 \
+  switch (block_size) {                                                     \
+    case 16:                                                                \
+      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE, MFMA_TYPE); \
+      break;                                                                \
+    case 32:                                                                \
+      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE, MFMA_TYPE); \
+      break;                                                                \
+    default:                                                                \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);           \
+      break;                                                                \
   }
 
 #undef WARP_SIZE

@@ -58,17 +58,17 @@ bool is_navi_gpu() {
   return result;
 }
 
-#define ATTN_HEAD_SWITCH(FN64, FN128)                                         \
-  switch (head_size) {                                                        \
-    case 64:                                                                  \
-      FN64(ATTN_FWD);                                                         \
-      break;                                                                  \
-    case 128:                                                                 \
-      FN128(ATTN_FWD);                                                        \
-      break;                                                                  \
-    default:                                                                  \
-      TORCH_CHECK(false, "Unsupported head size: ", head_size);                \
-      break;                                                                  \
+#define ATTN_HEAD_SWITCH(FN64, FN128)                           \
+  switch (head_size) {                                          \
+    case 64:                                                    \
+      FN64(ATTN_FWD);                                           \
+      break;                                                    \
+    case 128:                                                   \
+      FN128(ATTN_FWD);                                          \
+      break;                                                    \
+    default:                                                    \
+      TORCH_CHECK(false, "Unsupported head size: ", head_size); \
+      break;                                                    \
   }
 
 // clang-format off
