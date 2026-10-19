@@ -17,6 +17,13 @@ logger = init_logger(__name__)
 class RoutingStrategy(ABC):
     """Base class for token-to-expert routing strategies."""
 
+    @property
+    def supports_monolithic_logits(self) -> bool:
+        return False
+
+    def generate_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("This strategy cannot generate monolithic logits")
+
     @abstractmethod
     def route_tokens(
         self,
@@ -118,6 +125,25 @@ class DistributionBasedRouting(RoutingStrategy):
         topk_weights = self._generate_weights(num_tokens, top_k, hidden_states.device)
 
         return topk_weights, topk_ids
+
+    @property
+    def supports_monolithic_logits(self) -> bool:
+        return self.distribution == "uniform"
+
+    def generate_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        """Run the model's routing on random logits on the monolithic path.
+
+        Unlike modular simulation's uniformly sampled IDs and unit weights,
+        the kernel computes weights and retains the model's expert grouping.
+        Negative logits put top-k near zero, reducing BF16 ties on CUDA.
+        """
+        if not self.supports_monolithic_logits:
+            return super().generate_monolithic_logits(router_logits)
+        return -torch.rand(
+            router_logits.shape,
+            dtype=router_logits.dtype,
+            device=router_logits.device,
+        )
 
     def _sample_expert_ids(
         self,
@@ -255,6 +281,16 @@ class RoutingSimulator:
         """
         return list(cls._routing_strategies.keys())
 
+    @classmethod
+    def get_strategy(cls, strategy_name: str) -> RoutingStrategy:
+        """Return a registered routing strategy by name."""
+        if strategy_name not in cls._routing_strategies:
+            raise ValueError(
+                f"Unknown routing strategy: {strategy_name}. "
+                f"Available strategies: {list(cls._routing_strategies.keys())}"
+            )
+        return cls._routing_strategies[strategy_name]
+
     @staticmethod
     def simulate_routing(
         hidden_states: torch.Tensor,
@@ -276,12 +312,7 @@ class RoutingSimulator:
             tuple of (topk_weights, topk_ids)
 
         """
-        if strategy_name not in RoutingSimulator._routing_strategies:
-            raise ValueError(
-                f"Unknown routing strategy: {strategy_name}. "
-                f"Available strategies: "
-                f"{list(RoutingSimulator._routing_strategies.keys())}"
-            )
+        strategy = RoutingSimulator.get_strategy(strategy_name)
         logger.warning_once(
             "Simulating MoE routing using a %s strategy. "
             "This should only be used for performance testing. "
@@ -289,7 +320,6 @@ class RoutingSimulator:
             strategy_name,
         )
 
-        strategy = RoutingSimulator._routing_strategies[strategy_name]
         return strategy.route_tokens(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -313,9 +343,22 @@ class RoutingSimulatorRouter(BaseRouter):
             eplb_state=eplb_state,
         )
 
+        strategy_name = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        self._strategy = RoutingSimulator.get_strategy(strategy_name)
+        logger.warning_once(
+            "Simulating MoE routing using a %s strategy. "
+            "This should only be used for performance testing. "
+            "Model outputs will not be valid.",
+            strategy_name,
+        )
+
     @property
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.Simulated
+
+    @property
+    def supports_monolithic_kernels(self) -> bool:
+        return self._strategy.supports_monolithic_logits
 
     def _compute_routing(
         self,
@@ -326,11 +369,9 @@ class RoutingSimulatorRouter(BaseRouter):
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Use routing simulator to compute routing."""
-        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-        topk_weights, topk_ids = RoutingSimulator.simulate_routing(
+        topk_weights, topk_ids = self._strategy.route_tokens(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            strategy_name=routing_strategy,
             top_k=self.top_k,
             indices_type=indices_type,
         )

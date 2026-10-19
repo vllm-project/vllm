@@ -39,6 +39,10 @@ class FusedMoERouter(ABC):
         """Routing method executed by kernels, before any router override."""
         return self.routing_method_type
 
+    @property
+    def supports_monolithic_kernels(self) -> bool:
+        return True
+
     @abstractmethod
     def _select_experts(
         self,
