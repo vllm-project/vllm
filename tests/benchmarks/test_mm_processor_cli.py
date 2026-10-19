@@ -34,6 +34,10 @@ def test_bench_mm_processor(tmp_path):
         "32",
         "--random-output-len",
         "1",
+        "--random-mm-base-items-per-request",
+        "1",
+        "--random-mm-num-mm-items-range-ratio",
+        "0",
         "--random-mm-bucket-config",
         "{(224, 224, 1): 1.0}",
         "--random-mm-limit-mm-per-prompt",
@@ -45,11 +49,18 @@ def test_bench_mm_processor(tmp_path):
         "--output-json",
         str(output_json),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as exc:
+        print(exc.stdout or "")
+        print(exc.stderr or "")
+        raise
     print(result.stdout)
     print(result.stderr)
 
-    assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+    assert result.returncode == 0, (
+        f"Benchmark failed with exit code {result.returncode}: {result.stderr}"
+    )
 
     payload = json.loads(output_json.read_text())
     assert payload["config"]["model"] == MODEL_NAME
@@ -60,11 +71,12 @@ def test_bench_mm_processor(tmp_path):
     # request would complete without producing any of these stats.
     stats = payload["mm_processor_stats"]
     assert "preprocessor_total_ms" in stats
+    assert stats["preprocessor_total_ms"]["mean"] > 0
     assert all(
         math.isfinite(value) for stage in stats.values() for value in stage.values()
     )
 
     # The vision encoder must actually have run for these image requests.
     encoder_summary = payload["encoder_summary"]
-    assert encoder_summary["total_encoder_calls"] > 0
-    assert encoder_summary["num_requests_with_encoder_calls"] > 0
+    assert encoder_summary, "no encoder timing recorded"
+    assert encoder_summary["num_requests_with_encoder_calls"] == NUM_PROMPTS
