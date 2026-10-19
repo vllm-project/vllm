@@ -23,7 +23,17 @@ function "cfrom" {   # trusted cache, plus this PR's own cache when CACHE_TO poi
 }
 function "cto" {
   params = [name]
-  result = CACHE_TO == "" ? [] : ["type=registry,ref=${CACHE_TO}${STACK}-${name},mode=max,image-manifest=true,ignore-error=true"]
+  result = CACHE_TO == "" ? [] : ["type=registry,ref=${CACHE_TO}${STACK}-${name},mode=max,image-manifest=true,ignore-error=true,compression=zstd,compression-level=3,force-compression=true"]
+}
+# Images and cache layers are zstd: on the CI fleet, unpacking dominates pull time (vllm#60258,
+# vllm#28656). Pulling needs Docker >= 23 or containerd >= 1.5. force-compression keeps every layer
+# zstd: without it, a builder exports whichever copy of a layer it holds, e.g. a gzip one imported
+# from an older cache. Images built once per key (stack, runtime, release) also get reproducible
+# timestamps.
+function "out" {
+  params = [rewrite]
+  result = PUSH ? join(",", concat(["type=registry", "compression=zstd", "compression-level=3", "force-compression=true", "oci-mediatypes=true"],
+                                   rewrite ? ["rewrite-timestamp=true"] : [])) : "type=docker"
 }
 function "ctx" {   # named contexts: prebuilt refs when given, else in-graph targets
   params = []
@@ -36,7 +46,7 @@ target "_rocm" {
   context = "."
   args    = { SOURCE_DATE_EPOCH = "0", STACK = STACK }
   attest  = ["type=provenance,disabled=true"]   # provenance would change the pushed digest on every build
-  output  = [PUSH ? "type=registry,rewrite-timestamp=true" : "type=docker"]
+  output  = [out(true)]
 }
 target "_stack" {
   inherits   = ["_rocm"]
@@ -77,7 +87,7 @@ target "test" {
   target   = "test"
   args     = { ARCH = CI_ARCH }
   tags     = [TAG]
-  output   = [PUSH ? "type=registry" : "type=docker"]   # per-build image: rewrite-timestamp would cost ~13 min per push
+  output   = [out(false)]   # per-build image: rewriting would hand it second copies of inherited layers
   cache-to = CACHE_CI ? cto("ci") : []
   no-cache-filter = AITER_SPEC == "" && AITER_NIGHTLY != "1" ? [] : ["test-base"]   # AITER nightly: always fetch the newest wheel
 }

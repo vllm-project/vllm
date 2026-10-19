@@ -128,7 +128,9 @@ meta()   { buildkite-agent meta-data "$@"; }
 #   A Kr cache miss triggers a runtime rebuild (minutes).
 
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-Ks=$(git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"} | sha256sum | cut -c1-16)
+# The layer compression is part of every image's identity: an image left in an older
+# compression would hand later builds a second copy of the same layers.
+Ks=$( { echo "layers: zstd-3"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
 Kr=$(
   {
     echo "$Ks"
