@@ -689,6 +689,28 @@ def test_decompose_size_with_getitem_user():
             )
 
 
+@pytest.mark.parametrize("use_keyword", [False, True])
+def test_decompose_size_preserves_reshape_shape(use_keyword):
+    """Shape tuples must survive Dynamo graph splitting in args and kwargs."""
+
+    def model(x):
+        shape = x.size()
+        x = torch.ops.aten.sigmoid.default(x)
+        if use_keyword:
+            return torch.reshape(x, shape=shape)
+        return torch.reshape(x, shape)
+
+    def backend(graph, example_inputs):
+        split_gm, split_items = split_graph(graph, ["aten::sigmoid"])
+        assert len(split_items) == 3
+        return split_gm
+
+    compiled = torch.compile(model, backend=backend, dynamic=True, fullgraph=True)
+    for batch_size in (4, 8):
+        x = torch.randn(batch_size, 3)
+        torch.testing.assert_close(compiled(x), model(x))
+
+
 def test_decompose_size_leaves_scalar_size_with_dim():
     """Regression test: _decompose_size_nodes must leave x.size(dim) alone.
 
