@@ -1764,12 +1764,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len: int | None = max(scheduler_output.num_scheduled_tokens.values())
+        allow_full = True
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
             if batch_req_state.has_prefill:
+                allow_full = False
                 # Varlen decode graphs replay decodes only, and their bound
                 # alone would admit a short prefill.
                 max_query_len = None
@@ -1808,6 +1810,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.ubatch_runner is not None and not skip_attn_for_dummy_run
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
+            allow_full=allow_full,
         )
 
         if batch_desc.num_tokens == 0:

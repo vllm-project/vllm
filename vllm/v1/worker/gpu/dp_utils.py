@@ -222,6 +222,7 @@ def dispatch_cg_and_sync_dp(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     dp_sync_state: DPSyncState | None = None,
+    allow_full: bool = True,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -283,6 +284,7 @@ def dispatch_cg_and_sync_dp(
             dp_sync_state.uniform_token_count if dp_sync_state else uniform_token_count,
             num_active_loras=num_active_loras,
             max_query_len=max_query_len,
+            allow_full=allow_full,
         )
 
     if dp_size == 1:
