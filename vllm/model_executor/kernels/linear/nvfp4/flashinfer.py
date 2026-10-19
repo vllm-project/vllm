@@ -112,6 +112,9 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
+    def input_quant_key(self) -> QuantKey | None:
+        return kNvfp4Dynamic
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -137,19 +140,26 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cutedsl",
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp4, x_blockscale = qa.data, qa.scale
+            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
+        else:
+            assert isinstance(x, torch.Tensor)
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="flashinfer-cutedsl",
+            )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
             x_fp4, nvfp4_weight_padding_bytes(layer)
@@ -219,6 +229,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
             x_fp4, x_blockscale = qa.data, qa.scale
+            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
             output_dtype = qa.orig_dtype
             output_shape = [*qa.orig_shape[:-1], output_size]

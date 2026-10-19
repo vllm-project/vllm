@@ -17,11 +17,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def local_num_offload_blocks(capacity_bytes: int, total_bytes_per_block: int) -> int:
-    assert total_bytes_per_block > 0
-    return max(1, capacity_bytes // total_bytes_per_block)
-
-
 def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
     """All-reduce MIN so every rank allocates the same offload pool size."""
     if not dist.is_initialized():

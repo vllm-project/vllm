@@ -204,7 +204,6 @@ def test_variable_length_audio_batching(
 @pytest.mark.asyncio
 async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""
-
     messages = [
         {
             "role": "user",

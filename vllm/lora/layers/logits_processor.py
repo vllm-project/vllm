@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
@@ -18,8 +18,7 @@ from .base import BaseLayerWithLoRA
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
-    """
-    LoRA wrapper for LogitsProcessor, with extra logic to handle the
+    """LoRA wrapper for LogitsProcessor, with extra logic to handle the
     application of the LoRA adapter.
 
     Args:
@@ -30,6 +29,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         sharded_to_full_mapping: index mapping from sharded vocab to full vocab
             received from base_layer.get_sharded_to_full_mapping(). If None,
             no reindexing will be done.
+
     """
 
     def __init__(
@@ -85,7 +85,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if self.base_layer.vocab_size > 258048:
@@ -221,7 +221,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False

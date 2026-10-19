@@ -3,8 +3,10 @@
 
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, replace
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import get_draft_load_config
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
@@ -31,6 +33,42 @@ def _resolve_dspark_attention_backend(
     return None
 
 
+def _get_dspark_parallel_config(
+    parallel_config: ParallelConfig,
+    tensor_parallel_size: int,
+    draft_model_config: ModelConfig,
+) -> ParallelConfig:
+    enable_draft_eplb = parallel_config.enable_eplb and dspark_draft_supports_eplb(
+        draft_model_config
+    )
+    if parallel_config.enable_eplb and not enable_draft_eplb:
+        logger.warning_once(
+            "EPLB is disabled for the DSpark draft model (%s). EPLB remains "
+            "enabled for the target model.",
+            draft_model_config.hf_config.model_type,
+        )
+
+    if enable_draft_eplb:
+        return replace(
+            parallel_config,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=tensor_parallel_size,
+            enable_elastic_ep=False,
+        )
+
+    return replace(
+        parallel_config,
+        pipeline_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
+        enable_eplb=False,
+        eplb_config=replace(
+            parallel_config.eplb_config,
+            num_redundant_experts=0,
+        ),
+        enable_elastic_ep=False,
+    )
+
+
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -54,12 +92,10 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
-        parallel_config=replace(
+        parallel_config=_get_dspark_parallel_config(
             vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-            tensor_parallel_size=(
-                speculative_config.draft_parallel_config.tensor_parallel_size
-            ),
+            speculative_config.draft_parallel_config.tensor_parallel_size,
+            draft_model_config,
         ),
         attention_config=replace(
             vllm_config.attention_config,
@@ -74,7 +110,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
-        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
+        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.

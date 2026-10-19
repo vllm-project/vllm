@@ -1,0 +1,258 @@
+meta:
+  title: "Laguna S-2.1"
+  slug: "laguna-s-2.1"
+  provider: "Poolside"
+  description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
+  date_added: 2026-07-21
+  date_updated: 2026-07-22
+  tasks:
+    - text
+  performance_headline: "118B/8B-A MoE for agentic coding with interleaved thinking and tool use"
+  related_recipes:
+    - "poolside/Laguna-XS-2.1"
+    - "poolside/Laguna-M.1"
+  hardware:
+    h200: verified
+    mi325x: verified
+
+model:
+  model_id: "poolside/Laguna-S-2.1"
+  min_vllm_version: "0.25.0"
+  architecture: moe
+  parameter_count: "118B"
+  active_parameters: "8B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Poolside's tool-call parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "poolside_v1"
+  reasoning:
+    description: "Enable interleaved thinking with Poolside's reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "poolside_v1"
+  spec_decoding:
+    description: "DFlash speculative decoding with the Laguna-S-2.1 draft model (15 tokens, greedy)"
+    args:
+      - "--speculative-config"
+      - '{"model":"poolside/Laguna-S-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
+      - "--moe-backend"
+      - "triton"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 282
+    description: "BF16 weights (~235GB) — needs a multi-GPU node (≥2× H200/B200, or a full HGX node)"
+    hardware_overrides:
+      mi325x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+  fp8:
+    model_id: "poolside/Laguna-S-2.1-FP8"
+    precision: fp8
+    vram_minimum_gb: 145
+    description: "Block-FP8 weights + FP8 KV cache (~121GB) — a hair over one 141GB H200, so TP2 (or a single 268GB B300)"
+    extra_env:
+      VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: "0"
+    hardware_overrides:
+      mi325x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_MOE: "0"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+  nvfp4:
+    model_id: "poolside/Laguna-S-2.1-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 86
+    description: "NVFP4 weights + FP8 KV cache (~72GB, Blackwell only) — fits a single B200/B300"
+  int4:
+    model_id: "poolside/Laguna-S-2.1-INT4"
+    precision: int4
+    vram_minimum_gb: 86
+    description: "INT4 (W4A16) weights + FP8 KV cache (~72GB) — fits a single 96GB+ GPU (H200/B200)"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Laguna S-2.1](https://huggingface.co/poolside/Laguna-S-2.1) is Poolside's
+  118B-total / 8B-activated Mixture-of-Experts model — the larger sibling of
+  [Laguna XS-2.1](https://huggingface.co/poolside/Laguna-XS-2.1), built for
+  agentic coding and long-horizon work. It shares the `laguna` architecture:
+  mixed sliding-window + global attention (3:1 across 48 layers) with softplus
+  per-head gating and an FP8 KV cache, plus native interleaved reasoning and
+  tool calling.
+
+  ### Key features
+  - **Mixed SWA + global attention**: 36 sliding-window layers (window=512)
+    interleaved with 12 global-attention layers (3:1), each with per-layer
+    rotary scaling.
+  - **256 experts + 1 shared expert** with top-10 routing.
+  - **Grouped-query attention**: 8 KV heads, head dim 128, per-head softplus
+    output gating.
+  - **Native FP8 KV cache** to reduce memory per token.
+  - **Interleaved reasoning**: thinking blocks emitted between tool calls;
+    toggled per-request via `enable_thinking`.
+  - **Tool calling**: Poolside's XML-style tool-call protocol, parsed via
+    `poolside_v1`.
+
+  Same architecture as XS-2.1, so vLLM needs no S-specific code — support
+  lands with the shared `laguna` implementation.
+
+  ## Prerequisites
+
+  ### pip
+  ```bash
+  uv pip install -U 'vllm>=0.25.0'
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai:latest
+  ```
+
+  ## Variants and VRAM
+
+  Laguna S-2.1 is large: the BF16 weights are ~235GB, so unlike XS-2.1 the
+  default **does not fit a single GPU** — plan for a multi-GPU node or pick a
+  quantized checkpoint. Select one with the **Variant** control above:
+
+  | Variant | Checkpoint | Weights | ~Size | Fits on |
+  |---------|-----------|---------|-------|---------|
+  | BF16 | [Laguna-S-2.1](https://huggingface.co/poolside/Laguna-S-2.1) | BF16 | 235 GB | ≥2× H200/B200, or a full HGX node |
+  | FP8 | [Laguna-S-2.1-FP8](https://huggingface.co/poolside/Laguna-S-2.1-FP8) | Block-FP8 | 121 GB | TP2 on H200, or one B300; set `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0` |
+  | NVFP4 | [Laguna-S-2.1-NVFP4](https://huggingface.co/poolside/Laguna-S-2.1-NVFP4) | NVFP4 | 72 GB | single B200/B300 (Blackwell only) |
+  | INT4 | [Laguna-S-2.1-INT4](https://huggingface.co/poolside/Laguna-S-2.1-INT4) | INT4 (W4A16) | 72 GB | single H200/B200 |
+
+  Quantization is detected automatically from each checkpoint's
+  `quantization_config`, so the launch command is identical — just swap the
+  model ID. All three quantized checkpoints ship an **FP8-quantized KV cache**.
+
+  Precision-matched DFlash speculators ship for each quantization —
+  [DFlash-FP8](https://huggingface.co/poolside/Laguna-S-2.1-DFlash-FP8),
+  [DFlash-NVFP4](https://huggingface.co/poolside/Laguna-S-2.1-DFlash-NVFP4),
+  [DFlash-INT4](https://huggingface.co/poolside/Laguna-S-2.1-DFlash-INT4) — to
+  pair speculative decoding with a quantized base at matching precision.
+
+  > **Context length.** The BF16 checkpoint supports up to 1,048,576 tokens;
+  > the quantized checkpoints are configured for 256K. The commands below use
+  > `--max-model-len 262144`; raise or lower it to trade context for KV memory.
+
+  ## Launch command
+
+  ### Multi-GPU node (H200/B200, BF16)
+  ```bash
+  vllm serve poolside/Laguna-S-2.1 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --max-model-len 262144 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1
+  ```
+
+  ### AMD ROCm — 8× MI325X
+
+  For FP8, the MI325X override disables AITER MoE because its blockscale kernel
+  currently corrupts logits; other AITER operators remain enabled, while vLLM
+  uses Triton MoE.
+
+  ### Single GPU (INT4 on H200, or NVFP4 on B200)
+  ```bash
+  vllm serve poolside/Laguna-S-2.1-INT4 \
+    --trust-remote-code \
+    --max-model-len 262144 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1
+  ```
+
+  ## Controlling reasoning
+
+  Reasoning is **off by default** in the chat template. Enable it per-request:
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="poolside/Laguna-S-2.1",
+      messages=[{"role": "user", "content": "Write a Python retry wrapper with exponential backoff."}],
+      extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+      temperature=0.7,
+      top_p=1.0,
+      extra_query={"top_k": 20},
+  )
+  print(resp.choices[0].message.reasoning)
+  print(resp.choices[0].message.content)
+  ```
+
+  Or default-on with `--default-chat-template-kwargs '{"enable_thinking": true}'`.
+
+  The model's `generation_config.json` sets `top_k 20` (eval-certified
+  truncation) so clients that send no sampling params still get sane output.
+  Do **not** add `min_p` when speculative decoding is on — vLLM rejects
+  `min_p`/`logit_bias` with speculation; use `top_k`/`top_p`.
+
+  ## Speculative decoding (DFlash)
+
+  Enable the **Spec Decoding** toggle above to attach Poolside's
+  [DFlash draft model](https://huggingface.co/poolside/Laguna-S-2.1-DFlash) — a
+  parallel drafter that proposes up to 15 draft tokens per step. Measured mean
+  accepted length is ~3.1 tokens/step on natural text (higher on code),
+  matching Poolside's production deployment.
+
+  Requires:
+  - DFlash drafter support for Laguna, merged in
+    [PR #46853](https://github.com/vllm-project/vllm/pull/46853) (2026-07-03) —
+    use a vLLM build that includes it (validated on 0.25.1).
+  - `--moe-backend triton` — the default DeepGEMM MoE backend is incompatible
+    with the DFlash draft path. Enabling the toggle adds this flag.
+
+  ```bash
+  vllm serve poolside/Laguna-S-2.1 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --max-model-len 16384 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --speculative-config '{"model":"poolside/Laguna-S-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}' \
+    --moe-backend triton
+  ```
+
+  ### DGX Spark (GB10)
+
+  The NVFP4 checkpoint is validated on a single DGX Spark (GB10, `sm_121a`) with
+  vLLM 0.25.1 + a FlashInfer nightly and DFlash — see the
+  [Laguna-S-2.1-NVFP4 model card](https://huggingface.co/poolside/Laguna-S-2.1-NVFP4)
+  for the full one-box recipe.
+
+  ## References
+
+  - [Model card](https://huggingface.co/poolside/Laguna-S-2.1)
+  - [DFlash draft model](https://huggingface.co/poolside/Laguna-S-2.1-DFlash)
+  - [vLLM DFlash spec-decoding PR #46853](https://github.com/vllm-project/vllm/pull/46853)
+  - [Laguna XS-2.1 recipe](https://huggingface.co/poolside/Laguna-XS-2.1)
