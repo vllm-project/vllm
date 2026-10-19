@@ -1,0 +1,196 @@
+meta:
+  title: "GLM-4.7"
+  slug: "glm-4.7"
+  provider: "GLM (Z-AI)"
+  description: "GLM-4.7 MoE language model (~358B total parameters) with MTP speculative decoding, updated tool call parser, and reasoning support"
+  date_added: 2025-12-20
+  date_updated: 2026-09-18
+  tasks:
+    - text
+  performance_headline: "Latest GLM-4.X release with updated glm47 tool call parser and MTP speculative decoding"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "zai-org/GLM-4.7"
+  min_vllm_version: "0.24.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "358B"
+  active_parameters: "32B"
+  context_length: 202752
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies:
+  - note: "GLM-4.7 requires the nightly vllm wheel"
+    command: "uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly"
+  - note: "transformers from source — GLM-4.7 tokenizer is newer than any release"
+    command: "uv pip install git+https://github.com/huggingface/transformers.git"
+
+features:
+  tool_calling:
+    description: "GLM-4.7 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm47"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.7 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "glm47"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding using the model's built-in MTP layers"
+    args:
+      - "--speculative-config.method"
+      - "mtp"
+      - "--speculative-config.num_speculative_tokens"
+      - "1"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 859
+    description: "Full precision BF16 on 8xH200 or equivalent"
+  fp8:
+    model_id: "zai-org/GLM-4.7-FP8"
+    precision: fp8
+    vram_minimum_gb: 430
+    description: "Native FP8 checkpoint with minimal accuracy loss"
+  nvfp4:
+    model_id: "nvidia/GLM-4.7-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 215
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-4.7 is the latest GLM-4.X MoE release from Z-AI. It introduces the `glm47`
+  tool call parser and uses the matching `glm47` reasoning parser. Built-in
+  Multi-Token Prediction (MTP) layers enable speculative decoding for throughput
+  gains on decode-heavy workloads.
+
+  A smaller `zai-org/GLM-4.7-Flash` variant is also available for lower-latency
+  scenarios.
+
+  ## Prerequisites
+
+  - **vLLM version:** nightly recommended for GLM-4.7 (until packaged in a stable release)
+  - **Hardware:** 4x-8x H200 (FP8), AMD MI300X / MI325X / MI355X for ROCm
+  - **Python:** 3.10 - 3.13 (3.12 required for ROCm wheels)
+
+  ### Install vLLM (NVIDIA, nightly)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install git+https://github.com/huggingface/transformers.git
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  ## Launching the Server
+
+  ### Tensor Parallel + MTP (FP8 on 4xH200)
+
+  ```bash
+  vllm serve zai-org/GLM-4.7-FP8 \
+      --tensor-parallel-size 4 \
+      --speculative-config.method mtp \
+      --speculative-config.num_speculative_tokens 1 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm47 \
+      --enable-auto-tool-choice
+  ```
+
+  ### AMD ROCm
+
+  ```bash
+  SAFETENSORS_FAST_GPU=1 \
+  vllm serve zai-org/GLM-4.7 \
+      --tensor-parallel-size 8 \
+      --gpu-memory-utilization 0.9 \
+      --no-enable-prefix-caching \
+      --trust-remote-code
+  ```
+
+  ### Tuning Tips
+
+  - `--max-model-len=65536` is a sensible default; max is 128K.
+  - `--max-num-batched-tokens=32768` for prompt-heavy workloads; reduce to 8K-16K for latency-sensitive.
+  - Use `--gpu-memory-utilization=0.95` to maximize KV cache.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="zai-org/GLM-4.7-FP8",
+      messages=[{"role": "user", "content": "Hello!"}],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model zai-org/GLM-4.7-FP8 \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos
+  ```
+
+  ## Troubleshooting
+
+  - **Parser mismatch:** GLM-4.7 uses `--tool-call-parser glm47` and `--reasoning-parser glm47`.
+  - **MTP acceptance:** 1 speculative token gives ~90%+ acceptance and best throughput.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-4.7)
+  - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-4.7-FP8)
+  - [GLM-4.7-Flash](https://huggingface.co/zai-org/GLM-4.7-Flash)
+  - [vLLM docs](https://docs.vllm.ai/)
