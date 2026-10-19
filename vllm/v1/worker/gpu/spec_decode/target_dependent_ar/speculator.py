@@ -376,8 +376,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
         if self.pcp_manager is not None:
-            input_buffers = self.pcp_manager.get_draft_input_buffers(self.input_buffers)
-            is_padding = input_buffers.is_padding[:num_tokens]
+            input_buffers, is_padding = self.pcp_manager.get_draft_input_buffers(
+                self.input_buffers, num_tokens
+            )
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,

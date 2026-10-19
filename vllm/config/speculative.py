@@ -72,8 +72,6 @@ EagleModelTypes = Literal[
 ]
 SpeculativeMethod = Literal[
     "ngram",
-    "medusa",
-    "mlp_speculator",
     "draft_model",
     "suffix",
     "custom_class",
@@ -454,6 +452,12 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
+    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
+    MTP). "fp8" uses per-row weight and per-token activation scales on the
+    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
+    W4A16 kernel. The target verifies with its own head, so only the
+    acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1272,20 +1276,12 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
-                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
-                # lack a model_type key in config.json, so AutoConfig cannot
-                # detect them. When the method is explicitly "medusa", inject
-                # model_type so MedusaConfig.from_pretrained is used instead.
-                draft_hf_overrides: HfOverrides
-                if self.method == "medusa":
-                    draft_hf_overrides = {"model_type": "medusa"}
-                else:
-                    # Compose any callable hf_overrides set on the target so the
-                    # draft config receives the same transform (e.g. the test
-                    # shrink). Dict overrides stay target-only.
-                    draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-                        self.target_model_config.hf_overrides
-                    )
+                # Compose any callable hf_overrides set on the target so the
+                # draft config receives the same transform (e.g. the test
+                # shrink). Dict overrides stay target-only.
+                draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
+                    self.target_model_config.hf_overrides
+                )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -1311,17 +1307,6 @@ class SpeculativeConfig:
                     hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
                 )
-
-                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
-                # omit vocab_size in config.json, so MedusaConfig falls back to
-                # its default (32001). Align with the target model's vocab size
-                # to avoid shape mismatches when loading LM-head weights.
-                if self.method == "medusa":
-                    target_vocab = self.target_model_config.hf_config.vocab_size
-                    draft_hf = self.draft_model_config.hf_config
-                    if draft_hf.vocab_size != target_vocab:
-                        draft_hf.vocab_size = target_vocab
-                        draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
                 if self.method in ("eagle", "eagle3", "dflash", "dspark"):
@@ -1353,10 +1338,6 @@ class SpeculativeConfig:
                     )
                 ):
                     self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type == "medusa":
-                    self.method = "medusa"
-                elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
-                    self.method = "mlp_speculator"
                 elif self.draft_model_config.hf_config.model_type in get_args(
                     MTPModelTypes
                 ):
@@ -1468,13 +1449,6 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
-                if self.num_speculative_tokens is not None and hasattr(
-                    self.draft_model_config.hf_config, "num_lookahead_tokens"
-                ):
-                    self.draft_model_config.hf_config.num_lookahead_tokens = (
-                        self.num_speculative_tokens
-                    )
-
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
@@ -1550,7 +1524,6 @@ class SpeculativeConfig:
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size,
-                        self.draft_model_config.hf_config,
                     )
                 )
                 self.draft_model_config.max_model_len = (
@@ -1712,7 +1685,6 @@ class SpeculativeConfig:
     def _verify_and_get_draft_tp(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int | None,
-        draft_hf_config: PreTrainedConfig,
     ) -> int:
         """Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
@@ -1720,18 +1692,9 @@ class SpeculativeConfig:
         # If speculative_draft_tensor_parallel_size is unset then set it
         # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type == "mlp_speculator":
-                speculative_draft_tensor_parallel_size = 1
-                if target_parallel_config.tensor_parallel_size > 1:
-                    logger.warning(
-                        "%s cannot currently be run with tp>1; "
-                        "setting speculative_draft_tensor_parallel_size=1",
-                        draft_hf_config.model_type,
-                    )
-            else:
-                speculative_draft_tensor_parallel_size = (
-                    target_parallel_config.tensor_parallel_size
-                )
+            speculative_draft_tensor_parallel_size = (
+                target_parallel_config.tensor_parallel_size
+            )
         elif speculative_draft_tensor_parallel_size not in (
             1,
             target_parallel_config.tensor_parallel_size,
@@ -1823,6 +1786,20 @@ class SpeculativeConfig:
                 "n_predict parameter."
             )
 
+        if self.draft_lm_head_quantization is not None:
+            # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
+            if self.method not in ("eagle", "eagle3", "mtp") or self.use_gemma4_mtp():
+                raise ValueError(
+                    "draft_lm_head_quantization is not supported for method "
+                    f"{self.method!r}."
+                )
+            draft = self.draft_model_config
+            if draft is not None and draft.head_dtype != draft.dtype:
+                raise ValueError(
+                    "draft_lm_head_quantization needs the lm_head to run in the "
+                    f"model dtype, got head_dtype={draft.head_dtype}."
+                )
+
         if self.num_speculative_tokens <= 0:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
@@ -1896,19 +1873,21 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         EAGLE3               eagle3        No       0
         P-EAGLE              eagle3        Yes      K - 1
-        DFlash               dflash        Yes      K
-        DSpark               dspark        Yes      K - 1
+        DFlash               dflash        Yes      0
+        DSpark               dspark        Yes      0
         MTP                  mtp           No       0
         N-gram               ngram         No       0
         Draft model          draft_model   No       1
         PARD                 draft_model   Yes      K
         ==================== ============= ======== ================
+
+        DFlash and DSpark draft in a separate query pass rather than adding
+        rows to the target batch.
         """
         num_draft_tokens = self.num_speculative_tokens
 
-        if self.use_dflash():
-            # DFlash uses one bonus query followed by K mask queries.
-            return num_draft_tokens
+        if self.use_dflash() or self.use_dspark():
+            return 0
 
         if self.parallel_drafting:
             if self.uses_draft_model():
