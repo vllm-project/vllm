@@ -26,6 +26,7 @@ from vllm.multimodal.cache import (
     ShmObjectStoreSenderCache,
     engine_receiver_cache_from_config,
     processor_cache_from_config,
+    worker_receiver_cache_from_config,
 )
 from vllm.multimodal.cache.base import (
     MultiModalCache,
@@ -261,6 +262,37 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         vllm_config_ipc_enabled,
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
+
+
+def test_cuda_ipc_pool_disables_processor_cache():
+    """cuda_ipc_pool items reference recycled pool slices, so no process may
+    cache them, while the cache size is kept so items are still hashed."""
+
+    def _vllm_config(mm_config: MultiModalConfig) -> VllmConfig:
+        model_config = SimpleNamespace(
+            supports_multimodal_inputs=True,
+            get_multimodal_config=lambda: mm_config,
+        )
+        return cast(
+            VllmConfig,
+            SimpleNamespace(
+                model_config=model_config, parallel_config=ParallelConfig()
+            ),
+        )
+
+    default_config = _vllm_config(MultiModalConfig())
+    assert isinstance(
+        processor_cache_from_config(default_config), LruKeyReplicatedSenderCache
+    )
+
+    pool_mm_config = MultiModalConfig(
+        mm_tensor_ipc="cuda_ipc_pool", mm_cuda_ipc_pool_gb=1
+    )
+    pool_config = _vllm_config(pool_mm_config)
+    assert processor_cache_from_config(pool_config) is None
+    assert engine_receiver_cache_from_config(pool_config) is None
+    assert worker_receiver_cache_from_config(pool_config, None) is None
+    assert pool_mm_config.mm_processor_cache_gb > 0
 
 
 class _StubModelConfig:

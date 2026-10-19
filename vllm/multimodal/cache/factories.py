@@ -4,6 +4,7 @@ from multiprocessing.synchronize import Lock as LockType
 from typing import Literal
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 
 from .base import (
     BaseMultiModalProcessorCache,
@@ -19,6 +20,8 @@ from .shm import (
     ShmObjectStoreSenderCache,
 )
 
+logger = init_logger(__name__)
+
 
 def _get_cache_type(
     vllm_config: VllmConfig,
@@ -30,6 +33,15 @@ def _get_cache_type(
     # Check if the cache is disabled.
     mm_config = model_config.get_multimodal_config()
     if mm_config.mm_processor_cache_gb <= 0:
+        return None
+
+    # cuda_ipc_pool items reference pool slices that are recycled once read,
+    # so they must not be cached across requests.
+    if mm_config.mm_tensor_ipc == "cuda_ipc_pool":
+        logger.info_once(
+            "Disabling the multi-modal processor cache: "
+            "mm_tensor_ipc='cuda_ipc_pool' items cannot outlive a request."
+        )
         return None
 
     # Check if IPC caching is supported.

@@ -447,9 +447,10 @@ class MultiModalConfig:
       round trip. Supports `tensor_parallel_size > 1` on a single node with peer
       access. Only engages for GPU-resident features (e.g.
       `mm_processor_kwargs={"device": "cuda"}`); CPU features fall back to
-      "direct_rpc". Requires `mm_cuda_ipc_pool_gb` > 0, which both sizes the
-      pool and reserves the headroom for it. Currently requires
-      `--api-server-count=1` because each API-server process owns its own pool.
+      "direct_rpc". Requires `mm_cuda_ipc_pool_gb` > 0 to size the pool, and
+      disables the multi-modal processor cache, whose items would otherwise
+      reference recycled pool slices. Currently requires `--api-server-count=1`
+      because each API-server process owns its own pool.
     Defaults to "direct_rpc". """
     allow_missing_mm_embeddings: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
@@ -482,8 +483,10 @@ class MultiModalConfig:
     transport pool in the API-server process. Currently requires
     `--api-server-count=1`.
 
-    The budget is carved out of the engine's KV-cache memory independently of
-    `mm_ipc_gpu_memory_gb`.
+    On an instance with a KV cache (e.g. prefill/decode), the budget is carved
+    out of the KV-cache memory, independently of `mm_ipc_gpu_memory_gb`. Such
+    instances currently keep the processor on CPU, so they never allocate the
+    pool.
 
     Set to `0` (default) when `mm_tensor_ipc` is not `"cuda_ipc_pool"`."""
 
@@ -541,13 +544,12 @@ class MultiModalConfig:
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
             )
-        # The CUDA-IPC pool lives on the frontend's device; its memory must be
-        # reserved from the engine so it cannot race the workers' KV cache.
+        # Validate the CUDA-IPC pool size.
         if self.mm_tensor_ipc == "cuda_ipc_pool":
             if self.mm_cuda_ipc_pool_gb <= 0:
                 raise ValueError(
                     "mm_tensor_ipc='cuda_ipc_pool' requires "
-                    "'mm_cuda_ipc_pool_gb' > 0 to size and reserve the "
+                    "'mm_cuda_ipc_pool_gb' > 0 to size the "
                     "on-device transport pool."
                 )
         elif self.mm_cuda_ipc_pool_gb > 0:
@@ -675,6 +677,17 @@ class MultiModalConfig:
 
         device_type = self.get_mm_processor_device_type()
         accelerator = current_platform.device_type
+        if self.mm_tensor_ipc == "cuda_ipc_pool" and (
+            device_type != accelerator or accelerator in ("", "cpu")
+        ):
+            logger.warning_once(
+                "mm_tensor_ipc='cuda_ipc_pool' is not enabled: the multi-modal "
+                "processor does not run on the GPU, so its outputs are host "
+                "tensors and take the host-copy path. The GPU processor only "
+                "runs on an encode-only instance of an encode/prefill/decode "
+                "deployment, with --mm-processor-device left at auto or set to "
+                "the GPU."
+            )
         if device_type is None or accelerator in ("", "cpu"):
             return
         if device_type != accelerator:

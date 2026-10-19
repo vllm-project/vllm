@@ -44,6 +44,7 @@ API-server (frontend) process:
 
 import atexit
 import contextlib
+import itertools
 import threading
 import time
 from multiprocessing import shared_memory
@@ -204,7 +205,8 @@ def reserve_mm_ipc_gpu_memory(
       entire decoder reservation scales with ``api_process_count`` because
       these resources are not shared between processes.
     * The ``mm_cuda_ipc_pool_gb`` budget for the persistent CUDA-IPC transport
-      pool. This transport currently requires ``--api-server-count=1``.
+      pool, which requires ``--api-server-count=1``. Instances with a KV cache
+      currently keep the processor on CPU, so they never allocate the pool.
 
     Args:
         available_kv_cache_memory_bytes: KV-cache capacity before reserving
@@ -566,6 +568,8 @@ class CudaIpcTensorSender(OOBTensorConsumer):
         self._tp_size = tp_size
         self._pool: _SenderPool | None = None
         self._pool_lock = threading.Lock()
+        # Host-copy fallback is silent; warn on the first and every 100th.
+        self._fallback_count = itertools.count(1)
 
     def _get_pool(self, device_index: int) -> _SenderPool | None:
         if self._pool is not None:
@@ -594,6 +598,17 @@ class CudaIpcTensorSender(OOBTensorConsumer):
         src = tensor.detach().contiguous()
         res = pool.try_put(src.reshape(-1).view(torch.uint8))
         if res is None:
+            num_fallbacks = next(self._fallback_count)
+            if num_fallbacks == 1 or num_fallbacks % 100 == 0:
+                logger.warning(
+                    "Multimodal CUDA-IPC pool full: %d tensor(s) have fallen "
+                    "back to the host-copy path (this one needed %.1f MiB of a "
+                    "%d MiB pool). Raise --mm-cuda-ipc-pool-gb; timings taken "
+                    "while this happens mix both transports.",
+                    num_fallbacks,
+                    src.nbytes / (1024 * 1024),
+                    pool.pool_bytes // (1024 * 1024),
+                )
             return None
         offset, nbytes, slot = res
         # Only plain scalars/bytes go into the message (msgpack-native, no
