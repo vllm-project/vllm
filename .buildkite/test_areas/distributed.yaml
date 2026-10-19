@@ -295,7 +295,8 @@ steps:
       - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
       - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-      - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+      # Loading weights from the shared HF cache can exceed the default 300s --timeout.
+      - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager --timeout 900
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
       - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
@@ -736,3 +737,16 @@ steps:
       - pytest -v -s distributed/test_ray_v2_executor_e2e.py
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
       - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
+
+- label: ":nvidia: (L4) Distributed Preload"
+  key: preload-2-gpus
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/fused_moe/expert_map_manager.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'

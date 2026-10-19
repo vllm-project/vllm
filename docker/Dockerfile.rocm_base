@@ -2,8 +2,8 @@ ARG BASE_IMAGE=ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035b
 # Bump to rebuild the stack (changes its key and busts every layer); upstream drift alone never does.
 ARG REFRESH=2026-10-12
 ARG PYTHON_VERSION=3.12
-ARG TORCH_VERSION=2.12.0+rocm10.0.0
-ARG TORCHVISION_VERSION=0.27.0+rocm10.0.0
+ARG TORCH_VERSION=2.13.0+rocm10.0.0
+ARG TORCHVISION_VERSION=0.28.0+rocm10.0.0
 ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
 ARG TRITON_BRANCH="669b31ac" # release/internal/3.8.x as of 09/29/2026
 ARG TRITON_VERSION=3.8.0+git669b31ac
