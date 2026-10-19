@@ -66,8 +66,6 @@ class DecodeConfig:
         offload = config.offload_config
         if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
             reasons.append("does not support model weight offloading")
-        if not config.model_config.enforce_eager:
-            reasons.append("milestone one requires --enforce-eager")
         if config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             reasons.append("does not support stock torch.compile")
         text_config = config.model_config.hf_text_config

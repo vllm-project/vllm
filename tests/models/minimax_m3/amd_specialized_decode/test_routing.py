@@ -50,7 +50,7 @@ def test_decode_widths_route_uniformly(width: int):
     ("rows", "mode", "metadata"),
     [
         (DECODE_CONFIG.max_rows + 1, CUDAGraphMode.NONE, _metadata(1)),
-        (1, CUDAGraphMode.FULL, _metadata(1)),
+        (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
         (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
         (1, CUDAGraphMode.NONE, None),
         (1, CUDAGraphMode.NONE, _metadata(1, prefills=1)),
@@ -59,6 +59,10 @@ def test_decode_widths_route_uniformly(width: int):
 )
 def test_unsupported_steps_fall_back(rows, mode, metadata):
     assert not decide_step(DECODE_CONFIG, rows, mode, metadata).use_mono
+
+
+def test_full_graph_decode_is_eligible():
+    assert decide_step(DECODE_CONFIG, 2, CUDAGraphMode.FULL, _metadata(2)).use_mono
 
 
 def test_padding_slots_are_eligible():

@@ -28,8 +28,9 @@ def decide_step(
 ) -> StepDecision:
     if rows not in spec.widths:
         return StepDecision(False, f"unsupported physical row count {rows}")
-    if graph_mode != CUDAGraphMode.NONE:
-        return StepDecision(False, "milestone one supports eager execution only")
+    if graph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
+        # a PIECEWISE capture is keyed by token count alone and replays mixed steps
+        return StepDecision(False, f"{graph_mode.name} graph step")
     if not isinstance(metadata, MiniMaxM3SparseMetadata):
         return StepDecision(False, "sparse attention metadata missing")
     if metadata.decode is None or metadata.num_decodes == 0:
