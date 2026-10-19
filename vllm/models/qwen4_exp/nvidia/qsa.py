@@ -53,6 +53,7 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+from vllm.v1.attention.ops.dcp import CPTritonContext
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -209,7 +210,15 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
-    supports_dcp: bool = False
+    can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
+    # Each row reads the global token ids its selection lists, and
+    # qsa_localize_dcp_indices maps them to (owner, local slot) for any
+    # interleave that divides the block size (checked in __init__). No
+    # per-row DCP sequence length is computed, so MTP verify rows are
+    # correct at every such interleave, as in index-based sparse MLA.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+    lse_base_on_e: bool = False
     supports_pcp: bool = False
 
     def __init__(
@@ -251,15 +260,47 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         self.kv_cache_dtype = real_kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
-        if self.dcp_world_size != 1:
-            raise NotImplementedError(
-                "Qwen4Exp QSA does not support decode context parallelism"
+        self.cp_kv_cache_interleave_size = 1
+        self._dcp_combine_ctx = CPTritonContext()
+        if self.dcp_world_size > 1:
+            from vllm.config import get_current_vllm_config
+
+            config = get_current_vllm_config()
+            self.cp_kv_cache_interleave_size = (
+                config.parallel_config.cp_kv_cache_interleave_size
             )
+            block_size = config.cache_config.block_size
+            if block_size % self.cp_kv_cache_interleave_size:
+                raise NotImplementedError(
+                    "Qwen4Exp QSA DCP requires block_size divisible by "
+                    "cp_kv_cache_interleave_size"
+                )
         if self.kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
             )
         self.supports_quant_query_input = False
+
+    def localize_dcp_selection_(self, selection: torch.Tensor) -> None:
+        """Keep this rank's share of a packed selection, in place.
+
+        Under DCP the indexer calls this once for each new top-k selection, so
+        ``topk_indices_buffer`` holds rank-local token ids with their count.
+        MTP skip_topk steps and ``compact_topk_indices`` reuse those rows; the
+        attention reads them without localizing again. Without DCP the global
+        selection stays unchanged.
+        """
+        if self.dcp_world_size <= 1:
+            return
+        from .ops.qsa_dcp import qsa_localize_dcp_indices
+
+        qsa_localize_dcp_indices(
+            selection,
+            selection,
+            self.dcp_world_size,
+            self.dcp_rank,
+            self.cp_kv_cache_interleave_size,
+        )
 
     def forward_qsa(
         self,
@@ -285,7 +326,12 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             raise NotImplementedError("QSA does not support sliding-window attention")
 
         num_tokens = attn_metadata.num_actual_tokens
-        output.zero_()
+        if self.dcp_world_size > 1:
+            # The DCP gate writes every row below num_tokens; clear only the
+            # padding rows.
+            output[num_tokens:].zero_()
+        else:
+            output.zero_()
         if num_tokens == 0:
             return output
 
@@ -318,6 +364,23 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
         from .ops.qsa import qsa_sparse_paged_attention
 
+        if self.dcp_world_size > 1:
+            self._forward_qsa_dcp(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                topk_buffer,
+                num_tokens,
+                attn_metadata.block_table,
+                token_to_req,
+                use_prefill_config,
+                output[:num_tokens],
+                output_gate[:num_tokens],
+                k_scale,
+                v_scale,
+            )
+            return output
+
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
@@ -333,11 +396,85 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         )
         return output
 
+    def _forward_qsa_dcp(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        topk_buffer: torch.Tensor,
+        num_tokens: int,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+        use_prefill_config: bool,
+        output: torch.Tensor,
+        output_gate: torch.Tensor,
+        k_scale: float | None,
+        v_scale: float | None,
+    ) -> None:
+        """Attend over local selections and merge rank results.
+
+        ``topk_buffer`` already holds this rank's local selection: the indexer
+        localizes each new selection once (``localize_dcp_selection_``), and
+        MTP skip_topk steps reuse those rows. The partial output, its LSE and
+        the head-major combine buffer come from the shared workspace. They
+        are reserved for max_num_batched_tokens rows, as FlashAttention DCP
+        reserves its context output, so the workspace does not grow after
+        CUDA graph capture. The gathered query and the combine output stay
+        collective outputs, as in FlashAttention DCP.
+        """
+        from vllm.distributed.parallel_state import get_dcp_group
+        from vllm.v1.worker.workspace import current_workspace_manager
+
+        from .ops.qsa import qsa_sparse_paged_attention
+        from .ops.qsa_dcp import gate_qsa_dcp_output, qsa_dcp_combine
+
+        group = get_dcp_group()
+        query_all_heads = group.all_gather(query.contiguous(), dim=1)
+        reserved = max(num_tokens, self._dcp_max_num_tokens)
+        row_shape = query_all_heads.shape[1:]
+        partial_out, partial_lse, heads_first = (
+            current_workspace_manager().get_simultaneous(
+                ((reserved, *row_shape), torch.float32),
+                ((reserved, row_shape[0]), torch.float32),
+                ((reserved * row_shape.numel(),), torch.float32),
+            )
+        )
+        local_indices = topk_buffer[:num_tokens]
+
+        partial_out, partial_lse = qsa_sparse_paged_attention(
+            query_all_heads,
+            key_cache,
+            value_cache,
+            local_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config,
+            partial_out[:num_tokens],
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+            out_lse=partial_lse[:num_tokens],
+        )
+
+        # A row with count 0 runs no tile; the reader writes output 0 and LSE
+        # -inf, the identity for the LSE combine.
+
+        # The reader writes the FP32 partial into the workspace buffer, and the
+        # combine reads it in place.
+        merged = qsa_dcp_combine(
+            partial_out,
+            partial_lse,
+            group,
+            self.dcp_combine,
+            heads_first[: partial_out.numel()],
+            ctx=self._dcp_combine_ctx,
+            is_lse_base_on_e=self.lse_base_on_e,
+        )
+        gate_qsa_dcp_output(merged, output_gate, output)
+
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     """Merged Qwen full-attention owner with a QSA index side branch."""
-
-    supports_dcp = False
 
     def __init__(
         self,
@@ -368,12 +505,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.decode_context_parallel_size > 1
-        ):
+        if parallel_config.prefill_context_parallel_size > 1:
             raise NotImplementedError(
-                "Qwen4Exp QSA does not support context parallelism"
+                "Qwen4Exp QSA does not support prefill context parallelism"
             )
         if not getattr(config, "is_causal", True):
             raise NotImplementedError("Qwen4Exp QSA requires causal decoder attention")
@@ -521,6 +655,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # index; the sparse attention kernel reads it as its loop bound.
         # MTP skip_topk steps reuse rows frozen from step 0; the count is
         # a row column, so compaction/reuse keep it paired with the content.
+        # Under DCP the rows hold this rank's local token ids.
         self.register_buffer(
             "topk_indices_buffer",
             torch.empty(

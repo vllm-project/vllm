@@ -1063,10 +1063,11 @@ def generate_scheduler_kv_cache_config(
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # so use an arbitrary one to initialize the scheduler.
+            # The sharded member sets the group's DCP block size.
+            specs = group.kv_cache_spec.kv_cache_specs.values()
             group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
+                (spec for spec in specs if spec.dcp_sharded),
+                group.kv_cache_spec.first_spec,
             )
     return cfg
 
