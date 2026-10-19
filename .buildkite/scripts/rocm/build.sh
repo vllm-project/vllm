@@ -9,7 +9,7 @@
 #
 # Modes:
 #   keys     Print current Ks/Kr keys and whether their images exist (on-call debug).
-#   base     Ensure stack + runtime images exist; write their refs to Buildkite metadata.
+#   base     Ensure stack, runtime and test-deps images exist; write their refs to Buildkite metadata.
 #   ci       Build and push this build's per-commit test image.
 #   csrc     All-arch csrc compile into the BuildKit cache (release, serialized per stack).
 #   release  Full release image + wheels from the CI-tested layers.
@@ -139,6 +139,8 @@ Kr=$(
       requirements/common.txt \
       requirements/rocm.txt \
       requirements/test/rocm.txt \
+      rust-toolchain.toml \
+      tests/vllm_test_utils \
       tools/install_torchcodec_rocm.sh
   } | sha256sum | cut -c1-16
 )
@@ -179,7 +181,8 @@ load() {
   STACK_IMAGE=$(meta get "rocm-$STACK-stack")
   STACK_WHEELS=$(meta get "rocm-$STACK-stack-wheels")
   RUNTIME=$(meta get "rocm-$STACK-runtime")
-  export STACK_IMAGE STACK_WHEELS RUNTIME
+  TEST_DEPS=$(meta get "rocm-$STACK-test-deps")
+  export STACK_IMAGE STACK_WHEELS RUNTIME TEST_DEPS
 }
 
 # ---------------------------------------------------------------------------
@@ -189,7 +192,7 @@ case $MODE in
 
   keys)
     # Print current content keys and registry status (useful for on-call triage).
-    for t in "stack-$STACK-$Ks" "runtime-$STACK-$Kr"; do
+    for t in "stack-$STACK-$Ks" "runtime-$STACK-$Kr" "test-deps-$STACK-$Kr"; do
       echo "$t  $(digest "$TRUSTED:$t" || echo MISSING)"
     done
     ;;
@@ -201,13 +204,16 @@ case $MODE in
     STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
     export STACK_IMAGE
     RUNTIME=$(ensure runtime "runtime-$STACK-$Kr")
+    export RUNTIME
+    TEST_DEPS=$(ensure test-deps "test-deps-$STACK-$Kr")
     STACK_WHEELS=${STACK_IMAGE%@*}-wheels
     STACK_WHEELS=$STACK_WHEELS@$(digest "$STACK_WHEELS")
 
     meta set "rocm-$STACK-stack"        "$STACK_IMAGE"
     meta set "rocm-$STACK-runtime"      "$RUNTIME"
+    meta set "rocm-$STACK-test-deps"    "$TEST_DEPS"
     meta set "rocm-$STACK-stack-wheels" "$STACK_WHEELS"
-    echo "stack=$STACK_IMAGE runtime=$RUNTIME stack-wheels=$STACK_WHEELS"
+    echo "stack=$STACK_IMAGE runtime=$RUNTIME test-deps=$TEST_DEPS stack-wheels=$STACK_WHEELS"
     ;;
 
   ci)

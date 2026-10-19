@@ -6,6 +6,7 @@ variable "STACK"        { default = "rocm" }   # rocm: TheRock ROCm 10
 variable "STACK_IMAGE"  { default = "" }       # prebuilt stack ref@digest; empty: build it in this graph
 variable "STACK_WHEELS" { default = "" }       # that stack's -wheels image
 variable "RUNTIME"      { default = "" }       # prebuilt runtime ref@digest; empty: build it in this graph
+variable "TEST_DEPS"    { default = "" }       # prebuilt test-deps ref@digest; empty: build it in this graph
 variable "CI_ARCH"      { default = "gfx90a;gfx942;gfx950" }  # MI250, MI300/325, MI355: what CI can test
 variable "TAG"          { default = "vllm-rocm:dev" }
 variable "PUSH"         { default = false }
@@ -39,7 +40,8 @@ function "ctx" {   # named contexts: prebuilt refs when given, else in-graph tar
   params = []
   result = merge(
     { stack = STACK_IMAGE == "" ? "target:stack-${STACK}" : "docker-image://${STACK_IMAGE}" },
-    RUNTIME == "" ? {} : { runtime = "docker-image://${RUNTIME}" })
+    RUNTIME == "" ? {} : { runtime = "docker-image://${RUNTIME}" },
+    TEST_DEPS == "" ? {} : { test-deps = "docker-image://${TEST_DEPS}" })
 }
 
 target "_rocm" {
@@ -74,6 +76,16 @@ target "runtime" {
   tags       = [TAG]
   cache-from = cfrom(["runtime"])
   cache-to   = cto("runtime")
+}
+target "test-deps" {   # content-keyed like the runtime (build.sh base mode)
+  inherits   = ["_rocm"]
+  dockerfile = "docker/Dockerfile.rocm"
+  target     = "test-deps"
+  contexts   = ctx()
+  tags       = [TAG]
+  output     = [out(false)]   # rewriting would hand it a second copy of the runtime's base layer
+  cache-from = cfrom(["test-deps", "runtime", "ci"])
+  cache-to   = cto("test-deps")
 }
 target "_app" {
   inherits   = ["_rocm"]

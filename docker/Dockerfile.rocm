@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # vLLM on ROCm, shared by both stacks. Build it with docker/docker-bake-rocm.hcl, which provides the
 # `stack` named context (the `final` stage of docker/Dockerfile.rocm_base)
-# and optionally a prebuilt `runtime`.
+# and optionally prebuilt `runtime` and `test-deps` images.
 # Everything above the per-commit marker is hashed into the runtime key by .buildkite/scripts/rocm/build.sh.
 ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
 
@@ -337,6 +337,33 @@ ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 ARG STACK
 LABEL ai.vllm.rocm.stack=${STACK}
 
+FROM dev AS rust-toolchain
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=${CARGO_HOME}/bin:${PATH}
+RUN --mount=type=bind,source=rust-toolchain.toml,target=/tmp/rust-toolchain.toml \
+    TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none \
+    && rustup toolchain install "${TOOLCHAIN}" \
+    && rustup default "${TOOLCHAIN}" \
+    && rustc --version \
+    && cargo --version
+
+# Test-only dependencies, a content-keyed image like the runtime (build.sh: test-deps-<stack>-<Kr>),
+# so every build of a key reuses these layers by digest instead of rebuilding them from cache.
+FROM runtime AS test-deps
+COPY --from=rust-toolchain /root/.cargo /root/.cargo
+COPY --from=rust-toolchain /root/.rustup /root/.rustup
+ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
+RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=type=bind,source=tests/vllm_test_utils,target=/tu,rw \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
+    && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
+# No VLLM_GPU_SYNC_CHECK yet: AMD CI never ran with it, and ROCm code paths still sync
+# (EPLB, sparse MLA, indexers, moondream3). Enable it once those are fixed.
+ENV HF_XET_HIGH_PERFORMANCE=1
+
 # ==== per-commit stages: nothing below is part of the runtime key ====
 
 FROM dev AS triton-kernels
@@ -363,18 +390,6 @@ RUN --mount=type=bind,target=/src,rw cd /src \
     && cat /vllm-version.txt && ! grep -q '^0\.1\.dev' /vllm-version.txt
 FROM scratch AS version
 COPY --from=version-calc /vllm-version.txt /
-
-FROM dev AS rust-toolchain
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH=${CARGO_HOME}/bin:${PATH}
-RUN --mount=type=bind,source=rust-toolchain.toml,target=/tmp/rust-toolchain.toml \
-    TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none \
-    && rustup toolchain install "${TOOLCHAIN}" \
-    && rustup default "${TOOLCHAIN}" \
-    && rustc --version \
-    && cargo --version
 
 # Compiles the `vllm-rs` frontend once per change to the rust sources, so the wheel build does not
 # need the rust toolchain. The crates, their downloads and target/ stay in this stage's layers (no
@@ -478,15 +493,7 @@ RUN --network=none so="$(python3 -c 'import os, vllm, vllm._C; print(os.path.dir
     && for a in $(echo "$PYTORCH_ROCM_ARCH" | tr ';' ' '); do \
          llvm-objdump --offloading "$so" | grep -qw "$a" || { echo "_C lacks $a" >&2; exit 1; }; done
 
-FROM runtime AS test-base
-COPY --from=rust-toolchain /root/.cargo /root/.cargo
-COPY --from=rust-toolchain /root/.rustup /root/.rustup
-ENV CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup PATH=/root/.cargo/bin:$PATH
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=type=bind,source=tests/vllm_test_utils,target=/tu,rw \
-    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
-    && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
-    && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
+FROM test-deps AS test-base
 # AITER nightly: replace the stack's aiter with the newest nightly wheel that fits this image's ROCm,
 # torch and Python (never cached, see the bake file). AITER_SPEC pins a pip spec instead.
 ARG AITER_NIGHTLY
@@ -498,9 +505,6 @@ RUN --mount=type=bind,source=.buildkite/scripts/rocm/select_aiter_nightly_wheel.
         echo "$out"; spec="$(echo "$out" | head -n 1)"; \
     fi; \
     if [ -n "$spec" ]; then pip install --pre --no-deps --force-reinstall "$spec" && python3 -c 'import aiter'; fi
-# No VLLM_GPU_SYNC_CHECK yet: AMD CI never ran with it, and ROCm code paths still sync
-# (EPLB, sparse MLA, indexers, moondream3). Enable it once those are fixed.
-ENV HF_XET_HIGH_PERFORMANCE=1
 
 FROM test-base AS test
 COPY --link --from=native /out /
