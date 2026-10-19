@@ -97,6 +97,8 @@ fn lower_render_request(
         token_ids,
         sampling_params: GenerateSamplingParams {
             n: None,
+            stop: None,
+            include_stop_str_in_output: None,
             inner: text_request.sampling_params,
         },
         stream,
