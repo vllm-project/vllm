@@ -922,6 +922,44 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_route_follows_api_server_options() {
+    for enabled in [false, true] {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-tokenizer-info",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_tokenizer_info_endpoint: enabled,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        if enabled {
+            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
+        } else {
+            let response = app
+                .clone()
+                .call(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/tokenizer_info")
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+}
+
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.

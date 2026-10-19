@@ -180,6 +180,11 @@ fn build_router_with_options(
         }
     }
 
+    if state.api_server_options.enable_tokenizer_info_endpoint {
+        // TODO: implement `/tokenizer_info`.
+        router = router.route("/tokenizer_info", get(not_supported));
+    }
+
     if runtime_lora_updating_enabled {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
