@@ -880,6 +880,48 @@ async fn scale_out_generate_route_can_be_enabled() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
+    const ROUTES: [&str; 7] = [
+        "/inference/v1/abort_requests",
+        "/v1/chat/completions/render",
+        "/v1/completions/render",
+        "/v1/messages/render",
+        "/v1/responses/render",
+        "/v1/chat/completions/derender",
+        "/v1/completions/derender",
+    ];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-unimplemented",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    for uri in ROUTES {
+        assert_route_not_supported(&enabled, "POST", uri, uri).await;
+    }
+
+    let disabled = build_router_with_scale_out_endpoints(state, false);
+    for uri in ROUTES {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
