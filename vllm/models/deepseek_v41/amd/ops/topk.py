@@ -83,7 +83,8 @@ def _load():
 
 
 def decode_top_k(logits, next_n, seq_lens, indices, topk_tokens) -> bool:
-    """The hook in vLLM's ROCm decode indexer (rocm_aiter_mla_sparse.py).
+    """The hook in front of vLLM's decode top-k in the indexer's decode path
+    (sparse_indexer.py).
 
     When ``enabled()`` and the extension is built, a call with topK 512 and
     unit column strides runs here and returns True. Otherwise it returns
@@ -100,7 +101,7 @@ def candidate_top_k(
     logits, next_n, seq_lens, candidates, block_size, indices, topk_tokens
 ) -> bool:
     """The hook in front of the DSpark candidate mask of the decode indexer
-    (rocm_aiter_mla_sparse.py), on layers 24 to 36.
+    (sparse_indexer.py), on layers 24 to 36.
 
     When ``enabled()`` and the extension is built, a call with topK 512
     writes each row's top 512 among its candidate blocks to ``indices`` and
@@ -139,7 +140,7 @@ def candidate_logits_top_k(
     requires_padding,
 ) -> bool:
     """The hook in front of the dense logits of the decode indexer
-    (rocm_aiter_mla_sparse.py), on layers 24 to 36.
+    (sparse_indexer.py), on layers 24 to 36.
 
     When ``enabled()`` and the extension is built, a call that the hook
     takes writes each row's top 512 among its candidate blocks to ``indices``
@@ -218,7 +219,7 @@ def candidate_logits_top_k(
 
 def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
     """The hook in front of vLLM's select_candidate_blocks in the decode
-    indexer (rocm_aiter_mla_sparse.py), on layer 20, which writes the
+    indexer (sparse_indexer.py), on layer 20, which writes the
     candidate blocks of layers 24 to 36.
 
     When ``enabled()`` and the extension is built, ``candidates`` gets each
@@ -242,14 +243,15 @@ def select_candidates(logits, next_n, seq_lens, block_size, candidates) -> bool:
     )
     if taken:
         # vLLM repeats each request's length over its next_n rows when
-        # seq_lens holds one length a request (rocm_aiter_mla_sparse.py).
+        # seq_lens holds one length a request (_row_bounds in
+        # sparse_indexer.py).
         row_repeat = 1 if ends.numel() == rows else next_n
         _load().candidate_blocks(logits, ends, row_repeat, block_size, candidates)
     return taken
 
 
 def skip_decode_fill(has_prefill, num_decode_tokens, num_tokens, decode) -> bool:
-    """Whether vLLM's decode indexer (rocm_aiter_mla_sparse.py) may skip its
+    """Whether the indexer's decode path (sparse_indexer.py) may skip vLLM's
     -1 fill of the step's top-k rows. When ``enabled()`` and the extension is
     built, it may when every row of the step is a decode row and none is
     padded. The decode top-k then writes every entry of every row, the -1

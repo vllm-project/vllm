@@ -572,3 +572,139 @@ def test_gfx942_reload_writes_the_copies_in_place(monkeypatch):
     load(2)
     assert experts.mono942 is first[0] and linear.mono942 is first[1]
     assert all(bool((t == 2).all()) for t in (*first[0], *first[1]))
+
+
+# With --monokernel on gfx942 the indexer layer and the DSpark draft sampling
+# run gfx942 launches from the model folder. vLLM's ROCm indexer op and its
+# DSpark speculator loop stay as they are, and they run every step that the
+# gfx942 code does not take.
+
+
+@pytest.mark.parametrize(
+    "case, gfx942_path",
+    [
+        ("decode", True),
+        ("profiling", False),
+        ("prefill", False),
+        ("mixed", False),
+        ("no rows", False),
+        ("writes its own K", False),
+        ("without the flag", False),
+    ],
+)
+def test_gfx942_indexer_runs_vllm_op_off_decode_steps(monkeypatch, case, gfx942_path):
+    """Only a step of only decode rows, whose K cache the model already wrote,
+    takes the gfx942 decode path. The profiling run, prefill and mixed steps,
+    a layer that writes its own K cache and a process without --monokernel on
+    gfx942 call vLLM's op with the same arguments."""
+    from vllm.models.deepseek_v41.amd.ops import sparse_indexer as si
+
+    prefills, decodes = {"prefill": (1, 0), "mixed": (1, 1), "no rows": (0, 0)}.get(
+        case, (0, 1)
+    )
+    meta = SimpleNamespace(num_prefills=prefills, num_decodes=decodes)
+    attn_metadata = None if case == "profiling" else {"idx": meta}
+    monkeypatch.setattr(si, "DeepseekV32IndexerMetadata", SimpleNamespace)
+    monkeypatch.setattr(
+        si, "get_forward_context", lambda: SimpleNamespace(attn_metadata=attn_metadata)
+    )
+    monkeypatch.setattr(si, "enabled", lambda: case != "without the flag")
+    calls = []
+
+    def vllm_op(*args, **kwargs):
+        calls.append(("vllm", args, kwargs))
+        return "vllm"
+
+    def decode_step(*args):
+        calls.append(("gfx942", args, {}))
+        return "gfx942"
+
+    monkeypatch.setattr(si, "rocm_aiter_sparse_attn_indexer", vllm_op)
+    monkeypatch.setattr(si, "_decode_step", decode_step)
+    buffer = torch.zeros(6, 512, dtype=torch.int32)
+    args = (torch.zeros(6, 4), "idx", torch.zeros(1), torch.zeros(1), None)
+    args += (torch.zeros(1), 128, "ue8m0", 512, 128, 1024, 1024, buffer)
+    kwargs = dict(
+        skip_k_cache_insert=case != "writes its own K",
+        compress_ratio=4,
+        candidate_blocks=None,
+        candidate_block_size=0,
+        candidate_write=False,
+    )
+    out = si.gfx942_sparse_attn_indexer(*args, **kwargs)
+    assert out == ("gfx942" if gfx942_path else "vllm")
+    assert len(calls) == 1
+    if not gfx942_path:
+        assert calls[0][1] == args and calls[0][2] == kwargs
+
+
+@pytest.mark.parametrize(
+    "monokernel, gfx942, takes_gfx942_indexer",
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
+    monkeypatch, monokernel, gfx942, takes_gfx942_indexer
+):
+    """The attention builds its indexer before the mono decode layer records
+    the flag for ops.enabled(), so it reads --monokernel from the config of
+    the model that is being built. Without the flag, and on gfx950, the layer
+    keeps vLLM's indexer."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.models.deepseek_v41.amd import rocm
+    from vllm.models.deepseek_v41.amd.ops.sparse_indexer import (
+        Gfx942SparseAttnIndexer,
+    )
+    from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
+
+    config = SimpleNamespace(kernel_config=SimpleNamespace(monokernel=monokernel))
+    monkeypatch.setattr(rocm, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(rocm_platform, "on_gfx942", lambda: gfx942)
+    attn_cls = rocm.DeepseekV41ROCMAiterMLAAttention
+    indexer_cls = attn_cls._indexer_cls(
+        attn_cls.__new__(attn_cls), SimpleNamespace(rocm_mxfp4=False)
+    )
+    expected = (
+        rocm.DeepseekV41Gfx942Indexer if takes_gfx942_indexer else DeepseekV4Indexer
+    )
+    assert indexer_cls is expected
+    assert rocm.DeepseekV41Gfx942Indexer.attn_cls is Gfx942SparseAttnIndexer
+
+
+def test_dspark_speculator_asks_the_draft_model_first():
+    """A draft model that samples a step itself returns True, and vLLM's
+    loop then does not run. The stub speculator has none of the loop's
+    buffers, so the loop would fail here."""
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    calls = []
+
+    def sample_sequential(s, n, h):
+        calls.append((s, n, h))
+        return True
+
+    spec = DSparkSpeculator.__new__(DSparkSpeculator)
+    spec._draft_topk = None
+    spec.model = SimpleNamespace(sample_sequential=sample_sequential)
+    hidden = torch.zeros(4, 8)
+    DSparkSpeculator._sample_sequential(spec, 2, hidden)
+    assert calls == [(spec, 2, hidden)]
+
+
+@pytest.mark.parametrize("taken", [True, False])
+def test_dspark_draft_model_samples_with_fused_markov(monkeypatch, taken):
+    """The DSv4.1 draft model answers the speculator with fused_markov, which
+    returns False for a step that the fused launches do not take."""
+    from vllm.models.deepseek_v41.amd import dspark
+    from vllm.models.deepseek_v41.amd.ops import fused_markov
+
+    calls = []
+
+    def sample_sequential(s, n, h):
+        calls.append((s, n, h))
+        return taken
+
+    monkeypatch.setattr(fused_markov, "sample_sequential", sample_sequential)
+    spec, hidden = object(), torch.zeros(4, 8)
+    model_cls = dspark.DSparkDeepseekV4ForCausalLM
+    assert model_cls.sample_sequential(None, spec, 2, hidden) is taken
+    assert calls == [(spec, 2, hidden)]

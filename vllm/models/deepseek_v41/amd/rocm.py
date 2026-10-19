@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -21,6 +21,7 @@ from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
 )
+from vllm.models.deepseek_v41.amd.ops.sparse_indexer import Gfx942SparseAttnIndexer
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -575,6 +576,23 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
         return q, q_scale, weights
 
 
+class DeepseekV41Gfx942Indexer(DeepseekV4Indexer):
+    """vLLM's FP8 indexer, whose layers run the gfx942 top-512 launches of
+    ops/topk.py on decode steps (ops/sparse_indexer.py). The attention below
+    takes it only with --monokernel on gfx942."""
+
+    attn_cls = Gfx942SparseAttnIndexer
+
+
+def _gfx942_monokernel() -> bool:
+    """True with --monokernel on a gfx942 GPU, read from the config of the
+    model that is being built. ops.enabled() cannot answer here, because the
+    mono decode layers record the flag only after their attention is built."""
+    from vllm.platforms.rocm import on_gfx942
+
+    return bool(get_current_vllm_config().kernel_config.monokernel) and on_gfx942()
+
+
 class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
@@ -607,6 +625,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> type[DeepseekV4Indexer]:
         if k_cache is not None and k_cache.rocm_mxfp4:
             return DeepseekV41RocmMxfp4Indexer
+        if _gfx942_monokernel():
+            return DeepseekV41Gfx942Indexer
         return super()._indexer_cls(k_cache)
 
     def __init__(self, *args, **kwargs):

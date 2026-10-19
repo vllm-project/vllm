@@ -4,7 +4,8 @@
 
 ``topk`` holds the sparse indexer's top-512 hooks, built from
 ``topk512_gfx942.cu``, and ``cand_logits`` the indexer logits of the DSpark
-candidate positions. ``topk_pack`` and ``swa_decode_meta`` build the decode
+candidate positions. ``sparse_indexer`` is the indexer layer that runs them on
+decode steps. ``topk_pack`` and ``swa_decode_meta`` build the decode
 attention metadata, ``fused_markov`` is DSpark's Markov sampling in one
 launch, and ``draft_lm_head`` keeps the DSpark draft's 5-row logits GEMM off
 wvSplitK. All of them run only when ``enabled()`` is true.
