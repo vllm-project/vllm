@@ -78,12 +78,7 @@ pub(super) fn prepare_completion_request(
 
     let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
-    let prompt_logprobs =
-        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo { logprobs } else { None });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -658,12 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_enables_prompt_logprobs_for_non_stream_echo() {
+    fn prepare_completion_request_enables_prompt_logprobs_for_stream_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": "hello",
             "echo": true,
-            "stream": false,
+            "stream": true,
             "logprobs": 3
         }))
         .expect("parse request");

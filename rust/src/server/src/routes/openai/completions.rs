@@ -33,8 +33,8 @@ use vllm_text::{
 use self::convert::{ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
-    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
-    prompt_logprobs_to_maps, text_len,
+    append_openai_logprobs, collected_logprobs_to_openai, decoded_logprobs_to_openai,
+    decoded_prompt_logprobs_to_openai, prompt_logprobs_to_maps, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
@@ -87,6 +87,10 @@ pub async fn completions(
         types::CompletionPrompt::Text(String::new()),
     )
     .into_prompts();
+    if prompts.is_empty() {
+        return ApiError::invalid_request("You must pass at least one prompt", Some("prompt"))
+            .into_response();
+    }
     let mut prepared_requests = Vec::with_capacity(prompts.len());
     for prompt in prompts {
         let mut item = body.clone();
@@ -99,7 +103,11 @@ pub async fn completions(
         ) {
             Ok(prepared) => {
                 if let Err(error) = prepared.text_request.validate() {
-                    return text_submit_error("invalid completion request", error).into_response();
+                    return completion_error_response(
+                        text_submit_error("invalid completion request", error),
+                        stream && is_batch,
+                        state.api_server_options,
+                    );
                 }
                 prepared_requests.push(prepared);
             }
@@ -130,8 +138,11 @@ pub async fn completions(
         {
             Ok(stream) => stream,
             Err(error) => {
-                return text_submit_error("failed to submit completion request", error)
-                    .into_response();
+                return completion_error_response(
+                    text_submit_error("failed to submit completion request", error),
+                    stream && is_batch,
+                    api_server_options,
+                );
             }
         };
         submitted.push((text_stream, prepared.options));
@@ -181,21 +192,6 @@ pub async fn completions(
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        if submitted.is_empty() {
-            return Json(CompletionResponse {
-                id: public_request_id,
-                object: "text_completion".to_string(),
-                created,
-                model: response_model,
-                choices: Vec::new(),
-                usage: Some(Usage::from_counts(0, 0, None, 0)),
-                metrics: None,
-                system_fingerprint: None,
-                kv_transfer_params: None,
-                ec_transfer_params: None,
-            })
-            .into_response();
-        }
         let responses = try_join_all(submitted.into_iter().map(|(text_stream, options)| {
             collect_completion(
                 text_stream,
@@ -214,6 +210,22 @@ pub async fn completions(
         };
 
         Json(response).into_response()
+    }
+}
+
+fn completion_error_response(
+    error: ApiError,
+    stream: bool,
+    api_server_options: ApiServerOptions,
+) -> Response {
+    if stream {
+        let chunks = futures::stream::once(async move { Err::<CompletionSseChunk, _>(error) });
+        sse_response(
+            completion_sse_stream(chunks),
+            api_server_options.sse_keep_alive_interval,
+        )
+    } else {
+        error.into_response()
     }
 }
 
@@ -340,16 +352,35 @@ async fn collect_completion(
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
-    let logprobs = if requested_logprobs.is_some() && prompt_only {
-        let prompt = echo.as_deref().ok_or_else(|| {
-            server_error!("prompt-only completion response missing echoed prompt")
-        })?;
-        Some(prompt_only_logprobs_to_openai(
+    let logprobs = if requested_logprobs.is_some()
+        && let Some(prompt) = echo.as_deref()
+    {
+        let prompt_logprobs = echo_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
             return_tokens_as_token_ids,
-        )?)
+        )?;
+        Some(
+            if !prompt_only && let Some(completion_logprobs) = collected.logprobs.as_ref() {
+                let completion_offset = prompt_logprobs
+                    .text_offset
+                    .last()
+                    .zip(prompt_logprobs.tokens.last())
+                    .map(|(&offset, token)| offset.saturating_add(text_len(token)))
+                    .unwrap_or_default();
+                append_openai_logprobs(
+                    prompt_logprobs,
+                    decoded_logprobs_to_openai(
+                        completion_logprobs,
+                        completion_offset,
+                        return_tokens_as_token_ids,
+                    )?,
+                )
+            } else {
+                prompt_logprobs
+            },
+        )
     } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
             &collected,
@@ -476,8 +507,8 @@ async fn completion_chunk_stream(
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
-                    let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                    let logprobs = if requested_logprobs.is_some() {
+                        Some(echo_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
@@ -672,7 +703,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
-fn prompt_only_logprobs_to_openai(
+fn echo_prompt_logprobs_to_openai(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt: &str,
     prompt_token_ids: &[u32],
@@ -698,7 +729,7 @@ fn prompt_only_logprobs_to_openai(
     }
 
     Err(server_error!(
-        "prompt-only completion requested logprobs but generation returned none"
+        "echoed completion requested logprobs but generation returned none"
     ))
 }
 
