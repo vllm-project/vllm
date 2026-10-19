@@ -8,11 +8,14 @@ else is scheduled; a training-side replay can run the same schedule.
 """
 
 import inspect
+from typing import ClassVar, cast
 
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn import (
@@ -30,25 +33,40 @@ NUM_SPLITS = 32
 
 def fixed_split_unsupported_reason(
     head_size: int,
+    dtype: torch.dtype,
     kv_cache_dtype: str,
     sliding_window: int | None,
     max_model_len: int,
+    *,
+    has_sink: bool = False,
+    attn_type: str = AttentionType.DECODER,
+    use_dcp: bool = False,
 ) -> str | None:
-    """Why the fixed split-KV schedule cannot serve this attention layer."""
-    if not current_platform.is_device_capability_family(100):
-        return "requires an SM10x GPU"
-    params = inspect.signature(_flash_attn_fwd).parameters
-    if not {"seqlen_k_per_split", "disable_scheduler_metadata"} <= params.keys():
-        return "requires a vllm-flash-attn build with fixed split-KV scheduling"
-    if head_size != 128:
-        return f"requires head_size 128, got {head_size}"
-    if kv_cache_dtype not in ("fp8", "fp8_e4m3", "auto", "bfloat16"):
-        return f"requires an FP8 E4M3 or BF16 KV cache, got {kv_cache_dtype!r}"
-    if sliding_window is not None:
-        return "does not support sliding-window attention"
+    """Why the fixed split-KV schedule cannot serve this attention layer:
+    the backend's declared limits (``validate_configuration``) plus the
+    schedule's sequence-length bound."""
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        reasons = ["compute capability not supported"]
+    else:
+        reasons = FlashAttnFixedSplitBackend.validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=cast(CacheDType, kv_cache_dtype),
+            block_size=None,
+            use_mla=False,
+            has_sink=has_sink,
+            use_sparse=False,
+            use_mm_prefix=False,
+            use_per_head_quant_scales=False,
+            device_capability=capability,
+            attn_type=attn_type,
+            has_sliding_window=sliding_window is not None,
+            use_dcp=use_dcp,
+        )
     if max_model_len > MAX_SEQ_LEN:
-        return f"supports max_model_len <= {MAX_SEQ_LEN}, got {max_model_len}"
-    return None
+        reasons.append(f"max_model_len {max_model_len} > {MAX_SEQ_LEN}")
+    return "; ".join(reasons) or None
 
 
 class FlashAttnFixedSplitImpl(FlashAttentionImpl):
@@ -72,21 +90,27 @@ class FlashAttnFixedSplitImpl(FlashAttentionImpl):
         config = get_current_vllm_config()
         reason = fixed_split_unsupported_reason(
             head_size,
+            config.model_config.dtype,
             kv_cache_dtype,
             sliding_window,
             config.model_config.max_model_len,
+            has_sink=sinks is not None,
+            attn_type=attn_type,
+            use_dcp=config.parallel_config.decode_context_parallel_size != 1,
         )
         if reason is None and (
             alibi_slopes is not None
             or logits_soft_cap is not None
-            or sinks is not None
-            or attn_type != AttentionType.DECODER
             or kv_sharing_target_layer_name is not None
-            or config.parallel_config.decode_context_parallel_size != 1
         ):
-            reason = "requires plain causal decoder attention without DCP"
+            reason = "ALiBi, logits soft cap and KV sharing not supported"
         if reason is not None:
-            raise ValueError(f"Fixed split-KV FA4 attention {reason}")
+            raise ValueError(
+                f"Fixed split-KV FA4 attention (head_size={head_size}, "
+                f"kv_cache_dtype={kv_cache_dtype!r}, "
+                f"sliding_window={sliding_window}, attn_type={attn_type}) "
+                f"is not supported: {reason}"
+            )
         # FlashAttentionImpl.__init__ is skipped: it picks a vllm_flash_attn
         # version and rejects FP8 KV caches, while this impl calls the CuTe FA4
         # kernel directly. Set the attributes other code reads.
@@ -168,6 +192,71 @@ class FlashAttnFixedSplitImpl(FlashAttentionImpl):
 
 
 class FlashAttnFixedSplitBackend(FlashAttentionBackend):
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_impl_cls() -> type[FlashAttnFixedSplitImpl]:
         return FlashAttnFixedSplitImpl
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size == 128
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        return kv_cache_dtype in cls.supported_kv_cache_dtypes
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 10
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        return attn_type == AttentionType.DECODER
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_rswa(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        params = inspect.signature(_flash_attn_fwd).parameters
+        if not {"seqlen_k_per_split", "disable_scheduler_metadata"} <= params.keys():
+            return "requires a vllm-flash-attn build with fixed split-KV scheduling"
+        return None

@@ -14,31 +14,57 @@ NUM_HEADS, NUM_KV_HEADS, HEAD = 32, 2, 128
 
 
 @pytest.mark.parametrize(
-    "head_size,kv_cache_dtype,sliding_window,max_model_len,reason",
+    "head_size,kv_cache_dtype,sliding_window,max_model_len,kwargs,capability,reason",
     [
-        (128, "fp8_e4m3", None, 262144, None),
-        (64, "fp8_e4m3", None, 262144, "head_size"),
-        (128, "auto", None, 262144, None),
-        (128, "bfloat16", None, 262144, None),
-        (128, "fp8_e5m2", None, 262144, "FP8 E4M3 or BF16"),
-        (128, "fp8_e4m3", 4096, 262144, "sliding-window"),
-        (128, "fp8_e4m3", None, 262145, "max_model_len"),
+        (128, "fp8_e4m3", None, 262144, {}, (10, 0), None),
+        (128, "fp8_e4m3", None, 262144, {}, (10, 3), None),
+        (64, "fp8_e4m3", None, 262144, {}, (10, 0), "head_size not supported"),
+        (128, "auto", None, 262144, {}, (10, 0), None),
+        (128, "bfloat16", None, 262144, {}, (10, 0), None),
+        (128, "fp8_e5m2", None, 262144, {}, (10, 0), "kv_cache_dtype not supported"),
+        (128, "fp8_e4m3", 4096, 262144, {}, (10, 0), "sliding window not supported"),
+        (128, "fp8_e4m3", None, 262145, {}, (10, 0), "max_model_len"),
+        (128, "fp8_e4m3", None, 262144, {}, (9, 0), "compute capability"),
+        (128, "fp8_e4m3", None, 262144, {"has_sink": True}, (10, 0), "sinks"),
+        (128, "fp8_e4m3", None, 262144, {"use_dcp": True}, (10, 0), "DCP"),
+        (
+            128,
+            "fp8_e4m3",
+            None,
+            262144,
+            {"attn_type": "encoder_only"},
+            (10, 0),
+            "attention type",
+        ),
     ],
 )
 def test_fixed_schedule_rejects_what_it_cannot_serve(
-    monkeypatch, head_size, kv_cache_dtype, sliding_window, max_model_len, reason
+    monkeypatch,
+    head_size,
+    kv_cache_dtype,
+    sliding_window,
+    max_model_len,
+    kwargs,
+    capability,
+    reason,
 ):
     """Unsupported layers get a reason, which FlashAttnFixedSplitImpl raises at
     construction instead of exceeding the schedule at runtime."""
+    from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends import flash_attn_fixed_split
 
     monkeypatch.setattr(
         flash_attn_fixed_split.current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: family == 100,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(*capability),
     )
     actual = flash_attn_fixed_split.fixed_split_unsupported_reason(
-        head_size, kv_cache_dtype, sliding_window, max_model_len
+        head_size,
+        torch.bfloat16,
+        kv_cache_dtype,
+        sliding_window,
+        max_model_len,
+        **kwargs,
     )
     if reason is None:
         assert actual is None
@@ -50,7 +76,9 @@ def _make_impl(monkeypatch, kv_cache_dtype):
     from vllm.v1.attention.backends import flash_attn_fixed_split
 
     config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=flash_attn_fixed_split.MAX_SEQ_LEN),
+        model_config=SimpleNamespace(
+            max_model_len=flash_attn_fixed_split.MAX_SEQ_LEN, dtype=torch.bfloat16
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     monkeypatch.setattr(
