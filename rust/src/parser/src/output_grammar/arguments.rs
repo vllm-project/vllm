@@ -25,14 +25,11 @@
 //! - `minProperties` and `maxProperties` are not enforced.
 //! - `allOf` with more than one schema accepts any value.
 
-use std::collections::HashSet;
+use serde_json::{Value, json};
+use xgrammar_structural_tag::format::{EndBoundary, Format, JsonSchemaFormat, TokenFormat};
 
-use serde_json::{Map, Value, json};
-use xgrammar_structural_tag::format::{Format, JsonSchemaFormat};
-
-/// Bound on `$ref` and combinator nesting within one value, which keeps a long
-/// chain of references from overflowing the stack.
-const MAX_SCHEMA_DEPTH: usize = 32;
+pub use crate::schema::JsonType;
+use crate::schema::{self, OptionSource, SchemaOption, SchemaRoot};
 
 /// The schema accepting any value.
 static ANY_SCHEMA: Value = Value::Bool(true);
@@ -63,7 +60,13 @@ impl ParameterKey<'_> {
 
     /// `prefix KEY suffix content end`: a tag for a declared key, or a
     /// sequence matching [`Self::FREE_PATTERN`] for a free key.
-    pub fn tag(&self, prefix: &str, suffix: &str, content: Format, end: &str) -> Format {
+    pub fn tag(
+        &self,
+        prefix: &str,
+        suffix: &str,
+        content: Format,
+        end: impl Into<EndBoundary>,
+    ) -> Format {
         match self {
             Self::Declared(key) => Format::tag(format!("{prefix}{key}{suffix}"), content, end),
             Self::Free => Format::sequence(vec![
@@ -71,74 +74,14 @@ impl ParameterKey<'_> {
                 Format::regex(Self::FREE_PATTERN),
                 Format::const_string(suffix),
                 content,
-                Format::const_string(end),
+                match end.into() {
+                    EndBoundary::Text(end) => Format::const_string(end),
+                    EndBoundary::Texts(ends) => {
+                        one_of(ends.into_iter().map(Format::const_string).collect())
+                    }
+                    EndBoundary::Token(end) => Format::Token(TokenFormat { token: end.token }),
+                },
             ]),
-        }
-    }
-}
-
-/// JSON type of a value option.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonType {
-    String,
-    Number,
-    Boolean,
-    Null,
-    Object,
-    Array,
-}
-
-impl JsonType {
-    const ALL: [Self; 6] = [
-        Self::String,
-        Self::Number,
-        Self::Boolean,
-        Self::Null,
-        Self::Object,
-        Self::Array,
-    ];
-
-    /// The type's JSON name. Integers are numbers.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Number => "number",
-            Self::Boolean => "boolean",
-            Self::Null => "null",
-            Self::Object => "object",
-            Self::Array => "array",
-        }
-    }
-
-    fn of_schema_type(name: &str) -> Option<Self> {
-        Some(match name {
-            "string" => Self::String,
-            "integer" | "number" => Self::Number,
-            "boolean" => Self::Boolean,
-            "null" => Self::Null,
-            "object" => Self::Object,
-            "array" => Self::Array,
-            _ => return None,
-        })
-    }
-
-    fn of_value(value: &Value) -> Self {
-        match value {
-            Value::String(_) => Self::String,
-            Value::Number(_) => Self::Number,
-            Value::Bool(_) => Self::Boolean,
-            Value::Null => Self::Null,
-            Value::Object(_) => Self::Object,
-            Value::Array(_) => Self::Array,
-        }
-    }
-
-    /// Schema accepting every JSON value of this type.
-    fn any_schema(self) -> Value {
-        match self {
-            Self::Object => json!({ "type": "object", "additionalProperties": true }),
-            Self::Array => json!({ "type": "array", "items": true }),
-            _ => json!({ "type": self.name() }),
         }
     }
 }
@@ -146,26 +89,19 @@ impl JsonType {
 /// One option of a parameter value: a single JSON type under a narrowed
 /// schema, a constant, or any value of the type.
 pub struct ValueOption<'a> {
-    /// The option's JSON type.
+    /// The option's JSON Schema type.
     pub ty: JsonType,
-    source: OptionSource,
+    source: OptionSource<'a>,
     cx: &'a ArgumentContext<'a>,
-}
-
-enum OptionSource {
-    /// A schema narrowed to [`ValueOption::ty`].
-    Schema(Map<String, Value>),
-    /// A `const` or `enum` value.
-    Literal(Value),
-    /// Any value of [`ValueOption::ty`].
-    Any,
 }
 
 impl ValueOption<'_> {
     /// The option as JSON text.
     pub fn json(&self) -> Format {
         match &self.source {
-            OptionSource::Schema(schema) => self.cx.json(Value::Object(schema.clone())),
+            OptionSource::Schema(schema) => {
+                self.cx.json(Value::Object(schema::narrow(schema, self.ty).into_owned()))
+            }
             OptionSource::Literal(value) => self.cx.json(json!({ "const": value })),
             OptionSource::Any => self.cx.json(self.ty.any_schema()),
         }
@@ -216,26 +152,18 @@ pub struct ArgumentOptions {
     pub excludes: Vec<String>,
 }
 
-/// Reference targets expanded while collecting one value's options.
-#[derive(Default)]
-struct Expansion {
-    expanded: HashSet<*const Value>,
-    /// Whether a reference was skipped because its target already expanded.
-    skipped: bool,
-}
-
 /// Request state shared by the value options of one call.
 struct ArgumentContext<'a> {
     options: &'a ArgumentOptions,
-    /// The parameters schema, which local `$ref`s resolve against.
-    root: &'a Value,
+    root: SchemaRoot<'a>,
 }
 
 impl ArgumentContext<'_> {
     /// A JSON value under `schema`, which keeps the root's definitions so its
     /// local `$ref`s still resolve.
     fn json(&self, mut schema: Value) -> Format {
-        if let (Some(schema), Some(root)) = (schema.as_object_mut(), self.root.as_object()) {
+        if let (Some(schema), Some(root)) = (schema.as_object_mut(), self.root.schema().as_object())
+        {
             for key in ["$defs", "definitions"] {
                 if let Some(definitions) = root.get(key) {
                     schema.entry(key).or_insert_with(|| definitions.clone());
@@ -250,122 +178,14 @@ impl ArgumentContext<'_> {
         })
     }
 
-    fn resolve_ref(&self, reference: &str) -> Option<&Value> {
-        self.root.pointer(reference.strip_prefix('#')?)
-    }
-
-    /// Follow `$ref`s and single-schema `allOf`s at the root.
-    fn resolve<'s>(&'s self, schema: &'s Value, depth: usize) -> &'s Value {
-        if depth > MAX_SCHEMA_DEPTH {
-            return &ANY_SCHEMA;
-        }
-        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            return match self.resolve_ref(reference) {
-                Some(target) => self.resolve(target, depth + 1),
-                None => &ANY_SCHEMA,
-            };
-        }
-        match schema.get("allOf").and_then(Value::as_array).map(Vec::as_slice) {
-            Some([schema]) => self.resolve(schema, depth + 1),
-            _ => schema,
-        }
-    }
-
     /// Every option of a value under `schema`.
-    ///
-    /// Each reference target expands at most once. A union gains no values
-    /// from a repeated alternative, and a definition shared by several
-    /// alternatives would otherwise expand once per path to it, exponentially
-    /// in the nesting. A schema whose references only lead back into it
-    /// accepts any value.
-    fn value_options(&self, schema: &Value) -> Vec<ValueOption<'_>> {
-        let mut expansion = Expansion::default();
-        let options = self.value_options_at(schema, 0, &mut expansion);
-        if options.is_empty() && expansion.skipped {
-            return self.any_value();
-        }
-        options
-    }
-
-    fn value_options_at(
-        &self,
-        schema: &Value,
-        depth: usize,
-        expansion: &mut Expansion,
-    ) -> Vec<ValueOption<'_>> {
-        let schema = match schema {
-            _ if depth > MAX_SCHEMA_DEPTH => return self.any_value(),
-            Value::Bool(false) => return vec![],
-            Value::Object(schema) => schema,
-            _ => return self.any_value(),
-        };
-        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            let Some(target) = self.resolve_ref(reference) else {
-                return self.any_value();
-            };
-            if !expansion.expanded.insert(std::ptr::from_ref(target)) {
-                expansion.skipped = true;
-                return vec![];
-            }
-            return self.value_options_at(target, depth + 1, expansion);
-        }
-        if let Some(value) = schema.get("const") {
-            return vec![self.literal(value)];
-        }
-        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-            return values.iter().map(|value| self.literal(value)).collect();
-        }
-        if let Some(options) =
-            schema.get("anyOf").or_else(|| schema.get("oneOf")).and_then(Value::as_array)
-        {
-            return options
-                .iter()
-                .flat_map(|option| self.value_options_at(option, depth + 1, expansion))
-                .collect();
-        }
-        if let Some(schemas) = schema.get("allOf").and_then(Value::as_array) {
-            return match schemas.as_slice() {
-                [schema] => self.value_options_at(schema, depth + 1, expansion),
-                _ => self.any_value(),
-            };
-        }
-        match schema.get("type") {
-            Some(Value::String(name)) => self.typed(schema.clone(), name).into_iter().collect(),
-            Some(Value::Array(names)) => names
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(|name| {
-                    let mut schema = schema.clone();
-                    schema.insert("type".to_string(), Value::String(name.to_string()));
-                    self.typed(schema, name)
-                })
-                .collect(),
-            _ => self.any_value(),
-        }
-    }
-
-    fn typed(&self, schema: Map<String, Value>, type_name: &str) -> Option<ValueOption<'_>> {
-        Some(ValueOption {
-            ty: JsonType::of_schema_type(type_name)?,
-            source: OptionSource::Schema(schema),
-            cx: self,
-        })
-    }
-
-    fn literal(&self, value: &Value) -> ValueOption<'_> {
-        ValueOption {
-            ty: JsonType::of_value(value),
-            source: OptionSource::Literal(value.clone()),
-            cx: self,
-        }
-    }
-
-    fn any_value(&self) -> Vec<ValueOption<'_>> {
-        JsonType::ALL
+    fn value_options<'s>(&'s self, schema: &'s Value) -> Vec<ValueOption<'s>> {
+        let root: SchemaRoot<'s> = self.root;
+        root.options(schema)
             .into_iter()
-            .map(|ty| ValueOption {
+            .map(|SchemaOption { ty, source }| ValueOption {
                 ty,
-                source: OptionSource::Any,
+                source,
                 cx: self,
             })
             .collect()
@@ -375,15 +195,44 @@ impl ArgumentContext<'_> {
 /// Build the grammar of one call's arguments under `schema`, the tool's
 /// parameters schema, rendering each parameter with `syntax`.
 pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &ArgumentOptions) -> Format {
+    parameter_list(
+        options,
+        syntax.separator(),
+        parameters(schema, syntax, options),
+    )
+}
+
+/// The parameters of one call, each rendered by an [`ArgumentSyntax`], for a
+/// syntax that lists them itself rather than through [`arguments`].
+pub struct Parameters {
+    /// The declared parameters, in declared order.
+    pub declared: Vec<Parameter>,
+    /// Any one additional parameter, if the schema allows them.
+    pub additional: Option<Format>,
+}
+
+/// One declared parameter.
+pub struct Parameter {
+    pub key: String,
+    pub format: Format,
+    pub required: bool,
+}
+
+/// The parameters of one call under `schema`, the tool's parameters schema,
+/// rendering each parameter with `syntax`.
+pub fn parameters(
+    schema: &Value,
+    syntax: &dyn ArgumentSyntax,
+    options: &ArgumentOptions,
+) -> Parameters {
     let cx = ArgumentContext {
         options,
-        root: schema,
+        root: SchemaRoot::new(schema),
     };
     let parameter =
         |key: ParameterKey<'_>, schema: &Value| syntax.parameter(key, &cx.value_options(schema));
 
-    let schema = cx.resolve(schema, 0);
-    let (properties, additional) = match schema {
+    match cx.root.resolved() {
         Value::Object(schema) => {
             let additional = match schema.get("additionalProperties") {
                 Some(Value::Bool(false)) => None,
@@ -398,22 +247,33 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
                 .and_then(Value::as_array)
                 .map(|required| required.iter().filter_map(Value::as_str).collect::<Vec<_>>())
                 .unwrap_or_default();
-            let properties = schema
+            let declared = schema
                 .get("properties")
                 .and_then(Value::as_object)
                 .into_iter()
                 .flatten()
                 .filter_map(|(key, schema)| {
-                    let parameter = parameter(ParameterKey::Declared(key), schema)?;
-                    Some((parameter, required.contains(&key.as_str())))
+                    Some(Parameter {
+                        key: key.clone(),
+                        format: parameter(ParameterKey::Declared(key), schema)?,
+                        required: required.contains(&key.as_str()),
+                    })
                 })
                 .collect();
-            (properties, additional)
+            Parameters {
+                declared,
+                additional,
+            }
         }
-        Value::Bool(false) => (vec![], None),
-        _ => (vec![], parameter(ParameterKey::Free, &ANY_SCHEMA)),
-    };
-    parameter_list(options, syntax.separator(), properties, additional)
+        Value::Bool(false) => Parameters {
+            declared: vec![],
+            additional: None,
+        },
+        _ => Parameters {
+            declared: vec![],
+            additional: parameter(ParameterKey::Free, &ANY_SCHEMA),
+        },
+    }
 }
 
 /// Parameters in declared order, required ones mandatory, followed by any
@@ -422,8 +282,10 @@ pub fn arguments(schema: &Value, syntax: &dyn ArgumentSyntax, options: &Argument
 fn parameter_list(
     options: &ArgumentOptions,
     separator: Option<Format>,
-    properties: Vec<(Format, bool)>,
-    additional: Option<Format>,
+    Parameters {
+        declared,
+        additional,
+    }: Parameters,
 ) -> Format {
     let separated = |parameter: Format| match &separator {
         Some(separator) => Format::sequence(vec![parameter, separator.clone()]),
@@ -431,10 +293,10 @@ fn parameter_list(
     };
     let mut elements = Vec::from_iter(separator.clone());
     if options.any_order {
-        let any_required = properties.iter().any(|(_, required)| *required);
-        let parameters = properties
+        let any_required = declared.iter().any(|parameter| parameter.required);
+        let parameters = declared
             .into_iter()
-            .map(|(parameter, _)| parameter)
+            .map(|parameter| parameter.format)
             .chain(additional)
             .collect::<Vec<_>>();
         if !parameters.is_empty() {
@@ -446,8 +308,11 @@ fn parameter_list(
             });
         }
     } else {
-        for (parameter, required) in properties {
-            let parameter = separated(parameter);
+        for Parameter {
+            format, required, ..
+        } in declared
+        {
+            let parameter = separated(format);
             elements.push(if required {
                 parameter
             } else {
@@ -492,6 +357,8 @@ pub fn group_by<'o, 'a, K: PartialEq>(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Map;
+
     use super::*;
     use crate::output_grammar::test_utils::outline;
     use expect_test::{Expect, expect};
@@ -617,7 +484,7 @@ mod tests {
                       or
                         `celsius`
                         `fahrenheit`
-                    tag `<arg key="days" type="number">` json(integer(minimum=1)) any_order `</arg>`
+                    tag `<arg key="days" type="integer">` json(integer(minimum=1)) any_order `</arg>`
             "#]],
         );
     }
@@ -639,13 +506,13 @@ mod tests {
                 sequence
                   optional
                     or
-                      tag `<arg key="id" type="number">` json(integer) `</arg>`
+                      tag `<arg key="id" type="integer">` json(integer) `</arg>`
                       tag `<arg key="id" type="string">` text excluding [`</arg>`] `</arg>`
                       tag `<arg key="id" type="null">` json(null) `</arg>`
                   optional
                     or
                       tag `<arg key="mode" type="string">` `fast` `</arg>`
-                      tag `<arg key="mode" type="number">` json(1) `</arg>`
+                      tag `<arg key="mode" type="integer">` json(1) `</arg>`
                   or
                     tag `<arg key="q" type="string">` /[a-z]+/ `</arg>`
                     tag `<arg key="q" type="array">` json(string[]) `</arg>`

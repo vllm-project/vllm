@@ -29,12 +29,10 @@ IDX_OOB_FILL_VALUE = -1
 
 try:
     import vllm._deepselect_C  # noqa: F401  (registers torch.ops.deep_select)
-except ImportError as e:
-    from vllm.logger import init_logger
 
-    init_logger(__name__).warning(
-        "Failed to import the DeepSelect extension (vllm._deepselect_C): %s", e
-    )
+    _HAS_DEEP_SELECT_C = True
+except ImportError:
+    _HAS_DEEP_SELECT_C = False
 
 
 @functools.lru_cache(maxsize=1)
@@ -196,6 +194,8 @@ class SparseIndexerTopk(torch.nn.Module):
                 failures.append("requires a CUDA platform")
             elif not self._has_deep_select:
                 failures.append("requires SM100a/SM103a (10.x device family)")
+            elif not _HAS_DEEP_SELECT_C:
+                failures.append("vllm._deepselect_C could not be imported")
             elif not is_deep_select_supported(logits, topk_tokens):
                 failures.append(
                     f"inputs violate DeepSelect's constraints: dtype={logits.dtype},"

@@ -380,6 +380,7 @@ async fn harmony_assistant_event_stream(
                 if let Some(finished) = finished {
                     y.yield_ok(AssistantEvent::Done {
                         usage: finished.usage.into(),
+                        timestamps: finished.timestamps,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
