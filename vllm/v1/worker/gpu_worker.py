@@ -365,7 +365,7 @@ class Worker(WorkerBase):
 
         if wake_weights and self._sleep_discarded_weights:
             self._sleep_discarded_weights = False
-            self.model_runner.restore_lora_state()
+            self.model_runner.reset_lora_state()
 
         self.synchronize_device()
 

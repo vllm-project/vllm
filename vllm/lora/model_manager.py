@@ -365,12 +365,6 @@ class LoRAModelManager:
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
-        self._write_adapter_slot(index, lora_model)
-        self._active_adapters[lora_id] = None
-        self.lora_index_to_id[index] = lora_model.id
-        return True
-
-    def _write_adapter_slot(self, index: int, lora_model: LoRAModel) -> None:
         num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
             if isinstance(module, ClassificationHeadWithLoRA):
@@ -404,17 +398,9 @@ class LoRAModelManager:
                 "This may be expected with pipeline or expert parallelism.",
                 lora_model.id,
             )
-
-    def restore_adapter_slots(self) -> None:
-        """Rewrite active adapter slots from the CPU cache after their GPU
-        memory was discarded, keeping the slot layout, LRU order and pins."""
-        registered = self._registered_adapters.cache
-        for index, lora_id in enumerate(self.lora_index_to_id):
-            if lora_id is not None:
-                self._write_adapter_slot(index, registered[lora_id])
-        # Punica metadata shares the discarded memory; force a rebuild.
-        self._last_mapping = None
-        self._last_slot_layout = None
+        self._active_adapters[lora_id] = None
+        self.lora_index_to_id[index] = lora_model.id
+        return True
 
     def _deactivate_adapter(self, lora_id: int):
         try:

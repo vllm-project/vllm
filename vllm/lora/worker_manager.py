@@ -238,9 +238,6 @@ class WorkerLoRAManager:
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
 
-    def restore_adapter_slots(self) -> None:
-        self._adapter_manager.restore_adapter_slots()
-
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
 

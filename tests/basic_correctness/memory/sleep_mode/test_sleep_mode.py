@@ -172,8 +172,8 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     With TP > 1 the LoRA logits processor carries
     ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
-    reorder gathered logits. Level-2 sleep must preserve and restore this
-    buffer before the model produces logits again.
+    reorder gathered logits. It lives in the sleep-mode pool, so waking
+    the weights after level-2 sleep must rewrite it.
     """
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -198,8 +198,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     llm.sleep(level=2)
     llm.wake_up(tags=["weights"])
-    # Check before reload_weights, which also resets the mapping, so that
-    # wake-up alone is verified to restore it.
+    # Check before reload_weights, which also resets the mapping.
     assert all(llm.apply_model(_lora_logits_mapping_correct))
     llm.collective_rpc("reload_weights")
     llm.wake_up(tags=["kv_cache"])

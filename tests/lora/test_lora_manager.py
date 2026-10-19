@@ -809,59 +809,6 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
     assert manager._last_slot_layout is None
 
 
-def _lora_stacks(module) -> list[torch.Tensor]:
-    stacks: list[torch.Tensor] = []
-    for attr in ("lora_a_stacked", "lora_b_stacked"):
-        stacked = getattr(module, attr)
-        stacks.extend(stacked if isinstance(stacked, tuple) else (stacked,))
-    return stacks
-
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_restore_adapter_slots_after_discard(
-    default_vllm_config, dist_init, dummy_model, device
-):
-    # Level-2 sleep discards slot and punica memory while the manager still
-    # lists the adapters as active, so restoring must rewrite both.
-    model = dummy_model
-    manager = LRUCacheLoRAModelManager(
-        model,
-        2,
-        2,
-        2,
-        LoRAConfig(
-            max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
-        ),
-        device=device,
-        vllm_config=default_vllm_config,
-    )
-    punica_wrapper = manager.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
-    for lora_id in (1, 2):
-        lora = create_lora(lora_id, model, ["dense1", "dense2", "lm_head"], device)
-        assert manager.add_adapter(lora)
-        assert manager.activate_adapter(lora_id)
-    mapping = LoRAMapping((1, 2), (1, 2))
-    manager.set_adapter_mapping(mapping)
-    expected = {
-        name: [t.clone() for t in _lora_stacks(module)]
-        for name, module in manager.modules.items()
-    }
-
-    for module in manager.modules.values():
-        for t in _lora_stacks(module):
-            t.zero_()
-    punica_wrapper._token_lora_indices.fill_(-1)
-
-    manager.restore_adapter_slots()
-    manager.set_adapter_mapping(mapping)
-
-    assert manager.lora_index_to_id == [1, 2]
-    for name, module in manager.modules.items():
-        for actual, want in zip(_lora_stacks(module), expected[name], strict=True):
-            torch.testing.assert_close(actual, want)
-    assert punica_wrapper.token_lora_indices.tolist() == [0, 1]
-
-
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
     lora_config = LoRAConfig(

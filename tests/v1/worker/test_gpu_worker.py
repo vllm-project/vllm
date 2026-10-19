@@ -62,10 +62,10 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
 
 
 @pytest.mark.parametrize("level", [1, 2])
-def test_weights_wake_restores_lora_slots_after_level2_sleep(monkeypatch, level):
-    """Level-2 sleep discards LoRA slots with the weights pool; the weights
-    wake-up must rewrite them, since reload_weights() may never run."""
-    restores = []
+def test_weights_wake_resets_lora_state_after_level2_sleep(monkeypatch, level):
+    """Level-2 sleep discards LoRA GPU state with the weights pool; the weights
+    wake-up must reset it, since reload_weights() may never run."""
+    resets = []
     worker = object.__new__(gpu_worker.Worker)
     worker._sleep_mode_backend = SimpleNamespace(
         suspend=lambda level: None, resume=lambda tags: None
@@ -81,17 +81,17 @@ def test_weights_wake_restores_lora_slots_after_level2_sleep(monkeypatch, level)
     worker.model_runner = SimpleNamespace(
         model=torch.nn.Module(),
         get_draft_model=lambda: None,
-        restore_lora_state=lambda: restores.append(level),
+        reset_lora_state=lambda: resets.append(level),
     )
     monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
     monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
 
     worker.sleep(level=level)
     worker.wake_up(tags=["kv_cache"])
-    assert restores == []
+    assert resets == []
     worker.wake_up(tags=["weights"])
     worker.wake_up(tags=["weights"])
-    assert len(restores) == (1 if level == 2 else 0)
+    assert len(resets) == (1 if level == 2 else 0)
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
