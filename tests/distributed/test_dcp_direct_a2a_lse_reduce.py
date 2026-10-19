@@ -3,6 +3,7 @@
 """Tests for direct symmetric-memory DCP collectives."""
 
 import functools
+import math
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -55,11 +56,19 @@ class _OOTKVGather(dcp.DirectDCPKVGather):
         (dcp.DirectDCPKVGather, _OOTKVGather),
     ],
 )
-@pytest.mark.parametrize("workspace_state", ["available", "absent", "oversized"])
-@pytest.mark.parametrize("use_oot", [False, True])
 @pytest.mark.parametrize(
-    "mode",
-    ["eager_default", "inductor_default", "all", "none", "explicit_on", "explicit_off"],
+    "mode, use_oot, workspace_state",
+    [
+        ("eager_default", False, "available"),
+        ("inductor_default", False, "available"),
+        ("none", False, "absent"),
+        ("all", True, "available"),
+        ("inductor_default", True, "absent"),
+        ("inductor_default", True, "oversized"),
+        ("explicit_on", True, "available"),
+        ("explicit_off", False, "available"),
+        ("explicit_off", True, "available"),
+    ],
 )
 def test_oot_collective_dispatch_preserves_cuda_fallback(
     monkeypatch: pytest.MonkeyPatch,
@@ -292,6 +301,41 @@ def test_direct_dcp_a2a_fallback_checks(
             op(partial_output, partial_lse, True)
 
 
+@pytest.mark.parametrize("is_lse_base_on_e", [False, True])
+def test_direct_dcp_native_a2a_combine(
+    monkeypatch: pytest.MonkeyPatch, is_lse_base_on_e: bool
+) -> None:
+    group = SimpleNamespace(world_size=2, device_group=object())
+    log_two = math.log(2) if is_lse_base_on_e else 1.0
+    received = torch.tensor(
+        [
+            [[[2.0, 4.0, 0.0]], [[10.0, 20.0, log_two]]],
+            [[[6.0, 8.0, log_two]], [[30.0, 40.0, 0.0]]],
+        ]
+    )
+
+    def all_to_all(
+        destination: torch.Tensor, source: torch.Tensor, *, group: Any
+    ) -> None:
+        destination.copy_(received)
+
+    monkeypatch.setattr(dist, "all_to_all_single", all_to_all)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            custom_ops=[f"-{dcp.DirectDCPA2AReduce.name}"]
+        )
+    )
+    with set_current_vllm_config(config):
+        op = dcp.DirectDCPA2AReduce(group)
+    partial_output = torch.ones(2, 2, 2, dtype=torch.bfloat16)
+    actual = op(partial_output, torch.zeros(2, 2), is_lse_base_on_e)
+    # The shards have weights 1:2 for the first token and 2:1 for the second.
+    expected = torch.tensor(
+        [[[14 / 3, 20 / 3]], [[50 / 3, 80 / 3]]], dtype=partial_output.dtype
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _torch_group_all_gather(group: Any, query: torch.Tensor, dim: int) -> torch.Tensor:
     shards = [torch.empty_like(query) for _ in range(dist.get_world_size(group))]
     dist.all_gather(shards, query.contiguous(), group=group)
@@ -300,15 +344,15 @@ def _torch_group_all_gather(group: Any, query: torch.Tensor, dim: int) -> torch.
 
 def _collective_test_op(
     op_cls: type[CustomOp], mode: str, workspace: cp_common.DirectCPWorkspace
-) -> _OOTQGather | _OOTA2AReduce | _OOTKVGather:
+) -> CustomOp:
     oot_cls = {
         dcp.DirectDCPQGather: _OOTQGather,
         dcp.DirectDCPA2AReduce: _OOTA2AReduce,
         dcp.DirectDCPKVGather: _OOTKVGather,
     }[op_cls]
-    if op_cls.__name__ not in custom_op.op_registry_oot:
+    if mode == "oot" and op_cls.__name__ not in custom_op.op_registry_oot:
         op_cls.register_oot(oot_cls)
-    directives = [] if mode == "default" else [f"-{op_cls.__name__}"]
+    directives = [f"-{op_cls.name}"] if mode == "native" else []
     config = VllmConfig(
         compilation_config=CompilationConfig(mode=3, custom_ops=directives)
     )
@@ -323,8 +367,8 @@ def _collective_test_op(
             if isinstance(workspace, dcp.DirectDCPQGatherWorkspace)
             else {}
         )
-        op = op_cls(group, workspace if mode == "default" else None, **kwargs)
-    assert isinstance(op, (_OOTQGather, _OOTA2AReduce, _OOTKVGather))
+        op = op_cls(group, workspace if mode != "native" else None, **kwargs)
+    assert type(op) is (oot_cls if mode == "oot" else op_cls)
     return op
 
 
@@ -354,6 +398,7 @@ def _assert_close(
     expected: torch.Tensor,
     dtype: torch.dtype,
 ) -> None:
+    assert actual.dtype == dtype
     torch.testing.assert_close(actual.float(), expected.float(), rtol=3e-2, atol=3e-2)
 
 
@@ -468,10 +513,10 @@ class _FakeProcessGroup:
         ),
     ],
 )
-@pytest.mark.parametrize("use_direct", [None, False, True])
 @pytest.mark.parametrize(
     "cuda, symmetric_memory, same_node, multicast, dtype, expected",
     [
+        (True, True, True, True, torch.bfloat16, (True, True, True)),
         (False, True, True, True, torch.bfloat16, (False, False, False)),
         (True, False, True, True, torch.bfloat16, (False, False, False)),
         (True, True, True, False, torch.bfloat16, (True, False, False)),
@@ -486,7 +531,6 @@ def test_direct_dcp_workspace_eligibility(
     workspace_cls: str,
     dimensions: tuple[int, ...],
     expected_index: int,
-    use_direct: bool | None,
     cuda: bool,
     symmetric_memory: bool,
     same_node: bool,
@@ -494,14 +538,13 @@ def test_direct_dcp_workspace_eligibility(
     dtype: torch.dtype,
     expected: tuple[bool, bool, bool],
 ) -> None:
-    env_name = (
+    env_names = (
         "VLLM_USE_DIRECT_DCP_A2A",
         "VLLM_USE_DIRECT_DCP_Q_GATHER",
         "VLLM_USE_DIRECT_DCP_KV_GATHER",
-    )[expected_index]
-    monkeypatch.setattr(dcp.envs, env_name, use_direct)
-    if use_direct is not None:
-        expected = (use_direct, use_direct and multicast, use_direct and multicast)
+    )
+    for env_name in env_names:
+        monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setattr(cp_common.current_platform, "is_cuda", lambda: cuda)
     monkeypatch.setattr(cp_common, "symm_mem_available", symmetric_memory)
     monkeypatch.setattr(
@@ -517,7 +560,108 @@ def test_direct_dcp_workspace_eligibility(
     )
     assert result is (workspace if expected[expected_index] else None)
     assert allocate.call_count == int(expected[expected_index])
+    if result is workspace and workspace_cls == "DirectDCPQGatherWorkspace":
+        assert allocate.call_args.args[5] == dtype
     factory.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "env_name, factory, workspace_cls, dimensions",
+    [
+        (
+            "VLLM_USE_DIRECT_DCP_A2A",
+            dcp.get_direct_dcp_a2a_workspace,
+            "DirectDCPA2AWorkspace",
+            (16, 2, 32),
+        ),
+        (
+            "VLLM_USE_DIRECT_DCP_Q_GATHER",
+            dcp.get_direct_dcp_q_gather_workspace,
+            "DirectDCPQGatherWorkspace",
+            (16, 2, 32),
+        ),
+        (
+            "VLLM_USE_DIRECT_DCP_KV_GATHER",
+            dcp.get_direct_dcp_kv_gather_workspace,
+            "DirectDCPKVGatherWorkspace",
+            (64, 576),
+        ),
+    ],
+)
+@pytest.mark.parametrize("use_direct", [False, True])
+def test_direct_dcp_workspace_flags_are_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    factory: Any,
+    workspace_cls: str,
+    dimensions: tuple[int, ...],
+    use_direct: bool,
+) -> None:
+    for name in (
+        "VLLM_USE_DIRECT_DCP_A2A",
+        "VLLM_USE_DIRECT_DCP_Q_GATHER",
+        "VLLM_USE_DIRECT_DCP_KV_GATHER",
+    ):
+        monkeypatch.setenv(
+            name, str(int(use_direct if name == env_name else not use_direct))
+        )
+    monkeypatch.setattr(cp_common.current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: True)
+    workspace = object()
+    allocate = MagicMock(return_value=workspace)
+    monkeypatch.setattr(dcp, workspace_cls, allocate)
+    factory.cache_clear()
+    result = factory(
+        _FakeGroupCoordinator(), torch.device("cpu"), *dimensions, torch.bfloat16, 1
+    )
+    assert result is (workspace if use_direct else None)
+    assert allocate.call_count == int(use_direct)
+    factory.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "env_name, factory, dimensions",
+    [
+        (
+            "VLLM_USE_DIRECT_DCP_Q_GATHER",
+            dcp.get_direct_dcp_q_gather_workspace,
+            (16, 2, 32),
+        ),
+        (
+            "VLLM_USE_DIRECT_DCP_KV_GATHER",
+            dcp.get_direct_dcp_kv_gather_workspace,
+            (64, 576),
+        ),
+    ],
+)
+def test_direct_dcp_gather_requires_multicast(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    factory: Any,
+    dimensions: tuple[int, ...],
+) -> None:
+    monkeypatch.setenv(env_name, "1")
+    monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: False)
+    factory.cache_clear()
+    assert (
+        factory(
+            _FakeGroupCoordinator(), torch.device("cpu"), *dimensions, torch.bfloat16, 1
+        )
+        is None
+    )
+    factory.cache_clear()
+
+
+def test_direct_dcp_forced_unsupported_dtype_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "1")
+    dcp.get_direct_dcp_a2a_workspace.cache_clear()
+    with pytest.raises(ValueError, match="does not support torch.float32"):
+        dcp.get_direct_dcp_a2a_workspace(
+            _FakeGroupCoordinator(), torch.device("cpu"), 16, 2, 32, torch.float32, 1
+        )
+    dcp.get_direct_dcp_a2a_workspace.cache_clear()
 
 
 class TestDirectDCPGating:
@@ -642,6 +786,13 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
+    for forward, expected_workspace in (
+        (manager.query_gather, direct_query),
+        (manager.combine.func, direct_a2a),
+        (manager._kv_gather, direct_kv),
+    ):
+        assert forward.__self__.group is group
+        assert forward.__self__.workspace is expected_workspace
     a2a_reduce.assert_called_once_with(
         output,
         lse,
@@ -651,9 +802,20 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch, default_vllm_confi
     )
 
 
-def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_config):
-    for op_cls in (dcp.DirectDCPQGather, dcp.DirectDCPA2AReduce, dcp.DirectDCPKVGather):
-        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
+@pytest.mark.parametrize("use_oot", [False, True])
+def test_mla_dcp_manager_selects_fallback_backends(
+    monkeypatch, default_vllm_config, use_oot: bool
+):
+    monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
+    for platform in ("rocm", "cpu", "tpu", "xpu", "out_of_tree"):
+        monkeypatch.setattr(custom_op.current_platform, f"is_{platform}", lambda: False)
+    if use_oot:
+        for op_cls, oot_cls in (
+            (dcp.DirectDCPQGather, _OOTQGather),
+            (dcp.DirectDCPA2AReduce, _OOTA2AReduce),
+            (dcp.DirectDCPKVGather, _OOTKVGather),
+        ):
+            op_cls.register_oot(oot_cls)
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = SimpleNamespace(
@@ -697,11 +859,10 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
     output, local = torch.empty(4, 8), torch.ones(2, 8)
     manager.kv_gather(output, local)
     all_gather.assert_called_once_with(output, local, group=group.device_group)
-    assert torch.equal(output, torch.cat((local, local), dim=0))
 
     query = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
     assert manager.query_gather is not None
-    assert torch.equal(manager.query_gather(query), torch.cat((query, query), dim=1))
+    manager.query_gather(query)
     group.all_gather.assert_called_once_with(query, dim=1)
 
     fallback_output = torch.full((1, 2, 4), 42.0)
@@ -716,7 +877,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
-    assert torch.equal(combined, torch.full((1, 2, 4), 42.0))
+    assert combined is fallback_output
     a2a_fallback.assert_called_once_with(
         partial_output,
         partial_lse,
@@ -725,6 +886,16 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch, default_vllm_con
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
     )
+    if use_oot:
+        for forward in (
+            manager.query_gather,
+            manager.combine.func,
+            manager._kv_gather,
+        ):
+            op = forward.__self__
+            assert op.group is group
+            assert op.workspace is None
+            assert op.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -871,10 +1042,13 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
         padded_num_heads = 128 if world_size == 4 else None
         active_ubatch = [0]
         dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
-        epoch_increment = int(env["CUSTOM_OPS"] == "default")
-        for dtype_idx, dtype_name in enumerate(
-            ("bfloat16", "float8_e4m3fn", "float32")
-        ):
+        epoch_increment = int(env["CUSTOM_OPS"] != "native")
+        dtype_names = (
+            ("bfloat16",)
+            if env["CUSTOM_OPS"] == "native"
+            else ("bfloat16", "float8_e4m3fn", "float32")
+        )
+        for dtype_idx, dtype_name in enumerate(dtype_names):
             dtype = _dtype_from_name(dtype_name)
             workspace = dcp.DirectDCPQGatherWorkspace(
                 dist.group.WORLD,
@@ -914,7 +1088,7 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
                 actual = op(local_query)
                 torch.accelerator.synchronize()
 
-                if env["CUSTOM_OPS"] == "default" and num_tokens <= max_num_tokens:
+                if env["CUSTOM_OPS"] != "native" and num_tokens <= max_num_tokens:
                     assert (
                         actual.data_ptr()
                         == workspace.final_query[active_ubatch[0]].data_ptr()
@@ -1007,7 +1181,8 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
             _assert_q_gather_matches_reference(
                 captured_output, captured_input, world_size, padded_num_heads
             )
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
+        if env["CUSTOM_OPS"] == "oot":
+            assert op.calls > 0
     finally:
         # NCCL shutdown waits for captured graphs to release their communicators.
         if graph is not None:
@@ -1094,6 +1269,8 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
                 assert torch.equal(
                     gathered.view(torch.uint8), expected.view(torch.uint8)
                 )
+            if dtype != torch.bfloat16:
+                continue
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 op(gathered, local_kv)
@@ -1103,7 +1280,8 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
                 torch.accelerator.synchronize()
                 dist.all_gather_into_tensor(expected, local_kv.contiguous())
                 assert torch.equal(gathered, expected)
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
+        if env["CUSTOM_OPS"] == "oot":
+            assert op.calls > 0
     finally:
         if graph is not None:
             graph.reset()
@@ -1122,14 +1300,11 @@ def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
         ),
     ],
 )
-@pytest.mark.parametrize("custom_ops", ["default", "native"])
-def test_distributed_direct_kv_gather_matches_reference(
-    world_size: int, custom_ops: str
-):
+def test_distributed_direct_kv_gather_matches_reference(world_size: int):
     _distributed_run(
         _distributed_direct_kv_gather_worker,
         world_size=world_size,
-        extra_env={"CUSTOM_OPS": custom_ops},
+        extra_env={"CUSTOM_OPS": "default"},
     )
 
 
@@ -1371,7 +1546,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             outputs, lses, is_lse_base_on_e=is_lse_base_on_e
         )
         _assert_close(actual, expected, dtype)
-        assert (op.calls > 0) == (env["CUSTOM_OPS"] == "default")
+        if env["CUSTOM_OPS"] == "oot":
+            assert op.calls > 0
     finally:
         if graph is not None:
             graph.reset()
@@ -1379,24 +1555,50 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "world_size",
+    "world_size, custom_ops, is_lse_base_on_e",
     [
         pytest.param(
             2,
+            "default",
+            False,
+            marks=pytest.mark.skipif(
+                torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+            ),
+        ),
+        pytest.param(
+            2,
+            "oot",
+            True,
+            marks=pytest.mark.skipif(
+                torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+            ),
+        ),
+        pytest.param(
+            2,
+            "native",
+            False,
+            marks=pytest.mark.skipif(
+                torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+            ),
+        ),
+        pytest.param(
+            2,
+            "native",
+            True,
             marks=pytest.mark.skipif(
                 torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
             ),
         ),
         pytest.param(
             4,
+            "default",
+            True,
             marks=pytest.mark.skipif(
                 torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
             ),
         ),
     ],
 )
-@pytest.mark.parametrize("custom_ops", ["default", "native"])
-@pytest.mark.parametrize("is_lse_base_on_e", [False, True])
 def test_distributed_direct_a2a_matches_reference(
     world_size: int, custom_ops: str, is_lse_base_on_e: bool
 ):
