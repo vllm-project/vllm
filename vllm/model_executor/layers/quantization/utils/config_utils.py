@@ -185,8 +185,9 @@ def is_shared_expert_quant_fse_compatible(
     if moe_backend == "aiter_mega_moe":
         return (
             False,
-            "AITER MegaMoE fuses the shared experts only when "
-            "--quantization-config.targets requantizes them to MXFP4",
+            "AITER MegaMoE fuses the shared experts only when they are "
+            "requantized to MXFP4, e.g. with --quantization-config.targets "
+            '\'{"*shared_experts*": "mxfp4"}\'',
         )
 
     if isinstance(quant_config, DeepseekV4FP8Config):
