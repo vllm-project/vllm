@@ -13,9 +13,12 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
+if not (
+    current_platform.is_rocm()
+    or (current_platform.is_cuda() and current_platform.has_device_capability(80))
+):
     pytest.skip(
-        reason="Fused GDN MTP decode requires CUDA compute capability 8.0+.",
+        reason="Fused GDN MTP decode requires ROCm or CUDA compute capability 8.0+.",
         allow_module_level=True,
     )
 
@@ -83,7 +86,9 @@ def _make_vllm_config():
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    config.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    config.additional_config = {
+        "gdn_prefill_backend": "triton" if current_platform.is_rocm() else "cutedsl"
+    }
     config.cache_config.mamba_cache_mode = "none"
     config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=NUM_SPEC
@@ -155,7 +160,9 @@ def _build_layer(
     ],
 )
 def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
-    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+    if not current_platform.is_rocm() and not hasattr(
+        torch.ops._C, "fused_gdn_decode_post_conv_mtp"
+    ):
         pytest.skip("fused GDN decode MTP op is not built")
 
     layer = types.SimpleNamespace(
@@ -363,13 +370,16 @@ def test_fused_model_path_matches_reference(
     )
     context.no_compile_layers = {PREFIX: fused_layer}
     fused_out = torch.zeros_like(output_gate)
-    fused_op = qwen_gdn_linear_attn.ops.fused_gdn_decode_post_conv_mtp
+    # ROCm runs the Triton port of the CUDA op.
+    fused_owner, fused_name = (
+        (qwen_gdn_linear_attn, "fused_gdn_decode_post_conv_mtp_triton")
+        if current_platform.is_rocm()
+        else (qwen_gdn_linear_attn.ops, "fused_gdn_decode_post_conv_mtp")
+    )
     with (
         patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),
         patch.object(
-            qwen_gdn_linear_attn.ops,
-            "fused_gdn_decode_post_conv_mtp",
-            wraps=fused_op,
+            fused_owner, fused_name, wraps=getattr(fused_owner, fused_name)
         ) as fused_mock,
     ):
         torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(

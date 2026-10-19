@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
@@ -282,7 +283,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     output_gate_activation: str,
     impl: str,
 ) -> None:
-    if torch.cuda.get_device_capability() < (8, 0):
+    if current_platform.is_cuda() and not current_platform.has_device_capability(80):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
     if impl == "cuda" and not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
         pytest.skip("fused GDN decode MTP op is not built")

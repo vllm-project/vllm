@@ -14,16 +14,10 @@ their sum of squares. The epilogue then applies the gated RMSNorm, the only step
 the whole value dimension, and writes the out_proj input.
 """
 
-import functools
-
 import torch
 
 from vllm.triton_utils import tl, triton
-
-
-@functools.cache
-def _num_cus(device: torch.device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
+from vllm.utils.platform_utils import num_compute_units
 
 
 @triton.jit
@@ -163,11 +157,30 @@ def fused_gdn_decode_post_conv_mtp_triton(
     HV, V = out.shape[-2:]
     K = state.shape[-1]
     H = (mixed_qkv.shape[-1] - HV * V) // (2 * K)
+    num_tokens = mixed_qkv.shape[0]
     num_requests = cu_seqlens.numel() - 1
+    # Layouts the kernels index with (as the CUDA op checks).
+    assert K == triton.next_power_of_2(K) and V == triton.next_power_of_2(V) >= 64
+    assert H > 0 and HV % H == 0 and mixed_qkv.shape[-1] == 2 * H * K + HV * V
+    assert mixed_qkv.dim() == 2 and mixed_qkv.stride(1) == 1
+    assert a.shape == b.shape == (num_tokens, HV) and a.stride(1) == b.stride(1) == 1
+    assert A_log.is_contiguous() and A_log.numel() == HV
+    assert dt_bias.is_contiguous() and dt_bias.numel() == HV
+    assert state.dim() == 4 and state.shape[1:3] == (HV, V)
+    assert state.stride(1) == V * K and state.stride(2) == K and state.stride(3) == 1
+    assert state_indices.dim() == 2 and state_indices.shape[0] == num_requests
+    assert state_indices.stride(1) == 1 and cu_seqlens.is_contiguous()
+    assert num_accepted_tokens.is_contiguous()
+    assert num_accepted_tokens.numel() == num_requests
+    assert output_gate.shape == out.shape == (num_tokens, HV, V)
+    assert output_gate.stride(2) == 1 and output_gate.stride(1) == V
+    assert out.is_contiguous()
+    assert norm_weight.is_contiguous() and norm_weight.numel() == V
+    assert output_gate_activation in ("silu", "sigmoid")
     # Tile V only while the GPU needs more programs: 32 rows per program while there are fewer
     # (request, value head) pairs than CUs, 64 up to 4x the CUs, else one tile per value head
     # (tuned on MI300X and MI350X).
-    heads, num_cus = num_requests * HV, _num_cus(out.device)
+    heads, num_cus = num_requests * HV, num_compute_units(out.device.index)
     BV = 32 if heads < num_cus else 64 if heads <= 4 * num_cus else V
     sum_sq = torch.empty(
         (out.shape[0], HV, V // BV), dtype=torch.float32, device=out.device
