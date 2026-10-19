@@ -153,9 +153,12 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
             1.0,
         )
         indices = self.punica_wrapper.token_lora_indices
-        assert indices.size(0) == output.size(0), (
-            "Token classification rows do not match LoRA token mapping"
+        padding = output.size(0) - indices.size(0)
+        assert padding >= 0, (
+            "Token classification has fewer rows than LoRA token mapping"
         )
+        if padding:
+            indices = torch.nn.functional.pad(indices, (0, padding), value=-1)
         safe_indices = indices.clamp_min(0)
         use_full = (indices >= 0) & self.full_module_enabled[safe_indices]
         adapter_output = adapter_output[0, :, : self.output_size].to(
