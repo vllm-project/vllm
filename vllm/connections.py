@@ -83,7 +83,7 @@ class MediaRequestDownloadBudget:
                 raise MediaRequestDownloadSizeExceededError(
                     "Request media downloads exceed "
                     f"VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB={limit_mb:g} "
-                    f"({received} bytes received)."
+                    f"({received} bytes received, including retried attempts)."
                 )
             self.used = received
 

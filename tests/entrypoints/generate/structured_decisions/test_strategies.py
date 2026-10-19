@@ -97,6 +97,12 @@ def test_strategy_selection():
     )
     lfm = "Lfm2VlForConditionalGeneration"
     assert select_read_strategy(model(lfm), generate) is LiquidStrategy
+    for gemma4 in (
+        "Gemma4ForCausalLM",
+        "Gemma4ForConditionalGeneration",
+        "Gemma4UnifiedForConditionalGeneration",
+    ):
+        assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -222,6 +228,26 @@ def test_labels_start_the_reply(qwen):
     # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
     with pytest.raises(ValueError, match="not one distinct token"):
         reply_label_ids(tokenizer, tokenizer.encode("team:"))
+
+
+@pytest.mark.parametrize(
+    "model_name,reply_start",
+    [
+        # E2B and E4B: the reply starts right after the model turn.
+        ("google/gemma-4-E2B-it", "<|turn>model\n"),
+        # 12B, 26B and 31B: the template closes an empty thought first.
+        ("google/gemma-4-12B-it", "<|turn>model\n<|channel>thought\n<channel|>"),
+    ],
+)
+def test_gemma4_labels_start_the_reply(model_name, reply_start):
+    from vllm.tokenizers import get_tokenizer
+
+    tokenizer = get_tokenizer(model_name)
+    renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    context = ReadContext(None, SimpleNamespace(renderer=renderer), None, "auto", {})
+    # Construction fails unless every label is one token at the reply's start.
+    strategy = NextTokenStrategy(context)
+    assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
 
 
 @pytest.fixture
