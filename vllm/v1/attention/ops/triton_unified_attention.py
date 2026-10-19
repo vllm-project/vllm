@@ -61,6 +61,35 @@ _GFX1201_2D_DECODE_CONFIGS = {
     512: (16, 8, 1),
 }
 
+is_gfx1100 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100
+
+    is_gfx1100 = on_gfx1100()
+
+# gfx1100 2D launch configs for batches with prefill tokens (max_seqlen_q > 1):
+# padded head_size -> (config for max_seqlen_q <= 64, 64 < max_seqlen_q < 4096,
+# max_seqlen_q >= 4096), each config = (BLOCK_M, TILE_SIZE, num_warps,
+# num_stages) or None for the default launch. From a synthetic sweep (head_dim
+# 64/128/256/512, GQA 1-16, KV heads 1-8, block size 16/528, bf16): per band,
+# the best geomean speedup with at most 1% of batches below 0.97x and none
+# below 0.8x.
+_GFX1100_2D_CONFIGS = {
+    64: ((16, 32, 2, 1), (32, 32, 2, 1), (128, 64, 8, 1)),
+    128: (None, (64, 32, 4, 1), (128, 32, 8, 1)),
+    256: ((32, 32, 8, 1), (64, 32, 8, 1), (128, 64, 8, 1)),
+    512: ((64, 32, 8, 1), (64, 32, 8, 1), (64, 32, 8, 1)),
+}
+# gfx1100 2D decode (batches above the 3D threshold): padded head size ->
+# (TILE_SIZE, num_warps, num_stages); BLOCK_M keeps its default. Head 64:
+# 1.37x geomean, 4% of batches below 0.97x (worst 0.89x).
+_GFX1100_2D_DECODE_CONFIGS = {
+    64: (16, 2, 1),
+    128: (16, 2, 1),
+    256: (16, 4, 1),
+    512: (32, 8, 1),
+}
+
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -1161,6 +1190,49 @@ def unified_attention(
     if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
+
+    # gfx1100: tuned 2D launch, in the scope it was tuned and validated for
+    # (16-bit Q, 16-bit or per-tensor fp8 KV cache, causal, no sliding window /
+    # sinks / softcap / ALiBi). Applied after the 2D/3D choice, so it does not
+    # move the 3D threshold.
+    gfx1100_head_size = triton.next_power_of_2(head_size)
+    if (
+        is_gfx1100
+        and not use_3d
+        and gfx1100_head_size in _GFX1100_2D_CONFIGS
+        and num_queries_per_kv <= 16
+        and q.element_size() == 2
+        and (
+            (kv_quant_mode == KVQuantMode.NONE and k.dtype == q.dtype)
+            or kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        )
+        and use_causal
+        and not use_per_seq_causal
+        and sliding_window_val == 0
+        and sinks is None
+        and softcap == 0
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and not use_mm_prefix
+        and not use_rswa
+        and output_scale is None
+        and not use_td
+        and not is_batch_invariant
+    ):
+        if max_seqlen_q > 1:
+            band = 0 if max_seqlen_q <= 64 else (1 if max_seqlen_q < 4096 else 2)
+            cfg = _GFX1100_2D_CONFIGS[gfx1100_head_size][band]
+            if cfg is not None:
+                BLOCK_M, TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = cfg
+                BLOCK_Q = BLOCK_M // num_queries_per_kv
+                total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+        elif gfx1100_head_size in _GFX1100_2D_DECODE_CONFIGS:
+            TILE_SIZE_PREFILL, launch_num_warps, launch_num_stages = (
+                _GFX1100_2D_DECODE_CONFIGS[gfx1100_head_size]
+            )
+            if kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
+                # an fp8 KV tile needs TILE_SIZE >= 32
+                TILE_SIZE_PREFILL = max(TILE_SIZE_PREFILL, 32)
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
