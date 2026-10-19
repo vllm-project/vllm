@@ -355,6 +355,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
+        # (layer, peer) -> local and remote address ranges, diagnostic only.
+        self._desc_ranges: dict[tuple[int, int], list[int]] = {}
         self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
@@ -477,11 +479,57 @@ class NixlEplbCommunicator(EplbCommunicator):
                 )
             )
 
+        if os.getenv("VLLM_EEP_DEBUG_XFER_DESCS") == "1":
+            self._record_desc_range(layer_idx, src_rank, local_descs, remote_descs)
+
         local_h, remote_h, xfer_h = self._create_peer_xfer(
             src_rank, local_descs, remote_descs
         )
         self._nixl_wrapper.transfer(xfer_h)
         self._xfer_entries.append((local_h, remote_h, xfer_h))
+
+    def _record_desc_range(
+        self,
+        layer_idx: int,
+        src_rank: int,
+        local_descs: list[tuple[int, int, int]],
+        remote_descs: list[tuple[int, int, int]],
+    ) -> None:
+        """Keep the address span this layer reads from each peer.
+
+        A fault during the reshuffle names the device and the address but
+        nothing else, and the two readings it can have need opposite fixes. If
+        the address falls inside the span a peer published, the mapping was
+        revoked under a descriptor that was still correct. If it falls outside,
+        send_base plus src_row times send_stride walked off the registration,
+        which is arithmetic this file owns. One span per layer and peer is
+        enough to tell those apart and is cheap, where a line per expert is
+        thousands of lines per reconfiguration.
+
+        Diagnostic only.
+        """
+        key = (layer_idx, src_rank)
+        span = self._desc_ranges.get(key)
+        local_lo = min(addr for addr, _, _ in local_descs)
+        local_hi = max(addr + size for addr, size, _ in local_descs)
+        remote_lo = min(addr for addr, _, _ in remote_descs)
+        remote_hi = max(addr + size for addr, size, _ in remote_descs)
+        remote_dev = remote_descs[0][2]
+        if span is None:
+            self._desc_ranges[key] = [
+                local_lo,
+                local_hi,
+                remote_lo,
+                remote_hi,
+                remote_dev,
+                1,
+            ]
+            return
+        span[0] = min(span[0], local_lo)
+        span[1] = max(span[1], local_hi)
+        span[2] = min(span[2], remote_lo)
+        span[3] = max(span[3], remote_hi)
+        span[5] += 1
 
     def _init_remote_agents(self) -> None:
         local_metadata = self._nixl_wrapper.get_agent_metadata()
@@ -553,6 +601,21 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._remote_send_meta[peer] = peer_meta
 
     def _wait_for_all_transfers(self, handles: list[int]) -> None:
+        """Wait for every READ issued for this layer to report DONE.
+
+        The wait is bounded. A transfer only leaves this loop by reaching DONE
+        or by reporting a state that is neither DONE nor PROC, and a peer whose
+        GPU faults never does either: its handle stays in PROC for good, so the
+        survivors spin here until the test itself is killed. On MI355 two ranks
+        faulted with `Memory access fault by GPU node-N` during the expert
+        reshuffle and the rest of the ranks sat in this loop for the whole
+        780 s budget without printing a thing.
+        """
+        timeout = float(os.getenv("VLLM_EPLB_NIXL_XFER_TIMEOUT_S") or 300.0)
+        report_every = float(os.getenv("VLLM_EPLB_NIXL_XFER_REPORT_S") or 0)
+        next_report = report_every
+        started = time.perf_counter()
+        total = len(handles)
         pending = set(handles)
         while pending:
             completed: list[int] = []
@@ -566,6 +629,29 @@ class NixlEplbCommunicator(EplbCommunicator):
             for handle in completed:
                 pending.remove(handle)
             if pending:
+                elapsed = time.perf_counter() - started
+                if report_every > 0 and elapsed > next_report:
+                    # A reshuffle that normally costs under 5 s was measured at
+                    # 260 s with every rank sitting in this loop, and a single
+                    # duration at the end cannot say whether one layer stalled
+                    # or every layer crawled.
+                    next_report += report_every
+                    logger.warning(
+                        "[EEP-DEBUG] layer %s still waiting after %.0f s: "
+                        "%d of %d transfer(s) in PROC",
+                        self._layer_idx,
+                        elapsed,
+                        len(pending),
+                        total,
+                    )
+                if timeout > 0 and elapsed > timeout:
+                    raise RuntimeError(
+                        f"NIXL EPLB transfers for layer {self._layer_idx} did "
+                        f"not finish within {timeout:.0f} s: "
+                        f"{len(pending)} of {total} still in PROC. A peer whose "
+                        f"GPU faulted leaves its READ in PROC forever, so this "
+                        f"rank cannot tell a slow transfer from a dead peer."
+                    )
                 time.sleep(0.0005)
 
     def _create_peer_xfer(
@@ -639,6 +725,21 @@ class NixlEplbCommunicator(EplbCommunicator):
                 self._layer_idx,
                 len(self._xfer_entries),
             )
+        # Before the wait, never after: the fault ends the process.
+        for (layer, peer), span in self._desc_ranges.items():
+            local_lo, local_hi, remote_lo, remote_hi, remote_dev, reads = span
+            logger.warning(
+                "[EEP-DEBUG] layer %s reads %d expert(s) from rank %s on "
+                "device %s: remote 0x%x-0x%x, local 0x%x-0x%x",
+                layer,
+                reads,
+                peer,
+                remote_dev,
+                remote_lo,
+                remote_hi,
+                local_lo,
+                local_hi,
+            )
         try:
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
             if trace:
@@ -656,6 +757,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
             self._xfer_entries.clear()
+            self._desc_ranges.clear()
             self._expert_to_src_row = None
             self._layer_idx = None
 
