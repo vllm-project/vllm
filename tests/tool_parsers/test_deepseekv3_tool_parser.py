@@ -118,3 +118,31 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
             weather,
             hotels,
         ]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_preserves_text_after_tool_call(
+        self,
+        tool_parser,
+        streaming: bool,
+    ) -> None:
+        model_output = (
+            "let me check the weather."
+            "<｜tool▁calls▁begin｜>"
+            "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n"
+            "```json\n"
+            '{"city": "Paris"}\n'
+            "```<｜tool▁call▁end｜>"
+            "<｜tool▁calls▁end｜>"
+            "It is 30 degrees."
+        )
+
+        content, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=streaming,
+        )
+
+        assert content == "let me check the weather.It is 30 degrees."
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_weather"
+        assert tool_calls[0].function.arguments == '{"city": "Paris"}'
