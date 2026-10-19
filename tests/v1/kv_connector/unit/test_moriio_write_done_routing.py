@@ -41,6 +41,11 @@ from .utils import make_moriio_writer
 pytestmark = pytest.mark.cpu_test
 
 
+class _HandshakeDone(dict):
+    def __contains__(self, key: object) -> bool:
+        return True
+
+
 def _fake_worker(
     alloc: dict[str, Any],
     *,
@@ -70,7 +75,15 @@ def _fake_worker(
     )
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
-    worker = SimpleNamespace(moriio_wrapper=wrapper, tp_rank=tp_rank)
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=tp_rank,
+        get_engine_name_with_dp=lambda engine_name, dp_rank: (
+            f"{engine_name}_dp{dp_rank}"
+        ),
+        # These tests start after the decode-rank handshake has finished.
+        remote_moriio_metadata=_HandshakeDone(),
+    )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
     return worker
@@ -537,6 +550,127 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ran
         ("tA", "10.0.0.1", 20000 + get_port_offset(0, tp_rank))
         for tp_rank in expected_tp_ranks
     ]
+
+
+def test_write_stays_deferred_until_target_decode_rank_handshake():
+    info = RemoteAllocInfo(block_ids=None, decode_dp_rank=9)
+    worker = SimpleNamespace(
+        moriio_wrapper=SimpleNamespace(
+            done_remote_allocate_req_dict={"tA": info},
+            lock=threading.Lock(),
+            waiting_for_transfer_complete=lambda statuses: None,
+            _is_transfer_terminal_locked=lambda transfer_id: False,
+        ),
+        tp_rank=0,
+        get_engine_name_with_dp=lambda engine_name, dp_rank: (
+            f"{engine_name}_dp{dp_rank}"
+        ),
+        remote_moriio_metadata={"remote-engine_dp0": object()},
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task(
+        "tA",
+        "10.0.0.1",
+        multi_pod_hosts=["10.0.0.1", "10.0.0.2"],
+        remote_dp_size_local=8,
+    )
+    writer._deferred_tasks.append(task)
+
+    writer._process_deferred_tasks()
+
+    assert info.completion_remote_ip is None
+    assert writer._deferred_tasks == [task]
+
+    worker.remote_moriio_metadata["remote-engine_dp9"] = object()
+    writer._process_deferred_tasks()
+
+    assert info.completion_remote_ip == "10.0.0.2"
+    assert writer._deferred_tasks == []
+
+
+def test_allocated_handshake_timeout_notifies_owning_decode_rank():
+    wrapper = _real_wrapper()
+    info = RemoteAllocInfo(block_ids=[[4]], decode_dp_rank=9)
+    info.transfer_statuses.append("posted")
+    waited: list[list] = []
+    wrapper.waiting_for_transfer_complete = lambda statuses: waited.append(
+        list(statuses)
+    )
+    sent: list[tuple] = []
+    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
+        (tid, ip, port, message_type)
+    )
+    wrapper.done_remote_allocate_req_dict["tA"] = info
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=0,
+        get_engine_name_with_dp=lambda engine_name, dp_rank: (
+            f"{engine_name}_dp{dp_rank}"
+        ),
+        remote_moriio_metadata={},
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task(
+        "tA",
+        "10.0.0.1",
+        multi_pod_hosts=["10.0.0.1", "10.0.0.2"],
+        remote_dp_size_local=8,
+    )
+    task.enqueue_time = time.perf_counter() - 2 * writer._defer_timeout
+    writer._deferred_tasks.append(task)
+
+    writer._process_deferred_tasks()
+
+    assert writer._deferred_tasks == []
+    assert waited == [["posted"]]
+    assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tA"]
+    assert wrapper._is_transfer_terminal_locked("tA")
+    assert sent == [
+        ("tA", "10.0.0.2", 20000 + get_port_offset(9 % 8, 0), "write_failed")
+    ]
+
+
+def test_write_exception_notifies_owning_decode_rank():
+    info = RemoteAllocInfo(block_ids=None, decode_dp_rank=3)
+    sent: list[tuple] = []
+    wrapper = SimpleNamespace(
+        done_remote_allocate_req_dict={"tA": info},
+        lock=threading.Lock(),
+        done_req_ids=[],
+        waiting_for_transfer_complete=lambda statuses: None,
+        _terminal_transfer_ids=OrderedDict(),
+        send_notify=lambda tid, ip, port, message_type: sent.append(
+            (tid, ip, port, message_type)
+        ),
+    )
+    wrapper._is_transfer_terminal_locked = (
+        lambda transfer_id: transfer_id in wrapper._terminal_transfer_ids
+    )
+    wrapper._mark_transfer_terminal_locked = (
+        lambda transfer_id: wrapper._terminal_transfer_ids.__setitem__(
+            transfer_id, None
+        )
+    )
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=2,
+        get_engine_name_with_dp=lambda engine_name, dp_rank: (
+            f"{engine_name}_dp{dp_rank}"
+        ),
+        remote_moriio_metadata={"remote-engine_dp3": object()},
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("tA", "10.0.0.1")
+    writer._deferred_tasks.append(task)
+
+    with patch.object(
+        writer, "_execute_write_task", side_effect=KeyError("remote-engine_dp3")
+    ):
+        writer._process_deferred_tasks()
+
+    assert writer._deferred_tasks == []
+    assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tA"]
+    assert sent == [("tA", "10.0.0.1", 20000 + get_port_offset(3, 2), "write_failed")]
 
 
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
