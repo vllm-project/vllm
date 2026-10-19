@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -324,6 +325,24 @@ def test_speculator_factory_builds_uno(uno_config_factory, monkeypatch):
         return "uno"
 
     monkeypatch.setattr(uno, "UnoSpeculator", fake_speculator)
+    constructors = [
+        (import_module(f"vllm.v1.worker.gpu.spec_decode.{module}"), name)
+        for module, name in (
+        ("extract_hidden_states", "ExtractHiddenStatesSpeculator"),
+        ("lilicorr.speculator", "LiLiCorrSpeculator"),
+        ("dflash2.speculator", "DFlash2Speculator"),
+        ("dflash.speculator", "DFlashSpeculator"),
+        ("dspark.speculator", "DSparkSpeculator"),
+        ("gemma4.speculator", "Gemma4Speculator"),
+        ("multi_module_mtp.speculator", "MultiModuleMTPSpeculator"),
+        ("mtp.speculator", "MTPSpeculator"),
+        ("eagle.speculator", "EagleSpeculator"),
+        ("standalone_ar.speculator", "StandaloneARSpeculator"),
+        ("ngram.speculator", "NgramGPUSpeculator"),
+        )
+    ]
+    for constructor, name in constructors:
+        monkeypatch.setattr(constructor, name, lambda *args, name=name: name)
     config = _serving_config(uno_config_factory())
     device = torch.device("cpu")
 
