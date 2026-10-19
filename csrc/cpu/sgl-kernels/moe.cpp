@@ -916,15 +916,18 @@ void fused_experts_cpu(
     const std::optional<double>& alpha,
     const std::optional<double>& limit,
     bool is_vnni,
-    const std::optional<std::string>& activation) {
-  const CPUActMethod act_func = act_method_from_string(activation, alpha.has_value() && limit.has_value());
+    int64_t act_method) {
+  const CPUActMethod act_func = act_method_from_int(act_method);
+  TORCH_CHECK(
+      act_func != CPUActMethod::swiglu || (alpha.has_value() && limit.has_value()),
+      "fused_experts_cpu: swiglu requires alpha and limit");
   // the int8 and int4 kernels only support silu or gelu_tanh in their fused store step
   const bool is_int_quant =
       moe_comp_method == CPUQuantMethod::INT8_W8A8 || moe_comp_method == CPUQuantMethod::INT4_W4A8;
   TORCH_CHECK(
       !is_int_quant || act_func == CPUActMethod::silu_and_mul || act_func == CPUActMethod::gelu_tanh_and_mul,
-      "fused_experts_cpu: INT8_W8A8 and INT4_W4A8 support activation='silu' or 'gelu_tanh' only, got: ",
-      activation.value_or("silu"));
+      "fused_experts_cpu: INT8_W8A8 and INT4_W4A8 support silu or gelu_tanh only, got act_method: ",
+      act_method);
 
   auto packed_w1 = is_vnni ? w1 : convert_weight_packed(w1);
   auto packed_w2 = is_vnni ? w2 : convert_weight_packed(w2);

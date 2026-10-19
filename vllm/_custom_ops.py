@@ -3466,6 +3466,13 @@ def weight_packed_linear_cpu(
     return output
 
 
+class CPUActMethod(IntEnum):
+    SILU_AND_MUL = 0
+    SWIGLU = 1
+    GELU_AND_MUL = 2
+    GELU_TANH_AND_MUL = 3
+
+
 class CPUQuantMethod(IntEnum):
     UNQUANT = 0
     INT8_W8A8 = 1
@@ -3512,7 +3519,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
-    activation: str | None = None,
+    act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3533,7 +3540,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
-        activation,
+        act_method,
     )
 
 

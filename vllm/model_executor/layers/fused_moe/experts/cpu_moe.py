@@ -10,6 +10,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import (
+    CPUActMethod,
     CPUQuantAlgo,
     CPUQuantMethod,
     convert_weight_packed_scale_zp,
@@ -51,6 +52,14 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
+
+_CPU_ACT_METHODS = {
+    MoEActivation.SILU: CPUActMethod.SILU_AND_MUL,
+    MoEActivation.GELU: CPUActMethod.GELU_AND_MUL,
+    MoEActivation.GELU_TANH: CPUActMethod.GELU_TANH_AND_MUL,
+    MoEActivation.SWIGLUOAI: CPUActMethod.SWIGLU,
+}
+
 # ===========================================================================
 # Weight layout
 # ===========================================================================
@@ -583,7 +592,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             None,  # a1_scale
-            activation.value,
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -752,7 +761,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
             limit,
             True,  # is_vnni
             None,  # a1_scale
-            activation.value,
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -985,7 +994,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             None,  # a1_scale
-            activation.value,
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -1162,7 +1171,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             None,  # a1_scale
-            activation.value,
+            _CPU_ACT_METHODS[activation],
         )
 
 
@@ -1846,5 +1855,5 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             None,  # limit
             True,  # is_vnni
             x_scales,  # a1_scale: per-token FP8 activation scales
-            activation.value,
+            _CPU_ACT_METHODS[activation],
         )
