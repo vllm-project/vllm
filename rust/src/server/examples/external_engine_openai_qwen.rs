@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -16,7 +17,6 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
-use vllm_chat::ToolStrictLevel;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         grpc_listener_mode: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
-        tool_strict_level: ToolStrictLevel::Auto,
+        tool_strict_level: None,
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,
@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
+        stream_interval: NonZeroU32::MIN,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
         tls: None,

@@ -47,16 +47,18 @@ pytestmark = pytest.mark.skipif(
 #
 # The kernel requires 16-aligned heads, so _mla_fp8_prefill_attn replicate-pads
 # q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
-# Cover all three regimes:
+# Cover all four regimes:
+#    8 -> padded to 16 (divisor, repeat_interleave), so the real heads sit at
+#         stride 2 in the padded output. Live case: Kimi-K2.x at TP8.
 #   12 -> padded to 16 (non-divisor, tile+slice). Live case: a K3 rank at TP8.
 #   16 -> no padding, output aliases the caller's buffer.
 #   24 -> padded to 32. No current model and TP reaches this band (96 heads
 #         would need TP4, which does not fit in 288 GiB; 128-head models give
 #         128/64/32/16/8), so this case exists to keep the general path honest
-#         for future architectures: it is the only one of the three where
-#         padding above 16 actually happens, so it is what proves the
-#         replicate-pad/slice-back argument holds for a target other than 16.
-HEAD_COUNTS = [12, 16, 24]
+#         for future architectures: it is the only one where padding above
+#         16 actually happens, so it is what proves the replicate-pad/slice-back
+#         argument holds for a target other than 16.
+HEAD_COUNTS = [8, 12, 16, 24]
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
 QK_HEAD_DIM = QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM  # 192

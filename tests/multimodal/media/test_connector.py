@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import mimetypes
 import os
 import shutil
@@ -292,7 +291,7 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     try:
         video_sync, metadata_sync = connector.fetch_video(video_url)
         video_async, metadata_async = await connector.fetch_video_async(video_url)
-    except (TimeoutError, asyncio.TimeoutError) as e:
+    except TimeoutError as e:
         pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
 
     assert np.array_equal(video_sync, video_async)
@@ -324,7 +323,7 @@ async def test_fetch_video_http_with_dynamic_loader(
         try:
             video_sync, metadata_sync = connector.fetch_video(video_url)
             video_async, metadata_async = await connector.fetch_video_async(video_url)
-        except (TimeoutError, asyncio.TimeoutError) as e:
+        except TimeoutError as e:
             pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
 
         assert np.array_equal(video_sync, video_async)
@@ -402,7 +401,7 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
     try:
         video_sync, metadata_sync = connector.fetch_video(video_url)
         video_async, metadata_async = await connector.fetch_video_async(video_url)
-    except (TimeoutError, asyncio.TimeoutError) as e:
+    except TimeoutError as e:
         pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
 
     assert np.array_equal(video_sync, video_async)

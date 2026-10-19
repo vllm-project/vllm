@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
@@ -11,10 +12,9 @@ from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Self, TypeVar
 
 import torch
-from typing_extensions import Self
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import MultipleOf
 
 logger = init_logger(__name__)
 
@@ -169,12 +170,31 @@ class KVCacheSpec:
     dcp_sharded: bool = field(default=False, kw_only=True)
     """Whether DCP shards this cache's token positions across ranks."""
 
-    block_stride_alignment: int | None = field(default=None, kw_only=True)
-    """Required byte alignment between physical blocks, including packed layers."""
+    block_stride_alignment: int | MultipleOf | None = field(default=None, kw_only=True)
+    """Required byte alignment between physical blocks, including packed layers.
+    ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
+    blocks of up to ``n`` tokens."""
+
+    is_draft: bool = field(default=False, kw_only=True, compare=False)
+    """Whether a draft model owns this layer; excluded from equality so it never
+    affects grouping."""
 
     def __post_init__(self):
-        if self.block_stride_alignment is not None and self.block_stride_alignment <= 0:
+        alignment = self.block_stride_alignment
+        if isinstance(alignment, int) and alignment <= 0:
             raise ValueError("block_stride_alignment must be positive")
+
+    def get_block_stride_alignment(self) -> int:
+        """Bytes the stride between physical blocks must be a multiple of."""
+        from vllm.v1.attention.backend import MultipleOf
+
+        alignment = self.block_stride_alignment
+        if not isinstance(alignment, MultipleOf):
+            return alignment or 1
+        kernel_block_size = math.gcd(alignment.base, self.block_size)
+        if kernel_block_size == self.block_size:
+            return 1
+        return self.copy_with_new_block_size(kernel_block_size).page_size_bytes
 
     @property
     def prefix_cacheable(self) -> bool:
@@ -644,6 +664,8 @@ class FullAttentionSpec(AttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -670,13 +692,13 @@ def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
+    topk_buffer_width: int | None = None
+    """Width of the model's sparse top-k indices buffer, including padding."""
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
     cache_role: SparseCacheRole = SparseCacheRole.SPARSE
     is_index_group_leader: bool = False
-    storage_block_size: int | None = None
-    """Token width used to view storage when it differs from the kernel block."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -693,24 +715,25 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        topk_buffer_width_set = {spec.topk_buffer_width for spec in specs}
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
-        storage_block_size_set = set(spec.storage_block_size for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
+            and len(topk_buffer_width_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
-            and len(storage_block_size_set) == 1
             and len(block_stride_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size and block stride alignment."
+            "quantization method, top-k buffer width, tokens per state, "
+            "model version, cache role, "
+            "index-sharing role, and block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -724,11 +747,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
+            topk_buffer_width=topk_buffer_width_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
-            storage_block_size=storage_block_size_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -736,6 +759,8 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -844,6 +869,14 @@ class SlidingWindowSpec(AttentionSpec):
     # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
     # of the sequence, and thus needs to delay freeing/caching of blocks.
     extra_retained_tokens: int = 0
+
+    @property
+    def num_retained_tokens(self) -> int:
+        """Tokens below a request's first scheduled position that must stay
+        readable. The worker nulls a step's block-table entries wholly below
+        that many tokens.
+        """
+        return self.sliding_window - 1 + self.extra_retained_tokens
 
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
@@ -1020,32 +1053,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
-@dataclass(frozen=True, kw_only=True)
-class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
-
-    def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
-    ) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
-    def uses_slot_mapping(self) -> bool:
-        return False
-
-
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
@@ -1128,7 +1135,10 @@ def get_mamba_prefill_checkpoint_position(
     drop_eagle_block: bool,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    checkpoint_position = (num_tokens - 1) // hash_block_size * hash_block_size
+    # Without EAGLE, leave one token to recompute on resend.
+    # EAGLE's block drop already leaves tokens to recompute.
+    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
     return max(checkpoint_position, 0)
@@ -1220,6 +1230,8 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         for spec in specs:
             for f in fields(AttentionSpec):
+                if not f.compare:
+                    continue
                 assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
                     "All attention layers in the same KV cache group must have "
                     "the same attention spec."
@@ -1457,7 +1469,7 @@ class KVCacheGroupSpec:
     layer_names: list[str]
     # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
-    # Whether this group contains EAGLE/MTP draft attention layers.
+    # Whether this group holds draft layers and takes the EAGLE last-block drop.
     is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
@@ -1488,6 +1500,10 @@ class KVCacheConfig:
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+    hash_block_size: int | None = None
+    """Tokens per prefix-cache block hash, resolved by the engine core."""
+    cache_hit_alignment_tokens: int | None = None
+    """Token granularity of prefix-cache hits, resolved by the engine core."""
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
