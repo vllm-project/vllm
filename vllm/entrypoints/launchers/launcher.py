@@ -66,7 +66,6 @@ class NoSignalServer(uvicorn.Server):
         self._listen_tasks: set[asyncio.Task] = set()
         self._listen_sockets: list[socket.socket] = []
         self._connecting = 0
-        self._accepting = True
 
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
@@ -91,10 +90,10 @@ class NoSignalServer(uvicorn.Server):
         if not self.started:  # lifespan startup failed (uvicorn < 0.50)
             return
         self._publish_load()
+        self._listen_sockets = list(sockets)
         for sock in sockets:
             sock.listen(self.config.backlog)
             sock.setblocking(False)
-            self._listen_sockets.append(sock)
             self._listen_tasks.add(self._track(self._accept(sock)))
 
     def _track(self, coro) -> asyncio.Task:
@@ -105,32 +104,16 @@ class NoSignalServer(uvicorn.Server):
         return task
 
     def stop_accepting(self) -> None:
-        """Stop accepting new connections; accepted ones keep being served.
-
-        Used at the start of a graceful shutdown, before the engines drain, so
-        that new arrivals are refused at the socket instead of being admitted
-        and then rejected by a draining engine. With several API workers on one
-        shared socket, connections are refused once every worker (and the
-        launcher) has closed its copy; until then they go to the other workers.
-        """
-        if not self._accepting:
-            return
-        self._accepting = False
+        """Close the listeners and idle connections; in-flight requests finish."""
         logger.info_once("[shutdown] API server: no longer accepting new connections")
         if self.peer_loads is not None:
-            loads, index = self.peer_loads
-            loads[index] = _NOT_ACCEPTING
-        for task in list(self._listen_tasks):
+            self.peer_loads[0][self.peer_loads[1]] = _NOT_ACCEPTING
+        for task in self._listen_tasks:
             task.cancel()
         for sock in self._listen_sockets:
             sock.close()
-        # Without peer_loads uvicorn's asyncio servers own the listeners.
-        for server in getattr(self, "servers", []):
+        for server in getattr(self, "servers", ()):
             server.close()
-        # Connections that are already open stop taking new requests as well:
-        # idle keep-alive connections are closed now and busy ones close after
-        # their current response (uvicorn's own graceful-shutdown step), so a
-        # client's next request needs a new connection and is refused.
         for connection in list(self.server_state.connections):
             connection.shutdown()
 
@@ -295,15 +278,12 @@ async def serve_http(
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
-    # The multi-API-server launcher sends SIGUSR1 to stop the workers accepting
-    # before it drains the engines; the workers exit on the later SIGTERM.
+    # Sent by the multi-API-server launcher before it drains the engines.
     loop.add_signal_handler(signal.SIGUSR1, server.stop_accepting)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
-        # Refuse new connections first; the requests already accepted finish
-        # while the engine drains (or are aborted with it when timeout == 0).
         server.stop_accepting()
 
         if engine_client is not None:
