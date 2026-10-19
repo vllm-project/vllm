@@ -10,6 +10,7 @@ hw-agnostic and which fell back to vLLM.
 """
 
 import importlib
+from typing import TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -35,8 +36,11 @@ def _resolve(module: str, name: str):
     return getattr(importlib.import_module(f"{_VLLM_PKG}.{module}"), name)
 
 
-RMSNorm = _resolve("layernorm", "RMSNorm")
-GemmaRMSNorm = _resolve("layernorm", "GemmaRMSNorm")
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+else:
+    RMSNorm = _resolve("layernorm", "RMSNorm")
+    GemmaRMSNorm = _resolve("layernorm", "GemmaRMSNorm")
 
 
 def get_act_and_mul_fn(act_fn_name: str):
