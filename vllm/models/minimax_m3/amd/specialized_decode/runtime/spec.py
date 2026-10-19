@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Static contract for the MiniMax-M3 ROCm MonoKernel."""
+"""Side-effect-free configuration for MiniMax-M3 specialized decode."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationMode, VllmConfig
 
 
 @dataclass(frozen=True)
-class MiniMaxM3MonoSpec:
+class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
     max_rows: int = 16
@@ -69,9 +69,15 @@ class MiniMaxM3MonoSpec:
             reasons.append("does not support model weight offloading")
         if not config.model_config.enforce_eager:
             reasons.append("milestone one requires --enforce-eager")
+        if config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            reasons.append("does not support stock torch.compile")
         text_config = config.model_config.hf_text_config
         if getattr(text_config, "use_index_cache", False):
             reasons.append("does not support cross-layer index reuse")
+        if getattr(text_config, "index_topk_freq", 1) != 1:
+            reasons.append("requires the default index_topk_freq")
+        if getattr(config, "routed_experts_capturer_config", None) is not None:
+            reasons.append("does not support routed-expert capture")
         if config.kernel_config.moe_backend != "aiter":
             reasons.append("requires --moe-backend aiter")
         sparse = getattr(text_config, "sparse_attention_config", None)
@@ -86,4 +92,15 @@ class MiniMaxM3MonoSpec:
         return reasons
 
 
-MONO_SPEC = MiniMaxM3MonoSpec()
+DECODE_CONFIG = DecodeConfig()
+
+
+def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
+    if not config.kernel_config.monokernel:
+        return None
+    reasons = DECODE_CONFIG.refusal_reasons(config)
+    if reasons:
+        raise ValueError(
+            "MiniMax-M3 specialized decode unsupported: " + "; ".join(reasons)
+        )
+    return DECODE_CONFIG

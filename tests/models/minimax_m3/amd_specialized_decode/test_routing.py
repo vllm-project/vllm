@@ -5,11 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
 
-from vllm.config import CUDAGraphMode
-from vllm.models.minimax_m3.amd.mono.routing import decide_step, tensor_identity
-from vllm.models.minimax_m3.amd.mono.spec import MONO_SPEC
+from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.caches import (
+    tensor_identity,
+)
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.decode import Step
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.routing import decide_step
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import DECODE_CONFIG
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseDecodeMetadata,
     MiniMaxM3SparseMetadata,
@@ -35,10 +38,10 @@ def _metadata(rows: int, *, decode_tokens: int | None = None, prefills: int = 0)
     )
 
 
-@pytest.mark.parametrize("width", MONO_SPEC.widths)
+@pytest.mark.parametrize("width", DECODE_CONFIG.widths)
 def test_decode_widths_route_uniformly(width: int):
-    left = decide_step(MONO_SPEC, width, CUDAGraphMode.NONE, _metadata(width))
-    right = decide_step(MONO_SPEC, width, CUDAGraphMode.NONE, _metadata(width))
+    left = decide_step(DECODE_CONFIG, width, CUDAGraphMode.NONE, _metadata(width))
+    right = decide_step(DECODE_CONFIG, width, CUDAGraphMode.NONE, _metadata(width))
     assert left == right
     assert left.use_mono
 
@@ -46,7 +49,7 @@ def test_decode_widths_route_uniformly(width: int):
 @pytest.mark.parametrize(
     ("rows", "mode", "metadata"),
     [
-        (MONO_SPEC.max_rows + 1, CUDAGraphMode.NONE, _metadata(1)),
+        (DECODE_CONFIG.max_rows + 1, CUDAGraphMode.NONE, _metadata(1)),
         (1, CUDAGraphMode.FULL, _metadata(1)),
         (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
         (1, CUDAGraphMode.NONE, None),
@@ -55,27 +58,27 @@ def test_decode_widths_route_uniformly(width: int):
     ],
 )
 def test_unsupported_steps_fall_back(rows, mode, metadata):
-    assert not decide_step(MONO_SPEC, rows, mode, metadata).use_mono
+    assert not decide_step(DECODE_CONFIG, rows, mode, metadata).use_mono
 
 
 def test_padding_slots_are_eligible():
     metadata = _metadata(4, decode_tokens=2)
     metadata.slot_mapping[2:] = -1
-    assert decide_step(MONO_SPEC, 4, CUDAGraphMode.NONE, metadata).use_mono
+    assert decide_step(DECODE_CONFIG, 4, CUDAGraphMode.NONE, metadata).use_mono
 
 
 @pytest.mark.parametrize("query_len", [2, 4])
 def test_speculative_verification_falls_back(query_len: int):
     metadata = _metadata(4)
     metadata.decode.decode_query_len = query_len
-    assert not decide_step(MONO_SPEC, 4, CUDAGraphMode.NONE, metadata).use_mono
+    assert not decide_step(DECODE_CONFIG, 4, CUDAGraphMode.NONE, metadata).use_mono
 
 
 def test_cache_identity_detects_replacement():
     first = torch.empty(8)
     replacement = torch.empty(8)
-    assert tensor_identity(first) != tensor_identity(replacement)
-    assert tensor_identity(first) == tensor_identity(first)
+    assert tensor_identity(first, "test") != tensor_identity(replacement, "test")
+    assert tensor_identity(first, "test") == tensor_identity(first, "test")
 
 
 def _config(**overrides):
@@ -101,8 +104,11 @@ def _config(**overrides):
         attention_config=SimpleNamespace(
             resolve_indexer_kv_dtype=lambda _default: "fp8"
         ),
-        compilation_config=SimpleNamespace(cudagraph_capture_sizes=[1, 32]),
-        kernel_config=SimpleNamespace(moe_backend="aiter"),
+        compilation_config=SimpleNamespace(
+            cudagraph_capture_sizes=[1, 32],
+            mode=CompilationMode.NONE,
+        ),
+        kernel_config=SimpleNamespace(moe_backend="aiter", monokernel=True),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
         speculative_config=None,
@@ -131,38 +137,18 @@ def test_static_refusals_report_all_reasons():
         enable_expert_parallel=True,
     )
     config.cache_config.enable_prefix_caching = True
-    reasons = MONO_SPEC.refusal_reasons(config)
+    reasons = DECODE_CONFIG.refusal_reasons(config)
     assert any("tensor parallel" in reason for reason in reasons)
     assert any("prefix caching" in reason for reason in reasons)
 
 
-def test_attach_does_not_change_parameter_tree(monkeypatch):
-    from vllm.models.minimax_m3.amd.mono import layer as mono_layer
+def test_step_layer_lookup_is_immutable():
+    def kernel(*args):
+        return args[1], args[2]
 
-    class FakeSparseLayer(nn.Module):
-        def __init__(self, layer_id: int):
-            super().__init__()
-            self.layer_id = layer_id
-            self.is_moe_layer = layer_id >= MONO_SPEC.first_layer
-            self.weight = nn.Parameter(torch.randn(2))
-            self.self_attn = SimpleNamespace(indexer=object())
-            self.mono = None
-
-    class FakeModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.layers = nn.ModuleList(FakeSparseLayer(i) for i in range(60))
-
-    class FakeBinder:
-        def bind(self, layer_id, binding):
-            raise AssertionError("bind is not called during attach")
-
-    monkeypatch.setattr(mono_layer, "_runtime_refusals", lambda _spec: [])
-    model = FakeModel()
-    before = {name: value.clone() for name, value in model.state_dict().items()}
-    controller = mono_layer.MiniMaxM3MonoLayer(model, _config(), FakeBinder())
-    controller.attach()
-    after = model.state_dict()
-    assert before.keys() == after.keys()
-    assert all(torch.equal(before[name], after[name]) for name in before)
-    assert len(controller.layers) == 57
+    step = Step(first_layer=3, kernels=(kernel, None))
+    assert step.layer(3) is kernel
+    assert step.layer(4) is None
+    assert step.layer(2) is None
+    with pytest.raises(AttributeError):
+        step.kernels = ()

@@ -11,7 +11,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
 
-from .spec import MiniMaxM3MonoSpec
+from .spec import DecodeConfig
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class StepDecision:
 
 
 def decide_step(
-    spec: MiniMaxM3MonoSpec,
+    spec: DecodeConfig,
     rows: int,
     graph_mode: CUDAGraphMode,
     metadata: object,
@@ -53,15 +53,3 @@ def decide_step(
     ):
         return StepDecision(False, "slot mapping does not cover physical rows")
     return StepDecision(True)
-
-
-def tensor_identity(
-    tensor: torch.Tensor,
-) -> tuple[int, int, torch.dtype, tuple[int, ...], int]:
-    return (
-        tensor.data_ptr(),
-        tensor.numel(),
-        tensor.dtype,
-        tensor.stride(),
-        tensor.storage_offset(),
-    )

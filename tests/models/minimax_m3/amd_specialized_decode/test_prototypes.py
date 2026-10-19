@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.models.minimax_m3.amd.mono.prototypes import (
+from tests.models.minimax_m3.amd_specialized_decode._prototypes import (
     a4w4_resource,
     bf16_gemv_resource,
     compile_a4w4_prototype,

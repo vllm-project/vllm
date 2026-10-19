@@ -25,11 +25,11 @@ def _on_cdna4() -> bool:
 
 @ray.remote(num_gpus=1, max_calls=1)
 def _sync_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
-    from vllm.distributed import get_tp_group
-    from vllm.models.minimax_m3.amd.mono.sync import (
+    from tests.models.minimax_m3.amd_specialized_decode._sync import (
         ELEMENTS,
         BoundedAllReducePrototype,
     )
+    from vllm.distributed import get_tp_group
 
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)

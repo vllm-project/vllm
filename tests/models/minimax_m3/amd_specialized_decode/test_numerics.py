@@ -4,13 +4,13 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
-from vllm.models.minimax_m3.amd.mono.stages import (
+from tests.models.minimax_m3.amd_specialized_decode._stages import (
     fp32_router_stage,
     gemma_norm_stage,
     select_index_blocks,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
 )
 from vllm.models.minimax_m3.amd.ops import gemma_rmsnorm
 from vllm.platforms import current_platform

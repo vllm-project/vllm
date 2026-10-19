@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
 )
-from vllm.models.minimax_m3.amd.mono.weights import (
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.weights import (
     EXPERTS,
     HIDDEN,
     INTER,
