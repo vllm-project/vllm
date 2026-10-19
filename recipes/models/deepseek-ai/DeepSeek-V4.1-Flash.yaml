@@ -971,6 +971,109 @@ guide: |
 
   Set the request's `model` to the served model name selected for the engine.
 
+  ### B300 disaggregated: DEP2 prefill x N, DEP8 decode
+
+  The disaggregated B300 deployment in
+  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231)
+  ([run 39112710364](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/39112710364))
+  runs N DEP2 prefill engines (two GPUs each) and one DEP8 decode engine (one
+  8-GPU node), each with its own sidecar, behind one KV-routing frontend. Prefill
+  engines push KV to decode over NIXL with the LIBFABRIC backend on EFA, and keep
+  an offloaded host KV tier. Image `vllm/vllm-openai:nightly-x86_64-dev-20261012-59e75f4`,
+  Dynamo `1.6.0.dev20261010`.
+
+  | Clients | Prefill engines (DEP2) | Decode | GPUs | Decode `--max-num-seqs` / `--max-num-batched-tokens` |
+  |---:|---:|---|---:|---|
+  | 256 | 2 | DEP8 | 12 | 18 / 180 |
+  | 768 | 2 | DEP8 | 12 | 40 / 400 |
+  | 1280 | 3 | DEP8 | 14 | 72 / 720 |
+  | 2048 | 4 | DEP8 | 16 | 132 / 1320 |
+  | 3584 | 5 | DEP8 | 18 | 168 / 1680 |
+
+  Decode captures FULL decode-only CUDA graphs in steps of 6 up to six times
+  `--max-num-seqs` (for example `{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":108,"cudagraph_capture_sizes":[6,12,...,108]}` at 18).
+
+  **EFA prerequisite.** NIXL's LIBFABRIC plugin needs the EFA userspace
+  stack (libfabric and rdma-core from the AWS EFA installer) inside the
+  container, and the CUDA 12 runtime it links against. Install them if the
+  image does not ship them.
+
+  Environment for every engine:
+
+  ```bash
+  export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 NCCL_CUMEM_ENABLE=1
+  export FI_PROVIDER=efa FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_FORK_SAFE=1
+  export UCX_TLS=cuda_copy,cuda_ipc,srd,tcp UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n UCX_RNDV_PIPELINE_ERROR_HANDLING=y
+  export NIXL_UCX_SGL_ENABLE=0
+  ```
+
+  Decode also sets `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4`. Loading takes a while,
+  so raise `VLLM_ENGINE_READY_TIMEOUT_S` and `VLLM_RPC_TIMEOUT` and pass
+  `--grpc-startup-deadline-secs` to the sidecars.
+
+  Prefill engine (one per DEP2 pair; give each its own gRPC, KV-event and DP RPC ports):
+
+  ```bash
+  vllm-rs serve deepseek-ai/DeepSeek-V4.1-Flash --grpc-port 19000 \
+    --data-parallel-size 2 --data-parallel-size-local 2 --tensor-parallel-size 1 --enable-expert-parallel \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":75161927680,"lazy_offload":true}}]}}' \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}' \
+    --attention-config '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}' \
+    --engram-config '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}' \
+    --kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}' \
+    --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}' \
+    --kv-cache-dtype fp8 --max-model-len 1048576 --gpu-memory-utilization 0.95 \
+    --max-num-seqs 64 --max-num-batched-tokens 16384 --long-prefill-token-threshold 8192 \
+    --prefill-schedule-interval 2 --prefix-cache-retention-interval 32768 \
+    --enable-ep-weight-filter --numa-bind --language-model-only \
+    --tokenizer-mode deepseek_v41 --reasoning-parser None
+  ```
+
+  The host KV tier is `SimpleCPUOffloadConnector` with 70 GiB per engine
+  (`cpu_bytes_to_use` 75161927680) and lazy offload.
+
+  Decode engine (set `--max-num-seqs`, `--max-num-batched-tokens` and the
+  graph sizes from the table):
+
+  ```bash
+  vllm-rs serve deepseek-ai/DeepSeek-V4.1-Flash --grpc-port 19002 \
+    --data-parallel-size 8 --data-parallel-size-local 8 --tensor-parallel-size 1 --enable-expert-parallel \
+    --enable-eplb --eplb-config '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":true,"log_balancedness_interval":3000}' \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}}' \
+    --attention-config '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}' \
+    --engram-config '{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}' \
+    --kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":<6*S>,"cudagraph_capture_sizes":[6,12,...,<6*S>]}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}' \
+    --kv-cache-dtype fp8 --max-model-len 1048576 --gpu-memory-utilization 0.95 \
+    --max-num-seqs <S> --max-num-batched-tokens <10*S> --prefill-schedule-interval 2 \
+    --no-enable-prefix-caching --enable-ep-weight-filter \
+    --numa-bind --numa-bind-nodes 0 0 0 0 1 1 1 1 --language-model-only \
+    --tokenizer-mode deepseek_v41 --reasoning-parser None
+  ```
+
+  Sidecars and frontend:
+
+  ```bash
+  # one per prefill engine
+  python3 -m dynamo.vllm.sidecar --grpc-endpoint 127.0.0.1:19000 \
+    --disaggregation-mode prefill --component prefill \
+    --dyn-tool-call-parser deepseek_v41 --dyn-reasoning-parser deepseek_v41
+  # decode
+  python3 -m dynamo.vllm.sidecar --grpc-endpoint 127.0.0.1:19002 \
+    --disaggregation-mode decode \
+    --dyn-tool-call-parser deepseek_v41 --dyn-reasoning-parser deepseek_v41
+  # frontend
+  export DYN_ROUTER_TEMPERATURE=0 DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE=1 DYN_TOKENIZER_CACHE_BYTES=8000000000
+  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TCP_CHANNEL_BUFFER=128
+  python3 -m dynamo.frontend --http-port 8000 --router-mode kv --router-session-affinity-ttl-secs 14400
+  ```
+
+  Session affinity keeps each conversation on one prefill engine so it reuses
+  that engine's prefix and host KV cache; send the conversation ID as the
+  Dynamo session ID.
+
   ## DGX Station (GB300) Tensor Parallel
 
   One GB300 exposes 252 GB of HBM next to 496 GB of Grace LPDDR5X, and the
