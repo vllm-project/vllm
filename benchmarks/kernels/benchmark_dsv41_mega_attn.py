@@ -10,17 +10,21 @@ whichever path launches fewer kernels.
               + mega kernel
     split-KV: fused_qnorm_rope_kv_rope_quant_insert (Q RoPE + pad + KV insert)
               + flash_mla_with_kvcache + fused_inv_rope_fp8_quant
+    swap-AB:  fused_qnorm_rope_kv_rope_quant_insert (Q pad + KV insert)
+              + swap-AB kernel (16 or 32 live heads only)
 
-Both arms fuse their Q preparation into the KV insert, so that op is charged
-to both; the mega arm's Q side is only a zero-pad (nothing at all when the
-shard is already at the kernel head count) because its kernel does the Q RoPE,
-the inverse RoPE and the FP8 cast.
+Every arm fuses its Q preparation into the KV insert, so that op is charged
+to each; the mega and swap-AB arms' Q side is only a zero-pad (nothing at all
+when the shard is already at the kernel head count) because their kernels do
+the Q RoPE, the inverse RoPE and the FP8 cast.
 
 ``--local-heads`` is the variable that decides the outcome: the mega kernel
 absorbs work proportional to the live head count while paying for the padded
 one, so it wins at 64 live heads and is a wash at 16 (TP4 on a 64-head model).
+The swap-AB kernel pays for the live heads only but runs one thread-block
+cluster per token; the layer takes it for steps of up to 16 tokens.
 
-Both arms use the same KV records so the comparison is kernel-for-kernel:
+All arms use the same KV records so the comparison is kernel-for-kernel:
 a V4.1 fp8 (528 B) sliding-window cache and a compressed cache that is either
 V4.1 fp8 or V4.1 NVFP4 (288 B) -- FlashMLA's SM100 sparse decode reads the
 NVFP4 compressed record in both the fused and unfused kernels.
@@ -44,6 +48,10 @@ from vllm.models.deepseek_v41.common.ops.fused_layout import permute_q_to_fused
 from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     alloc_mega_attn_output,
     is_flashmla_mega_attn_supported,
+)
+from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+    _SWAPAB_DECODE_KERNEL,
+    swapab_decode_supported,
 )
 from vllm.utils.math_utils import round_up
 
@@ -147,7 +155,7 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
     extra4 = extra.unsqueeze(-2)
     swa_2d = swa_backing
 
-    def mega():
+    def padded_q():
         # One launch zero-pads the fused-layout Q and inserts the SWA KV.
         q_pad = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q_fused,
@@ -161,11 +169,14 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
             SWA_BLOCK,
             False,  # apply_q_norm
             True,  # kv_mxfp8
-            False,  # apply_q_rope: the mega kernel rotates Q itself
+            False,  # apply_q_rope: the attention kernel rotates Q itself
             True,  # is_q_interleaved
         )
+        return q_fused if padded_heads == local_heads else q_pad
+
+    def mega():
         torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
-            q_fused if padded_heads == local_heads else q_pad,
+            padded_q(),
             swa4,
             swa_idx,
             scale,
@@ -230,7 +241,28 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
             tma_aligned_scales=True,
         )
 
-    return time_graph(mega), time_graph(split_kv)
+    def swapab():
+        _SWAPAB_DECODE_KERNEL(
+            q=padded_q(),
+            swa_cache=swa,
+            swa_idx=swa_idx,
+            swa_len=swa_len,
+            extra_cache=extra,
+            extra_idx=ex_idx,
+            extra_len=ex_len,
+            positions=pos32,
+            cos_sin_cache=cos_sin,
+            sink=sink,
+            heads=local_heads,
+            softmax_scale=scale,
+            out_data=out.data,
+            out_scale=out.scale,
+        )
+
+    swapab_us = None
+    if swapab_decode_supported(local_heads, swa_idx.shape[-1], topk_extra):
+        swapab_us = time_graph(swapab)
+    return time_graph(mega), time_graph(split_kv), swapab_us
 
 
 def main():
@@ -260,12 +292,16 @@ def main():
         f"decode, cudagraph (topk_swa=128, topk_extra={args.topk_extra}, "
         f"local_heads={args.local_heads}, extra={args.extra_bytes}B)"
     )
-    print(f"{'s_q':>6} {'mega_us':>9} {'split_kv_us':>12} {'speedup':>8}")
+    print(
+        f"{'s_q':>6} {'mega_us':>9} {'split_kv_us':>12} {'speedup':>8} "
+        f"{'swapab_us':>10} {'vs_mega':>8}"
+    )
     for s_q in args.decode_s_q:
-        m, s = bench_decode(
+        m, s, w = bench_decode(
             s_q, device, args.topk_extra, args.extra_bytes, args.local_heads
         )
-        print(f"{s_q:>6d} {m:9.1f} {s:12.1f} {s / m:7.2f}x")
+        swapab = f"{'-':>10} {'-':>8}" if w is None else f"{w:10.1f} {m / w:7.2f}x"
+        print(f"{s_q:>6d} {m:9.1f} {s:12.1f} {s / m:7.2f}x {swapab}")
 
 
 if __name__ == "__main__":
