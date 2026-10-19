@@ -143,5 +143,8 @@ performance. The previous requested stop boundary is superseded for this work.
 - [x] 12.6 Couple optional preparation with selected-session admission, verifying publication, failure fallback and cancellation.
 - [x] 12.7 Avoid request scans and guidance invalidation for signals that need neither; preserve custom-policy observations and scheduler age history.
 - [x] 12.8 Reuse the scheduler's actual cache hit for live admission demand, so a preceding admission cannot cause a shared prefix to be charged twice.
+- [x] 12.9 Keep completed/resident prefix members protected until multi-block preparation finishes, preserving shared cancellation and reset safety.
+- [x] 12.10 Cancel unused preparations before final result drain and acknowledge timed-out operations without hiding their failure; retain failure correlation.
+- [x] 12.11 Check complete preparation capacity before starting; preserve admission fairness and skip automatic resume work after admission without suppressing explicit importance.
 - [ ] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
 - [ ] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.

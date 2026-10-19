@@ -17,6 +17,7 @@ from vllm.config.kv_control import KVControlConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
 from vllm.v1.kv_hints.actions import (
     PRIMITIVE_VERSION,
     CopyTo,
@@ -399,21 +400,27 @@ class KVPolicyRuntime:
             or self._waiting_seconds(observed) >= self.settings.max_policy_wait_seconds
         ):
             return True
-        growth = sum(
+        growth = self._running_growth()
+        additional = self._allocation_demand(
+            request, computed, computed_tokens, local_computed_tokens
+        )
+        return additional <= max(
+            0, self.manager.block_pool.get_num_free_blocks() - growth
+        )
+
+    def _running_growth(self) -> int:
+        requests = tuple(islice(self.requests(), self.settings.max_policy_requests + 1))
+        if len(requests) > self.settings.max_policy_requests:
+            return self.manager.block_pool.num_gpu_blocks
+        return sum(
             self._allocation_demand(
                 running,
                 self.manager.empty_kv_cache_blocks,
                 running.num_computed_tokens,
                 running.num_computed_tokens,
             )
-            for running in self.requests()
+            for running in requests
             if running.status == RequestStatus.RUNNING
-        )
-        additional = self._allocation_demand(
-            request, computed, computed_tokens, local_computed_tokens
-        )
-        return additional <= max(
-            0, self.manager.block_pool.get_num_free_blocks() - growth
         )
 
     def before_admission(self, request: Request) -> bool:
@@ -435,6 +442,15 @@ class KVPolicyRuntime:
             matches(w) for w in (*self._pending.values(), *self._running.values())
         ):
             return True
+        observed = self._request_views.get(request.request_id)
+        if (
+            observed is not None
+            and self._view is not None
+            and self._waiting_seconds(observed) >= self.settings.max_policy_wait_seconds
+        ):
+            for work in tuple(self._pending.values()):
+                if matches(work):
+                    self._defer(work, "Preparation exceeded the admission wait budget")
         self.tick(
             force=True,
             admission_operations=frozenset(
@@ -444,6 +460,63 @@ class KVPolicyRuntime:
         return not any(
             matches(w) for w in (*self._pending.values(), *self._running.values())
         )
+
+    def _defer(self, work: _Work, reason: str) -> None:
+        self.controller.registry.update(
+            work.operation, OperationStatus.DEFERRED, reason=reason
+        )
+        self._pending.pop(work.operation.operation_id)
+        self._target_entries -= work.entries
+
+    def _queue_preparation(self, work: _Work) -> None:
+        self.controller.registry.update(
+            work.operation,
+            OperationStatus.QUEUED,
+            reason="Awaiting admission with complete preparation capacity",
+        )
+
+    def _preparation_fits(self, work: _Work) -> bool:
+        action = work.proposal.action
+        assert isinstance(action, CopyTo) and work.scope is not None
+        resources = self.manager.get_transfer_manager()
+        requirements = resources.load_requirements(
+            (
+                (
+                    make_block_hash_with_group_id(
+                        BlockHash(bytes.fromhex(b.block_hash)), b.group_id
+                    ),
+                    b.end_token,
+                )
+                for prefix in work.scope.prefixes
+                for b in prefix.blocks
+            ),
+            scope=f"{action.src.tier}/{self.controller.index.namespace}",
+        )
+        if requirements is None:
+            self._queue_preparation(work)
+            return False
+        loads, committed = requirements
+        total = (
+            self.manager.block_pool.num_gpu_blocks - 1 - self.manager.watermark_blocks
+        )
+        if (
+            resources.max_load_blocks and loads > resources.max_load_blocks
+        ) or committed > total:
+            self._defer(work, "Complete preparation exceeds its capacity budget")
+            return False
+        available = max(
+            0,
+            self.manager.block_pool.get_num_free_blocks()
+            - self.manager.watermark_blocks
+            - self._running_growth(),
+        )
+        if (
+            resources.max_load_blocks
+            and loads + resources.reserved_load_blocks > resources.max_load_blocks
+        ) or committed > available:
+            self._queue_preparation(work)
+            return False
+        return True
 
     def on_signal(
         self, operation: OperationResult, payload: SignalPayload, request_id: str | None
@@ -815,14 +888,23 @@ class KVPolicyRuntime:
             if w.proposal.not_before <= now
             or w.operation.operation_id in admission_operations
         ]
-        queued_demand = (
-            any(
-                not r.is_finished() and r.status != RequestStatus.RUNNING
-                for r in self.requests()
-            )
-            if any(w.proposal.wait_for_admission for w in ready)
-            else False
+        watch_admission = any(
+            w.proposal.wait_for_admission or w.proposal.skip_if_running for w in ready
         )
+        requests = (
+            tuple(islice(self.requests(), self.settings.max_policy_requests + 1))
+            if watch_admission
+            else ()
+        )
+        truncated = len(requests) > self.settings.max_policy_requests
+        waiting = {
+            r.session_id
+            for r in requests
+            if not r.is_finished() and r.status != RequestStatus.RUNNING
+        }
+        running = {r.session_id for r in requests if r.status == RequestStatus.RUNNING}
+        active = set() if truncated else running - waiting
+        queued_demand = truncated or bool(waiting)
         copies: dict[int, list[_Work]] = {}
         for candidate in (*self._pending.values(), *self._running.values()):
             if (
@@ -838,17 +920,18 @@ class KVPolicyRuntime:
             if executed >= self.settings.max_policy_actions_per_step:
                 break
             action = work.proposal.action
+            if work.proposal.skip_if_running and active.intersection(work.owners):
+                self._defer(work, "Session has already passed cache admission")
+                continue
             if (
                 work.proposal.wait_for_admission
                 and work.owners
                 and queued_demand
                 and work.operation.operation_id not in admission_operations
             ):
-                registry.update(
-                    work.operation,
-                    OperationStatus.QUEUED,
-                    reason="Awaiting session admission under queued demand",
-                )
+                self._queue_preparation(work)
+                continue
+            if work.proposal.wait_for_admission and not self._preparation_fits(work):
                 continue
             if isinstance(action, SetPriority) and action.value is not None:
                 origin = work.operation.origin

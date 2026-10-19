@@ -360,6 +360,15 @@ These observations motivate two independent changes and separate ablations:
   prune arrival/wait history. Only signals that can change scheduler scores
   invalidate cached guidance. Custom policy subclasses receive full observations
   unless they explicitly override the opt-out method.
+- A multi-block GPU preparation retains both completed destinations and already
+  resident members until the whole operation finishes or its caller cancels.
+  These are engine-owned operation references, not a public residency promise.
+  Shared callers release only their own interest; reset releases completed holds
+  while dispatched worker buffers remain protected until completion.
+- Rollout finalization prevents new preparation submissions, waits for submitted
+  receipts, ends the logical task to cancel unused preparation, and then collects
+  and acknowledges every result. A timeout remains a failed control outcome even
+  when cancellation cleanup successfully frees its result records.
 
 Tests extend the existing prefix, scheduler and HTTP suites. Their contracts are
 respectively signal-to-transfer behavior, admission-to-KV capacity behavior, and
@@ -370,6 +379,18 @@ small in-process behavioral tests before real full-workload timing.
 Use the same 256 trajectories at utilization 0.5 for native, quota and composed
 comparisons. Preserve all timing, control and per-family results; repeat runs,
 and label long-pause perturbations and oracle estimates separately.
+
+The V2 pressure run exposed eviction of 778 completed destination members before
+their multi-block operation finished. Keep both resident and newly loaded members
+referenced until the whole operation finishes, with independent interests for
+shared callers. Cancellation/reset release completed interests while dispatched
+worker buffers remain protected through completion. Admission-coupled preparation
+checks the complete target's load slots and physical commitment before starting;
+temporary shortages queue, impossible preparations and expired waiting fall back
+to recomputation. Late automatic resume work is skipped for already running
+sessions; explicit importance still applies. Task completion cancels unused
+preparation before draining results. Failed control work stays failed even when
+its result records are acknowledged, and measured cleanup includes worker drain.
 
 `integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.

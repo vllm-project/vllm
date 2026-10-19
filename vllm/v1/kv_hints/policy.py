@@ -86,6 +86,7 @@ class PolicyProposal:
     not_before: float = 0.0
     content_keys: frozenset[tuple[int, str]] = frozenset()
     wait_for_admission: bool = False
+    skip_if_running: bool = False
 
 
 @dataclass(frozen=True)
@@ -178,7 +179,8 @@ class RetentionPolicy(KVPolicy):
                         self._revision,
                         priority,
                         self.ttl_seconds,
-                    )
+                    ),
+                    skip_if_running=payload.signal == "resume",
                 ),
             )
         )
@@ -366,6 +368,7 @@ class ToolWaitPolicy(KVPolicy):
                             CacheLocation("gpu"),
                         ),
                         wait_for_admission=self.prefetch_on_admission,
+                        skip_if_running=self.prefetch_on_admission,
                     ),
                 )
             )
@@ -383,6 +386,7 @@ class ToolWaitPolicy(KVPolicy):
                         ),
                         view.now + max(0.0, payload.resume_after_seconds - lead),
                         wait_for_admission=self.prefetch_on_admission,
+                        skip_if_running=self.prefetch_on_admission,
                     ),
                 )
             )

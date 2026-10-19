@@ -59,7 +59,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.kv_hints.control import ControlContext
+from vllm.v1.kv_hints.control import ControlContext, OperationStatus
 from vllm.v1.kv_hints.engine import create_control_service
 from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
 from vllm.v1.outputs import (
@@ -327,15 +327,12 @@ def test_quota_counts_a_shared_cached_prefix_once_across_admissions():
     assert manager.block_pool.get_num_free_blocks() == 2
 
 
-@pytest.mark.parametrize("success", [False, True])
-def test_selected_session_prepares_cache_before_admission_and_falls_back(success):
-    from vllm.v1.kv_hints.native import ContentSpan
+def install_admission_prefetch(scheduler, controller):
     from vllm.v1.kv_hints.policy import ToolWaitPolicy
     from vllm.v1.kv_hints.transfers import KVTransferOperations
 
-    from .test_prefix_caching import QueuedControlTransfers, submit_movement
+    from .test_prefix_caching import QueuedControlTransfers
 
-    scheduler, controller, _ = quota_scheduler()
     runtime = scheduler.kv_policy_runtime
     runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
     adapter = QueuedControlTransfers()
@@ -345,6 +342,18 @@ def test_selected_session_prepares_cache_before_admission_and_falls_back(success
         controller.index.namespace,
         (adapter,),
     )
+    return adapter
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_selected_session_prepares_cache_before_admission_and_falls_back(success):
+    from vllm.v1.kv_hints.native import ContentSpan
+
+    from .test_prefix_caching import submit_movement
+
+    scheduler, controller, _ = quota_scheduler()
+    runtime = scheduler.kv_policy_runtime
+    adapter = install_admission_prefetch(scheduler, controller)
     request = scheduler.requests["a"]
     controller.index.associate(
         "a",
@@ -377,6 +386,98 @@ def test_selected_session_prepares_cache_before_admission_and_falls_back(success
     assert controller.registry.get(
         reference.message_id, reference.action_id
     ).status.terminal
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_preparation_waits_for_whole_load_budget_and_preserves_fairness(expired):
+    from vllm.v1.kv_hints.native import ContentSpan
+
+    from .test_prefix_caching import derived_results, submit_movement
+
+    scheduler, controller, now = quota_scheduler()
+    adapter = install_admission_prefetch(scheduler, controller)
+    scheduler.kv_cache_manager.get_transfer_manager().max_load_blocks = 1
+    parents = {}
+    for name in ("a", "b"):
+        request = scheduler.requests[name]
+        controller.index.associate(
+            name,
+            "c",
+            (ContentSpan(request.block_hashes[0].hex(), 0, 0, 16),),
+            expected_revision=0,
+        )
+        parents[name] = submit_movement(
+            controller,
+            name,
+            "signal",
+            {
+                "target": {
+                    "kind": "session",
+                    "session_id": name,
+                    "continuation_id": "c",
+                },
+                "signal": "resume",
+            },
+        )
+    assert not scheduler.schedule().scheduled_new_reqs
+    assert len(adapter.jobs) == 1
+    assert derived_results(controller, parents["b"])[0].status == OperationStatus.QUEUED
+    if expired:
+        now[0] = 0.5
+        output = scheduler.schedule()
+        assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+        assert (
+            derived_results(controller, parents["b"])[0].status
+            == OperationStatus.DEFERRED
+        )
+        assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    if not expired:
+        assert [r.req_id for r in scheduler.schedule().scheduled_new_reqs] == ["a"]
+        scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
+        assert not scheduler.schedule().scheduled_new_reqs
+        assert len(adapter.jobs) == 1
+        adapter.finish()
+        controller.executor.progress()
+        output = scheduler.schedule()
+        assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+        assert output.num_scheduled_tokens["b"] == 16
+
+
+@pytest.mark.parametrize("signal", ["resume", "importance"])
+def test_late_resume_skips_preparation_but_explicit_importance_still_applies(signal):
+    from vllm.v1.kv_hints.native import ContentSpan
+    from vllm.v1.kv_hints.policy import RetentionPolicy
+
+    from .test_prefix_caching import derived_results, submit_movement
+
+    scheduler, controller, _ = quota_scheduler()
+    adapter = install_admission_prefetch(scheduler, controller)
+    scheduler.kv_policy_runtime.policies["retention"] = RetentionPolicy()
+    request = scheduler.requests["a"]
+    controller.index.associate(
+        "a",
+        "c",
+        (ContentSpan(request.block_hashes[0].hex(), 0, 0, 16),),
+        expected_revision=0,
+    )
+    assert [r.req_id for r in scheduler.schedule().scheduled_new_reqs] == ["a"]
+    parent = submit_movement(
+        controller,
+        "late",
+        "signal",
+        {
+            "target": {"kind": "session", "session_id": "a", "continuation_id": "c"},
+            "signal": signal,
+            "importance": 50,
+        },
+    )
+    expected = (
+        OperationStatus.DEFERRED if signal == "resume" else OperationStatus.COMPLETED
+    )
+    assert all(r.status == expected for r in derived_results(controller, parent))
+    assert not adapter.jobs and not scheduler.kv_policy_runtime.has_pending
 
 
 def test_quota_observation_overflow_falls_back_to_scheduler_order():
