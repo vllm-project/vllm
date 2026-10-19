@@ -441,10 +441,31 @@ vllm serve model --enable-lora --max-lora-cls-labels 8
 
 The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
 
-This support has the following limitations:
+A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
 
-- A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
-- Token-classification adapters are not supported by this feature.
+## Token-Classification LoRA Adapters
+
+vLLM supports PEFT token-classification LoRA adapters for `BertForTokenClassification`, including LoRA on the backbone and classification head. The classification head can use LoRA A/B weights or a complete linear head saved through `modules_to_save=["classifier"]`.
+
+The adapter's classification head must have the same `num_labels` as the base model. Use a base checkpoint with the `BertForTokenClassification` architecture and matching label count:
+
+```python
+from vllm import LLM
+from vllm.lora.request import LoRARequest
+
+llm = LLM(
+    model="/path/to/bert-token-classifier",
+    runner="pooling",
+    enable_lora=True,
+)
+
+(output,) = llm.encode(
+    "Barack Obama visited Microsoft in Seattle.",
+    pooling_task="token_classify",
+    lora_request=LoRARequest("ner", 1, "/path/to/adapter"),
+)
+print(output.outputs.data)
+```
 
 ## Using Tips
 
