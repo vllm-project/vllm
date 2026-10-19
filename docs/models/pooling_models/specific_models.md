@@ -313,14 +313,12 @@ Start the server:
 ```shell
 vllm serve nvidia/llama-nemotron-rerank-vl-1b-v2 \
     --runner pooling \
-    --trust-remote-code \
-    --chat-template examples/pooling/score/template/nemotron-vl-rerank.jinja
+    --trust-remote-code
 ```
 
 !!! note
-    The chat template bundled with this checkpoint's tokenizer is not suitable
-    for the Score/Rerank APIs. Use the provided override template when serving:
-    `examples/pooling/score/template/nemotron-vl-rerank.jinja`.
+    The checkpoint declares its score template in its Sentence Transformers config, so vLLM applies it automatically (see [Templates declared by Sentence Transformers checkpoints](scoring.md#templates-declared-by-sentence-transformers-checkpoints)).
+    Revisions older than October 2026 need `--chat-template examples/pooling/score/template/nemotron-vl-rerank.jinja`.
 
 Score a text query against an image document:
 

@@ -151,7 +151,9 @@ def key_rec(c, t, k):
     table: slot | 1 << 31 for a compressed row, a window slot otherwise, -1 for
     none (it reads a zero record: its scores are masked, its values zeros)."""
     a, ratio = c["args"], c["ratio"]
-    val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1))
+    # a table this launch wrote (``krdy``) is read past the CU's cache
+    cm = CM_DEV if const_expr("krdy" in c) else 0
+    val = ld_i32(a["kt"], t * KEYS + fx.min(fx.max(k, 0), KEYS - 1), cm)
     ok = val != fx.Int32(-1)
     slot = ok.select(val & fx.Int32(0x7FFFFFFF), fx.Int32(0))
     if const_expr(ratio > 0):
@@ -209,9 +211,11 @@ def stage_split(c, unit):
     g = lane // 16
     r16 = lane % 16
     k0 = ch * ck
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
     # the key count, this lane's key and q: independent loads, out together
-    # (K1's key table holds -1 past a token's keys)
-    kv_len = ld_i32(a["klen"], t)
+    # (the key table holds -1 past a token's keys)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     key = k0 + kt * 16 + r16
     data, sc, okv = key_rec(c, t, key)
     qrow = d.heads * HEAD_DIM // 8

@@ -23,7 +23,8 @@ use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEvent
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::parser::unified::{
-    HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory, names,
+    BeamUnifiedParser, HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory,
+    names,
 };
 use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
@@ -70,7 +71,7 @@ impl DefaultChatOutputProcessor {
         tokenizer: DynTokenizer,
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
-        tool_strict_level: ToolStrictLevel,
+        tool_strict_level: Option<ToolStrictLevel>,
     ) -> ChatResult<Self> {
         Self::with_response_template(
             request,
@@ -92,7 +93,7 @@ impl DefaultChatOutputProcessor {
         response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
-        tool_strict_level: ToolStrictLevel,
+        tool_strict_level: Option<ToolStrictLevel>,
     ) -> ChatResult<Self> {
         let tool_name = tool_call_parser.resolve_tool_name(model_id);
         let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
@@ -135,6 +136,8 @@ impl DefaultChatOutputProcessor {
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
         }
+        let tool_strict_level =
+            tool_strict_level.unwrap_or_else(|| parser.default_tool_strict_level());
 
         Ok(Self {
             parser,
@@ -204,17 +207,19 @@ impl DefaultChatOutputProcessor {
             });
         }
 
-        // `hf` is built from the model's template, never by its registry constructor.
-        let parser = if parser_name == names::HF {
-            let template =
-                response_template.as_ref().map_err(|error| Error::ParserInitialization {
-                    kind: "unified",
-                    name: parser_name.to_string(),
-                    error: Box::new(error.clone()),
-                })?;
-            Box::new(HfUnifiedParser::new(template.clone(), tools, tokenizer))
-        } else {
-            factory.create(parser_name, tools, tokenizer)?
+        // Parsers driven by the model's template are built from it, never by
+        // their registry constructors.
+        let template = || {
+            response_template.clone().map_err(|error| Error::ParserInitialization {
+                kind: "unified",
+                name: parser_name.to_string(),
+                error: Box::new(error),
+            })
+        };
+        let parser: Box<dyn UnifiedParser> = match parser_name {
+            names::HF => Box::new(HfUnifiedParser::new(template()?, tools, tokenizer)),
+            names::BEAM => Box::new(BeamUnifiedParser::new(template()?, tools, tokenizer)),
+            _ => factory.create(parser_name, tools, tokenizer)?,
         };
 
         UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
@@ -292,6 +297,7 @@ mod tests {
 
     use thiserror_ext::AsReport as _;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+    use vllm_parser::output_grammar::BuiltOutputGrammar;
     use vllm_tokenizer::test_utils::TestTokenizer;
     use xgrammar_structural_tag::format::Format;
 
@@ -309,36 +315,45 @@ mod tests {
         )
     }
 
+    /// The output grammar for one `search` tool with `strict` under `parser`.
+    fn search_grammar(
+        parser: &str,
+        level: Option<ToolStrictLevel>,
+        strict: Option<bool>,
+        choice: ChatToolChoice,
+    ) -> Option<BuiltOutputGrammar> {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+            strict,
+            defer_loading: None,
+        }];
+        let mut request = ChatRequest {
+            tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
+            ..ChatRequest::for_test()
+        };
+        let mut processor = DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &ParserSelection::Explicit(parser.to_string()),
+            &ParserSelection::None,
+            level,
+        )
+        .unwrap();
+        processor.initialize(&[]).unwrap();
+        processor.build_output_grammar().unwrap()
+    }
+
     #[test]
     fn output_grammar_preserves_tool_strict_level() {
-        let build = |level, strict, choice| {
-            let tools = vec![ChatTool {
-                name: "search".to_string(),
-                description: None,
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } },
-                    "required": ["query"]
-                }),
-                strict,
-                defer_loading: None,
-            }];
-            let mut request = ChatRequest {
-                tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
-                ..ChatRequest::for_test()
-            };
-            let mut processor = DefaultChatOutputProcessor::new(
-                &mut request,
-                "other-model",
-                tokenizer(),
-                &ParserSelection::Explicit("qwen3_coder".to_string()),
-                &ParserSelection::None,
-                level,
-            )
-            .unwrap();
-            processor.initialize(&[]).unwrap();
-            processor.build_output_grammar().unwrap()
-        };
+        let build =
+            |level, strict, choice| search_grammar("qwen3_coder", Some(level), strict, choice);
 
         assert!(build(ToolStrictLevel::Auto, None, ChatToolChoice::Auto).is_none());
         let envelope = build(ToolStrictLevel::Function, None, ChatToolChoice::Auto).unwrap();
@@ -347,6 +362,19 @@ mod tests {
         assert_eq!(parameters, strict);
         assert_ne!(envelope, parameters);
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
+    }
+
+    #[test]
+    fn unset_tool_strict_level_falls_back_to_the_parser_default() {
+        let build = |parser, level| search_grammar(parser, level, None, ChatToolChoice::Auto);
+
+        // GLM-4.7 constrains auto tool calls unless the level is set explicitly.
+        let function = build("glm47", Some(ToolStrictLevel::Function));
+        assert_eq!(build("glm47", None), function);
+        assert!(function.is_some());
+        assert!(build("glm47", Some(ToolStrictLevel::Auto)).is_none());
+        // Other parsers default to `auto`.
+        assert!(build("qwen3_coder", None).is_none());
     }
 
     #[test]
@@ -377,7 +405,7 @@ mod tests {
                 tokenizer(),
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
-                ToolStrictLevel::Auto,
+                None,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -420,7 +448,7 @@ mod tests {
                 tokenizer(),
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
-                ToolStrictLevel::Auto,
+                None,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -444,7 +472,7 @@ mod tests {
             tokenizer(),
             &selection,
             &selection,
-            ToolStrictLevel::Auto,
+            None,
         )
         .unwrap();
     }
@@ -459,7 +487,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Auto,
-            ToolStrictLevel::Auto,
+            None,
         )
         .unwrap();
     }
@@ -477,7 +505,7 @@ mod tests {
                 tokenizer(),
                 tool,
                 reasoning,
-                ToolStrictLevel::Auto,
+                None,
             )
             .unwrap();
         }
@@ -492,7 +520,7 @@ mod tests {
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
-            ToolStrictLevel::Auto,
+            None,
         ) {
             Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
             Err(error) => error,
@@ -539,7 +567,7 @@ mod tests {
             template,
             tool,
             reasoning,
-            ToolStrictLevel::Auto,
+            None,
         )?;
         Ok(!request.decode_options.skip_special_tokens)
     }
@@ -562,6 +590,20 @@ mod tests {
             .assert_eq(&error(Err(HfTemplateError::Missing)));
         expect_test::expect!["failed to initialize unified parser `hf`: invalid response_template: response_template must define 'start_anchor' or 'start_anchor_pattern'."]
             .assert_eq(&error(invalid_template()));
+    }
+
+    #[test]
+    fn explicit_beam_uses_the_model_response_template() {
+        let beam = ParserSelection::Explicit("beam".to_string());
+        crate::parser::validate_parser_overrides(&beam, &beam).unwrap();
+        assert!(keeps_special_tokens("other-model", &loaded_template(), &beam, &beam).unwrap());
+
+        let error =
+            keeps_special_tokens("other-model", &Err(HfTemplateError::Missing), &beam, &beam)
+                .unwrap_err()
+                .to_report_string();
+        expect_test::expect!["failed to initialize unified parser `beam`: the model's tokenizer_config.json provides no response_template"]
+            .assert_eq(&error);
     }
 
     #[test]
