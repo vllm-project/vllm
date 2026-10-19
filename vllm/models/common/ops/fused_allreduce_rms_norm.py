@@ -90,7 +90,8 @@ def moe_finalize_allreduce_max_num_tokens(hidden_size: int, dtype: torch.dtype) 
     TRT-LLM workspace, so this stays within both its own one-shot bound and the
     size up to which vLLM picks the one-shot all-reduce anyway. Used by a MoE
     layer to decide whether, and up to which batch size, to leave its top-k
-    reduction to ``fused_allreduce_rms_norm``.
+    reduction to ``fused_allreduce_rms_norm``. Creates (or reuses) that
+    workspace, so a layer only defers when the fused kernel will run.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1 or flashinfer_trtllm_fused_allreduce_norm is None:
@@ -100,6 +101,7 @@ def moe_finalize_allreduce_max_num_tokens(hidden_size: int, dtype: torch.dtype) 
     )
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         _resolve_fi_ar_backend,
+        get_fi_ar_workspace,
     )
 
     backend, _ = _resolve_fi_ar_backend(get_tp_group().cpu_group)
@@ -111,6 +113,16 @@ def moe_finalize_allreduce_max_num_tokens(hidden_size: int, dtype: torch.dtype) 
     )
     max_token_num = _max_token_num(tp_size, hidden_size, dtype)
     if one_shot_mb is None or max_token_num is None:
+        return 0
+    workspace = get_fi_ar_workspace(
+        world_size=tp_size,
+        rank=get_tensor_model_parallel_rank(),
+        max_token_num=max_token_num,
+        hidden_dim=hidden_size,
+        dtype=dtype,
+        group=get_tp_group().cpu_group,
+    )
+    if workspace is None or workspace.backend != "trtllm":
         return 0
     element_size = torch.tensor([], dtype=dtype).element_size()
     return min(
@@ -177,7 +189,8 @@ def _moe_finalize_allreduce_rms_norm(
             )
             return norm_out, residual_out
 
-    # Finalize the top-k reduction unfused, then reduce as a plain partial.
+    # Layers defer only when the fused kernel is available (see
+    # moe_finalize_allreduce_max_num_tokens); other callers finalize unfused here.
     permuted_idx = routed.expanded_idx_to_permuted_idx
     rows = routed.gemm2_permuted[permuted_idx.clamp(min=0).long()]
     weights = torch.where(permuted_idx >= 0, expert_weights.float(), 0.0)

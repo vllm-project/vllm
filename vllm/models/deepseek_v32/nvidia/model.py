@@ -153,8 +153,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             return
         experts = self.mlp.experts
         experts_cls = getattr(experts.routed_experts.quant_method, "experts_cls", None)
-        # The runner scales the routed output itself unless the router folds
-        # routed_scaling_factor into the routing weights.
+        # The deferred output carries no routed scaling: defer only when the
+        # router folds routed_scaling_factor into the routing weights, so the
+        # experts have no factor of their own to apply.
         if (
             experts_cls not in _DEFERRING_EXPERTS
             or experts.routed_scaling_factor != 1.0
@@ -300,7 +301,7 @@ class DeepseekV32Model(torch.nn.Module):
         # A layer's output feeds the next layer's input norm or the final norm,
         # both of which can finalize a MoE output, except on a non-last PP rank,
         # whose last layer ships its output as IntermediateTensors.
-        local_layers = list(islice(self.layers, self.start_layer, self.end_layer))
+        local_layers = self.layers[self.start_layer : self.end_layer]
         if not get_pp_group().is_last_rank:
             local_layers = local_layers[:-1]
         for layer in local_layers:
