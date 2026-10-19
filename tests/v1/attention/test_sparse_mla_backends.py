@@ -3919,39 +3919,53 @@ def test_sparse_mqa_hisparse_lanes(
     )
 
 
-@pytest.mark.parametrize("max_swap_rows", [1, 4], ids=["over_capacity", "mixed"])
-def test_hisparse_resident_prefill_uses_attention_block_stride(max_swap_rows):
-    """Resident batches with prefill rows read resident pages directly, whether
-    they exceed the swap-row capacity or fit it."""
-    expected = torch.tensor([[19]], dtype=torch.int32)
-    cache_handle = SimpleNamespace(
-        all_context_pages_resident=True,
-        num_decode_tokens=1,
-        num_actual_tokens=2,
-        view=SimpleNamespace(block_size=64, attention_block_stride=832),
-        block_table=torch.tensor([[3]], dtype=torch.int32),
-        batch_block_table=lambda: torch.tensor([[3]], dtype=torch.int32),
-        runtime=SimpleNamespace(max_swap_rows=max_swap_rows),
+@pytest.mark.parametrize(
+    ("num_decode_tokens", "max_swap_rows"),
+    [(2, 1), (1, 4)],
+    ids=["over_capacity", "mixed"],
+)
+def test_hisparse_resident_prefill_reads_residency_by_state_row(
+    num_decode_tokens, max_swap_rows
+):
+    """Resident prefill conversion reads each request's residency row through
+    its state slot, at the attention block stride."""
+    topk = torch.zeros((2, 128), dtype=torch.int32, device=DEVICE_TYPE)
+    # [state slots, resident groups, pages]; the leader reads group 1.
+    residency = torch.tensor(
+        [[[7], [3]], [[8], [5]]], dtype=torch.int32, device=DEVICE_TYPE
     )
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((2, 1), dtype=torch.int32)
-    index_group._convert_once = MagicMock(return_value=expected)
-    topk = torch.zeros((2, 1), dtype=torch.int32)
+    runtime = SimpleNamespace(
+        max_swap_rows=max_swap_rows,
+        request_state_indices=torch.tensor(
+            [1, 0], dtype=torch.int32, device=DEVICE_TYPE
+        ),
+    )
+    cache = HiSparseCacheHandle(runtime)
+    cache.view = SimpleNamespace(block_size=64, attention_block_stride=832)
+    cache.block_table = residency[:, 1]
+    cache.num_actual_tokens = 2
+    cache.num_decode_tokens = num_decode_tokens
+    group = HiSparseMLAIndexGroup(
+        logical_topk_indices=topk,
+        physical_topk_indices=torch.empty_like(topk),
+        valid_topk_counts=torch.empty(2, dtype=torch.int32, device=DEVICE_TYPE),
+        side_stream=torch.Stream(),
+        logical_topk_ready=torch.Event(),
+        physical_topk_ready=torch.Event(),
+        has_indexer=True,
+        caches=[cache],
+    )
     metadata = SimpleNamespace(
-        req_id_per_token=torch.zeros(2, dtype=torch.int32),
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE)
     )
 
-    result = index_group.convert_logical_to_physical_topk(
-        0,
-        topk,
-        metadata,
-        block_stride_rows=None,
-        return_valid_counts=False,
+    group.set_logical_topk_ready(0)
+    physical = group.convert_logical_to_physical_topk(
+        0, topk, metadata, block_stride_rows=None, return_valid_counts=False
     )
 
-    assert result is expected
-    assert index_group._convert_once.call_args.kwargs["block_stride_rows"] == 832
+    expected = torch.tensor([[5 * 832], [3 * 832]], device=DEVICE_TYPE)
+    torch.testing.assert_close(physical, expected.int().expand_as(topk))
 
 
 def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
