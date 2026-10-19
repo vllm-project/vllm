@@ -6,6 +6,17 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+def _torch_hc_prenorm_gemm(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+):
+    out = x.float() @ fn.t()
+    gemm_out_mul.copy_(out.unsqueeze(0))
+    gemm_out_sqrsum.copy_(x.square().sum(dim=-1, keepdim=True).unsqueeze(0))
+
+
 def _hc_prenorm_gemm_outputs(
     x: torch.Tensor,
     fn: torch.Tensor,
