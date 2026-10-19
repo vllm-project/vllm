@@ -26,8 +26,6 @@ def _context_kv_kernel(
     TOKEN_STRIDE: tl.constexpr,
     PAGE: tl.constexpr,
     EPS: tl.constexpr,
-    VALUE_SCALE: tl.constexpr,
-    NEOX: tl.constexpr,
     FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -54,14 +52,9 @@ def _context_kv_kernel(
     key = key * tl.rsqrt(total / DIM + EPS)[:, None] * weight[None, :]
     key = key.to(KV.dtype.element_ty).to(tl.float32)
     half: tl.constexpr = DIM // 2
-    if NEOX:
-        partner = (col + half) % DIM
-        second = col >= half
-        rope_col = col % half
-    else:
-        partner = col ^ 1
-        second = col % 2 != 0
-        rope_col = col // 2
+    partner = (col + half) % DIM
+    second = col >= half
+    rope_col = col % half
     other = tl.gather(key, tl.broadcast_to(partner[None, :], (4, BLOCK)), 1)
     position = tl.load(POSITIONS + row, (row < ROWS) & (slot >= 0), 0).to(tl.int64)
     cosine = tl.load(ROPE + position[:, None] * DIM + rope_col[None, :], mask, 0)
@@ -79,11 +72,9 @@ def _context_kv_kernel(
         + col[None, :]
     )
     value = tl.load(KV + offsets + HEADS * DIM, mask, 0).to(tl.float32)
-    value = value * VALUE_SCALE
     if FP8:
-        # Preserve BF16 rounding after RoPE and value scaling.
+        # Preserve BF16 rounding after RoPE.
         key = key.to(KV.dtype.element_ty).to(tl.float32)
-        value = value.to(KV.dtype.element_ty).to(tl.float32)
         k_scale = tl.load(SCALE_PTRS + layer * 2).to(tl.pointer_type(tl.float32))
         v_scale = tl.load(SCALE_PTRS + layer * 2 + 1).to(tl.pointer_type(tl.float32))
         key = tl.minimum(tl.maximum(key / tl.load(k_scale), -FP8_MAX), FP8_MAX)
@@ -101,11 +92,9 @@ def store_context_kv(
     slots: torch.Tensor,
     cache: torch.Tensor,
     eps: float,
-    value_scale: float,
-    is_neox: bool,
     scale_ptrs: torch.Tensor | None = None,
 ) -> None:
-    """Normalize, rotate, and scatter all draft layers' context K/V."""
+    """Normalize, apply NeoX RoPE, and scatter all draft layers' context K/V."""
     rows, layers, _, heads, dim = kv.shape
     fp8 = cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     assert cache.dtype == kv.dtype or fp8
@@ -130,8 +119,6 @@ def store_context_kv(
             cache.stride(2),
             cache.shape[2],
             eps,
-            value_scale,
-            is_neox,
             fp8,
             torch.finfo(cache.dtype).max if fp8 else 0.0,
             triton.next_power_of_2(dim),

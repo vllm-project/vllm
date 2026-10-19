@@ -320,8 +320,6 @@ class DFlashQwen3Attention(nn.Module):
 
 
 class DFlashQwen3DecoderLayer(nn.Module):
-    attention_cls = DFlashQwen3Attention
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -356,7 +354,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # distilled the other way has to say so here.
         is_neox_style = getattr(config, "is_neox_style", True)
 
-        self.self_attn = self.attention_cls(
+        self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,

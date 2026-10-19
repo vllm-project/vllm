@@ -19,14 +19,13 @@ class PassThroughPrepareAndFinalize(MoEPrepareAndFinalizeNoDPEPModular):
     """Hands activations and routing straight to experts that own their EP
     communication."""
 
-    def post_init_setup(self, fused_experts: mk.FusedMoEExperts) -> None:
-        self._defer_output = fused_experts.moe_config.use_deferred_moe_finalize
-
     def output_is_reduced(self) -> bool:
         return True
 
     def supports_deferred_moe_finalize(self) -> bool:
-        return getattr(self, "_defer_output", False)
+        # The experts apply the top-k weights and combine internally; there
+        # is no finalize left for a consumer to take over.
+        return False
 
     def prepare(
         self,

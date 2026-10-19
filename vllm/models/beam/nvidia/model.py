@@ -11,20 +11,14 @@ selection.
 
 import math
 from collections.abc import Iterable
-from functools import partial
 from typing import cast
 
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    get_tp_group,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -50,11 +44,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.beam import BeamConfig
 
 from .activation import beam_softcap_logits
-from .allreduce import (
-    BeamAllReduceWorkspace,
-    beam_allreduce_norm_residual_norm,
-    beam_finalize_allreduce_norm_residual_norm,
-)
 from .attention import BeamAttention, use_merged_qkv_gate
 from .layernorm import RMSNorm, beam_norm_residual_norm, beam_rms_norm
 from .moe import BeamMLP, BeamSparseMoeBlock
@@ -80,7 +69,6 @@ class BeamDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        allreduce_workspace: BeamAllReduceWorkspace | None = None,
     ) -> None:
         super().__init__()
         config = cast(BeamConfig, vllm_config.model_config.hf_config)
@@ -88,98 +76,30 @@ class BeamDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
         self.layer_id = extract_layer_index(prefix)
         self.rms_norm_eps = config.rms_norm_eps
-        fuse_attention_reduce = (
-            allreduce_workspace is not None and not config.attention_bias
-        )
 
         self.self_attn = BeamAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.self_attn",
-            reduce_results=not fuse_attention_reduce,
+            config, cache_config, quant_config, prefix=f"{prefix}.self_attn"
         )
 
-        if self.layer_id in config.mlp_only_layers:
+        if config.mlp_layer_types[self.layer_id] == "dense":
             self.mlp: nn.Module = BeamMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=allreduce_workspace is None,
             )
         else:
             self.mlp = BeamSparseMoeBlock(
-                vllm_config=vllm_config,
-                prefix=f"{prefix}.mlp",
-                reduce_results=allreduce_workspace is None,
-            )
-
-        fused_boundary = (
-            partial(beam_allreduce_norm_residual_norm, workspace=allreduce_workspace)
-            if allreduce_workspace is not None
-            else beam_norm_residual_norm
-        )
-        self.attention_boundary = (
-            fused_boundary if fuse_attention_reduce else beam_norm_residual_norm
-        )
-        fuse_mlp_reduce = allreduce_workspace is not None and (
-            isinstance(self.mlp, BeamMLP)
-            or (
-                not self.mlp.is_sequence_parallel
-                and self.mlp.experts.moe_config.skip_final_all_reduce
-            )
-        )
-        self.mlp_boundary = (
-            fused_boundary if fuse_mlp_reduce else beam_norm_residual_norm
-        )
-        self.finalize_boundary = None
-        if fuse_mlp_reduce and isinstance(self.mlp, BeamSparseMoeBlock):
-            assert allreduce_workspace is not None
-            moe_config = self.mlp.experts.moe_config
-            allow_ep = moe_config.ep_size == allreduce_workspace.world_size
-            max_tokens = allreduce_workspace.max_tokens
-            if allow_ep:
-                max_tokens = min(max_tokens, allreduce_workspace.ep_finalize_max_tokens)
-            self.mlp.defer_finalize(max_tokens, allow_ep=allow_ep)
-            self.finalize_boundary = partial(
-                beam_finalize_allreduce_norm_residual_norm,
-                workspace=allreduce_workspace,
-                routed_scale=self.mlp.experts.routed_scaling_factor,
-                oneshot_max_tokens=(
-                    allreduce_workspace.ep_finalize_oneshot_max_tokens
-                    if allow_ep
-                    else 0
-                ),
+                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
             )
 
         self.input_layernorm = RMSNorm(config.hidden_size)
         self.pre_feedforward_layernorm = RMSNorm(config.hidden_size)
-        self.post_attention_layernorm = (
-            RMSNorm(config.hidden_size) if config.enable_sandwich_norm else None
-        )
-        self.post_feedforward_layernorm = (
-            RMSNorm(config.hidden_size) if config.enable_sandwich_norm else None
-        )
-        self.mlp_post_norm_fused = isinstance(
-            self.mlp, BeamSparseMoeBlock
-        ) and self.mlp.fuse_output_post_norm(
-            self.post_feedforward_layernorm,
-            self.rms_norm_eps,
-            workspace=allreduce_workspace,
-        )
-
-        self.attn_scales = (
-            _depth_scaled_coeffs(self.layer_id, is_attention=True)
-            if config.self_attn_depth_scaled_residual
-            else None
-        )
-        self.mlp_scales = (
-            _depth_scaled_coeffs(self.layer_id, is_attention=False)
-            if config.mlp_depth_scaled_residual
-            else None
-        )
+        self.post_attention_layernorm = RMSNorm(config.hidden_size)
+        self.post_feedforward_layernorm = RMSNorm(config.hidden_size)
+        self.attn_scales = _depth_scaled_coeffs(self.layer_id, is_attention=True)
+        self.mlp_scales = _depth_scaled_coeffs(self.layer_id, is_attention=False)
 
     def forward(
         self,
@@ -194,48 +114,22 @@ class BeamDecoderLayer(nn.Module):
             else normalized_states
         )
         x = self.self_attn(positions, x)
-        hidden_states, x = self.attention_boundary(
+        hidden_states, x = beam_norm_residual_norm(
             x,
             hidden_states,
-            self.post_attention_layernorm.weight
-            if self.post_attention_layernorm is not None
-            else None,
-            self.rms_norm_eps if self.post_attention_layernorm is not None else None,
+            self.post_attention_layernorm.weight,
+            self.rms_norm_eps,
             self.pre_feedforward_layernorm.weight,
             self.rms_norm_eps,
             self.attn_scales,
         )
         assert x is not None
-        if isinstance(self.mlp, BeamSparseMoeBlock) and self.mlp.output_boundary_fused:
-            return self.mlp.forward_boundary(
-                x,
-                hidden_states,
-                self.post_feedforward_layernorm.weight
-                if self.post_feedforward_layernorm is not None
-                else None,
-                self.rms_norm_eps
-                if self.post_feedforward_layernorm is not None
-                else None,
-                next_norm_weight,
-                self.rms_norm_eps if next_norm_weight is not None else None,
-                self.mlp_scales,
-            )
         x = self.mlp(x)
-        boundary = self.mlp_boundary
-        if isinstance(x, UnfinalizedMoEOutput):
-            assert self.finalize_boundary is not None
-            boundary = self.finalize_boundary
-        return boundary(
+        return beam_norm_residual_norm(
             x,
             hidden_states,
-            self.post_feedforward_layernorm.weight
-            if self.post_feedforward_layernorm is not None
-            and not self.mlp_post_norm_fused
-            else None,
-            self.rms_norm_eps
-            if self.post_feedforward_layernorm is not None
-            and not self.mlp_post_norm_fused
-            else None,
+            self.post_feedforward_layernorm.weight,
+            self.rms_norm_eps,
             next_norm_weight,
             self.rms_norm_eps if next_norm_weight is not None else None,
             self.mlp_scales,
@@ -309,26 +203,9 @@ class BeamModel(nn.Module, EagleModelMixin):
             )
         else:
             self.embed_tokens = PPMissingLayer()
-        tp_group = get_tp_group()
-        self.allreduce_workspace = BeamAllReduceWorkspace.create(
-            tp_group.cpu_group,
-            config.hidden_size,
-            max(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                vllm_config.scheduler_config.max_num_seqs,
-            ),
-            vllm_config.model_config.dtype,
-            device_group=tp_group.device_group,
-        )
-        if self.allreduce_workspace is not None:
-            self.allreduce_workspace.all_gather = partial(tp_group.all_gather, dim=0)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BeamDecoderLayer(
-                vllm_config=vllm_config,
-                prefix=prefix,
-                allreduce_workspace=self.allreduce_workspace,
-            ),
+            lambda prefix: BeamDecoderLayer(vllm_config=vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = (
@@ -393,15 +270,7 @@ class BeamModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            ignore_unexpected_suffixes=[
-                ".weight_scale",
-                "_weight_scale",
-                ".input_scale",
-                "_input_scale",
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -438,6 +307,8 @@ class BeamForCausalLM(
                 "Beam has not been validated with EPLB; run without --enable-eplb."
             )
         if parallel_config.use_sequence_parallel_moe:
+            # Data-parallel attention with expert-parallel MoE routes tokens
+            # through the sequence-parallel path, which is not yet validated.
             raise NotImplementedError(
                 "Beam has not been validated with sequence-parallel MoE "
                 "(data parallelism with expert parallelism)."
@@ -535,16 +406,6 @@ class BeamForCausalLM(
             logits = beam_softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
-    def _strip_lm_head_padding(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        # Strip padding from the LM head's input dimension.
-        hidden_size = self.config.hidden_size
-        for name, weight in weights:
-            if name.endswith("lm_head.weight") and weight.shape[-1] > hidden_size:
-                weight = weight[..., :hidden_size].contiguous()
-            yield name, weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(self._strip_lm_head_padding(weights))
+        return loader.load_weights(weights)

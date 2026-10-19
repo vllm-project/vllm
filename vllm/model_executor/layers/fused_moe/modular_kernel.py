@@ -843,6 +843,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
 
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        """Hidden size of the finalized output. Experts that drop the hidden
+        padding return the unpadded size."""
+        return hidden_dim
+
     @abstractmethod
     def workspace_shapes(
         self,
@@ -1116,7 +1121,7 @@ class FusedMoEKernelModularImpl:
         Returns the workspace tensors, output tensor, and whether the output
         uses a prepare/finalize-provided allocation.
         """
-        assert M_full >= 0 and M_chunk >= 0
+        assert M_full > 0 and M_chunk > 0
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
@@ -1158,8 +1163,7 @@ class FusedMoEKernelModularImpl:
         # externally aliased. The workspace manager profiles and locks a
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
-        # Idle collective ranks still need the workspace manager initialized.
-        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
+        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
@@ -1315,10 +1319,15 @@ class FusedMoEKernelModularImpl:
             a1q, w1, w2, topk_ids
         )
 
-        # After dispatch, an EP rank may have no work. With passthrough,
-        # dispatch happens inside the experts, so idle ranks must participate.
-        if M_full == 0 and not self.moe_parallel_config.use_passthrough_all2all:
-            return torch.empty_like(a1q, dtype=in_dtype)
+        # This happens when none of the tokens from the all2all reach this
+        # EP rank. Also, note that this is only relevant for CUDAGraph
+        # incompatible all2all kernels like the DeepEP high-throughput
+        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
+        # low-latency kernels are always batched and can never run into
+        # the tensor.numel() == 0 case.
+        if M_full == 0:
+            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1502,7 +1511,12 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:

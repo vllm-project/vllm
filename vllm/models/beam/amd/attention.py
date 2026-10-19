@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
-
 import torch
 from torch import nn
 
@@ -28,11 +26,7 @@ from .layernorm import RMSNorm
 
 
 def use_merged_qkv_gate(config: BeamConfig, tp_size: int) -> bool:
-    return (
-        config.attention_output_gate
-        and not config.attention_bias
-        and config.num_key_value_heads >= tp_size
-    )
+    return config.num_key_value_heads >= tp_size
 
 
 class BeamAttention(nn.Module):
@@ -84,66 +78,34 @@ class BeamAttention(nn.Module):
                 self.head_dim,
                 self.total_num_heads,
                 self.total_num_kv_heads,
-                bias=config.attention_bias,
+                bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=config.attention_bias,
+            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
             reduce_results=reduce_results,
         )
 
-        qk_norm_has_weight = not config.use_paramfree_qk_norm
         self.rms_norm_eps = config.rms_norm_eps
-        self.q_norm = RMSNorm(self.head_dim, has_weight=qk_norm_has_weight)
-        self.k_norm = RMSNorm(self.head_dim, has_weight=qk_norm_has_weight)
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
 
-        self.disable_rope = self.layer_id in config.nope_layer_ids
-        self.use_ssmax = bool(config.ssmax) and self.disable_rope
-        self.ssmax_mode = config.ssmax_scale_mode if self.use_ssmax else "none"
-        if self.ssmax_mode not in ("none", "default", "root10", "root1000"):
-            raise ValueError(f"Unknown ssmax_scale_mode: {self.ssmax_mode!r}")
-        self.ssmax_offset = config.ssmax_offset
-        self.ssmax_log_divisor = (
-            math.log(config.ssmax_offset)
-            if self.use_ssmax
-            and self.ssmax_mode == "default"
-            and config.ssmax_divide_by_log_offset
-            else 1.0
-        )
-        self.attn_output_gate = bool(config.attention_output_gate)
-        if self.attn_output_gate:
-            self.gate_floor = float(config.attention_output_gate_floor)
-            self.gate_temperature = float(config.attention_output_gate_temperature)
-            if not 0 <= self.gate_floor < 1:
-                raise ValueError(
-                    "attention_output_gate_floor must be in [0, 1); "
-                    f"got {self.gate_floor}"
-                )
-            if self.gate_temperature <= 0:
-                raise ValueError(
-                    "attention_output_gate_temperature must be positive; "
-                    f"got {self.gate_temperature}"
-                )
-            if not self.merged_qkv_gate:
-                self.output_gate_proj = ColumnParallelLinear(
-                    hidden_size,
-                    self.total_num_heads * self.head_dim,
-                    bias=False,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.output_gate_proj",
-                )
-            if config.attention_output_gate_bias:
-                self.gate_bias = nn.Parameter(torch.zeros(self.num_heads))
-                set_weight_attrs(
-                    self.gate_bias, {"weight_loader": sharded_weight_loader(0)}
-                )
-            else:
-                self.register_parameter("gate_bias", None)
+        self.disable_rope = config.layer_types[self.layer_id] == "full_attention"
+        if not self.merged_qkv_gate:
+            self.output_gate_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.output_gate_proj",
+            )
+        self.gate_bias = nn.Parameter(torch.zeros(self.num_heads))
+        set_weight_attrs(self.gate_bias, {"weight_loader": sharded_weight_loader(0)})
 
         if self.disable_rope:
             self.rotary_emb = None
@@ -181,8 +143,7 @@ class BeamAttention(nn.Module):
             )
         else:
             qkv, _ = self.qkv_proj(hidden_states)
-            if self.attn_output_gate:
-                gate, _ = self.output_gate_proj(hidden_states)
+            gate, _ = self.output_gate_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         rope = self.rotary_emb
@@ -197,21 +158,18 @@ class BeamAttention(nn.Module):
             self.head_dim,
             rope.rotary_dim if rope is not None else 0,
             rope.is_neox_style if rope is not None else True,
-            self.ssmax_mode,
-            self.ssmax_offset,
-            self.ssmax_log_divisor,
+            "root10" if self.disable_rope else "none",
         )
 
         attn_output = self.attn(q, k, v)
-        if gate is not None:
-            attn_output = beam_output_gate(
-                attn_output,
-                gate,
-                self.gate_bias,
-                num_heads=self.num_heads,
-                head_dim=self.head_dim,
-                floor=self.gate_floor,
-                temperature=self.gate_temperature,
-            )
+        attn_output = beam_output_gate(
+            attn_output,
+            gate,
+            self.gate_bias,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            floor=0.0,
+            temperature=1.0,
+        )
         output, _ = self.o_proj(attn_output)
         return output

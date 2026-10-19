@@ -38,7 +38,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
@@ -435,22 +434,16 @@ def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
             torch.testing.assert_close(experts.gemm1_beta, beta * expected)
 
 
-@pytest.mark.parametrize(
-    "m,chunk_size,ep_size", [(1, None, 1), (16, None, 1), (16, 5, 1), (16, None, 4)]
-)
+@pytest.mark.parametrize("m,chunk_size", [(1, None), (16, None), (16, 5)])
 @torch.inference_mode()
 def test_trtllm_fp4_moe_deferred_finalize(
     m: int,
     chunk_size: int | None,
-    ep_size: int,
     monkeypatch: pytest.MonkeyPatch,
     workspace_init,
 ):
     """TRTLLM-Gen NvFP4 modular experts can leave the top-k finalize to the caller."""
     e, topk, n, k = 128, 8, 1024, 1024
-    local_experts = e // ep_size
-    ep_rank = int(ep_size > 1)
-    offset = ep_rank * local_experts
     dtype = torch.bfloat16
     if chunk_size is not None:
         monkeypatch.setattr(
@@ -463,40 +456,23 @@ def test_trtllm_fp4_moe_deferred_finalize(
     ):
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1_q, w2_q, quant_config = make_test_quant_config(
-            local_experts,
-            n,
-            k,
-            in_dtype=dtype,
-            quant_dtype="nvfp4",
-            is_scale_swizzled=False,
+            e, n, k, in_dtype=dtype, quant_dtype="nvfp4", is_scale_swizzled=False
         )
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
-        expert_map = None
-        if ep_size > 1:
-            topk_ids[0] = torch.arange(topk, device="cuda")
-            topk_ids[1] = torch.arange(topk, device="cuda") + offset
-            expert_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-            expert_map[offset : offset + local_experts] = torch.arange(
-                local_experts, device="cuda", dtype=torch.int32
-            )
 
-        # One rank of a replicated-token TP or EP group.
+        # One rank of a TP group, which deferral needs.
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size=2 * n if ep_size == 1 else n,
-            num_local_experts=local_experts,
+            intermediate_size=2 * n,
+            num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
             moe_parallel_config=replace(
-                FusedMoEParallelConfig.make_no_parallel(),
-                tp_size=2 if ep_size == 1 else 1,
-                ep_size=ep_size,
-                ep_rank=ep_rank,
-                use_ep=ep_size > 1,
+                FusedMoEParallelConfig.make_no_parallel(), tp_size=2
             ),
             in_dtype=dtype,
             routing_method=RoutingMethodType.TopK,
@@ -504,8 +480,9 @@ def test_trtllm_fp4_moe_deferred_finalize(
         )
         kernel = _make_trtllm_fp4_moe_kernel(moe_config, quant_config)
 
-        def run():
-            output = kernel.apply(
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: kernel.apply(
                 hidden_states=a,
                 w1=w1_q,
                 w2=w2_q,
@@ -513,24 +490,11 @@ def test_trtllm_fp4_moe_deferred_finalize(
                 topk_ids=topk_ids,
                 activation=MoEActivation.SILU,
                 global_num_experts=e,
-                expert_map=expert_map,
+                expert_map=None,
                 apply_router_weight_on_input=False,
-            )
-            if ep_size > 1 and isinstance(output, UnfinalizedMoEOutput):
-                nonlocal_routes = (topk_ids < offset) | (
-                    topk_ids >= offset + local_experts
-                )
-                torch.testing.assert_close(
-                    output.expanded_idx_to_permuted_idx < 0, nonlocal_routes
-                )
-            return output
-
-        check_deferred_moe_finalize(
-            moe_config,
-            run,
+            ),
             router_weights=topk_weights,
             chunked=chunk_size is not None,
-            allow_ep=ep_size > 1,
         )
 
 

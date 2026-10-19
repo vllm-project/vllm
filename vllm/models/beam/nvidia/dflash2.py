@@ -19,22 +19,29 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Attention
-from vllm.model_executor.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
+from vllm.model_executor.models.qwen3_dflash2 import DFlashGroupedConv
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    get_draft_quant_config,
     maybe_prefix,
 )
 
@@ -43,7 +50,68 @@ from .dflash2_ops import candidate_edges
 logger = init_logger(__name__)
 
 
-class DFlash2BeamAttention(DFlashQwen3Attention):
+class DFlash2BeamAttention(nn.Module):
+    """Query-token attention; the context K/V is already in the KV cache."""
+
+    def __init__(
+        self,
+        config,
+        layer_idx: int,
+        cache_config: CacheConfig | None,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        hidden_size = config.hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        total_num_heads = config.num_attention_heads
+        total_num_kv_heads = config.num_key_value_heads
+        assert total_num_heads % tp_size == 0
+        if total_num_kv_heads >= tp_size:
+            assert total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % total_num_kv_heads == 0
+        self.num_heads = total_num_heads // tp_size
+        self.num_kv_heads = max(1, total_num_kv_heads // tp_size)
+        self.head_dim = config.head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        # Every layer is non-causal sliding-window attention over the block.
+        assert config.layer_types[layer_idx] == "sliding_attention"
+        assert not config.is_causal
+        self.causal = False
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            total_num_heads,
+            total_num_kv_heads,
+            bias=False,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            prefix=f"{prefix}.o_proj",
+        )
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=config.max_position_embeddings,
+            is_neox_style=True,
+            rope_parameters=config.rope_parameters,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.head_dim**-0.5,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            per_layer_sliding_window=config.sliding_window,
+            prefix=f"{prefix}.attn",
+        )
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -51,8 +119,6 @@ class DFlash2BeamAttention(DFlashQwen3Attention):
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.v_scale is not None:
-            v = v * self.v_scale
         cache, slots = None, None
         mapping = get_forward_context().slot_mapping
         assert isinstance(mapping, dict)
@@ -85,8 +151,103 @@ class DFlash2BeamAttention(DFlashQwen3Attention):
         return output
 
 
-class DFlash2BeamDecoderLayer(DFlash2Qwen3DecoderLayer):
-    attention_cls = DFlash2BeamAttention
+class DFlash2BeamMLP(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int, prefix: str) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            prefix=f"{prefix}.down_proj",
+        )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x, _ = self.down_proj(self.act_fn(x))
+        return x
+
+
+class DFlash2BeamDecoderLayer(nn.Module):
+    """Takes the normalized input and returns the next layer's normalized input,
+    fusing each grouped convolution's second half into the residual norm."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        config,
+        layer_idx: int,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        self.self_attn = DFlash2BeamAttention(
+            config, layer_idx, vllm_config.cache_config, f"{prefix}.self_attn"
+        )
+        self.mlp = DFlash2BeamMLP(
+            config.hidden_size, config.intermediate_size, f"{prefix}.mlp"
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        draft_config = config.dflash_config
+        assert vllm_config.speculative_config is not None
+        conv_args = dict(
+            hidden_size=config.hidden_size,
+            taps=int(draft_config["conv_kernel_size"]),
+            group_size=int(draft_config["conv_group_size"]),
+            # Query tokens per request: the bonus token plus the mask tokens.
+            block_size=1 + vllm_config.speculative_config.num_speculative_tokens,
+            params_dtype=vllm_config.model_config.dtype,
+        )
+        self.attention_conv = DFlashGroupedConv(
+            **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
+        )
+        self.mlp_conv = DFlashGroupedConv(
+            **conv_args, prefix=maybe_prefix(prefix, "mlp_conv")
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        next_norm: RMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from .dflash2_conv_ops import conv_residual_norm
+
+        conv = self.attention_conv
+        hidden_states, coefficients = conv.prepare(hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states, residual = conv_residual_norm(
+            hidden_states,
+            coefficients,
+            conv.base_kernel[1],
+            residual,
+            self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.variance_epsilon,
+            conv.block_size,
+            conv.group_size,
+        )
+        conv = self.mlp_conv
+        hidden_states, coefficients = conv.prepare(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        return conv_residual_norm(
+            hidden_states,
+            coefficients,
+            conv.base_kernel[1],
+            residual,
+            next_norm.weight,
+            next_norm.variance_epsilon,
+            conv.block_size,
+            conv.group_size,
+        )
 
 
 class DFlash2BeamCandidateSelector(nn.Module):
@@ -168,17 +329,7 @@ class DFlash2BeamModel(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         draft_config = config.dflash_config
-        if getattr(config, "attention_bias", False) or get_draft_quant_config(
-            vllm_config
-        ):
-            raise NotImplementedError(
-                "The Beam DFlash2 drafter supports only unquantized drafts "
-                "without attention biases."
-            )
         params_dtype = vllm_config.model_config.dtype
-        self.input_embedding_scale = float(
-            draft_config.get("input_embedding_scale", 1.0)
-        )
 
         # Replaced by the target's embedding when the speculator loads the draft.
         self.embed_tokens = VocabParallelEmbedding(
@@ -194,21 +345,16 @@ class DFlash2BeamModel(nn.Module):
             [
                 DFlash2BeamDecoderLayer(
                     current_vllm_config,
-                    config=config,
-                    layer_idx=layer_idx,
-                    cache_config=current_vllm_config.cache_config,
-                    quant_config=None,
+                    config,
+                    layer_idx,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
 
-        target_hidden_size = (
-            getattr(config, "target_hidden_size", None) or config.hidden_size
-        )
         self.fc = ReplicatedLinear(
-            target_hidden_size * len(draft_config["target_layer_ids"]),
+            config.hidden_size * len(draft_config["target_layer_ids"]),
             config.hidden_size,
             bias=False,
             params_dtype=params_dtype,
@@ -231,10 +377,7 @@ class DFlash2BeamModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        embeds = self.embed_tokens(input_ids)
-        if self.input_embedding_scale != 1.0:
-            embeds = embeds * self.input_embedding_scale
-        return embeds
+        return self.embed_tokens(input_ids)
 
     def build_context_kv_weights(self) -> None:
         """Stack every layer's K/V projection and K-norm weight.
@@ -367,8 +510,6 @@ class DFlash2BeamModel(nn.Module):
             slots,
             cache.view(fp8_dtype) if fp8_dtype is not None else cache,
             first.k_norm.variance_epsilon,
-            first.v_scale if first.v_scale is not None else 1.0,
-            rotary.is_neox_style,
             self._context_scale_ptrs,
         )
 
@@ -388,50 +529,14 @@ class DFlash2BeamModel(nn.Module):
                 if i + 1 < len(self.layers)
                 else self.norm
             )
-            hidden_states, residual = _forward_normalized(
-                layer, positions, hidden_states, residual, next_norm
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, next_norm
             )
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-
-def _forward_normalized(
-    layer: DFlash2Qwen3DecoderLayer,
-    positions: torch.Tensor,
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    next_norm: RMSNorm,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Carry normalized activations across layers to fuse both convolutions."""
-    from .dflash2_conv_ops import conv_residual_norm
-
-    hidden_states, coefficients = layer.attention_conv.prepare(hidden_states)
-    hidden_states = layer.self_attn(positions, hidden_states)
-    hidden_states, residual = conv_residual_norm(
-        hidden_states,
-        coefficients,
-        layer.attention_conv.base_kernel[1],
-        residual,
-        layer.post_attention_layernorm.weight,
-        layer.post_attention_layernorm.variance_epsilon,
-        layer.attention_conv.block_size,
-        layer.attention_conv.group_size,
-    )
-    hidden_states, coefficients = layer.mlp_conv.prepare(hidden_states)
-    hidden_states = layer.mlp(hidden_states)
-    return conv_residual_norm(
-        hidden_states,
-        coefficients,
-        layer.mlp_conv.base_kernel[1],
-        residual,
-        next_norm.weight,
-        next_norm.variance_epsilon,
-        layer.mlp_conv.block_size,
-        layer.mlp_conv.group_size,
-    )
 
 
 class DFlash2BeamForCausalLM(nn.Module):
@@ -456,11 +561,9 @@ class DFlash2BeamForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         draft_config = self.config.dflash_config
-        softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size,
-            scale=float(draft_config.get("output_multiplier", 1.0)),
-            soft_cap=softcap if softcap > 0 else None,
+            soft_cap=float(draft_config["final_logit_softcapping"]),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

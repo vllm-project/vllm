@@ -90,33 +90,6 @@ def test_attention_output_gate_is_renamed_not_fused():
     )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize(
-    "module_path,name",
-    [("self_attn", "gate_bias"), ("mlp.gate", "e_score_correction_bias")],
-)
-def test_optional_bias_loads_only_when_present(module_path, name, enabled):
-    """Unknown Beam biases must fail instead of silently changing model output."""
-    model = BeamModel.__new__(BeamModel)
-    nn.Module.__init__(model)
-    layer = nn.Module()
-    layer.self_attn = nn.Module()
-    layer.mlp = nn.Module()
-    layer.mlp.gate = nn.Module()
-    model.layers = nn.ModuleList([layer])
-    target = layer.get_submodule(module_path)
-    target.register_parameter(name, nn.Parameter(torch.zeros(2)) if enabled else None)
-    weight_name = f"layers.0.{module_path}.{name}"
-    weight = torch.tensor([1.0, 2.0])
-    weights = [(weight_name, weight)]
-    if enabled:
-        assert model.load_weights(weights) == {weight_name}
-        torch.testing.assert_close(getattr(target, name), weight)
-    else:
-        with pytest.raises(ValueError, match=name):
-            model.load_weights(weights)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.inference_mode()
 def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeypatch):
@@ -128,13 +101,7 @@ def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeyp
 
     monkeypatch.setattr(beam, "BeamAttention", lambda *args, **kwargs: Attention())
     monkeypatch.setattr(beam, "BeamMLP", lambda **kwargs: nn.Identity())
-    config = BeamConfig(
-        hidden_size=8,
-        mlp_only_layers=[0],
-        enable_sandwich_norm=True,
-        self_attn_depth_scaled_residual=False,
-        mlp_depth_scaled_residual=False,
-    )
+    config = BeamConfig(hidden_size=8, num_hidden_layers=1, mlp_layer_types=["dense"])
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=config),
         cache_config=None,
@@ -166,8 +133,10 @@ def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeyp
             * weights[f"layers.0.{name}.weight"]
         )
 
-    expected = x + norm(norm(x, names[0]), names[1])
-    expected = expected + norm(norm(expected, names[2]), names[3])
+    x_scale, r_scale = beam._depth_scaled_coeffs(0, is_attention=True)
+    expected = x * r_scale + norm(norm(x, names[0]), names[1]) * x_scale
+    x_scale, r_scale = beam._depth_scaled_coeffs(0, is_attention=False)
+    expected = expected * r_scale + norm(norm(expected, names[2]), names[3]) * x_scale
     actual, _ = layer(torch.arange(2, device="cuda"), x, None)
     torch.testing.assert_close(actual, expected)
 

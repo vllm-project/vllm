@@ -64,7 +64,7 @@ class BeamDecoderLayer(nn.Module):
             vllm_config.quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        if self.layer_id in config.mlp_only_layers:
+        if config.mlp_layer_types[self.layer_id] == "dense":
             self.mlp: nn.Module = BeamMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
@@ -80,22 +80,10 @@ class BeamDecoderLayer(nn.Module):
 
         self.input_layernorm = RMSNorm(config.hidden_size)
         self.pre_feedforward_layernorm = RMSNorm(config.hidden_size)
-        self.post_attention_layernorm = (
-            RMSNorm(config.hidden_size) if config.enable_sandwich_norm else None
-        )
-        self.post_feedforward_layernorm = (
-            RMSNorm(config.hidden_size) if config.enable_sandwich_norm else None
-        )
-        self.attn_scales = (
-            _depth_scaled_coeffs(self.layer_id, is_attention=True)
-            if config.self_attn_depth_scaled_residual
-            else None
-        )
-        self.mlp_scales = (
-            _depth_scaled_coeffs(self.layer_id, is_attention=False)
-            if config.mlp_depth_scaled_residual
-            else None
-        )
+        self.post_attention_layernorm = RMSNorm(config.hidden_size)
+        self.post_feedforward_layernorm = RMSNorm(config.hidden_size)
+        self.attn_scales = _depth_scaled_coeffs(self.layer_id, is_attention=True)
+        self.mlp_scales = _depth_scaled_coeffs(self.layer_id, is_attention=False)
 
     def forward(
         self,
@@ -113,10 +101,8 @@ class BeamDecoderLayer(nn.Module):
         hidden_states, x = beam_norm_residual_norm(
             x,
             hidden_states,
-            self.post_attention_layernorm.weight
-            if self.post_attention_layernorm is not None
-            else None,
-            self.rms_norm_eps if self.post_attention_layernorm is not None else None,
+            self.post_attention_layernorm.weight,
+            self.rms_norm_eps,
             self.pre_feedforward_layernorm.weight,
             self.rms_norm_eps,
             self.attn_scales,
@@ -126,10 +112,8 @@ class BeamDecoderLayer(nn.Module):
         return beam_norm_residual_norm(
             x,
             hidden_states,
-            self.post_feedforward_layernorm.weight
-            if self.post_feedforward_layernorm is not None
-            else None,
-            self.rms_norm_eps if self.post_feedforward_layernorm is not None else None,
+            self.post_feedforward_layernorm.weight,
+            self.rms_norm_eps,
             next_norm_weight,
             self.rms_norm_eps if next_norm_weight is not None else None,
             self.mlp_scales,
