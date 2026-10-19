@@ -168,6 +168,9 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        # Cached blocks evicted to make room for new blocks since the last
+        # drain by `KVCacheManager.make_prefix_cache_stats`.
+        self.num_evicted_blocks = 0
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
@@ -702,15 +705,18 @@ class BlockPool:
         if self.enable_caching:
             if self.metrics_collector:
                 for block in ret:
-                    self._maybe_evict_cached_block(block)
+                    if self._maybe_evict_cached_block(block):
+                        self.num_evicted_blocks += 1
                     assert block.ref_cnt == 0
                     block.ref_cnt = 1
                     self.metrics_collector.on_block_allocated(block)
             else:
                 for block in ret:
                     # Most blocks were never cached, so skip the call when possible.
-                    if block.block_hash is not None:
-                        self._maybe_evict_cached_block(block)
+                    if block.block_hash is not None and self._maybe_evict_cached_block(
+                        block
+                    ):
+                        self.num_evicted_blocks += 1
                     assert block.ref_cnt == 0
                     block.ref_cnt = 1
         else:
