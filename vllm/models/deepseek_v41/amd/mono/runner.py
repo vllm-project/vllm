@@ -259,7 +259,7 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp, self.experts, self.topk),
+                scratch_bytes(tokens, self.tp, self.experts, self.topk, self.ug_groups),
                 dtype=torch.uint8,
                 device=self.device,
             )

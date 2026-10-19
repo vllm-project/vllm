@@ -135,13 +135,17 @@ def _back_key(key: MonoBuild):
     return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
 
 
-def scratch_layout(s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK) -> dict:
+def scratch_layout(
+    s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK, ug_groups: int = 2
+) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
     flags. Each width has a scratch of its own (``DSV41MonoLayer.scratch``):
     under another width's layout a mailbox pair's tag word could be plain data,
     which a poll may take for a current tag. The MoE's counters, whose slots
-    outlive a step width, are in the epoch buffer."""
+    outlive a step width, are in the epoch buffer. The MoE regions follow the
+    runner's routing and FP4 groups of an ug task: with one group a task (the
+    DSpark draft's runner) the ug flags take twice the room of two groups."""
     d = Dims(tp)
     out: dict = {}
     off = 0
@@ -159,7 +163,7 @@ def scratch_layout(s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK) ->
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0))
     regions = moe.scratch_layout(
-        _moe_key(MonoBuild(s, tp, 1, experts=experts, topk=topk))
+        _moe_key(MonoBuild(s, tp, 1, experts=experts, topk=topk, ug_groups=ug_groups))
     ).items()
     mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
@@ -170,9 +174,14 @@ def scratch_layout(s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK) ->
 
 
 def scratch_bytes(
-    s: int = MAX_TOKENS, tp: int = 2, experts: int = EXPERTS, topk: int = TOPK
+    s: int = MAX_TOKENS,
+    tp: int = 2,
+    experts: int = EXPERTS,
+    topk: int = TOPK,
+    ug_groups: int = 2,
 ) -> int:
-    return max(o + n for o, n in scratch_layout(s, tp, experts, topk).values())
+    layout = scratch_layout(s, tp, experts, topk, ug_groups)
+    return max(o + n for o, n in layout.values())
 
 
 def peer_half_bytes(tp: int) -> int:
@@ -225,7 +234,7 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
@@ -523,12 +532,13 @@ def run_ffn(
     launch pair's epoch moved on. ``tl``: K2's timeline record base (a
     timeline build), stamped from point K2_SEAM_POINT on."""
     s, tp = key.tokens, key.tp
-    # The scratch is laid out for the routing of the runner that owns it. K2
-    # runs on the runner of its own layers, the target's or the DSpark
-    # draft's. The FFN launch (``part``) always runs on the target's runner,
-    # also for a gfx942 draft layer, so it reads the target's layout.
+    # The scratch is laid out for the routing and the FP4 groups of the
+    # runner that owns it. K2 runs on the runner of its own layers, the
+    # target's or the DSpark draft's. The FFN launch (``part``) always runs on
+    # the target's runner, also for a gfx942 draft layer, so it reads the
+    # target's layout.
     if const_expr(part is None):
-        layout = scratch_layout(s, tp, key.experts, key.topk)
+        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
     else:
         layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
@@ -661,7 +671,7 @@ def run_ffn(
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)
