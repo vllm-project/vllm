@@ -49,6 +49,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     NextTokenStrategy,
     ReadContext,
     cap_pixels,
+    common_prefix_len,
     reply_label_ids,
     select_read_strategy,
     state_text,
@@ -288,7 +289,7 @@ def serving_and_engine(engine_and_renderer):
     engine, online_renderer = engine_and_renderer
 
     async def generate(prompt, params, request_id, **kwargs):
-        label_ids = params.logprob_token_ids
+        label_ids = params.logprob_token_ids or [0]
         yield RequestOutput(
             request_id=request_id,
             prompt=None,
@@ -363,6 +364,75 @@ async def test_request_metadata_reaches_every_question(
         assert call.kwargs["trace_headers"] == (
             TRACE_HEADERS if request_headers else None
         )
+
+
+def test_common_prefix_len():
+    assert common_prefix_len([[1, 2, 3, 4], [1, 2, 3, 9, 9], [1, 2, 3]]) == 3
+    assert common_prefix_len([[1, 2], [3, 4]]) == 0
+    assert common_prefix_len([[1, 2, 3]]) == 3
+
+
+def two_choice_questions():
+    return {
+        "team": {
+            "type": "choice",
+            "instructions": "Which team does the message name?",
+            "criteria": {"billing": "payments", "shipping": "deliveries"},
+        },
+        "lang": {
+            "type": "choice",
+            "instructions": "Which language does the message name?",
+            "criteria": {"English": "English text", "French": "French text"},
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "hybrid,prefix_caching,n_questions,state_words,warms",
+    [
+        (True, True, 2, 300, True),
+        (False, True, 2, 300, False),
+        (True, False, 2, 300, False),
+        (True, True, 1, 300, False),
+        (True, True, 2, 5, False),
+    ],
+    ids=["warm", "attention_only", "no_prefix_caching", "one_question", "short_state"],
+)
+async def test_state_is_prefilled_once_before_the_reads(
+    serving_and_engine,
+    monkeypatch,
+    hybrid,
+    prefix_caching,
+    n_questions,
+    state_words,
+    warms,
+):
+    serving, engine = serving_and_engine
+    monkeypatch.setattr(ModelConfig, "is_hybrid", property(lambda self: hybrid))
+    engine.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching)
+    )
+    questions = dict(list(two_choice_questions().items())[:n_questions])
+    request = StructuredDecisionRequest(
+        state="word " * state_words, questions=questions, cache_salt="tenant"
+    )
+    response = await serving.create_decision(request)
+    assert isinstance(response, StructuredDecisionResponse)
+    calls = engine.generate.call_args_list
+    assert len(calls) == n_questions + warms
+    if not warms:
+        return
+    warm, reads = calls[0], calls[1:]
+    assert warm.args[2].endswith("-prefix")
+    assert warm.args[1].max_tokens == 1
+    assert warm.args[0]["cache_salt"] == "tenant"
+    warm_ids = warm.args[0]["prompt_token_ids"]
+    assert len(warm_ids) >= state_words
+    for read in reads:
+        read_ids = read.args[0]["prompt_token_ids"]
+        assert read_ids[: len(warm_ids)] == warm_ids
+        assert read.args[1].logprob_token_ids
 
 
 def test_canvas_read():
@@ -864,7 +934,7 @@ def decision_server(qwen):
     tokenizer, _ = qwen
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
         renderer = input_processor = None
         errored = False
         failure = None
