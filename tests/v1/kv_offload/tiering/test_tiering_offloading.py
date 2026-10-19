@@ -42,6 +42,12 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
+)
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -2196,14 +2202,32 @@ class TestTieringOffloadingManagerWithFsTier:
     @staticmethod
     def _make_fs_tier(mmap_region, root_dir: str) -> FileSystemTierManager:
         """Construct a FileSystemTierManager wired to the given mmap region."""
-        # The FS tier reads only blocks_per_chunk and the KV events config;
-        # kv_events_config must be real or MagicMock's auto-attribute turns
-        # events on.
         offloading_spec = MagicMock()
         offloading_spec.blocks_per_chunk = 1
         offloading_spec.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=False,
             self_describing_kv_events=False,
+        )
+        offloading_spec.config = OffloadingConfig(
+            groups=(),
+            worker_kv_bytes_per_block=0,
+            enable_kv_cache_events=False,
+            extra_config={},
+            engine_id="test-engine",
+            model=OffloadingModelConfig(name="test-model", dtype="float32"),
+            cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+            parallel=OffloadingParallelConfig(
+                rank=0,
+                world_size=1,
+                tp_size=1,
+                pp_size=1,
+                pcp_size=1,
+                dcp_size=1,
+                data_parallel_index=0,
+                data_parallel_size=1,
+                data_parallel_rank_local=None,
+                is_parallelism_agnostic=True,
+            ),
         )
         return FileSystemTierManager(
             offloading_spec=offloading_spec,
