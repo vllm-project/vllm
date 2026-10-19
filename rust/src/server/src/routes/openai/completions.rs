@@ -289,6 +289,7 @@ async fn aggregate_completion_chunk_streams(
         let chunk = match next {
             Ok(chunk) => chunk,
             Err(error) => {
+                drop(streams);
                 y.yield_error(error).await;
                 return Ok(());
             }
