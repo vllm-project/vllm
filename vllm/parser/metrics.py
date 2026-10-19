@@ -8,7 +8,7 @@ from enum import Enum
 from itertools import product
 from typing import cast
 
-from prometheus_client import REGISTRY, Counter
+from prometheus_client import REGISTRY, Counter, Histogram
 
 _model_name: str | None = None
 
@@ -16,6 +16,7 @@ _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 _tool_call_parser_invocations: Counter | None = None
 _tool_call_responses: Counter | None = None
 _tool_calls_emitted: Counter | None = None
+_request_tools: Histogram | None = None
 
 
 class ToolCallOutcome(Enum):
@@ -67,6 +68,20 @@ def init_parser_metrics(*, model_name: str) -> None:
         _tool_call_responses.labels(model_name=_model_name, status=status)
     _tool_calls_emitted.labels(model_name=_model_name)
 
+    global _request_tools
+    try:
+        _request_tools = Histogram(
+            "vllm:request_tools",
+            "Number of tool definitions supplied per request.",
+            ["model_name"],
+            buckets=(0, 1, 5, 10),
+        )
+    except ValueError:
+        _request_tools = cast(
+            Histogram, REGISTRY._names_to_collectors["vllm:request_tools"]
+        )
+    _request_tools.labels(model_name=_model_name)
+
     for mode, outcome, request_type in product(
         ("streaming", "non_streaming"),
         ToolCallOutcome,
@@ -77,6 +92,14 @@ def init_parser_metrics(*, model_name: str) -> None:
             mode=mode,
             outcome=outcome.value,
             request_type=request_type.value,
+        )
+
+
+def record_request_tools(request: object) -> None:
+    """Observe the supplied tool count before parsing can mutate the request."""
+    if _request_tools is not None:
+        _request_tools.labels(model_name=_model_name).observe(
+            len(getattr(request, "tools", None) or ())
         )
 
 

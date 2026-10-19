@@ -5,7 +5,7 @@
 from functools import partial
 
 import pytest
-from prometheus_client import CollectorRegistry, Counter, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -20,10 +20,12 @@ def registry(monkeypatch):
     registry = CollectorRegistry()
     monkeypatch.setattr(metrics, "REGISTRY", registry)
     monkeypatch.setattr(metrics, "Counter", partial(Counter, registry=registry))
+    monkeypatch.setattr(metrics, "Histogram", partial(Histogram, registry=registry))
     monkeypatch.setattr(metrics, "_model_name", None)
     monkeypatch.setattr(metrics, "_tool_call_parser_invocations", None)
     monkeypatch.setattr(metrics, "_tool_call_responses", None)
     monkeypatch.setattr(metrics, "_tool_calls_emitted", None)
+    monkeypatch.setattr(metrics, "_request_tools", None)
     metrics.init_parser_metrics(model_name="test-model")
     return registry
 
@@ -100,6 +102,89 @@ def test_response_counters_initialize_all_series_at_zero(registry):
     assert len(emitted) == 1
     assert emitted[0].labels == {"model_name": "test-model"}
     assert emitted[0].value == 0
+    for suffix in ("count", "sum"):
+        assert (
+            registry.get_sample_value(
+                f"vllm:request_tools_{suffix}", {"model_name": "test-model"}
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize("count", [0, 1, 2, 5, 6, 10, 11, 100])
+def test_request_tools_histogram_uses_cumulative_buckets(registry, count):
+    request = ChatCompletionRequest.model_construct(
+        tools=[{"function": {"name": "private-function"}}] * count
+    )
+    metrics.record_request_tools(request)
+    metrics.init_parser_metrics(model_name="test-model")
+    labels = {"model_name": "test-model"}
+    assert registry.get_sample_value("vllm:request_tools_count", labels) == 1
+    assert registry.get_sample_value("vllm:request_tools_sum", labels) == count
+    for boundary in (0, 1, 5, 10, float("inf")):
+        bucket = "+Inf" if boundary == float("inf") else str(float(boundary))
+        assert registry.get_sample_value(
+            "vllm:request_tools_bucket", {**labels, "le": bucket}
+        ) == int(count <= boundary)
+    assert b"private-function" not in generate_latest(registry)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "messages"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("count", [0, 2])
+async def test_request_tools_recorded_once_before_parser_mutation(
+    registry, api, stream, count
+):
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+
+    cls = OpenAIServingChat if api == "chat" else AnthropicServingMessages
+    serving = cls.__new__(cls)
+    serving.has_kv_connector = False
+    serving._merge_inline_system = False
+
+    async def chunks():
+        yield "data: {}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def generate(request, raw_request):
+        assert (
+            registry.get_sample_value(
+                "vllm:request_tools_sum", {"model_name": "test-model"}
+            )
+            == count
+        )
+        request.tools = None
+        return chunks() if stream else serving.create_error_response("fixture")
+
+    serving._create_chat_completion = generate
+    if api == "chat":
+        request = ChatCompletionRequest(
+            messages=[],
+            stream=stream,
+            n=2,
+            tools=[{"type": "function", "function": {"name": "private"}}] * count
+            if count
+            else None,
+        )
+        result = await serving.create_chat_completion(request)
+    else:
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[],
+            stream=stream,
+            tools=[{"name": "private", "input_schema": {}}] * count if count else None,
+        )
+        result = await serving.create_messages(request)
+    if stream:
+        assert len([chunk async for chunk in result]) == 2
+    assert (
+        registry.get_sample_value(
+            "vllm:request_tools_count", {"model_name": "test-model"}
+        )
+        == 1
+    )
 
 
 def test_reinitializing_metrics_preserves_labeled_counts(registry):

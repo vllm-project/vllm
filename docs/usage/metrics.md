@@ -51,6 +51,13 @@ The response counters aggregate APIs, tool choices, and numbers of supplied tool
 Cohere v2 also uses the Chat handler, so its traffic is included before Cohere
 response conversion.
 
+`vllm:request_tools` is a histogram of the number of tool definitions supplied
+to the shared Chat Completions/Messages handler. It has only `model_name` and
+bucket boundaries `0`, `1`, `5`, `10`, and `+Inf`. Each validated request is
+observed once before parsing, including requests without tools. Streaming
+fragments, multiple response choices, and internally converted Messages requests
+do not add observations. This measures supplied tools, not emitted tool calls.
+
 The existing parser counter keeps its labels and classifications unchanged:
 `mode` is `streaming` or `non_streaming`, `outcome` is `tool_call` or
 `no_tool_call`, and `request_type` is `chat_completions`, `responses`, or

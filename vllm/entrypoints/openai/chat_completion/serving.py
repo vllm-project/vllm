@@ -60,7 +60,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.parser.metrics import record_tool_call_response
+from vllm.parser.metrics import record_request_tools, record_tool_call_response
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -294,6 +294,7 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        record_request_tools(request)
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
