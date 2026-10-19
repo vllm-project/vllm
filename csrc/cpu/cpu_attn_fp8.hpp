@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #pragma once
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -26,21 +27,34 @@ inline float fp8e4m3_to_float_scalar(uint8_t b, float scale) noexcept {
   return b_f32_scaled;
 }
 
-inline uint8_t float_to_fp8e4m3_scalar(float v, float inv_scale) noexcept {
+template <int mantissa_bits>
+inline uint8_t float_to_fp8_scalar(float v, float inv_scale) noexcept {
+  constexpr int bias = mantissa_bits == 3 ? 7 : 15;
+  constexpr uint32_t max_bits = mantissa_bits == 3 ? 0x43e00000u : 0x47600000u;
+  constexpr uint8_t max_fp8 = mantissa_bits == 3 ? 0x7e : 0x7b;
+  constexpr uint32_t half_min_subnormal = (127 - bias - mantissa_bits) << 23;
+  constexpr uint32_t min_normal = (128 - bias) << 23;
   v *= inv_scale;
-  constexpr float fp8_max = 448.0f;
-  v = std::max(-fp8_max, std::min(fp8_max, v));
-  if (v == 0.0f) return 0;
-
-  // Inverse mapping of fp8e4m3_to_float_scalar: shift the effective exponent
-  // bias from fp32 (127) back to fp8 e4m3 (7), then pack sign|payload.
-  float v_f32_unscaled = v * 0x1p-120f;
-  uint32_t bits = *reinterpret_cast<const u32_alias_t*>(&v_f32_unscaled);
-  uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80);
-  uint8_t payload = static_cast<uint8_t>((bits >> 20) & 0x7F);
-  if (payload == 0) return sign;
-  payload = std::min<uint8_t>(payload, 0x7E);  // keep 0x7F as NaN encoding
-  return static_cast<uint8_t>(sign | payload);
+  const uint32_t bits = std::bit_cast<uint32_t>(v);
+  const uint8_t sign = (bits >> 24) & 0x80;
+  const uint32_t magnitude = bits & 0x7fffffffu;
+  if (magnitude > max_bits) {
+    // Preserve the existing cache writer's saturation of NaN inputs.
+    return magnitude > 0x7f800000u ? max_fp8 : sign | max_fp8;
+  }
+  if (magnitude <= half_min_subnormal) return sign;
+  if (magnitude < min_normal) {
+    const uint32_t significand = (magnitude & 0x7fffffu) | 0x800000u;
+    const uint32_t shift = 151 - bias - mantissa_bits - (magnitude >> 23);
+    const uint32_t rounded =
+        significand + (1u << (shift - 1)) - 1 + ((significand >> shift) & 1);
+    return sign | static_cast<uint8_t>(rounded >> shift);
+  }
+  constexpr int shift = 23 - mantissa_bits;
+  const uint32_t rounded = magnitude +
+                           ((1u << (shift - 1)) - 1 - ((127 - bias) << 23)) +
+                           ((magnitude >> shift) & 1);
+  return sign | static_cast<uint8_t>(rounded >> shift);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,37 +128,14 @@ inline void reshape_and_cache_fp8_amx_impl(
 }
 
 // ---------------------------------------------------------------------------
-// FP8 E5M2 scalar helpers
-// ---------------------------------------------------------------------------
-inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
-  v *= inv_scale;
-  constexpr float fp8_e5m2_max = 57344.0f;
-  v = std::max(-fp8_e5m2_max, std::min(fp8_e5m2_max, v));
-  if (v == 0.0f) return 0;
-  uint32_t bits = *reinterpret_cast<const u32_alias_t*>(&v);
-  const uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80);
-  const int32_t exp_fp32 = static_cast<int32_t>((bits >> 23) & 0xFF) - 127;
-  const uint8_t mant2 = static_cast<uint8_t>((bits >> 21) & 0x03);
-  if (exp_fp32 < -14) {  // subnormal in E5M2
-    const int shift = -14 - exp_fp32;
-    if (shift + 21 >= 32)
-      return sign;  // underflow: too small for E5M2 subnormal
-    const uint32_t m = (0x800000u | (bits & 0x7FFFFFu)) >> (shift + 21);
-    return sign | static_cast<uint8_t>(std::min<uint32_t>(m, 3u));
-  }
-  const uint8_t exp5 = static_cast<uint8_t>(exp_fp32 + 15);
-  return sign | (exp5 << 2) | mant2;
-}
-
-// ---------------------------------------------------------------------------
 // Select the FP8 quant function at compile time based on kv_cache_t.
 // ---------------------------------------------------------------------------
 template <typename kv_cache_t>
 constexpr auto select_fp8_quant_fn() {
   if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>)
-    return float_to_fp8e5m2_scalar;
+    return float_to_fp8_scalar<2>;
   else
-    return float_to_fp8e4m3_scalar;
+    return float_to_fp8_scalar<3>;
 }
 
 // ---------------------------------------------------------------------------

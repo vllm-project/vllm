@@ -180,7 +180,6 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
-from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
     NgramProposerGPU,
@@ -595,7 +594,6 @@ class GPUModelRunner(
                 | EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
-                | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
@@ -646,10 +644,6 @@ class GPUModelRunner(
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )
-            elif self.speculative_config.method == "medusa":
-                self.drafter = MedusaProposer(
-                    vllm_config=self.vllm_config, device=self.device
-                )
             elif self.speculative_config.method == "extract_hidden_states":
                 self.drafter = ExtractHiddenStatesProposer(
                     vllm_config=self.vllm_config, device=self.device
@@ -1085,8 +1079,9 @@ class GPUModelRunner(
 
         for i in range(num_reqs):
             seq_len_i = seq_lens_cpu[i]
-            pos = token_type_id_requests.get(i, seq_len_i)
-            ids = (torch.arange(seq_len_i) >= pos).int()
+            start, end = token_type_id_requests.get(i, (seq_len_i, seq_len_i))
+            positions = torch.arange(seq_len_i)
+            ids = ((positions >= start) & (positions < end)).int()
             token_type_ids.append(ids)
 
         token_type_ids_cpu = torch.empty(
@@ -2349,7 +2344,7 @@ class GPUModelRunner(
             # TODO(Isotr0py): Refactor mm_prefix_lm implementation
             # for better readability and maintainability.
             _span_pad_modulus = getattr(
-                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
+                self.model, "mm_prefix_span_leading_pad_modulus", 0
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -4830,33 +4825,6 @@ class GPUModelRunner(
                 sampled_token_ids,
                 slot_mappings=slot_mappings,
             )
-        elif spec_config.method == "medusa":
-            assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, MedusaProposer)
-
-            if sample_hidden_states.shape[0] == len(sampled_token_ids):
-                # The input to the target model does not include draft tokens.
-                hidden_states = sample_hidden_states
-            else:
-                indices = []
-                offset = 0
-                assert spec_decode_metadata is not None, (
-                    "No spec decode metadata for medusa"
-                )
-                for num_draft, tokens in zip(
-                    spec_decode_metadata.num_draft_tokens, sampled_token_ids
-                ):
-                    indices.append(offset + len(tokens) - 1)
-                    offset += num_draft + 1
-                indices = async_tensor_h2d(indices, device=self.device)
-                hidden_states = sample_hidden_states[indices]
-
-            draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_spec_tokens_to_schedule,
-                target_hidden_states=hidden_states,
-                sampling_metadata=sampling_metadata,
-                slot_mappings=slot_mappings,
-            )
         elif spec_config.uses_extract_hidden_states():
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)
             assert isinstance(sampled_token_ids, torch.Tensor), (
@@ -6004,7 +5972,7 @@ class GPUModelRunner(
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             draft_probs = None
             if (
-                self.speculative_config.rejection_sample_method == "standard"
+                self.speculative_config.rejection_sample_method in ("standard", "fly")
                 and self.speculative_config.draft_sample_method == "probabilistic"
             ):
                 draft_probs = torch.rand(
@@ -6206,27 +6174,23 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_utils import (
-            get_kv_cache_config_from_groups,
-            get_kv_cache_groups,
-        )
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+        from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        builder = get_kv_cache_config_builder(self.vllm_config)
+        kv_cache_groups = get_kv_cache_groups_from_builder(
+            builder, self.vllm_config, kv_cache_spec
+        )
         # the minimum number of blocks required is 1 block *per sequence*
         min_blocks = (
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
             or 1
         )
-
-        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            self.vllm_config, kv_cache_groups, num_blocks=min_blocks
         )
-        self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
@@ -7176,6 +7140,8 @@ class GPUModelRunner(
                     spec = customize_attention_spec(
                         attn_module.get_attn_backend(), spec
                     )
+                if attn_module.is_draft_layer:
+                    spec = replace(spec, is_draft=True)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
