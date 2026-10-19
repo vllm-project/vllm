@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Harmony ↔ Responses API conversion utilities.
+"""Harmony ↔ Responses API conversion utilities.
 
 Handles two directions:
   1. Response Input → Harmony Messages  (input parsing)
@@ -303,7 +302,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
         action = ActionFind(
             pattern=browser_call.get("pattern", ""),
             url=f"cursor:{browser_call.get('url', '')}",
-            type="find",
+            type="find_in_page",
         )
     else:
         raise ValueError(f"Unknown browser action: {recipient}")
@@ -434,7 +433,7 @@ def _parse_message_no_recipient(
         # See: https://cookbook.openai.com/articles/openai-harmony
         return [_parse_final_message(message, incomplete=incomplete)]
 
-    raise ValueError(f"Unknown channel: {message.channel}")
+    raise VLLMValidationError(f"Unknown channel: {message.channel}")
 
 
 # ---------------------------------------------------------------------------

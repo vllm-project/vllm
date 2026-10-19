@@ -16,9 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def vllm_version_matches_substr(substr: str) -> bool:
-    """
-    Check to see if the vLLM version matches a substring.
-    """
+    """Check to see if the vLLM version matches a substring."""
     from importlib.metadata import PackageNotFoundError, version
 
     try:
@@ -216,6 +214,15 @@ def cpu_platform_plugin() -> str | None:
             logger.debug(
                 "AMD Zen CPU detected but zentorch not installed, "
                 "falling back to CpuPlatform."
+            )
+        except OSError:
+            # An ABI-mismatched build fails here with an undefined-symbol
+            # error; other failures are not known to be safe to recover from.
+            logger.warning(
+                "AMD Zen CPU detected but zentorch failed to import, falling "
+                "back to CpuPlatform. This usually means the zentorch build "
+                "does not match the installed torch version.",
+                exc_info=True,
             )
 
     return "vllm.platforms.cpu.CpuPlatform"

@@ -99,9 +99,12 @@ class DiskBackend:
             t.stride(0) * t.element_size() for t in gpu_caches.values()
         ]
 
-        assert total_block_bytes % _ALIGNMENT == 0, (
-            f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
-        )
+        # The stride alignment is an O_DIRECT kernel-DMA requirement; buffered
+        # I/O through the page cache has no alignment constraint.
+        if not use_page_cache:
+            assert total_block_bytes % _ALIGNMENT == 0, (
+                f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
+            )
 
         # Separate buffer pools for store and load threads
         self._store_buffer_caches = {}
