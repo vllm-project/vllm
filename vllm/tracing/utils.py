@@ -13,8 +13,7 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 
 
 class SpanAttributes:
-    """
-    Standard attributes for spans.
+    """Standard attributes for spans.
 
     These are largely based on OpenTelemetry Semantic Conventions but are defined
     here as constants so they can be used by any backend or logger.
@@ -60,8 +59,7 @@ def contains_trace_headers(headers: Mapping[str, str]) -> bool:
 
 
 def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
-    """
-    Extract only trace-related headers from a larger header dictionary.
+    """Extract only trace-related headers from a larger header dictionary.
     Useful for logging or passing context to a non-OTel client.
     """
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}

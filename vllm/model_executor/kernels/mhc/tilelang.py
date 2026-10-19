@@ -6,19 +6,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
-def _torch_hc_prenorm_gemm(
-    x: torch.Tensor,
-    fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
-) -> None:
-    assert out.shape[0] == 1
-    assert sqrsum.shape[0] == 1
-    x_float = x.float()
-    out[0].copy_(x_float @ fn.t())
-    sqrsum[0].copy_(x_float.square().sum(dim=-1))
-
-
 def _hc_prenorm_gemm_outputs(
     x: torch.Tensor,
     fn: torch.Tensor,
@@ -109,6 +96,7 @@ def mhc_pre_delayed_tilelang(
         Post and residual coefficients, optionally normalized BF16 layer input,
         and the next FP32 pre-mix, with shapes (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), and (tokens, hc_mult).
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
@@ -320,6 +308,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         (tokens, hc_mult, hidden_size), (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), (tokens, hc_mult),
         and (tokens, hidden_size).
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
@@ -551,8 +540,7 @@ def mhc_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Forward pass for mHC pre block.
+    """Forward pass for mHC pre block.
 
     Args:
         residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
@@ -576,6 +564,7 @@ def mhc_pre_tilelang(
         post_mix: shape (..., hc_mult), dtype torch.float32
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
@@ -827,8 +816,7 @@ def mhc_fused_post_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Run one MHC post block followed by the next MHC pre block.
+    """Run one MHC post block followed by the next MHC pre block.
 
     When ``norm_weight`` is provided, the layer_input_cur output is the
     RMSNorm'd activation (fused into the kernel); otherwise it is the
@@ -842,8 +830,8 @@ def mhc_fused_post_pre_tilelang(
         post_mix_cur: shape (..., hc_mult, 1)
         comb_mix_cur: shape (..., hc_mult, hc_mult)
         layer_input_cur: shape (..., hidden_size)
-    """
 
+    """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_FUSED_TILELANG_KERNEL,
         _MHC_POST_TILELANG_KERNEL,

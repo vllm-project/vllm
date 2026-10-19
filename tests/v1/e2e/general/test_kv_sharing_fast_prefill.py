@@ -17,9 +17,7 @@ SEED = 42
 
 @pytest.fixture
 def test_prompts():
-    """
-    Adapted from tests/v1/e2e/spec_decode/utils.py
-    """
+    """Adapted from tests/v1/e2e/spec_decode/utils.py."""
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension
@@ -75,6 +73,12 @@ def test_kv_sharing_fast_prefill(
         pytest.skip(
             "ROCm: torch.compile produces incorrect output for gemma-3n's GELU "
             "with tanh approximation. Use enforce_eager=True instead."
+        )
+    if not enforce_eager and not use_v2_model_runner and current_platform.is_cuda():
+        pytest.skip(
+            "cublasCreate fails with CUBLAS_STATUS_ALLOC_FAILED during memory "
+            "profiling with torch 2.14: "
+            "https://github.com/pytorch/pytorch/issues/199944"
         )
 
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)

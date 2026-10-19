@@ -876,21 +876,6 @@ def _get_pair_lut(centroids: torch.Tensor) -> torch.Tensor:
     return build_pair_lut(centroids)
 
 
-# PiT in Q's dtype cached per (PiT-id, dtype) to avoid a host cast on every
-# launcher call. Keyed by the fp32 PiT's data_ptr so ownership/lifetime is
-# tied to the caller's tensor.
-_pit_qdtype_cache: dict = {}
-
-
-def _get_pit_in_query_dtype(PiT: torch.Tensor, qdtype: torch.dtype) -> torch.Tensor:
-    key = (PiT.data_ptr(), qdtype)
-    cached = _pit_qdtype_cache.get(key)
-    if cached is None:
-        cached = PiT.to(qdtype).contiguous()
-        _pit_qdtype_cache[key] = cached
-    return cached
-
-
 def triton_turboquant_unified_attention(
     query: torch.Tensor,  # [num_tokens, Hq, D] - fp16/bf16
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8

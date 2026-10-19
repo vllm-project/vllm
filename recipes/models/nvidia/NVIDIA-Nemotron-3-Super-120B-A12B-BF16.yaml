@@ -1,0 +1,271 @@
+meta:
+  title: "NVIDIA Nemotron-3-Super-120B-A12B"
+  slug: "nemotron-3-super-120b-a12b"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron-3-Super Mamba-hybrid latent-MoE (~120B total / ~12B active) with BF16, FP8, and NVFP4 variants"
+  date_added: 2026-04-28
+  date_updated: 2026-10-08
+  tasks:
+    - text
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+    dgx_station_gb300: verified
+    dgx_spark_gb10: verified
+    rtx_pro_6000: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+  min_vllm_version: "0.17.1"
+  architecture: moe
+  parameter_count: "120B"
+  active_parameters: "12B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Built-in nemotron_v3 reasoning parser (vLLM >= 0.17.1)"
+    args:
+      - "--reasoning-parser"
+      - "nemotron_v3"
+  spec_decoding:
+    description: "MTP speculative decoding for accelerated inference"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":3}'
+  long_context:
+    description: "Raise the context window from the default 256K to the model's full 1M tokens. Needs a large KV-cache budget — lower --max-model-len if you are memory-constrained."
+    args:
+      - "--max-model-len"
+      - "1048576"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 298
+    description: "BF16 weights (FP8 KV cache recommended)"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  fp8:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+    precision: fp8
+    vram_minimum_gb: 149
+    description: "FP8 weights + FP8 KV cache"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  nvfp4:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 75
+    description: "NVFP4 weights for Blackwell"
+    hardware_overrides:
+      rtx_pro_6000:
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+      dgx_station_gb300:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+          - "--gpu-memory-utilization"
+          - "0.92"
+          - "--load-format"
+          - "fastsafetensors"
+          - "--attention-backend"
+          - "flashinfer"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--mamba-cache-mode"
+          - "align"
+          - "--mamba-ssm-cache-dtype"
+          - "float32"
+          - "--enable-prefix-caching"
+        extra_env:
+          VLLM_FLOAT32_MATMUL_PRECISION: "high"
+          VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+  base_bf16:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16"
+    precision: bf16
+    vram_minimum_gb: 298
+    description: "Pre-RL base checkpoint (BF16)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  NVIDIA Nemotron-3-Super-120B-A12B is a hybrid-Mamba latent-MoE model (~120B total,
+  ~12B active per token) trained for general reasoning, tool use, and agentic workflows.
+  It supports a 1M-token context window and Multi-Token Prediction (MTP). Variants ship
+  in BF16, FP8, and NVFP4 (Blackwell). A pre-RL Base BF16 checkpoint is also available
+  for downstream fine-tuning.
+
+  ## Prerequisites
+
+  - Hardware: 4-8x H100/H200/B200/RTX Pro 6000, DGX Station, or DGX Spark
+  - vLLM >= 0.17.1
+  - Docker with NVIDIA Container Toolkit (recommended)
+
+  ## Launch commands
+
+  Reference command from the [vLLM blog](https://vllm.ai/blog/nemotron-3-super) (BF16, 4x H100, FP8 KV cache):
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --served-model-name nemotron \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser nemotron_v3
+  ```
+
+  FP8 weights:
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser nemotron_v3
+  ```
+
+  NVFP4 (Blackwell only):
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+    --tensor-parallel-size 2 \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser nemotron_v3
+  ```
+
+  ### DGX Spark (GB10)
+
+  The NVFP4 variant runs on a single DGX Spark (GB10) at TP=1 inside the
+  `vllm/vllm-openai:v0.28.0-ubuntu2404` container. The command below is the optimal
+  config tuned end-to-end on DGX Spark: the full 262144-token context fits with an FP8
+  KV cache and a float32 Mamba SSM cache (`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` allows the
+  long context, `VLLM_FLOAT32_MATMUL_PRECISION=high` keeps the Mamba scan numerically
+  stable), `--gpu-memory-utilization 0.8` leaves headroom in the 128 GB unified memory,
+  batching is sized for a single GB10 (`--max-num-seqs 8`,
+  `--max-num-batched-tokens 16384`), `--load-format fastsafetensors` speeds up weight
+  loading, and MTP speculative decoding plus prefix caching are enabled for lower
+  latency:
+
+  ```bash
+  # Use container: vllm/vllm-openai:v0.28.0-ubuntu2404
+
+  VLLM_FLOAT32_MATMUL_PRECISION="high" \
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+  vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --max-model-len 262144 \
+      --gpu-memory-utilization 0.8 \
+      --max-num-seqs 8 \
+      --load-format fastsafetensors \
+      --attention-backend flashinfer \
+      --max-num-batched-tokens 16384 \
+      --kv-cache-dtype fp8 \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype float32 \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+      --enable-prefix-caching \
+      --reasoning-parser nemotron_v3 \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder
+  ```
+
+  ### RTX Pro 6000 NVFP4
+
+  The NVFP4 variant runs on a single RTX Pro 6000 at TP=1. Requires vLLM v0.24.0 or later. A few notes:
+
+  - **Set `--gpu-memory-utilization 0.92`** to avoid an OOM at startup. If you encounter an OOM, try adjusting the value.
+  - **Set `VLLM_FLOAT32_MATMUL_PRECISION="high"`** to use high precision for the matmul operations.
+  - **Set `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`** to allow the model to use the full context length.
+
+  ```bash
+  # Use container: vllm/vllm-openai:v0.28.0-ubuntu2404
+
+  VLLM_FLOAT32_MATMUL_PRECISION="high" \
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+  vllm serve nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4 \
+      --max-model-len 262144 \
+      --gpu-memory-utilization 0.92 \
+      --max-num-seqs 8 \
+      --max-num-batched-tokens 16384 \
+      --kv-cache-dtype fp8 \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype float32 \
+      --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+      --enable-prefix-caching \
+      --reasoning-parser nemotron_v3 \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 --random-output-len 1024 \
+    --num-warmups 20 \
+    --ignore-eos \
+    --max-concurrency 1024 \
+    --num-prompts 2048
+  ```
+
+  ## References
+
+  - [vLLM blog: Nemotron-3-Super](https://vllm.ai/blog/nemotron-3-super)
+  - [vLLM blog: vLLM on DGX Spark](https://vllm.ai/blog/2026-06-01-vllm-dgx-spark)
+  - [Nemotron-3-Super-120B-A12B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16)
+  - [Nemotron-3-Super-120B-A12B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8)
+  - [Nemotron-3-Super-120B-A12B-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4)
+  - [Nemotron-3-Super-120B-A12B-Base-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16)
