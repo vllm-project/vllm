@@ -129,10 +129,6 @@ class LoRAModelManager:
             if self.is_pooling_model
             else None
         )
-        self._is_token_classification_head = (
-            self._pooling_task == "token_classify"
-            and isinstance(self.model.pooler, TokenPooler)
-        )
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
@@ -142,11 +138,7 @@ class LoRAModelManager:
 
         self.supported_modules_to_save = (
             {"score", "classifier"}
-            if self.is_pooling_model
-            and (
-                vllm_config.model_config.score_type == "cross-encoder"
-                or self._is_token_classification_head
-            )
+            if self._pooling_task in {"classify", "token_classify"}
             else set()
         )
 
@@ -561,7 +553,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     self.model.config,
-                    is_token_level=self._is_token_classification_head,
+                    is_token_level=isinstance(self.model.pooler, TokenPooler),
                 )
             else:
                 new_module = from_layer(
@@ -573,7 +565,9 @@ class LoRAModelManager:
                 )
             new_module = replace_submodule(self.model, module_name, new_module)
 
-            if is_classifier_head and not self._is_token_classification_head:
+            if is_classifier_head and isinstance(
+                new_module, ClassificationHeadWithLoRA
+            ):
                 self.model.pooler.replace_classifier(new_module)
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
