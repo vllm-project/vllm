@@ -433,18 +433,21 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
-        )
+        device = torch.get_default_device()
+        device = device if device.type != "meta" else torch.device("cpu")
+        with device:
+            (
+                self._local_num_experts,
+                self._expert_map,
+                self._expert_mask,
+            ) = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+            )
 
         self._local_num_experts += self.num_fused_shared_experts
 
