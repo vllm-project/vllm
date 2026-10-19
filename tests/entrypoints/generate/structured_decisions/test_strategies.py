@@ -8,7 +8,7 @@ from argparse import Namespace
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pybase64 as base64
@@ -1454,3 +1454,192 @@ async def test_joint_reads_on_both_endpoints(dgemma, endpoint):
     assert [c.args[0] for c in engine.check_admission.call_args_list] == [1, 1, 1]
     assert engine.generate.call_count == 3
     assert response.usage.output_tokens == engine.generate.call_args.args[1].max_tokens
+
+
+@pytest.mark.parametrize("custom_prompt", [False, True])
+def test_image_decisions_render_each_question_with_ordered_shared_media(
+    decision_server, monkeypatch, custom_prompt
+):
+    """The real API preserves media up to the existing multimodal renderer."""
+    from copy import deepcopy
+
+    server = decision_server
+    seen = []
+    original = server.renderer.preprocess_chat
+    server.engine.model_config.is_multimodal_model = True
+    strategy = server.client.app.state.openai_serving_decisions.strategy
+    warm_prefix = AsyncMock()
+    monkeypatch.setattr(strategy, "_warm_shared_prefix", warm_prefix)
+    if custom_prompt:
+        strategy = server.client.app.state.openai_serving_decisions.strategy
+        original_content = strategy._content
+        monkeypatch.setattr(
+            strategy,
+            "_content",
+            lambda state, q: "CUSTOM:" + original_content(state, q),
+        )
+
+    async def render(request, messages, **kwargs):
+        seen.append(deepcopy(messages))
+        # This fixture has a text tokenizer, not a vision processor. Keep the
+        # contract test at the renderer boundary; real image inference is separate.
+        text_messages = deepcopy(messages)
+        for message in text_messages:
+            if isinstance(message["content"], list):
+                message["content"] = "".join(
+                    part.get("text", "[image]") for part in message["content"]
+                )
+        return await original(request, text_messages, **kwargs)
+
+    monkeypatch.setattr(server.renderer, "preprocess_chat", render)
+    body = decision_body("decisions", 2)
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/first.png"},
+                {"type": "input_text", "text": "Between images"},
+                {"type": "input_image", "image_url": "https://example.com/second.png"},
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 200, response.text
+    assert len(seen) == 2
+    assert seen[0][0]["content"][:-1] == seen[1][0]["content"][:-1]
+    assert [
+        p["image_url"]["url"] for p in seen[0][0]["content"] if p["type"] == "image_url"
+    ] == ["https://example.com/first.png", "https://example.com/second.png"]
+    assert "Question 0" in seen[0][0]["content"][-1]["text"]
+    assert "Question 1" in seen[1][0]["content"][-1]["text"]
+    assert seen[0][0]["content"][:-1] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/first.png", "detail": "auto"},
+        },
+        {"type": "text", "text": "Between images"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/second.png", "detail": "auto"},
+        },
+    ]
+    assert seen[0][0]["content"][-1]["text"].startswith(
+        "CUSTOM:" if custom_prompt else "\n\n"
+    )
+    assert len(body["input"][0]["content"]) == 3
+    warm_prefix.assert_not_awaited()
+
+
+def test_image_request_to_text_only_model_fails_before_generation(decision_server):
+    server = decision_server
+    server.engine.model_config.is_multimodal_model = False
+    body = decision_body("decisions")
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/image.png"}
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 400
+    assert "does not support image input" in response.json()["error"]["message"]
+    assert not server.engine.generated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_cls", [LiquidStrategy, JointSchemaStrategy, D3Strategy]
+)
+async def test_fixed_protocol_image_prefix_is_preserved(strategy_cls):
+    """Fixed image-prefix protocols retain image order and their own text formatter."""
+    strategy = object.__new__(strategy_cls)
+    strategy.context = SimpleNamespace(
+        engine_client=SimpleNamespace(
+            model_config=SimpleNamespace(is_multimodal_model=True)
+        )
+    )
+    strategy.read = AsyncMock(return_value=[])
+    question = build_question("q", "choice", "Which?", {"yes": None, "no": None}, 26)
+    parts = [
+        {"type": "image_url", "image_url": {"url": url}} for url in ("first", "second")
+    ]
+    parts.append({"type": "text", "text": "Evidence"})
+    await strategy.read_input([question], None, [{"role": "user", "content": parts}])
+    strategy.read.assert_awaited_once_with(
+        [question], None, "Evidence", media={"image": ["first", "second"]}
+    )
+    if strategy_cls is LiquidStrategy:
+        assert "QUESTION:" in strategy._content("Evidence", question)
+        assert "Reply with the option code only." in strategy._content(
+            "Evidence", question
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_cls", [LiquidStrategy, JointSchemaStrategy, D3Strategy]
+)
+async def test_fixed_protocol_rejects_interleaving_without_reordering(strategy_cls):
+    strategy = object.__new__(strategy_cls)
+    strategy.context = SimpleNamespace(
+        engine_client=SimpleNamespace(
+            model_config=SimpleNamespace(is_multimodal_model=True)
+        )
+    )
+    strategy.read = AsyncMock()
+    state = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "first"}},
+                {"type": "text", "text": "Between images"},
+                {"type": "image_url", "image_url": {"url": "second"}},
+            ],
+        }
+    ]
+    with pytest.raises(
+        StructuredDecisionError, match="interleaved input is unsupported"
+    ):
+        await strategy.read_input([], None, state)
+    strategy.read.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fixed_protocol_preserves_message_text_boundaries(monkeypatch):
+    strategy = object.__new__(JointSchemaStrategy)
+    strategy.context = SimpleNamespace(
+        engine_client=SimpleNamespace(
+            model_config=SimpleNamespace(is_multimodal_model=True)
+        )
+    )
+    read = AsyncMock(return_value=[])
+    monkeypatch.setattr(strategy, "read", read)
+    state = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "first"}},
+                {"type": "text", "text": "First part"},
+                {"type": "text", "text": "Second part"},
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "Next message"}]},
+    ]
+    await strategy.read_input([], None, state)
+    read.assert_awaited_once_with(
+        [], None, "First part\nSecond part\n\nNext message", media={"image": ["first"]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_ordered_input_dispatch_preserves_joint_read_selection(monkeypatch):
+    strategy = object.__new__(NextTokenStrategy)
+    read = AsyncMock(return_value=[])
+    read_joint = AsyncMock(return_value=[])
+    monkeypatch.setattr(strategy, "read", read)
+    monkeypatch.setattr(strategy, "read_joint", read_joint)
+    await strategy.read_input([], None, "Evidence", joint=True)
+    read_joint.assert_awaited_once_with([], None, "Evidence")
+    read.assert_not_called()
