@@ -101,3 +101,44 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
+
+
+@pytest.mark.parametrize("model_consumes_first", [False, True])
+def test_iteration_timing_poll_preserves_model_response_order(model_consumes_first):
+    executor = object.__new__(MultiprocExecutor)
+    sent: list = []
+    responses: deque = deque()
+    writable = [False]
+
+    def receive(**kwargs):
+        assert responses, "Would block waiting for an RPC response"
+        return WorkerProc.ResponseStatus.SUCCESS, responses.popleft()
+
+    executor.is_failed = False
+    executor.output_rank = 0
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(
+        can_enqueue=lambda: writable[0], enqueue=sent.append
+    )
+    executor.response_mqs = [
+        SimpleNamespace(can_dequeue=lambda: bool(responses), dequeue=receive)
+    ]
+    assert executor.start_iteration_timing_poll() is None
+    assert not sent
+    writable[0] = True
+    poll = executor.start_iteration_timing_poll()
+    assert poll is not None and poll() is None
+    assert executor.start_iteration_timing_poll() is None
+    assert len(sent) == 1
+    later = executor.collective_rpc(
+        "execute_model", non_block=True, unique_reply_rank=0
+    )
+    responses.extend([((7, 10.0),), "model-output"])
+    if model_consumes_first:
+        assert later.result() == "model-output"
+        assert poll() == ((7, 10.0),)
+    else:
+        assert poll() == ((7, 10.0),)
+        assert later.result() == "model-output"
+    assert not responses
+    assert not executor.futures_queue
