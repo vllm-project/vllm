@@ -9,9 +9,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 if current_platform.is_cpu():
-    # The CPU model runner swaps in CPUBlockTables; run the same checks on it.
+    # Run the same checks on the CPU kernel overrides.
     import vllm.v1.worker.cpu.shm  # noqa: F401
-    from vllm.v1.worker.cpu.block_table import CPUBlockTables as BlockTables
 
     current_platform.register_triton_kernel_overrides()
 
@@ -24,7 +23,6 @@ pytestmark = pytest.mark.skipif(
 cuda_only = pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 
 
-@cuda_only
 def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
     device = DEVICE
     block_tables = BlockTables(

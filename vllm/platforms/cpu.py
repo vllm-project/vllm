@@ -703,6 +703,13 @@ class CpuPlatform(Platform):
             }
         )
 
+        if os.environ.get("VLLM_CPU_TRANSLATE_TRITON") == "1":
+            from vllm.triton_utils.numba_translate import translate_kernels
+
+            register_kernels(translate_kernels("vllm/v1/worker/gpu"))
+            register_kernels(translate_kernels("vllm/v1/worker/utils.py"))
+            return
+
         from vllm.v1.worker.cpu.kernels import get_kernel_overrides
 
         register_kernels(get_kernel_overrides())

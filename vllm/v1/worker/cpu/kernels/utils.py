@@ -7,8 +7,6 @@ from typing import Any
 
 import numba
 import torch
-from numba import types
-from numba.extending import intrinsic
 
 
 @functools.lru_cache(maxsize=1024)
@@ -20,22 +18,6 @@ def ptr_view(addr: int, dtype: torch.dtype, numel: int) -> torch.Tensor:
     """
     buf = (ctypes.c_byte * (numel * dtype.itemsize)).from_address(addr)
     return torch.frombuffer(buf, dtype=dtype)
-
-
-@intrinsic
-def _int32_ptr(typingctx, addr):
-    sig = types.CPointer(types.int32)(addr)
-
-    def codegen(context, builder, signature, args):
-        return builder.inttoptr(args[0], context.get_value_type(sig.return_type))
-
-    return sig, codegen
-
-
-@numba.njit(cache=True)
-def int32_array(addr, shape):
-    """Zero-copy int32 array at host address `addr`, inside numba kernels."""
-    return numba.carray(_int32_ptr(addr), shape)
 
 
 def numba_kernel(fn: Callable[..., Any]) -> Callable[..., Any]:

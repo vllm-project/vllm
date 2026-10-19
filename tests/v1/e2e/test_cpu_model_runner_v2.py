@@ -15,6 +15,7 @@ import pytest
 from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
+from vllm.sampling_params import StructuredOutputsParams
 
 pytestmark = pytest.mark.cpu_model
 
@@ -42,6 +43,9 @@ FEATURES = {
     # 12095 is " Paris", the greedy first token for the first prompt.
     "min_tokens": dict(min_tokens=4, stop_token_ids=[12095]),
     "allowed_token_ids": dict(allowed_token_ids=list(range(100, 1000))),
+    "structured_outputs": dict(
+        structured_outputs=StructuredOutputsParams(regex=r"[a-z]+( [a-z]+){3}")
+    ),
 }
 
 

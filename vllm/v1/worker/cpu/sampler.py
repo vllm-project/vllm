@@ -14,11 +14,14 @@ host memory.
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.cpu.kernels.gumbel import gumbel_argmax, gumbel_noise
+from vllm.v1.worker.cpu.kernels.sample import token_logprobs, token_ranks
 from vllm.v1.worker.cpu.logits_processors import (
     CPUBadWords,
     CPULogitBias,
@@ -30,6 +33,7 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
     LogitsProcessor,
     LogitsProcRequestState,
 )
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import SamplingStates
@@ -218,3 +222,50 @@ class CPUSampler(Sampler):
                 processed_logits, *args, top_k, top_p, self.use_fp64_gumbel
             )
         return sampled, processed_logits
+
+    @staticmethod
+    def compute_topk_scores(
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | torch.Tensor | None = None,
+        logprob_token_ids_state: LogprobTokenIdsState | None = None,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        max_per_req_token_ids: int = 0,
+        logits_mode: bool = False,
+    ) -> LogprobsTensors:
+        sampled = sampled_token_ids.long()
+        topk = torch.topk(logits, num_logprobs, dim=-1).indices
+        token_ids = torch.cat((sampled.unsqueeze(1), topk), dim=1)
+        valid = None
+        if max_per_req_token_ids > 0:
+            # Requests with logprob_token_ids get those instead of the top-k.
+            assert logprob_token_ids_state is not None
+            assert expanded_idx_mapping is not None
+            num_cols = max(num_logprobs, max_per_req_token_ids)
+            req = expanded_idx_mapping.long()
+            num_custom = logprob_token_ids_state.num_token_ids.gpu[req].unsqueeze(1)
+            custom = logprob_token_ids_state.token_ids.gpu[req, :num_cols].long()
+            custom = F.pad(custom, (0, num_cols - custom.shape[1]))
+            topk = F.pad(topk, (0, num_cols - num_logprobs))
+            has_custom = num_custom > 0
+            valid = torch.arange(num_cols) < torch.where(
+                has_custom, num_custom, num_logprobs
+            )
+            cols = torch.where(valid, torch.where(has_custom, custom, topk), 0)
+            token_ids = torch.cat((sampled.unsqueeze(1), cols), dim=1)
+            valid = F.pad(valid, (1, 0), value=True)
+        if logits_mode:
+            scores = logits.gather(1, token_ids).float()
+        else:
+            scores = token_logprobs(logits, token_ids)
+        if valid is not None:
+            scores = scores.masked_fill(~valid, float("-inf"))
+        is_tensor = isinstance(cu_num_logits, torch.Tensor)
+        return LogprobsTensors(
+            logprob_token_ids=token_ids.to(sampled_token_ids.dtype),
+            logprobs=scores,
+            selected_token_ranks=token_ranks(logits, sampled),
+            cu_num_generated_tokens=None if is_tensor else cu_num_logits,
+            cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
+        )

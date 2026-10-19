@@ -7,19 +7,12 @@ import torch
 from vllm.v1.worker.cpu.kernels.utils import numba_kernel
 
 
-def _compile(fn):
-    return torch.compile(fn, dynamic=True, fullgraph=True)
+def token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+    lse = torch.logsumexp(logits.float(), dim=1, keepdim=True)
+    return logits.gather(1, token_ids).float() - lse
 
 
-@_compile
-def _token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    logits = logits.to(torch.float32)
-    lse = torch.logsumexp(logits, dim=1, keepdim=True)
-    return logits.gather(1, token_ids) - lse
-
-
-@_compile
-def _ranks(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+def token_ranks(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     x = logits.gather(1, token_ids.unsqueeze(1))
     return (logits >= x).sum(dim=1)
 
@@ -31,9 +24,7 @@ def topk_log_softmax(
     topk: int,
     vocab_size: int,
 ) -> None:
-    output_ptr.copy_(
-        _token_logprobs(logits_ptr[:, :vocab_size], topk_ids_ptr[:, :topk])
-    )
+    output_ptr.copy_(token_logprobs(logits_ptr[:, :vocab_size], topk_ids_ptr[:, :topk]))
 
 
 def ranks(
@@ -44,7 +35,9 @@ def ranks(
 ) -> None:
     batch_size = output_ptr.shape[0]
     output_ptr.copy_(
-        _ranks(logits_ptr[:batch_size, :vocab_size], token_ids_ptr[:batch_size].long())
+        token_ranks(
+            logits_ptr[:batch_size, :vocab_size], token_ids_ptr[:batch_size].long()
+        )
     )
 
 
@@ -95,29 +88,6 @@ def prompt_logprobs_token_ids(
             # Shifted by one: the logprob at a position is for the next token.
             col = min(num_computed_tokens_ptr[req] + 1 + i, last_col)
             prompt_logprobs_token_ids_ptr[start + i] = all_token_ids_ptr[req, col]
-
-
-def apply_grammar_bitmask(
-    logits_ptr: torch.Tensor,
-    logits_indices_ptr: torch.Tensor,
-    cu_num_logits_ptr: torch.Tensor,
-    bitmask_ptr: torch.Tensor,
-    vocab_size: int,
-    MASK_STRIDE: int,
-) -> None:
-    num_masks, num_words = bitmask_ptr.shape
-    mapping_idx = logits_indices_ptr[:num_masks].long()
-    req = mapping_idx // MASK_STRIDE
-    position = mapping_idx % MASK_STRIDE
-    logits_start = cu_num_logits_ptr[req].long()
-    is_active = position < cu_num_logits_ptr[req + 1].long() - logits_start
-    rows = (logits_start + position)[is_active]
-
-    bits = torch.arange(32, dtype=bitmask_ptr.dtype)
-    allowed = (bitmask_ptr[is_active].unsqueeze(-1) >> bits) & 1
-    allowed = allowed.view(rows.shape[0], num_words * 32)[:, :vocab_size].bool()
-    logits = logits_ptr[rows, :vocab_size]
-    logits_ptr[rows, :vocab_size] = logits.masked_fill(~allowed, float("-inf"))
 
 
 def num_nans(

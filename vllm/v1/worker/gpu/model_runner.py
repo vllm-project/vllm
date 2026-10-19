@@ -504,7 +504,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 logprobs_mode=self.model_config.logprobs_mode,
             )
-            self.structured_outputs_worker = StructuredOutputsWorker(
+            self.structured_outputs_worker = self.structured_outputs_worker_cls(
                 max_num_logits=self.max_num_reqs * self.decode_query_len,
                 vocab_size=self.vocab_size,
                 device=self.device,
@@ -682,7 +682,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = self.block_tables_cls(
+        self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -2407,14 +2407,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def pcp_manager_cls(self) -> type[pcp.PCPManager]:
         return pcp.PCPManager
 
-    # Hardware runners can select the sampler and block table classes.
+    # Hardware runners can select the sampler and structured outputs classes.
     @property
     def sampler_cls(self) -> type[Sampler]:
         return Sampler
 
     @property
-    def block_tables_cls(self) -> type[BlockTables]:
-        return BlockTables
+    def structured_outputs_worker_cls(self) -> type[StructuredOutputsWorker]:
+        return StructuredOutputsWorker
 
 
 class ExecuteModelState(NamedTuple):

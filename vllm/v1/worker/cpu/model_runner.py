@@ -1,20 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import numpy as np
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.kernels import input_batch as kernels
 from vllm.v1.worker.cpu.sampler import CPUSampler
+from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 logger = init_logger(__name__)
+
+# Translate every MRV2 Triton kernel to numba, in place of the hand ports.
+_TRANSLATE_TRITON = os.environ.get("VLLM_CPU_TRANSLATE_TRITON") == "1"
 
 
 class CPUModelRunner(GPUModelRunner):
@@ -23,8 +28,8 @@ class CPUModelRunner(GPUModelRunner):
         return CPUSampler
 
     @property
-    def block_tables_cls(self) -> type[CPUBlockTables]:
-        return CPUBlockTables
+    def structured_outputs_worker_cls(self) -> type[CPUStructuredOutputsWorker]:
+        return CPUStructuredOutputsWorker
 
     def prepare_inputs(
         self,
@@ -35,7 +40,8 @@ class CPUModelRunner(GPUModelRunner):
     ) -> InputBatch:
         # Spec decode, fast prefill and PCP keep the GPU path (Triton only).
         if (
-            scheduler_output.scheduled_spec_decode_tokens
+            _TRANSLATE_TRITON
+            or scheduler_output.scheduled_spec_decode_tokens
             or self.model_state.num_new_sampled_tokens_per_step != 1
             or self.fast_prefill is not None
             or self.pcp_manager is not None
