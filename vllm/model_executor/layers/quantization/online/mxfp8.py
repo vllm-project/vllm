@@ -3,6 +3,7 @@
 
 """Online MXFP8 (microscaling FP8, block-32) quantization methods."""
 
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 import torch
@@ -34,6 +35,28 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import replace_parameter
+
+
+def _refresh_moe_quant_config_inplace(
+    dst: "FusedMoEQuantConfig", src: "FusedMoEQuantConfig"
+) -> None:
+    """Copy every tensor of ``src`` into the tensor ``dst`` holds in its place."""
+    for desc_name in ("_a1", "_a2", "_w1", "_w2"):
+        dst_desc = getattr(dst, desc_name)
+        src_desc = getattr(src, desc_name)
+        for desc_field in fields(dst_desc):
+            old = getattr(dst_desc, desc_field.name)
+            new = getattr(src_desc, desc_field.name)
+            if not isinstance(old, torch.Tensor) or old is new:
+                continue
+            if not isinstance(new, torch.Tensor) or (
+                old.shape != new.shape or old.dtype != new.dtype
+            ):
+                raise ValueError(
+                    f"MoE quant config {desc_name}.{desc_field.name} changed on "
+                    "weight reload and cannot be refreshed in place"
+                )
+            old.copy_(new)
 
 
 class Mxfp8OnlineLinearMethod(OnlineLinearBase):
@@ -195,7 +218,14 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if getattr(self, "moe_kernel", None) is not None:
+            # Weight reload: keep the kernel captured CUDA graphs reference and
+            # refresh its quant config in place.
+            _refresh_moe_quant_config_inplace(self.moe_quant_config, moe_quant_config)
+            return
+
+        self.moe_quant_config = moe_quant_config
         if self.moe_quant_config:
             assert self.experts_cls is not None
             self.moe_kernel = make_fp8_moe_kernel(
