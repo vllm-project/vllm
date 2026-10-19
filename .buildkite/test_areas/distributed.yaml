@@ -304,6 +304,8 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -652,6 +654,8 @@ steps:
 
 - label: ":nvidia: (L4) Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
