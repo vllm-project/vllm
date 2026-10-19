@@ -425,7 +425,6 @@ steps:
     amd:
       label: ":amd: (MI355) Distributed DP + EP"
       dind: false
-      optional: false
       device: mi355_8
       timeout_in_minutes: 50
       depends_on:
@@ -439,6 +438,14 @@ steps:
       - vllm/v1/executor/uniproc_executor.py
       - vllm/v1/worker/gpu_worker.py
       - vllm/platforms/rocm.py
+      commands:
+      - export NCCL_CUMEM_HOST_ENABLE=0
+      # TODO(akaratza): drop NCCL_RAS_ENABLE once RCCL's RAS thread no longer
+      # aborts at exit: https://github.com/ROCm/rocm-systems/issues/13572
+      - export NCCL_RAS_ENABLE=0
+      # Logs each process group's teardown, to locate the exit-time abort.
+      - export TORCH_CPP_LOG_LEVEL=INFO
+      - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: ":nvidia: (A100) Distributed"
   key: distributed-tests-4xa100
