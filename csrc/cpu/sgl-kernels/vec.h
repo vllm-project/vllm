@@ -612,9 +612,7 @@ inline __attribute__((always_inline)) __m512 _mm512_rcp14_sigmoid_glu_ps(__m512 
   return _mm512_mul_ps(x, _mm512_rcp14_sigmoid_ps(xa));
 }
 
-// tanh-approx GELU(x) * x, i.e. gelu_tanh(x) used as an activation-and-mul input, via
-// tanh(z) = 2 * sigmoid(2z) - 1, so gelu_tanh(x) = 0.5*x*(1+tanh(z)) simplifies to
-// x * sigmoid(2z) with z = sqrt(2/pi) * (x + 0.044715 * x^3).
+// gelu_tanh(x) = x * sigmoid(2z), z = sqrt(2/pi) * (x + 0.044715 * x^3)
 inline __attribute__((always_inline)) __m512 _mm512_rcp14_gelu_tanh_ps(__m512 x) {
   const __m512 c0 = _mm512_set1_ps(1.5957691216057308f);   // 2 * sqrt(2/pi)
   const __m512 c1 = _mm512_set1_ps(0.07135481627260025f);  // 2 * sqrt(2/pi) * 0.044715
@@ -650,11 +648,7 @@ inline at::vec::Vectorized<float> fast_gelu(const at::vec::Vectorized<float>& x)
   return half * x * (one + (x * inv_sqrt2).erf());
 }
 
-// tanh-approx gelu, matching torch.nn.functional.gelu(approximate="tanh")
-// (a.k.a. "gelu_pytorch_tanh", used by Gemma-style models):
-//   gelu_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// Using tanh(z) = 2 * sigmoid(2z) - 1 this simplifies to x * sigmoid(2z), reusing the
-// existing fast_sigmoid (rcp14-based on AVX512) instead of a dedicated tanh primitive.
+// tanh-approx gelu: x * sigmoid(2z), z = sqrt(2/pi) * (x + 0.044715 * x^3)
 inline at::vec::Vectorized<float> fast_gelu_tanh(const at::vec::Vectorized<float>& x) {
 #if defined(CPU_CAPABILITY_AVX512)
   return at::vec::Vectorized<float>(_mm512_rcp14_gelu_tanh_ps(x));

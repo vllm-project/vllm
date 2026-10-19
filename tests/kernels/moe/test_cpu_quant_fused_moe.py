@@ -833,12 +833,7 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
 @pytest.mark.parametrize("N,K,E,topk", [(128, 128, 4, 2), (64, 64, 4, 2)])
 @pytest.mark.parametrize("seed", [0])
 def test_mxfp4_cpu_fused_moe_bias_swigluoai_activation_string(M, N, K, E, topk, seed):
-    """Regression test: CPUExpertsMxfp4.apply() always passes
-    activation="swigluoai" (MoEActivation.SWIGLUOAI.value) alongside
-    gemm1_alpha/gemm1_clamp_limit, not the bare "swiglu" string. Must match
-    the alpha/limit-only dispatch exercised by
-    test_mxfp4_cpu_fused_moe_bias_swiglu.
-    """
+    """CPUExpertsMxfp4 passes activation="swigluoai" with alpha/limit."""
     set_random_seed(seed)
     dtype = torch.bfloat16
     alpha = 1.702

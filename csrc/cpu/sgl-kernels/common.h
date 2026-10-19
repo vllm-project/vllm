@@ -5,32 +5,13 @@
 // https://github.com/sgl-project/sglang/tree/c4870d98cfefa80f5cbf83de2ff6a6745032f86c/python/sglang/kernels/aot/csrc/cpu
 // Sync date: 2026-10-16
 //
-// Partial sync: only bmm.cpp, moe.cpp, moe.h, moe_fp8.cpp, vec.h, gemm.h were
-// reconciled against the commit above (3-way merge on top of the prior sync at
+// Partial sync: only moe.cpp, moe.h, moe_fp8.cpp, vec.h and gemm.h were merged
+// (3-way, on top of the prior sync at
 // 7c248dde7fe1f3b5100966f8143f97a9932c22a4). decode.cpp, extend.cpp,
-// gemm_fp8.cpp, topk.cpp, and vec_pack.h still reflect the prior sync and were
-// intentionally left unmerged: decode.cpp/extend.cpp/gemm_fp8.cpp gained a new
-// upstream fp8 "packed" KV-cache attention feature requiring new
-// op-schema/binding plumbing (not a pure kernel-body change); vec_pack.h's
-// `pack_vnni`/`pack_vnni2` grew a new `packed_t`/ `src_scale` template param
-// for that same feature, which is a breaking (not overloaded) signature change
-// for extend.cpp's still-unsynced call sites, and no in-scope file
-// (moe.cpp/moe_fp8.cpp/bmm.cpp/moe.h) uses these helpers — so it was reverted
-// rather than carried; and topk.cpp has a direct conflict between vLLM's local
-// DeepSeek-V4 biased-topk logic and upstream's own rewrite of the same
-// function. gemm.h's own "per tensor quantization" `tinygemm_kernel(...,
-// Float8_e4m3fn...)` forward declaration also grew a `Bbias`/`do_unpack` param
-// for the same feature, whose implementation lives in the still-unsynced
-// gemm_fp8.cpp; that declaration was reverted to its pre-sync form (the rest of
-// gemm.h's sync — the new `CPUActMethod`/ `act_method_from_string` additions
-// and the unrelated "block quantization" overload's pre-existing `Bbias` param
-// — is unaffected and was kept). bmm.cpp's own call to this overload had picked
-// up a matching `/* bias*/ nullptr` argument from the same upstream change, but
-// bmm_kernel_impl never threads a bias parameter through its own signature in
-// the first place, so that one argument was dropped (not functional, just
-// textual churn) rather than carrying the Bbias/do_unpack feature into
-// gemm_fp8.cpp. A future sync must reconcile all 5 of these together rather
-// than re-running a blind per-file merge.
+// gemm_fp8.cpp, topk.cpp and vec_pack.h still match the prior sync: upstream
+// changed them for fp8 packed KV-cache attention (new signatures that need
+// op-schema plumbing) and a topk.cpp rewrite that conflicts with the local
+// DeepSeek-V4 biased-topk. Reconcile them together in a full sync.
 
 // clang-format off
 
