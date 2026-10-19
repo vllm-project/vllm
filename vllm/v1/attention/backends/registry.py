@@ -117,6 +117,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
         "DeepseekV4FlashInferMLASparseBackend"
     )
+    ROCM_FLASHMLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v41.amd.rocm.DeepseekV41ROCMAiterMLASparseBackend"
+    )
     FLASHMLA_MEGA_ATTN_DSV41 = (
         "vllm.models.deepseek_v41.sparse_mla.FlashMLAMegaAttnBackend"
     )
@@ -124,6 +127,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     FLASH_ATTN_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashattn_mla_sparse.FlashAttnMLASparseBackend"
+    )
+    FLASH_ATTN_MLA_SPARSE_FA4 = (
+        "vllm.v1.attention.backends.mla.flashattn_mla_sparse."
+        "FlashAttnMLASparseFA4Backend"
     )
     MINIMAX_M3_SPARSE = (
         "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
@@ -136,6 +143,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
         "MiniMaxM3SparseTritonBackend"
     )
+    STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     # HPC Attention Backend:
