@@ -1496,13 +1496,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # The paged attention *instantiations* are split over one translation unit
   # per (dtype, kv-cache dtype, head size) combination: compiling them in a
   # single TU serializes ~10 min of device code generation onto one core.
-  # attention.cu only holds the runtime dispatch, attention_kernels.cuh the
-  # kernels and launchers.
+  # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
+  # the kernels and launchers.
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
-    "csrc/rocm/attention.cu"
+    "csrc/rocm/attention_dispatch.cu"
     "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
     "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
     "csrc/rocm/attention_paged_attn_h64_bf16_auto.cu"
