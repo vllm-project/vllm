@@ -34,6 +34,7 @@ from openai.types.responses.tool import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
+from starlette.requests import Request
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -768,6 +769,58 @@ class TestInitializeToolSessions:
         return instance
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "header,expected_rank", [(None, None), ("invalid", None), ("0", 0), ("3", 3)]
+    )
+    async def test_responses_data_parallel_rank(
+        self, serving_responses_instance, stream, header, expected_rank
+    ):
+        serving = serving_responses_instance
+        serving._check_model = AsyncMock(return_value=None)
+        serving._preflight = MagicMock()
+        serving._maybe_get_adapters = MagicMock(return_value=None)
+        serving._validate_generator_input = MagicMock(return_value=None)
+        serving._make_response_parser = MagicMock(return_value=None)
+        serving._get_trace_headers = AsyncMock(return_value=None)
+        serving.online_renderer.validate_chat_template.return_value = None
+        serving._render_resolved_response_inputs = AsyncMock(
+            return_value=SimpleNamespace(messages=[], engine_input=tokens_input([1, 2]))
+        )
+        serving.override_max_tokens = None
+        serving.tool_server = None
+
+        async def generate(*args, **kwargs):
+            if False:
+                yield
+
+        async def consume(request, sampling_params, result_generator, *args):
+            async for _ in result_generator:
+                pass
+            yield "done"
+
+        async def consume_full(*args):
+            return [item async for item in consume(*args)]
+
+        serving.engine_client.generate.side_effect = generate
+        serving.responses_stream_generator = consume
+        serving.responses_full_generator = consume_full
+        headers = [] if header is None else [(b"x-data-parallel-rank", header.encode())]
+        raw_request = Request({"type": "http", "headers": headers})
+        request = ResponsesRequest(input="hi", stream=stream, store=False)
+
+        result = await serving._create_responses(request, raw_request)
+        if stream:
+            result = [item async for item in result]
+        assert result == ["done"]
+        serving.engine_client.generate.assert_called_once()
+        assert (
+            serving.engine_client.generate.call_args.kwargs["data_parallel_rank"]
+            == expected_rank
+        )
+
+    @pytest.mark.asyncio
     async def test_stateful_harmony_delegates_named_tool_choice_to_renderer(
         self,
         serving_responses_instance,
@@ -839,8 +892,13 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("data_parallel_rank", [None, 0, 3])
     async def test_harmony_tool_followup_preserves_render_params(
-        self, serving_responses_instance, monkeypatch: pytest.MonkeyPatch
+        self,
+        serving_responses_instance,
+        monkeypatch: pytest.MonkeyPatch,
+        data_parallel_rank,
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
             def __init__(self):
@@ -883,6 +941,7 @@ class TestInitializeToolSessions:
 
         async for _ in serving_responses_instance._generate_with_builtin_tools(
             request_id="req",
+            data_parallel_rank=data_parallel_rank,
             engine_input=tokens_input([1], cache_salt="request-salt"),
             sampling_params=MagicMock(),
             context=context,
@@ -895,6 +954,10 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert all(
+            call.kwargs["data_parallel_rank"] == data_parallel_rank
+            for call in serving_responses_instance.engine_client.generate.call_args_list
+        )
         assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
