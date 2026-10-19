@@ -429,6 +429,7 @@ class Qwen3NextAttention(nn.Module):
             and self.attn.supports_prequantized_qkv_input
         )
         if self.use_prequantized_qkv:
+            self.attn.receives_prequantized_qkv = True
             logger.info_once(
                 "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
             )

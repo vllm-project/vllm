@@ -1003,6 +1003,16 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
 
+    def set_interleaved_v_cache(self):
+        """Opt this implementation into the interleaved V-cache layout for all of
+        its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
+        for every eligible layer when it is constructed, i.e. before any KV
+        cache is written, so fused and unfused paths stay consistent whether or
+        not the pattern matches. Default is a no-op; backends whose kernels
+        read an interleaved V-cache under this fusion (e.g. ROCM_ATTN) override.
+        """
+        return False
+
     def fused_rope_kvcache_supported(self):
         """Does this attention implementation support RoPE+KVCache fusion.
         This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
@@ -1127,6 +1137,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """MQA-style decode forward pass."""
         raise NotImplementedError
+
+    def reserve_workspace(self) -> None:
+        """Called in the memory profiling run to claim persistent workspace
+        that is otherwise reserved after profiling."""
+        return
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.

@@ -422,3 +422,97 @@ def test_aiter_backend_prequantized_qkv_cache_support(
     )
 
     assert impl.supports_prequantized_qkv_input is expected
+
+
+def _layer(supports: bool, receives: bool):
+    return SimpleNamespace(
+        impl=SimpleNamespace(supports_prequantized_qkv_input=supports),
+        receives_prequantized_qkv=receives,
+    )
+
+
+@pytest.mark.parametrize(
+    ("layers", "cache_dtype", "expected"),
+    [
+        ([_layer(True, True), _layer(True, True)], "fp8", True),
+        # A backend-capable layer that the model never feeds prequantized
+        # Q/K/V must keep the BF16 context workspace.
+        ([_layer(True, False)], "fp8", False),
+        ([_layer(True, True), _layer(True, False)], "fp8", False),
+        ([_layer(False, True)], "fp8", False),
+        ([_layer(True, True)], "auto", False),
+        ([], "fp8", False),
+    ],
+)
+def test_direct_fp8_context_gather_needs_prequantized_producers(
+    monkeypatch, layers, cache_dtype, expected
+):
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops, "is_shuffle_kv_cache_enabled", lambda: False
+    )
+    assert rocm_aiter_fa._uses_direct_fp8_context_gather(layers, cache_dtype) is (
+        expected
+    )
+
+
+def test_direct_fp8_context_gather_is_off_for_shuffle_layout(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops, "is_shuffle_kv_cache_enabled", lambda: True
+    )
+    assert not rocm_aiter_fa._uses_direct_fp8_context_gather(
+        [_layer(True, True)], "fp8"
+    )
+
+
+def test_fp8_context_workspace_requires_prequantized_qkv(monkeypatch):
+    impl = object.__new__(rocm_aiter_fa.AiterFlashAttentionImpl)
+    impl.num_kv_heads = 1
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = 1.0
+    impl.sliding_window = (-1, -1)
+    impl.alibi_slopes = None
+    impl.sinks = None
+    fp8_dtype = torch.float8_e4m3fn
+    monkeypatch.setattr(rocm_aiter_fa.current_platform, "fp8_dtype", lambda: fp8_dtype)
+    chunk_metadata = rocm_aiter_fa.AiterChunkContextMetadata(
+        workspace=torch.empty((2, 4, 1, 8), dtype=fp8_dtype),
+        cu_seq_lens_chunk=torch.tensor([[0, 3]], dtype=torch.int32),
+        chunk_starts=torch.tensor([[0]], dtype=torch.int32),
+        token_to_batch=torch.zeros((1, 3), dtype=torch.int32),
+        max_seq_lens=[3],
+        num_chunks=1,
+        total_token_per_batch=[3],
+        swa_metadata=None,
+    )
+    metadata = SimpleNamespace(
+        extend_metadata=rocm_aiter_fa.AiterFlashAttentionChunkPrefillMetadata(
+            max_query_len=2,
+            max_seq_len=5,
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            chunk_context_metadata=chunk_metadata,
+        )
+    )
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops,
+        "flash_attn_varlen_func",
+        lambda **kwargs: (torch.zeros(2, 4, 8), torch.zeros((1, 4))),
+    )
+    query, key, value = _make_tensors(1)
+    with pytest.raises(ValueError, match="FP8 context workspace"):
+        impl.extend_forward(
+            attn_metadata=metadata,
+            query=query,
+            key=key,
+            value=value,
+            key_cache=torch.empty((1, 1, 1, 16), dtype=fp8_dtype),
+            value_cache=torch.empty((1, 1, 1, 16), dtype=fp8_dtype),
+            output=torch.empty_like(query),
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            max_seqlen_q=2,
+            min_seqlen_q=1,
+            max_seqlen_k=5,
+            block_table=torch.zeros((1, 1), dtype=torch.int32),
+            slot_mapping=torch.tensor([0, 1], dtype=torch.int64),
+            k_scale=torch.ones(1),
+            v_scale=torch.ones(1),
+        )

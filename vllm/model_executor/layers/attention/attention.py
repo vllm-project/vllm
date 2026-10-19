@@ -691,6 +691,12 @@ class Attention(nn.Module, AttentionLayerBase):
     def supports_prequantized_qkv_input(self) -> bool:
         return self.impl.supports_prequantized_qkv_input
 
+    # Set by the model when it passes ``prequantized_qkv`` on every forward.
+    # ``supports_prequantized_qkv_input`` only says the backend can consume it;
+    # a backend must not change its buffers or kernels for prequantized input
+    # unless the layers actually send it.
+    receives_prequantized_qkv: bool = False
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size

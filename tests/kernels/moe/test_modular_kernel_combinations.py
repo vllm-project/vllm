@@ -89,14 +89,16 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     if not issubclass(fe_cls, AiterExperts):
         return
 
-    if config.quant_config is None or config.quant_dtype is None:
+    if config.weight_dtype is None:
         w_key, a_key = None, None
+    elif config.weight_dtype == "mxfp4":
+        w_key, a_key = config.mxfp4_quant_key_pair()
     else:
         w_key, a_key = config.fp8_quant_key_pair()
 
     assert fe_cls._supports_quant_scheme(w_key, a_key), (
         f"AITER case (weight_key={w_key}, activation_key={a_key}) reached "
-        "the modular-kernel harness, but AiterExperts._supports_quant_scheme "
+        f"the modular-kernel harness, but {fe_cls.__name__}._supports_quant_scheme "
         "does not declare it supported."
     )
     print(f"[AITER case] weight_key={w_key}, activation_key={a_key}")
@@ -112,7 +114,7 @@ def assert_aiter_activation_case(config: Config) -> None:
 
     assert fe_cls._supports_activation(config.activation), (
         f"AITER case activation={config.activation} reached the "
-        "modular-kernel harness, but AiterExperts._supports_activation "
+        f"modular-kernel harness, but {fe_cls.__name__}._supports_activation "
         "does not declare it supported."
     )
     print(f"[AITER case] activation={config.activation}")
@@ -157,13 +159,18 @@ def rank_worker(
             rank_tensors = RankTensors.make(config, pgi)
 
             # Skip unsupported: AITER block-scaled MoE does not
-            # support apply_router_weight_on_input (topk=1 path).
+            # support apply_router_weight_on_input (topk=1 path). The W4A16
+            # MXFP4 AITER kernel (unquantized activation, mxfp4 weight) hits
+            # this same gap -- observed to hang/fault the GPU at topk=1 on
+            # gfx950 -- even though it isn't represented via
+            # config.quant_block_shape. W4A4 (mxfp4 activation too) is
+            # unaffected, so this is scoped to the W4A16 case specifically.
             # https://github.com/ROCm/aiter/issues/2418
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
                 and issubclass(config.fused_experts_type, AiterExperts)
-                and config.quant_block_shape is not None
+                and (config.quant_block_shape is not None or config.is_w4a16_mxfp4)
             ):
                 print(
                     f"Skipping[{pgi.rank}]: m={m}, topk={topk}"
@@ -199,7 +206,7 @@ def rank_worker(
             with set_current_vllm_config(vllm_config):
                 ref_out = reference_moe_impl(config, weights, rank_tensors)
 
-            if config.quant_dtype == "nvfp4":
+            if config.quant_dtype == "nvfp4" or config.weight_dtype == "mxfp4":
                 atol = 1e-1 if config.K < 4096 else 2e-1
                 rtol = 1e-1 if config.K < 4096 else 2e-1
             else:
@@ -219,7 +226,32 @@ def rank_worker(
                 and issubclass(config.fused_experts_type, AiterExperts)
                 and config.quant_config is not None
             )
-            if is_aiter_fp8:
+
+            # AITER_MXFP4_BF16 silently computes the wrong thing for
+            # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
+            # on hardware), instead of raising. Only smoke-test until the
+            # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
+            if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
+                assert mk_out.shape == ref_out.shape, (
+                    f"AiterMxfp4Experts output shape {mk_out.shape} != "
+                    f"reference shape {ref_out.shape}."
+                )
+                assert torch.isfinite(mk_out).all(), (
+                    "AiterMxfp4Experts (W4A16) produced non-finite output."
+                )
+            elif is_aiter_fp8:
+                # MXFP4's small output magnitude lets an all-zero output pass
+                # the tolerance below outright; guard against a degenerate
+                # real output doing the same. Excludes topk==1, a separate,
+                # pre-existing apply_router_weight_on_input/reference gap.
+                if config.weight_dtype == "mxfp4" and config.topk != 1:
+                    ref_scale = ref_out.abs().mean()
+                    mk_scale = mk_out.abs().mean()
+                    assert mk_scale > 0.5 * ref_scale, (
+                        f"AITER MXFP4 output magnitude (mean "
+                        f"|mk_out|={mk_scale:.6f}) looks degenerate/zeroed "
+                        f"vs. reference (mean |ref_out|={ref_scale:.6f})."
+                    )
                 check_accuracy(ref_out, mk_out, atol=atol, rtol=rtol, percent=0.9)
             else:
                 torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
@@ -260,6 +292,7 @@ DTYPEs = [torch.bfloat16]
 MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
+    MoEActivation.SWIGLUOAI,
 ]
 
 
@@ -275,10 +308,23 @@ def is_nyi_config(config: Config) -> bool:
         if unsupported_quant_config:
             return True
 
+    # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
+    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
+    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
+    # heuristic dispatch" at runtime despite being declared supported by
+    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = (
+        issubclass(config.fused_experts_type, AiterExperts) and config.is_w4a16_mxfp4
+    )
+    if config.activation == MoEActivation.SWIGLUOAI:
+        return not is_w4a16_mxfp4
+    if is_w4a16_mxfp4:
+        return True
+
     if config.activation != MoEActivation.SILU:
         if not issubclass(config.fused_experts_type, AiterExperts):
             return True  # AITER-only for this axis, for now
-        if config.quant_dtype is not None:
+        if config.weight_dtype is not None:
             return True  # unquantized-only for this axis, for now
 
     return False

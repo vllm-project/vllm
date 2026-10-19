@@ -77,6 +77,10 @@ logger = init_logger(__name__)
 
 
 class DeepseekV4MoE(DeepseekV4MoEBase):
+    # TODO: revert once https://github.com/ROCm/aiter/pull/6598 is in the
+    # pinned AITER; with the padding set, its FlyDSL MoE can output NaN.
+    experts_intermediate_pad = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -140,13 +144,25 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+        raise NotImplementedError(
+            "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
+        )
     backend = vllm_config.attention_config.backend
-    if backend is not None and (
-        backend is not AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4
+    if backend is not None and backend not in (
+        AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
+        AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV41,
     ):
         raise ValueError(
             f"{backend.name} is not supported for DeepSeek V4.1 on ROCm; "
-            "use ROCM_FLASHMLA_SPARSE_DSV4."
+            "use ROCM_FLASHMLA_SPARSE_DSV41."
+        )
+    if backend is AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4:
+        # TODO: Remove DSV4 compatibility after a deprecation period.
+        logger.warning_once(
+            "ROCM_FLASHMLA_SPARSE_DSV4 is deprecated for DeepSeek V4.1 "
+            "and will be removed in a future release. "
+            "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
     return DeepseekV41ROCMAiterMLAAttention
 
