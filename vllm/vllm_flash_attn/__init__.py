@@ -23,6 +23,7 @@ if os.path.islink(_cute_dir) and "flash_attn" not in sys.modules:
 from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     FA2_AVAILABLE,
     FA3_AVAILABLE,
+    compile_flash_attn_varlen_func_from_specs,
     fa_version_unsupported_reason,
     flash_attn_varlen_func,
     get_scheduler_metadata,
@@ -36,6 +37,7 @@ if not (FA2_AVAILABLE or FA3_AVAILABLE):
     )
 
 __all__ = [
+    "compile_flash_attn_varlen_func_from_specs",
     "fa_version_unsupported_reason",
     "flash_attn_varlen_func",
     "get_scheduler_metadata",

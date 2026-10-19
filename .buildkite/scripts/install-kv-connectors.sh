@@ -9,11 +9,22 @@ if python3 -c "import torch; raise SystemExit(0 if torch.version.hip is not None
     exit 0
 fi
 
-REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv_connectors.txt}"
+# Select requirements before optional packages can change the installed Torch.
+CUDA_MAJOR=$(python3 -c 'import torch; print(torch.version.cuda.split(".", 1)[0])')
+DEFAULT_REQUIREMENTS=/vllm-workspace/requirements/kv_connectors.txt
+if [ "${CUDA_MAJOR}" = "12" ]; then
+    DEFAULT_REQUIREMENTS=/vllm-workspace/requirements/kv_connectors_cu12.txt
+fi
+REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-${DEFAULT_REQUIREMENTS}}"
 
-uv pip install --system -r "${REQUIREMENTS_FILE}"
+CONSTRAINTS_DIR=$(mktemp -d)
+trap 'rm -rf "${CONSTRAINTS_DIR}"' EXIT
+uv pip freeze --system > "${CONSTRAINTS_DIR}/installed.txt"
+grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
+    "${CONSTRAINTS_DIR}/installed.txt" > "${CONSTRAINTS_DIR}/constraints.txt"
+uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" -r "${REQUIREMENTS_FILE}"
 
-NIXL_METADATA=$(python3 - <<'PY'
+KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
 
 import torch
@@ -22,10 +33,16 @@ cuda_version = torch.version.cuda
 if cuda_version is None:
     raise SystemExit("torch.version.cuda is not set")
 
-print(cuda_version.split(".", 1)[0], metadata.version("nixl"))
+try:
+    mooncake_version = metadata.version("mooncake-transfer-engine")
+except metadata.PackageNotFoundError:
+    mooncake_version = ""
+
+print(cuda_version.split(".", 1)[0], metadata.version("nixl"), mooncake_version)
 PY
 )
-read -r CUDA_MAJOR NIXL_VERSION <<<"${NIXL_METADATA}"
+read -r CUDA_MAJOR NIXL_VERSION MOONCAKE_VERSION <<<"${KV_METADATA}"
+MOONCAKE_VERSION="${MOONCAKE_VERSION:-}"
 
 # nixl>=1.1.0 can install multiple CUDA wheel variants. Keep only the variant
 # matching this CI image so nixl_ep_cpp links against the available libcudart.
@@ -42,3 +59,13 @@ for package_name in ("nixl", "nixl-cu12", "nixl-cu13"):
         version = "not installed"
     print(f"{package_name}: {version}")
 PY
+
+# The default mooncake-transfer-engine PyPI wheel is built against CUDA 12; its
+# engine.so links libcudart.so.12, absent from the CUDA 13 runtime image. On a
+# CUDA 13 image, swap it for the cuda13 variant (same version), which links
+# libcudart.so.13. Both expose the `mooncake` package, so uninstall the CUDA 12
+# build first to avoid a clash.
+if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then
+    uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true
+    uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
+fi

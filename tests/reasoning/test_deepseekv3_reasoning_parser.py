@@ -2,20 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
 
 @pytest.fixture(scope="module")
-def tokenizer():
+def tokenizer() -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -35,9 +37,13 @@ def test_parser_selection(tokenizer, thinking, expected_parser_type):
 
 
 def test_deepseek_v4_reasoning_parser_alias():
+    from vllm.reasoning.deepseek_v4_engine_reasoning_parser import (
+        DeepSeekV4ParserReasoningAdapter,
+    )
+
     parser_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v4")
 
-    assert parser_cls is DeepSeekV3ReasoningParser
+    assert parser_cls is DeepSeekV4ParserReasoningAdapter
 
 
 def test_identity_reasoning_parser_basic(tokenizer):
@@ -81,3 +87,14 @@ def test_identity_reasoning_parser_basic(tokenizer):
         delta_token_ids=[],
     )
     assert result_none is None
+
+
+@pytest.mark.parametrize("thinking,expected", [(True, 3), (False, 0)])
+def test_count_reasoning_tokens_delegates(tokenizer, thinking, expected):
+    parser = DeepSeekV3ReasoningParser(
+        tokenizer, chat_template_kwargs={"thinking": thinking}
+    )
+    think = tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
+    token_ids = [think[0], 11, 12, 13, think[1], 14]
+
+    assert parser.count_reasoning_tokens(token_ids) == expected

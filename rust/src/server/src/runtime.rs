@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use tokio::runtime::Builder;
 use tracing::{info, warn};
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;

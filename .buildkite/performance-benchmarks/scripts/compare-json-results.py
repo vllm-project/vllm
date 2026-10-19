@@ -83,8 +83,7 @@ def compare_data_columns(
     drop_column: str,
     debug: bool = False,
 ):
-    """
-    Align concatenation by keys derived from info_cols instead of row order.
+    """Align concatenation by keys derived from info_cols instead of row order.
     - Pick one canonical key list: subset of info_cols present in ALL files.
     - For each file: set index to those keys, aggregate duplicates
       (mean for metric, first for names).
@@ -363,8 +362,7 @@ def _apply_two_decimals(
 # Export helpers (Excel + CSV)
 # -----------------------------
 def _sanitize_sheet_name(name: str) -> str:
-    """
-    Excel sheet constraints:
+    """Excel sheet constraints:
       - max 31 chars
       - cannot contain: : \ / ? * [ ]
       - cannot be empty

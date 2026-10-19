@@ -32,6 +32,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -44,14 +45,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -145,7 +144,7 @@ class OPTDecoderLayer(nn.Module):
         )
         self.do_layer_norm_before = config.do_layer_norm_before
 
-        self.self_attn_layer_norm = nn.LayerNorm(
+        self.self_attn_layer_norm = LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
         self.fc1 = ColumnParallelLinear(
@@ -163,7 +162,7 @@ class OPTDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
-        self.final_layer_norm = nn.LayerNorm(
+        self.final_layer_norm = LayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
 
@@ -220,6 +219,7 @@ class OPTDecoder(nn.Module):
         )
 
         # Project out & in will be replicated if they exist.
+        self.project_out: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_out = ReplicatedLinear(
                 config.hidden_size,
@@ -231,6 +231,7 @@ class OPTDecoder(nn.Module):
         else:
             self.project_out = None
 
+        self.project_in: ReplicatedLinear | None
         if config.word_embed_proj_dim != config.hidden_size:
             self.project_in = ReplicatedLinear(
                 config.word_embed_proj_dim,
@@ -246,8 +247,9 @@ class OPTDecoder(nn.Module):
         # keep backward compatibility with checkpoints that have been fine-tuned
         # before transformers v4.20.1
         # see https://github.com/facebookresearch/metaseq/pull/164
+        self.final_layer_norm: LayerNorm | None
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
-            self.final_layer_norm = nn.LayerNorm(
+            self.final_layer_norm = LayerNorm(
                 config.hidden_size,
                 elementwise_affine=config.layer_norm_elementwise_affine,
             )
@@ -325,52 +327,22 @@ class OPTModel(nn.Module):
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+        orig_to_new_prefix={
+            "decoder.": "model.decoder.",
+        },
+    )
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
-
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "decoder.": "model.decoder.",
-        }
-    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -381,14 +353,13 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.model = OPTModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.word_embed_proj_dim,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.tie_word_embeddings:
-            self.lm_head = self.model.decoder.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.word_embed_proj_dim,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.decoder.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -417,10 +388,5 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

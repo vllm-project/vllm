@@ -126,3 +126,4 @@ def wikitext_ppl_test(
     # We are not concerned that the vllm PPL is less than Transformers,
     # so we only perform one-sided testing.
     assert differ < atol
+    return vllm_ppl

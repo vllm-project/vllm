@@ -1,0 +1,611 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for the Transformers modeling backend's MoE fuser."""
+
+import pytest
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from vllm.model_executor.models.transformers.fusers import MoEBlockFuser
+
+from .test_linear import GLUMLP
+
+
+class TopKRouter(nn.Module):
+    """HF v5 top-k router: `linear -> softmax -> topk (-> renorm)`."""
+
+    def __init__(self, num_experts=8, hidden=16, top_k=2, sigmoid=False):
+        super().__init__()
+        self.top_k = top_k
+        self.sigmoid = sigmoid
+        self.weight = nn.Parameter(torch.zeros(num_experts, hidden))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits) if self.sigmoid else F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value / value.sum(dim=-1, keepdim=True)
+        return logits, value, index
+
+
+class SelectionScoredRouter(TopKRouter):
+    """Scores the selected logits only (GraniteMoE/Aria style), in fp32."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight).float()
+        value, index = torch.topk(logits, self.top_k, dim=-1)
+        value = (
+            torch.sigmoid(value) if self.sigmoid else F.softmax(value, dim=-1)
+        ).type_as(hidden_states)
+        return logits, value, index
+
+
+class EpsilonRenormRouter(TopKRouter):
+    """Renormalizes via an epsilon-offset denominator (DeepSeek-V3 style)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        denominator = value.sum(dim=-1, keepdim=True) + 1e-20
+        value /= denominator
+        return logits, value, index
+
+
+class UntraceableRouter(TopKRouter):
+    """Scores and selects, then loses the trace before the renormalization."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        if value.sum() > 0:  # data-dependent branch: tracing stops here
+            value = value / value.sum(dim=-1, keepdim=True)
+        return logits, value, index
+
+
+class ScaledRouter(TopKRouter):
+    """Greedy router scaling its top-k weights (DeepSeek `routed_scaling_factor`)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value * 16.0
+        return logits, value, index
+
+
+class Fp32Router(TopKRouter):
+    """Router that computes its logits in fp32 (DeepSeek/GLM style)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(
+            hidden_states.type(torch.float32), self.weight.type(torch.float32)
+        )
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        return logits, value.to(hidden_states.dtype), index
+
+
+class GroupedRouter(TopKRouter):
+    """Group-limited router (DeepSeek `group_limited_greedy`), scaled weights."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        group_scores = scores.view(-1, 4, 2).max(dim=-1).values
+        group_idx = torch.topk(group_scores, k=2, dim=-1)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = group_mask.unsqueeze(-1).expand(-1, 4, 2).reshape(-1, 8)
+        scores = scores.masked_fill(~score_mask.bool(), 0.0)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value * 16.0
+        return logits, value, index
+
+
+class CorrectionRouter(nn.Module):
+    """Router with a score-correction bias buffer (DeepSeek-V3 noaux) -> matched."""
+
+    def __init__(self, num_experts=8, hidden=16):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(num_experts, hidden))
+        self.register_buffer("e_score_correction_bias", torch.zeros(num_experts))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits) + self.e_score_correction_bias
+        _, index = torch.topk(scores, 2, dim=-1)
+        return logits, scores, index
+
+
+class BiasedRouter(TopKRouter):
+    """A valid top-k router but not `weight`-only (extra `bias` param) -> declined."""
+
+    def __init__(self):
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(8))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight) + self.bias
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        return logits, value, index
+
+
+class DisconnectedRouter(TopKRouter):
+    """linear+softmax+top-k present but top-k ignores the logits -> not a router."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        _ = F.softmax(logits, dim=-1)  # scored, but not consumed by top-k
+        value, index = torch.topk(hidden_states, self.top_k, dim=-1)
+        return logits, value, index
+
+
+class ExtraInputRouter(TopKRouter):
+    """Router taking a block-owned correction bias as a second input (HYV3)."""
+
+    def forward(self, hidden_states, bias=0.0):
+        logits = F.linear(hidden_states, self.weight)
+        _, index = torch.topk(logits.sigmoid() + bias, self.top_k, dim=-1)
+        value = logits.sigmoid().gather(1, index)
+        return logits, value, index
+
+
+class MoEExperts(nn.Module):
+    """Packed experts (3D weights); only its name (`experts`) matters here."""
+
+    def __init__(self, num_experts=8, hidden=16, inter=32):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.zeros(num_experts, 2 * inter, hidden))
+        self.down_proj = nn.Parameter(torch.zeros(num_experts, hidden, inter))
+
+    def forward(self, hidden_states, index, weights):
+        return hidden_states
+
+
+class MoEBlock(nn.Module):
+    """Single-tensor MoE block (Qwen3-style); subclasses override `_shared`."""
+
+    def __init__(self, router_cls=TopKRouter):
+        super().__init__()
+        self.experts = MoEExperts()
+        self.gate = router_cls()
+
+    def _shared(self, x, logits):
+        """The term added to the experts' output (none for a plain block)."""
+        return None
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        logits, weights, index = self.gate(x)
+        out = self.experts(x, index, weights)
+        if (shared := self._shared(x, logits)) is not None:
+            out = out + shared
+        return out.reshape(hidden_states.shape)
+
+
+class MoEBlockNoShared(MoEBlock):
+    """No shared-expert child but a gate-derived add -> declined, not misread."""
+
+    def _shared(self, x, logits):
+        return logits.sum()
+
+
+class MoEBlockShared(MoEBlock):
+    """A block with a shared expert and its sigmoid gate (Qwen2-style)."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = GLUMLP()
+        self.shared_expert_gate = nn.Linear(16, 1, bias=False)
+
+    def _shared(self, x, logits):
+        return torch.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
+
+
+class MoEBlockSharedNoGate(MoEBlock):
+    """A block with an ungated shared expert -> native, shared passed through."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = GLUMLP()
+
+    def _shared(self, x, logits):
+        return self.shared_expert(x)
+
+
+class MoEBlockTuple(MoEBlock):
+    """A tuple-returning block (gpt-oss-style) -> must decline."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights), index
+
+
+class MoEBlockTupleVar(MoEBlock):
+    """Returns a name bound to a tuple, not a literal tuple -> must still decline."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        result = self.experts(x, index, weights), index
+        return result
+
+
+class MoEBlockNestedTupleReturn(MoEBlock):
+    """Tuple `return` in a nested helper; block returns one tensor -> still fuses."""
+
+    def forward(self, hidden_states):
+        def keep(a, b):
+            return a, b
+
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out, _ = keep(self.experts(x, index, weights), index)
+        return out.reshape(hidden_states.shape)
+
+
+class PlainMLP(nn.Module):
+    """A non-GLU FFN: `down(act(up(x)))`, no gating multiply."""
+
+    def __init__(self, hidden: int = 16, inter: int = 32):
+        super().__init__()
+        self.up_proj = nn.Linear(hidden, inter, bias=False)
+        self.down_proj = nn.Linear(inter, hidden, bias=False)
+        self.act_fn = nn.SiLU()
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.up_proj(x)))
+
+
+class MoEBlockSharedNonGLU(MoEBlock):
+    """A non-GLU shared expert -> detected by dataflow (no gate/up merge)."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = PlainMLP()
+
+    def _shared(self, x, logits):
+        return self.shared_expert(x)
+
+
+class MoEBlockUnaccounted(MoEBlock):
+    """A weight-bearing child outside the fused dataflow (pre-router) -> declined."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = nn.Linear(16, 16, bias=False)
+
+    def forward(self, hidden_states):
+        x = self.extra(hidden_states.reshape(-1, hidden_states.shape[-1]))
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights).reshape(hidden_states.shape)
+
+
+class BufferScale(nn.Module):
+    """A stateful child carrying only a buffer (no parameters)."""
+
+    def __init__(self, hidden: int = 16):
+        super().__init__()
+        self.register_buffer("scale", torch.ones(hidden))
+
+    def forward(self, x):
+        return x * self.scale
+
+
+class MoEBlockUnaccountedBuffer(MoEBlockUnaccounted):
+    """Like `MoEBlockUnaccounted`, but the extra child holds only a buffer."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = BufferScale()
+
+
+class MoEBlockExpertsKeywords(MoEBlock):
+    """Passes the experts' routing by keyword -> still fuses."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, weights=weights, index=index)
+
+
+class ScaledExperts(MoEExperts):
+    def forward(self, hidden_states, index, weights, scale=1.0):
+        return hidden_states * scale
+
+
+class MoEBlockExpertsExtraArg(MoEBlock):
+    """Passes the experts an extra argument the fused forward would drop."""
+
+    def __init__(self):
+        super().__init__()
+        self.experts = ScaledExperts()
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights, scale=2.0)
+
+
+class MoEBlockSharedUnflattened(MoEBlockSharedNoGate):
+    """Gate and shared expert read the unflattened input (Kolibri-1)."""
+
+    def forward(self, hidden_states):
+        _, weights, index = self.gate(hidden_states)
+        x = hidden_states.view(-1, hidden_states.shape[-1])
+        out = self.experts(x, index, weights).view(*hidden_states.shape)
+        return out + self.shared_expert(hidden_states)
+
+
+class MoEBlockSharedAveraged(MoEBlockSharedUnflattened):
+    """Averages the experts' and shared expert's outputs (Cohere2-MoE)."""
+
+    def forward(self, hidden_states):
+        return super().forward(hidden_states) / 2
+
+
+class MoEBlockScaled(MoEBlockSharedNoGate):
+    """Scales the experts' output by `routed_scaling_factor` (Laguna)."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights) * 2.5 + self.shared_expert(x)
+
+
+class MoEBlockScaledBiasedRouter(MoEBlockScaled):
+    """An unrecognized router with a scaled experts' output."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = BiasedRouter()
+
+
+class MoEBlockSharedBiasedRouter(MoEBlockSharedUnflattened):
+    """An unrecognized router with a shared expert."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = BiasedRouter()
+
+
+class MoEBlockGateExtraInput(MoEBlock):
+    """Passes the gate a block-owned bias the fused forward would drop (HYV3)."""
+
+    def __init__(self):
+        super().__init__(ExtraInputRouter)
+        self.register_buffer("e_score_correction_bias", torch.zeros(8))
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x, self.e_score_correction_bias)
+        return self.experts(x, index, weights)
+
+
+class MoEBlockCastCombine(MoEBlockSharedNoGate):
+    """Combines the outputs in fp32 (HYV3)."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights).float() + self.shared_expert(x).float()
+        return out.to(x.dtype)
+
+
+class MoEBlockIdentityLatent(MoEBlockSharedNoGate):
+    """Wraps the experts in unused (identity) latent projections (NemotronH)."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1_latent_proj = nn.Identity()
+        self.fc2_latent_proj = nn.Identity()
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.fc2_latent_proj(
+            self.experts(self.fc1_latent_proj(x), index, weights)
+        )
+        return out + self.shared_expert(x)
+
+
+@pytest.mark.parametrize("sigmoid", [False, True])
+def test_moe_fuser_detects_router(sigmoid):
+    with torch.device("meta"):
+        block = MoEBlock(lambda: TopKRouter(sigmoid=sigmoid))
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.gate_name == "gate"
+    assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
+    assert fuser.shared_name is None and fuser.shared_gate_name is None
+
+
+@pytest.mark.parametrize("sigmoid", [False, True])
+def test_moe_fuser_matches_router_scoring_the_selection(sigmoid):
+    """Scoring the selection rather than all logits still allows the fuser to match."""
+    with torch.device("meta"):
+        block = MoEBlock(lambda: SelectionScoredRouter(sigmoid=sigmoid))
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.gate_name == "gate"
+    assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
+    assert fuser.renormalize is (not sigmoid)
+    assert fuser.router_dtype == torch.float32
+
+
+def test_moe_fuser_matches_scaled_router():
+    """Weight scaling after the top-k (DeepSeek style) does not break matching."""
+    with torch.device("meta"):
+        block = MoEBlock(ScaledRouter)
+    assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
+
+
+@pytest.mark.parametrize(
+    "router_cls,expected",
+    [
+        (TopKRouter, True),  # divides by the sum of the selection
+        (EpsilonRenormRouter, True),  # ... with an epsilon in the denominator
+        (ScaledRouter, False),  # scales the weights instead of renormalizing
+        (UntraceableRouter, None),  # trace stops before it could say
+    ],
+)
+def test_moe_fuser_reads_renormalize_from_the_gate(router_cls, expected):
+    """The router's graph, not the config, decides whether vLLM renormalizes: it
+    is the code being replaced, and it already bakes in `norm_topk_prob` because
+    the flag is a Python bool that fx resolves at trace time. Absence of the
+    division only means "no" on a complete trace."""
+    with torch.device("meta"):
+        block = MoEBlock(router_cls)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.renormalize is expected
+
+
+def test_moe_fuser_matches_grouped_router():
+    """Group masking between the score and the routing top-k still matches: the
+    scorer is anchored on the routing (last) top-k, not the group one."""
+    with torch.device("meta"):
+        block = MoEBlock(GroupedRouter)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.scoring_func == "softmax"
+
+
+def test_moe_fuser_matches_correction_router():
+    """A score-correction bias buffer (DeepSeek-V3 noaux) is allowed; the
+    rebuilt gate carries it in fp32 for FusedMoE's biased routers."""
+    with torch.device("meta"):
+        block = MoEBlock(CorrectionRouter)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.scoring_func == "sigmoid"
+
+
+def test_moe_fuser_reads_router_dtype_from_the_gate():
+    """A router that computes its logits in fp32 must keep routing in fp32 when
+    rebuilt, even though no config field names the dtype. The cast back to the
+    activation dtype after the top-k must not be mistaken for the routing dtype."""
+    with torch.device("meta"):
+        fp32 = MoEBlockFuser.match(MoEBlock(Fp32Router), "experts")
+        default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
+    assert fp32.router_dtype == torch.float32
+    assert default.router_dtype is None
+
+
+def test_moe_fuser_detects_shared_experts():
+    with torch.device("meta"):
+        block = MoEBlockShared()
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name == "shared_expert_gate"
+
+
+def test_moe_fuser_shared_without_gate():
+    with torch.device("meta"):
+        block = MoEBlockSharedNoGate()
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name is None
+
+
+def test_moe_fuser_detects_non_glu_shared_expert():
+    with torch.device("meta"):
+        block = MoEBlockSharedNonGLU()
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    # Recognised by dataflow (added to the experts' output), though not a GLU.
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name is None
+
+
+@pytest.mark.parametrize(
+    "block_cls",
+    [
+        lambda: MoEBlock(BiasedRouter),  # router with an unrecognized extra param
+        MoEBlockTuple,  # tuple-returning block (e.g. gpt-oss)
+        MoEBlockTupleVar,  # tuple returned via a name binding, not a literal
+        MoEBlockUnaccounted,  # weight-bearing child outside the fused dataflow
+        MoEBlockUnaccountedBuffer,  # buffer-only child outside the fused dataflow
+        MoEBlockExpertsExtraArg,  # extra experts argument the fused forward drops
+        MoEBlockNoShared,  # gate-derived term added to the experts' output
+        MoEBlockSharedAveraged,  # experts' and shared expert's outputs averaged
+        MoEBlockGateExtraInput,  # gate input the fused forward drops
+    ],
+)
+def test_moe_fuser_declines_unsupported(block_cls):
+    with torch.device("meta"):
+        block = block_cls()
+    assert MoEBlockFuser.match(block, "experts") is None
+
+
+def test_moe_fuser_ignores_nested_returns():
+    """A tuple `return` inside a nested helper must not decline a block whose own
+    forward returns a single tensor."""
+    with torch.device("meta"):
+        block = MoEBlockNestedTupleReturn()
+    assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
+
+
+def test_moe_fuser_router_requires_connected_dataflow():
+    """A gate with linear + softmax + top-k present but not wired as a router
+    (top-k selects over the input, not the scored logits) is not detected."""
+    with torch.device("meta"):
+        block = MoEBlock(DisconnectedRouter)
+    assert MoEBlockFuser.match(block, "experts") is None
+
+
+def test_moe_fuser_unrecognized_router_moves_shared_expert():
+    """Without vLLM routing, the shared expert still moves to vLLM."""
+    with torch.device("meta"):
+        block = MoEBlockSharedBiasedRouter()
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert fuser.scoring_func is None
+    assert fuser.shared_name == "shared_expert"
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "scoring_func"),
+    [
+        (MoEBlockSharedUnflattened, None),  # routing falls back to Transformers
+        (MoEBlock, "softmax"),  # no shared output to divide
+    ],
+)
+def test_moe_fuser_divided_shared_output(block_cls, scoring_func):
+    with torch.device("meta"):
+        fuser = MoEBlockFuser.match(block_cls(), "experts", divides_shared_output=True)
+    assert fuser.scoring_func == scoring_func
+
+
+def test_moe_fuser_scaled_output_needs_vllm_routing():
+    """Only vLLM routing applies the routed scale, so nothing else moves without it."""
+    with torch.device("meta"):
+        block = MoEBlockScaledBiasedRouter()
+    assert MoEBlockFuser.match(block, "experts") is None
+
+
+def test_moe_fuser_matches_experts_called_by_keyword():
+    with torch.device("meta"):
+        block = MoEBlockExpertsKeywords()
+    assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
+
+
+def test_moe_fuser_scaled_output_with_vllm_routing():
+    """A scaled block fuses because vLLM routing applies `routed_scaling_factor`."""
+    with torch.device("meta"):
+        fuser = MoEBlockFuser.match(MoEBlockScaled(), "experts")
+    assert fuser.scoring_func == "softmax"
+    assert fuser.shared_name == "shared_expert"
+
+
+@pytest.mark.parametrize("block_cls", [MoEBlockCastCombine, MoEBlockIdentityLatent])
+def test_moe_fuser_looks_through_casts_and_identity(block_cls):
+    with torch.device("meta"):
+        fuser = MoEBlockFuser.match(block_cls(), "experts")
+    assert fuser.shared_name == "shared_expert"

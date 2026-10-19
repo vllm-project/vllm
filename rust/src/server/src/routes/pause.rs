@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use axum::Json;
@@ -36,10 +39,6 @@ fn invalid_query(error: QueryRejection) -> ApiError {
     ApiError::invalid_request(error.body_text(), Some("mode"))
 }
 
-// TODO: the Python frontend also accepts the deprecated
-// `wait_for_inflight_requests` flag (equivalent to `mode="wait"`); it is
-// intentionally omitted here in favor of the `mode` parameter.
-
 /// Pause the scheduler so generation can be halted (e.g. for weight updates).
 pub async fn pause(
     State(state): State<Arc<AppState>>,
@@ -49,7 +48,7 @@ pub async fn pause(
 
     state
         .engine_core_client()
-        .pause_scheduler(params.mode, params.clear_cache)
+        .pause_generation(params.mode, params.clear_cache)
         .await
         .map_err(|error| utility_call_error("pause", error))?;
 

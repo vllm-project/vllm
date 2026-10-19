@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::protocol::OpaqueValue;
@@ -19,24 +22,4 @@ pub struct LoraRequest {
     pub load_inplace: bool,
     #[serde(default)]
     pub is_3d_lora_weight: bool,
-}
-
-impl LoraRequest {
-    pub fn new(
-        lora_name: String,
-        lora_int_id: u64,
-        lora_path: String,
-        load_inplace: bool,
-        is_3d_lora_weight: bool,
-    ) -> Self {
-        Self {
-            lora_name,
-            lora_int_id,
-            lora_path,
-            base_model_name: None,
-            tensorizer_config_dict: None,
-            load_inplace,
-            is_3d_lora_weight,
-        }
-    }
 }

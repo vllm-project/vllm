@@ -1,12 +1,15 @@
-use std::collections::BTreeSet;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use itertools::Itertools as _;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{F64Gauge, HistogramFamily, U64Counter, U64Gauge};
+use crate::{F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
 
 const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
@@ -25,10 +28,69 @@ fn kv_block_reuse_gap_histogram() -> Histogram {
     Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
 }
 
+// Buckets copied verbatim from the Python `MooncakeStorePromMetrics` /
+// `NixlPromMetrics` classes so dashboards built against either frontend are
+// interchangeable.
+const MOONCAKE_OPERATION_TIME_BUCKETS: [f64; 15] = [
+    1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 2e-1, 3e-1, 4e-1, 5e-1, 7.5e-1, 1.0, 1.5, 2.0, 3.0, 4.0,
+];
+const NIXL_XFER_TIME_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
+];
+const NIXL_POST_TIME_BUCKETS: [f64; 13] = [
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
+];
+// Uniform 2KB to 8GB range: 2**(10+i) for i in range(1, 25, 2).
+const NIXL_BYTES_TRANSFERRED_BUCKETS: [f64; 12] = [
+    2048.0,
+    8192.0,
+    32768.0,
+    131072.0,
+    524288.0,
+    2097152.0,
+    8388608.0,
+    33554432.0,
+    134217728.0,
+    536870912.0,
+    2147483648.0,
+    8589934592.0,
+];
+const NIXL_NUM_DESCRIPTORS_BUCKETS: [f64; 14] = [
+    10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 200.0, 400.0, 1000.0, 2000.0, 4000.0, 10000.0, 20000.0,
+    50000.0,
+];
+
+fn mooncake_operation_time_histogram() -> Histogram {
+    Histogram::new(MOONCAKE_OPERATION_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_xfer_time_histogram() -> Histogram {
+    Histogram::new(NIXL_XFER_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_post_time_histogram() -> Histogram {
+    Histogram::new(NIXL_POST_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_bytes_transferred_histogram() -> Histogram {
+    Histogram::new(NIXL_BYTES_TRANSFERRED_BUCKETS.iter().copied())
+}
+
+fn nixl_num_descriptors_histogram() -> Histogram {
+    Histogram::new(NIXL_NUM_DESCRIPTORS_BUCKETS.iter().copied())
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct EngineLabels {
     pub model_name: String,
     pub engine: u32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CacheHitSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -45,6 +107,24 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
+/// Labels for per-operation Mooncake store connector telemetry. `operation`
+/// and `status` are dynamic (not known ahead of time), unlike the other
+/// fixed-label families in this module.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MooncakeOperationLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub operation: String,
+    pub status: String,
+}
+
+/// Family type aliases for the Mooncake connector telemetry, exposed so
+/// `engine-core-client` can hold onto the `Family` directly (rather than a
+/// pre-resolved handle) since `operation`/`status` vary per record.
+pub type MooncakeOperationHistogramFamily =
+    Family<MooncakeOperationLabels, Histogram, fn() -> Histogram>;
+pub type MooncakeOperationCounterFamily = Family<MooncakeOperationLabels, U64Counter>;
+
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct LoraAdapterNames(pub BTreeSet<String>);
@@ -60,6 +140,90 @@ impl EncodeLabelValue for LoraAdapterNames {
 pub struct LoraInfoLabels {
     pub running_lora_adapters: LoraAdapterNames,
     pub waiting_lora_adapters: LoraAdapterNames,
+}
+
+/// CUDA graph sample key used for periodic text-log aggregation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CudagraphLogKey {
+    pub num_unpadded_tokens: u64,
+    pub num_padded_tokens: u64,
+    pub num_paddings: u64,
+    pub runtime_mode: String,
+}
+
+/// Raw scheduler stats accumulated for one periodic text-log interval.
+#[derive(Default)]
+pub struct SchedulerLogStatsInterval {
+    pub spec_num_drafts: u64,
+    pub spec_accepted_tokens_per_pos: Vec<u64>,
+    pub cudagraph_counts: BTreeMap<CudagraphLogKey, u64>,
+}
+
+impl SchedulerLogStatsInterval {
+    /// Merge another drained interval into this one.
+    pub fn merge(&mut self, other: Self) {
+        self.spec_num_drafts += other.spec_num_drafts;
+
+        if self.spec_accepted_tokens_per_pos.len() < other.spec_accepted_tokens_per_pos.len() {
+            self.spec_accepted_tokens_per_pos
+                .resize(other.spec_accepted_tokens_per_pos.len(), 0);
+        }
+        for (position, accepted_tokens) in
+            other.spec_accepted_tokens_per_pos.into_iter().enumerate()
+        {
+            self.spec_accepted_tokens_per_pos[position] += accepted_tokens;
+        }
+
+        for (key, count) in other.cudagraph_counts {
+            *self.cudagraph_counts.entry(key).or_default() += count;
+        }
+    }
+}
+
+/// Internal, non-Prometheus accumulator for periodic text logs that need raw
+/// scheduler DTOs.
+#[derive(Clone, Default)]
+pub struct SchedulerLogStatsAccumulator {
+    inner: Arc<Mutex<SchedulerLogStatsInterval>>,
+}
+
+impl SchedulerLogStatsAccumulator {
+    /// Observe spec-decoding fields needed for per-position text-log rates.
+    pub fn observe_spec_decode(&self, num_drafts: u64, accepted_tokens_per_pos: &[u64]) {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        inner.spec_num_drafts += num_drafts;
+
+        if inner.spec_accepted_tokens_per_pos.len() < accepted_tokens_per_pos.len() {
+            inner.spec_accepted_tokens_per_pos.resize(accepted_tokens_per_pos.len(), 0);
+        }
+        for (position, accepted_tokens) in accepted_tokens_per_pos.iter().copied().enumerate() {
+            inner.spec_accepted_tokens_per_pos[position] += accepted_tokens;
+        }
+    }
+
+    /// Observe one CUDA graph runtime sample for the interval table.
+    pub fn observe_cudagraph(
+        &self,
+        num_unpadded_tokens: u64,
+        num_padded_tokens: u64,
+        num_paddings: u64,
+        runtime_mode: &str,
+    ) {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        let key = CudagraphLogKey {
+            num_unpadded_tokens,
+            num_padded_tokens,
+            num_paddings,
+            runtime_mode: runtime_mode.to_string(),
+        };
+        *inner.cudagraph_counts.entry(key).or_default() += 1;
+    }
+
+    /// Drain and reset the current text-log interval.
+    pub fn drain(&self) -> SchedulerLogStatsInterval {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        std::mem::take(&mut *inner)
+    }
 }
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
@@ -79,6 +243,7 @@ pub struct SchedulerMetrics {
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_cached_by_source: Family<CacheHitSourceLabels, U64Counter>,
 
     // Speculative decoding counters.
     pub spec_decode_num_drafts: Family<EngineLabels, U64Counter>,
@@ -95,6 +260,25 @@ pub struct SchedulerMetrics {
     pub kv_block_lifetime_seconds: HistogramFamily,
     pub kv_block_idle_before_evict_seconds: HistogramFamily,
     pub kv_block_reuse_gap_seconds: HistogramFamily,
+
+    // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
+    pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
+    pub mooncake_operation_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_keys_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
+
+    // NIXL connector telemetry. Mirrors `NixlPromMetrics`.
+    pub nixl_xfer_time_seconds: HistogramFamily,
+    pub nixl_post_time_seconds: HistogramFamily,
+    pub nixl_bytes_transferred: HistogramFamily,
+    pub nixl_num_descriptors: HistogramFamily,
+    pub nixl_num_failed_transfers: Family<EngineLabels, U64Counter>,
+    pub nixl_num_failed_notifications: Family<EngineLabels, U64Counter>,
+    pub nixl_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
+
+    /// Non-Prometheus interval accumulators for periodic text-log helpers.
+    pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
 
 impl SchedulerMetrics {
@@ -163,6 +347,13 @@ impl SchedulerMetrics {
         );
 
         let external_prefix_cache_hits = Family::default();
+
+        let prompt_tokens_cached_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached_by_source",
+            "Prefix-cache hit tokens by the cache tier that supplied them: device (local HBM), host (offloaded to DRAM), disk, p2p (transferred from another vLLM instance) or external_unspecified. Counted at admission; sums to vllm:prefix_cache_hits + vllm:external_prefix_cache_hits.",
+            prompt_tokens_cached_by_source.clone(),
+        );
         registry.register(
             "vllm:external_prefix_cache_hits",
             "External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.",
@@ -245,6 +436,103 @@ impl SchedulerMetrics {
             kv_block_reuse_gap_seconds.clone(),
         );
 
+        // Mooncake store connector telemetry.
+        let mooncake_operation_time_seconds =
+            Family::new_with_constructor(mooncake_operation_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:mooncake_store_operation_time_seconds",
+            "Histogram of Mooncake store communication time.",
+            mooncake_operation_time_seconds.clone(),
+        );
+
+        // NOTE: registration names below omit the `_total` suffix that the
+        // Python metric names carry (e.g. `vllm:mooncake_store_operation_total`)
+        // because this crate's `prometheus-client` (unlike Python's, which
+        // strips a user-supplied `_total` before re-adding it) appends
+        // `_total` unconditionally for counters; see the note in `lib.rs`.
+        let mooncake_operation_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation",
+            "Number of Mooncake store communication operations.",
+            mooncake_operation_total.clone(),
+        );
+
+        let mooncake_operation_keys_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_keys",
+            "Number of Mooncake store keys touched by operations.",
+            mooncake_operation_keys_total.clone(),
+        );
+
+        let mooncake_operation_bytes_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_bytes",
+            "Number of bytes transferred by Mooncake store operations.",
+            mooncake_operation_bytes_total.clone(),
+        );
+
+        let mooncake_operation_failed_keys_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_failed_keys",
+            "Number of Mooncake store keys that failed in operations.",
+            mooncake_operation_failed_keys_total.clone(),
+        );
+
+        // NIXL connector telemetry.
+        let nixl_xfer_time_seconds =
+            Family::new_with_constructor(nixl_xfer_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_xfer_time_seconds",
+            "Histogram of transfer duration for NIXL KV Cache transfers.",
+            nixl_xfer_time_seconds.clone(),
+        );
+
+        let nixl_post_time_seconds =
+            Family::new_with_constructor(nixl_post_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_post_time_seconds",
+            "Histogram of transfer post time for NIXL KV Cache transfers.",
+            nixl_post_time_seconds.clone(),
+        );
+
+        let nixl_bytes_transferred =
+            Family::new_with_constructor(nixl_bytes_transferred_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_bytes_transferred",
+            "Histogram of bytes transferred per NIXL KV Cache transfers.",
+            nixl_bytes_transferred.clone(),
+        );
+
+        let nixl_num_descriptors =
+            Family::new_with_constructor(nixl_num_descriptors_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_num_descriptors",
+            "Histogram of number of descriptors per NIXL KV Cache transfers.",
+            nixl_num_descriptors.clone(),
+        );
+
+        let nixl_num_failed_transfers = Family::default();
+        registry.register(
+            "vllm:nixl_num_failed_transfers",
+            "Number of failed NIXL KV Cache transfers.",
+            nixl_num_failed_transfers.clone(),
+        );
+
+        let nixl_num_failed_notifications = Family::default();
+        registry.register(
+            "vllm:nixl_num_failed_notifications",
+            "Number of failed NIXL KV Cache notifications.",
+            nixl_num_failed_notifications.clone(),
+        );
+
+        let nixl_num_kv_expired_reqs = Family::default();
+        registry.register(
+            "vllm:nixl_num_kv_expired_reqs",
+            "Number of requests that had their KV expire. \
+             NOTE: This metric is tracked on the P instance.",
+            nixl_num_kv_expired_reqs.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -255,6 +543,7 @@ impl SchedulerMetrics {
             prefix_cache_hits,
             external_prefix_cache_queries,
             external_prefix_cache_hits,
+            prompt_tokens_cached_by_source,
             spec_decode_num_drafts,
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,
@@ -265,13 +554,26 @@ impl SchedulerMetrics {
             kv_block_lifetime_seconds,
             kv_block_idle_before_evict_seconds,
             kv_block_reuse_gap_seconds,
+            mooncake_operation_time_seconds,
+            mooncake_operation_total,
+            mooncake_operation_keys_total,
+            mooncake_operation_bytes_total,
+            mooncake_operation_failed_keys_total,
+            nixl_xfer_time_seconds,
+            nixl_post_time_seconds,
+            nixl_bytes_transferred,
+            nixl_num_descriptors,
+            nixl_num_failed_transfers,
+            nixl_num_failed_notifications,
+            nixl_num_kv_expired_reqs,
+            log_stats: Family::default(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{EngineLabels, Metrics};
+    use crate::{CudagraphLogKey, EngineLabels, Metrics, SchedulerLogStatsAccumulator};
 
     #[test]
     fn perf_counters_render_with_a_single_total_suffix() {
@@ -300,5 +602,33 @@ mod tests {
         assert!(!rendered.contains("vllm:estimated_flops_per_gpu_total_total"));
         assert!(!rendered.contains("vllm:estimated_read_bytes_per_gpu_total_total"));
         assert!(!rendered.contains("vllm:estimated_write_bytes_per_gpu_total_total"));
+    }
+
+    #[test]
+    fn log_stats_accumulator_drains_interval_data() {
+        let accumulator = SchedulerLogStatsAccumulator::default();
+
+        accumulator.observe_spec_decode(2, &[1, 2]);
+        accumulator.observe_spec_decode(3, &[3, 4, 5]);
+        accumulator.observe_cudagraph(8, 16, 8, "FULL");
+        accumulator.observe_cudagraph(8, 16, 8, "FULL");
+
+        let interval = accumulator.drain();
+
+        assert_eq!(interval.spec_num_drafts, 5);
+        assert_eq!(interval.spec_accepted_tokens_per_pos, vec![4, 6, 5]);
+        assert_eq!(
+            interval
+                .cudagraph_counts
+                .get(&CudagraphLogKey {
+                    num_unpadded_tokens: 8,
+                    num_padded_tokens: 16,
+                    num_paddings: 8,
+                    runtime_mode: "FULL".to_string(),
+                })
+                .copied(),
+            Some(2)
+        );
+        assert_eq!(accumulator.drain().spec_num_drafts, 0);
     }
 }

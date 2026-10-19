@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import Any
 
 from vllm.inputs import (
     DecoderOnlyEngineInput,
@@ -13,6 +14,7 @@ from vllm.inputs import (
 )
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 
 
 @dataclass
@@ -115,6 +117,7 @@ class BeamSearchInstance:
         prompt: TokensInput | MultiModalInput | EncoderDecoderInput,
         lora_request: LoRARequest | None = None,
         logprobs: list[dict[int, Logprob]] | None = None,
+        priority: int = 0,
         **kwargs,
     ):
         decoder_prompt = (
@@ -132,12 +135,13 @@ class BeamSearchInstance:
             )
         ]
         self.completed: list[BeamSearchSequence] = []
+        self.priority = priority
 
 
 def get_beam_search_score(
     tokens: list[int],
     cumulative_logprob: float,
-    eos_token_id: int,
+    eos_token_ids: set[int],
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
@@ -147,16 +151,31 @@ def get_beam_search_score(
     https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
     """
     seq_len = len(tokens)
-    if tokens[-1] == eos_token_id:
+    if tokens[-1] in eos_token_ids:
         seq_len -= 1
 
-    return cumulative_logprob / (seq_len**length_penalty)
+    # An aborted beam may contain only an EOS prompt token.
+    return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
 
 
-def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
+def create_sort_beams_key_function(eos_token_ids: set[int], length_penalty: float):
     def sort_beams_key(x: BeamSearchSequence) -> float:
         return get_beam_search_score(
-            x.tokens, x.cum_logprob, eos_token_id, length_penalty
+            x.tokens, x.cum_logprob, eos_token_ids, length_penalty
         )
 
     return sort_beams_key
+
+
+def get_beam_search_eos_token_ids(
+    generation_config: dict[str, Any], eos_token_id: int | None
+) -> set[int]:
+    """Return the token ids that end generation: the tokenizer EOS plus the
+    generation config's ``eos_token_id``.
+
+    This uses a separate SamplingParams so the params sent to the engine keep
+    their own ``stop_token_ids`` and are validated as before.
+    """
+    params = SamplingParams()
+    params.update_from_generation_config(generation_config, eos_token_id)
+    return params.all_stop_token_ids

@@ -20,7 +20,8 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -74,9 +75,11 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -100,6 +103,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # E/P/D: Connector-specific encoder-cache transfer parameters.
+        self.ec_transfer_params: dict[str, Any] | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -115,6 +120,14 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
+                self.ec_transfer_params = sampling_params.extra_args.get(
+                    "ec_transfer_params"
+                )
+                self.kv_cache_report_mode = sampling_params.extra_args.get(
+                    "kv_cache_report_mode", "incremental"
+                )
+            else:
+                self.kv_cache_report_mode = "incremental"
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
@@ -131,15 +144,33 @@ class Request:
             prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
-            self.prompt_token_ids.copy()
-            if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
-        )
+        if self.prompt_token_ids is None:
+            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+        elif self.prompt_is_token_ids is None:
+            self._all_token_ids = self.prompt_token_ids.copy()
+        else:
+            # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
+            # special token id that may lie outside the embedding. Zero them, matching
+            # the no-token-ids case above, so embedding gathers over these placeholder
+            # ids stay in bounds; the actual inputs come from prompt_embeds.
+            self._all_token_ids = [
+                t if is_tok else 0
+                for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
+            ]
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        self.async_tokens_to_discard = 0
+        # Tokens of output in flight when the request was preempted: delivered
+        # on return, but must not mutate the reset counters.
+        self.num_stale_output_tokens = 0
+        # Drop the stale output instead, for same-step preempt + resume
+        # (reset_prefix_cache).
+        self.drop_stale_output = False
+
+        # Tokens of steps whose output is not yet processed (async scheduling
+        # and PP run ahead of the GPU); `num_computed_tokens` counts them
+        # optimistically.
+        self.num_in_flight_tokens = 0
 
         # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
         # so the worker's broadcast slot ring stays consistent.
@@ -163,9 +194,19 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
+        self.session_id = session_id
+        self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+
+        # Block-aligned token position of a proven shared prefix worth pinning
+        # in the (sparse) prefix cache; 0 means none. Set at admission for
+        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
+        self.shared_prefix_boundary = 0
+        # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
+        # sliding-window KV below this position; 0 when nothing replays.
+        self.replay_start = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -175,6 +216,11 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+
+        # Per-request speculative-decoding acceptance accumulator. Populated by
+        # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
+        # add_request, then observed each verify step); stays None otherwise.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -216,6 +262,8 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            session_id=request.session_id,
+            kv_hints=request.kv_hints,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
@@ -307,8 +355,7 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
+        """Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:

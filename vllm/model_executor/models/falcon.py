@@ -413,6 +413,7 @@ class FalconModel(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
@@ -499,15 +500,14 @@ class FalconForCausalLM(nn.Module, SupportsPP):
             if config.tie_word_embeddings is not None
             else True
         )
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.tie_word_embeddings:
-            self.lm_head = self.transformer.word_embeddings
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.transformer.word_embeddings)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
@@ -536,8 +536,5 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
