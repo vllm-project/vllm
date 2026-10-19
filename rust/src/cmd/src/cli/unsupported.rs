@@ -137,7 +137,7 @@ Remove these arguments to continue."
 /// recognizes but does not support yet.
 ///
 /// Source of truth in Python vLLM:
-/// - `vllm.entrypoints.openai.cli_args.make_arg_parser(...)`
+/// - `vllm.entrypoints.common.cli_args.make_arg_parser(...)`
 /// - `vllm.entrypoints.cli.serve.ServeSubcommand.subparser_init(...)`
 ///
 /// These are not part of `EngineArgs`, `AsyncEngineArgs`, `BaseFrontendArgs`,
@@ -384,8 +384,8 @@ pub struct EngineUnsupportedArgs {
 /// does not support yet.
 ///
 /// Source of truth in Python vLLM:
-/// - `vllm.entrypoints.openai.cli_args.BaseFrontendArgs`
-/// - `vllm.entrypoints.openai.cli_args.FrontendArgs`
+/// - `vllm.entrypoints.common.cli_args.BaseFrontendArgs`
+/// - `vllm.entrypoints.common.cli_args.FrontendArgs`
 ///
 /// These are not engine args. They belong to the Python OpenAI-compatible
 /// frontend / API-server layer itself, for example chat-template configuration,

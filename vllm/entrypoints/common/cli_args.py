@@ -17,6 +17,10 @@ from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
 )
+from vllm.entrypoints.launchers.utils.constants import (
+    H11_MAX_HEADER_COUNT_DEFAULT,
+    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
+)
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
@@ -26,11 +30,6 @@ from vllm.renderers.chat_utils import (
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-from .utils.constants import (
-    H11_MAX_HEADER_COUNT_DEFAULT,
-    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
-)
 
 logger = init_logger(__name__)
 
@@ -571,3 +570,33 @@ def propagate_flash_late_interaction(args, engine_args) -> None:
         engine_args.pooler_config = PoolerConfig(enable_flash_late_interaction=False)
     else:
         engine_args.pooler_config.enable_flash_late_interaction = False
+
+
+def init_parser_plugin(args: argparse.Namespace):
+    from vllm.reasoning import ReasoningParserManager
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+
+
+def validate_api_server_args(args: argparse.Namespace):
+    from vllm.reasoning import ReasoningParserManager
+
+    valid_tool_parses = ToolParserManager.list_registered()
+    if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
+        raise KeyError(
+            f"invalid tool call parser: {args.tool_call_parser} "
+            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+        )
+
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parsers:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+        )

@@ -7,7 +7,7 @@ from typing import cast
 from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
+from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels

@@ -7,7 +7,7 @@ from starlette.datastructures import State
 
 import vllm.entrypoints.launchers.render.app_state as app_state_mod
 from vllm.config import ModelConfig, VllmConfig
-from vllm.entrypoints.launchers.cli_args import make_arg_parser
+from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 

@@ -34,9 +34,11 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Unit"
