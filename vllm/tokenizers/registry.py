@@ -37,7 +37,10 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "internlm2",
     "step3_vl",
     "step3p7",
+    "step5",
+    "step5_vl",
     "unlimited-ocr",
+    "unlimited_ocr",
 }
 
 _VLLM_TOKENIZERS = {
@@ -173,6 +176,10 @@ def resolve_tokenizer_args(
                 token=kwargs.get("token"),
             )
 
+    if tokenizer_mode == "mistral":
+        # MistralCommonBackend rejects HF-only keyword arguments, even None.
+        kwargs.pop("code_revision", None)
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 
@@ -180,6 +187,10 @@ cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    if config.tokenizer == config.model:
+        code_revision = getattr(config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
@@ -240,6 +251,7 @@ def get_tokenizer(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            code_revision=kwargs.get("code_revision"),
             config_format=config_format,
             token=kwargs.get("token"),
         )
@@ -287,6 +299,10 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+    if model_config.tokenizer == model_config.model:
+        code_revision = getattr(model_config, "code_revision", None)
+        if code_revision is not None:
+            kwargs.setdefault("code_revision", code_revision)
 
     return cached_get_tokenizer(
         model_config.tokenizer,
