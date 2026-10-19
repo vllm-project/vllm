@@ -79,7 +79,7 @@ steps:
       label: ':amd: (MI355) Elastic EP Scaling'
       dind: false
       device: mi355_4
-      timeout_in_minutes: 120
+      timeout_in_minutes: 180
       working_dir: /vllm-workspace/tests
       depends_on:
       - image-build-amd
@@ -128,18 +128,52 @@ steps:
       # across cluster", and the log kept the thread headers with nothing
       # underneath them.
       #
-      # The same build also measured the phases, and the gap is the lead worth
-      # chasing: commit_scale_up takes 9 s locally and over 120 s here, with a
-      # rank crashing inside that window. Each phase now reports its own
-      # duration and each step inside it reports its own, so the next log says
-      # where those two minutes go instead of only that they went.
+      # The phase timings settled the slowness lead instead of confirming it.
+      # commit_scale_up was measured at 70.55 s here, and warm_and_capture
+      # accounts for 55 to 63 s of that, against up to 44.75 s locally over 88
+      # samples, so it is the same work a little slower. Another case in the
+      # same build committed in 8 to 10 s and still lost a rank, which leaves
+      # nothing for the duration to explain.
+      #
+      # With RAY_DEDUP_LOGS=0 one crash finally kept its frames, and they name
+      # the only writer any stack has pointed at so far: a newly joined rank
+      # died in NIXL's UCX progress thread, inside the rendezvous memory type
+      # copy (ucp_proto_rndv_mdesc_mtype_copy, rndv_mtype.inl:179) reached
+      # through the UCX TCP transport. A second crash in the same build left
+      # nothing but interpreter frames with no Python file or line, which is how
+      # a corrupted heap looks: the process dies where someone first touches the
+      # bad pointer, not where it was made. That also explains the allreduce,
+      # the PyObject_Malloc and the missing GPU kernel from earlier builds.
+      #
+      # Three recurring messages are noise and counting them says so. "Cannot
+      # get amd_mem_obj" appears 6571 times and "Cijk_..." 704 times in a log
+      # whose cases mostly passed, and "UpdateStreams failed" from
+      # hip_graph_internal shows up in all 15 green local iterations, hundreds
+      # of times per run.
       #
       # --timeout bounds a hang so one stuck case cannot eat the step budget,
-      # and the whole file runs twice, because a group that passes sometimes is
-      # not a group that passes. Build 95373 ran it twice and every one of the
-      # four real cases passed at least once, so nothing here is dead, it is
-      # unstable: three green out of eight runs.
-      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      # and the whole file runs more than once, because a group that passes
+      # sometimes is not a group that passes. Build 95373 ran it twice and every
+      # one of the four real cases passed at least once, and build 95389 came
+      # back 3 passed 1 failed, so nothing here is dead, it is unstable.
+      #
+      # Each pass now carries exactly one lever, so the log says which lever did
+      # it. The first drops Python's own allocator and turns on glibc checking,
+      # so corruption aborts where it is made instead of where it is noticed.
+      # The second turns off the pipelined rendezvous that Dockerfile.rocm
+      # enables and that the crashing stack runs through. The third asks for a
+      # rendezvous scheme that does not use the receiver driven path the crash
+      # sits in at all. Two further levers were tried locally first and
+      # discarded: UCX_PROTO_ENABLE=n made a case slow enough that a rank timed
+      # out on the coordination store, and UCX_TLS narrowed to self,tcp left
+      # NIXL unable to register its buffers.
+      #
+      # They can only be judged here. Locally the crash will not reproduce even
+      # when cma is dropped so that the rendezvous has to run over tcp with
+      # rocm_copy, which is the combination the crashing stack shows, and 15
+      # iterations of the whole file came back green under the same CPU quota.
+      - PYTHONMALLOC=malloc MALLOC_CHECK_=3 MALLOC_PERTURB_=165 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,PYTHONMALLOC,MALLOC_CHECK_,MALLOC_PERTURB_ pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - UCX_RMA_PPLN_ENABLE=n RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - UCX_RNDV_SCHEME=get_zcopy RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.
