@@ -980,14 +980,13 @@ class OpenAIServingChat(GenerateBaseServing):
         finally:
             if emitted_tool_calls is not None:
                 record_tool_call_response(
-                    request,
                     tool_calls_count=len(emitted_tool_calls),
                     parse_failed=parse_failed,
                     completed=stream_completed,
                 )
             elif request.tools and parse_failed:
                 # Messages counts emitted blocks after its own conversion.
-                record_tool_call_response(request, parse_failed=True, completed=False)
+                record_tool_call_response(parse_failed=True, completed=False)
 
     async def chat_completion_full_generator(
         self,
@@ -1061,7 +1060,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
                 except Exception:
                     if request.tools:
-                        record_tool_call_response(request, parse_failed=True)
+                        record_tool_call_response(parse_failed=True)
                     raise
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
@@ -1291,7 +1290,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         if request.tools and request._api_surface != "messages":
             tool_calls_count = sum(len(choice.message.tool_calls) for choice in choices)
-            record_tool_call_response(request, tool_calls_count=tool_calls_count)
+            record_tool_call_response(tool_calls_count=tool_calls_count)
         return response
 
     def _get_top_logprobs(

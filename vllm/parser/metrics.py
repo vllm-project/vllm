@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from enum import Enum
 from itertools import product
-from typing import Literal, cast
+from typing import cast
 
 from prometheus_client import REGISTRY, Counter
 
@@ -56,22 +56,16 @@ def init_parser_metrics(*, model_name: str) -> None:
     _tool_call_responses = _register_counter(
         "vllm:tool_call_responses_total",
         "Tool-calling response outcomes, counted once per request.",
-        ["model_name", "status", "tool_choice", "tool_count", "api_surface"],
+        ["model_name", "status"],
     )
     _tool_calls_emitted = _register_counter(
         "vllm:tool_calls_emitted_total",
         "Individual tool-call objects emitted to clients.",
-        ["model_name", "api_surface"],
+        ["model_name"],
     )
     for status in ("success", "parse_failure", "no_tool_calls"):
-        _tool_call_responses.labels(
-            model_name=_model_name,
-            status=status,
-            tool_choice="unset",
-            tool_count="0",
-            api_surface="chat_completions",
-        )
-    _tool_calls_emitted.labels(model_name=_model_name, api_surface="chat_completions")
+        _tool_call_responses.labels(model_name=_model_name, status=status)
+    _tool_calls_emitted.labels(model_name=_model_name)
 
     for mode, outcome, request_type in product(
         ("streaming", "non_streaming"),
@@ -86,39 +80,7 @@ def init_parser_metrics(*, model_name: str) -> None:
         )
 
 
-def _tool_choice_label(tool_choice: object) -> str:
-    if tool_choice is None:
-        return "unset"
-    if isinstance(tool_choice, str):
-        return tool_choice if tool_choice in ("auto", "none", "required") else "other"
-    choice_type = (
-        tool_choice.get("type")
-        if isinstance(tool_choice, dict)
-        else getattr(tool_choice, "type", None)
-    )
-    return "named" if choice_type == "function" else "other"
-
-
-def _tool_count_bucket(count: int) -> str:
-    if count <= 1:
-        return str(count)
-    if count <= 5:
-        return "2-5"
-    if count <= 10:
-        return "6-10"
-    return "10+"
-
-
-def _request_api_surface(request: object) -> Literal["chat_completions", "messages"]:
-    return (
-        "messages"
-        if getattr(request, "_api_surface", None) == "messages"
-        else "chat_completions"
-    )
-
-
 def record_tool_call_response(
-    request: object,
     *,
     tool_calls_count: int = 0,
     parse_failed: bool = False,
@@ -130,7 +92,6 @@ def record_tool_call_response(
     """
     if _tool_call_responses is None or _tool_calls_emitted is None:
         return
-    api_surface = _request_api_surface(request)
     status = (
         "parse_failure"
         if parse_failed
@@ -139,16 +100,8 @@ def record_tool_call_response(
         else "no_tool_calls"
     )
     if completed or parse_failed:
-        _tool_call_responses.labels(
-            model_name=_model_name,
-            status=status,
-            tool_choice=_tool_choice_label(getattr(request, "tool_choice", None)),
-            tool_count=_tool_count_bucket(len(getattr(request, "tools", None) or ())),
-            api_surface=api_surface,
-        ).inc()
-    _tool_calls_emitted.labels(model_name=_model_name, api_surface=api_surface).inc(
-        tool_calls_count
-    )
+        _tool_call_responses.labels(model_name=_model_name, status=status).inc()
+    _tool_calls_emitted.labels(model_name=_model_name).inc(tool_calls_count)
 
 
 def record_tool_parser_invocation(

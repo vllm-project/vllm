@@ -1232,7 +1232,6 @@ async def test_message_stream_metrics_count_only_emitted_tool_blocks(
         tool_response_record.assert_not_called()
     else:
         tool_response_record.assert_called_once_with(
-            request,
             tool_calls_count=count,
             completed=failure in ("none", "no-calls", "metadata-only"),
         )
@@ -1719,11 +1718,9 @@ async def test_messages_full_metrics_wait_for_successful_conversion(
     chat_request = handler.create_chat_completion.call_args.args[0]
     assert chat_request._api_surface == "messages"
     if error is not None:
-        tool_response_record.assert_called_once_with(chat_request, parse_failed=True)
+        tool_response_record.assert_called_once_with(parse_failed=True)
     elif has_tools:
-        tool_response_record.assert_called_once_with(
-            chat_request, tool_calls_count=len(arguments)
-        )
+        tool_response_record.assert_called_once_with(tool_calls_count=len(arguments))
     else:
         tool_response_record.assert_not_called()
 

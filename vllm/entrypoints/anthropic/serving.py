@@ -826,7 +826,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 tool_calls_count = sum(
                     block.type == "tool_use" for block in response.content
                 )
-                record_tool_call_response(chat_req, tool_calls_count=tool_calls_count)
+                record_tool_call_response(tool_calls_count=tool_calls_count)
             return response
 
         return generator
@@ -889,7 +889,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
             except (json.JSONDecodeError, ValidationError):
                 if request is not None and request.tools:
-                    record_tool_call_response(request, parse_failed=True)
+                    record_tool_call_response(parse_failed=True)
                 raise
             content += [anthropic_tool_call]
 
@@ -1240,7 +1240,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             finally:
                 if request is not None and request.tools:
                     record_tool_call_response(
-                        request,
                         tool_calls_count=emitted_tool_calls,
                         completed=stream_completed,
                     )

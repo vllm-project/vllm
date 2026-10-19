@@ -1003,7 +1003,7 @@ async def test_full_tool_response_metrics_count_returned_calls_once(
         if api_surface == "messages":
             record.assert_not_called()
         else:
-            record.assert_called_once_with(request, tool_calls_count=expected_count)
+            record.assert_called_once_with(tool_calls_count=expected_count)
 
 
 @pytest.mark.asyncio
@@ -1048,7 +1048,7 @@ async def test_full_tool_response_metrics_report_parse_error_not_emitted_calls(
             parser=parser,
         )
     assert caught.value is error
-    record.assert_called_once_with(request, parse_failed=True)
+    record.assert_called_once_with(parse_failed=True)
 
 
 @pytest.fixture
@@ -1151,7 +1151,6 @@ async def test_stream_tool_response_metrics_deduplicate_filtered_fragments(
             record.assert_not_called()
         else:
             record.assert_called_once_with(
-                request,
                 tool_calls_count=expected_count,
                 parse_failed=False,
                 completed=True,
@@ -1237,12 +1236,11 @@ async def test_stream_tool_response_metrics_retain_calls_without_false_outcomes(
         assert sum("error" in chunk for chunk in errors) == 1
     if api_surface == "messages":
         if parser_failed:
-            record.assert_called_once_with(request, parse_failed=True, completed=False)
+            record.assert_called_once_with(parse_failed=True, completed=False)
         else:
             record.assert_not_called()
     else:
         record.assert_called_once_with(
-            request,
             tool_calls_count=int(emitted_first),
             parse_failed=parser_failed,
             completed=False,
@@ -1295,8 +1293,8 @@ async def test_messages_stream_tool_response_metrics_count_parser_failure_once(
     chunks = [chunk async for chunk in stream]
     assert any("event: error" in chunk for chunk in chunks)
     assert record.call_args_list == [
-        call(request, parse_failed=True, completed=False),
-        call(request, tool_calls_count=int(emitted_first), completed=False),
+        call(parse_failed=True, completed=False),
+        call(tool_calls_count=int(emitted_first), completed=False),
     ]
 
 

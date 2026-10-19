@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compatible parser metrics and bounded tool-calling response dimensions."""
+"""Compatible parser metrics and request-level tool-calling outcomes."""
 
 from functools import partial
 
@@ -9,10 +9,7 @@ from prometheus_client import CollectorRegistry, Counter, generate_latest
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser import metrics
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -77,81 +74,32 @@ def test_parser_counter_keeps_existing_label_set_and_series(registry):
     }
 
 
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-@pytest.mark.parametrize(
-    "choice, expected",
-    [
-        (None, "unset"),
-        ("auto", "auto"),
-        ("none", "none"),
-        ("required", "required"),
-        (
-            ChatCompletionNamedToolChoiceParam(function={"name": "private-function"}),
-            "named",
-        ),
-        ({"type": "function", "function": {"name": "private-function"}}, "named"),
-        ("private-function", "other"),
-        ({"type": "private-function"}, "other"),
-    ],
-)
-def test_tool_choice_labels_do_not_export_function_names(
-    registry, api_surface, choice, expected
-):
-    # model_construct also exercises unknown values without API validation.
-    request = ChatCompletionRequest.model_construct(tool_choice=choice, tools=None)
-    request._api_surface = api_surface
-    metrics.record_tool_call_response(request)
-    assert (
-        registry.get_sample_value(
-            "vllm:tool_call_responses_total",
-            {
-                "model_name": "test-model",
-                "status": "no_tool_calls",
-                "tool_choice": expected,
-                "tool_count": "0",
-                "api_surface": api_surface,
-            },
-        )
-        == 1
+def test_response_counters_initialize_all_series_at_zero(registry):
+    samples = [
+        sample
+        for family in registry.collect()
+        for sample in family.samples
+        if sample.name == "vllm:tool_call_responses_total"
+    ]
+    assert len(samples) == 3
+    assert {sample.labels["status"] for sample in samples} == {
+        "success",
+        "parse_failure",
+        "no_tool_calls",
+    }
+    assert all(
+        set(sample.labels) == {"model_name", "status"} and sample.value == 0
+        for sample in samples
     )
-    assert b"private-function" not in generate_latest(registry)
-
-
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-@pytest.mark.parametrize(
-    "count, expected",
-    [
-        (0, "0"),
-        (1, "1"),
-        (2, "2-5"),
-        (5, "2-5"),
-        (6, "6-10"),
-        (10, "6-10"),
-        (11, "10+"),
-        (100, "10+"),
-    ],
-)
-def test_tool_counts_use_fixed_buckets(registry, api_surface, count, expected):
-    request = ChatCompletionRequest.model_construct(
-        tool_choice="auto",
-        tools=[{"type": "function", "function": {"name": "private-function"}}] * count,
-    )
-    request._api_surface = api_surface
-    metrics.record_tool_call_response(request)
-    assert (
-        registry.get_sample_value(
-            "vllm:tool_call_responses_total",
-            {
-                "model_name": "test-model",
-                "status": "no_tool_calls",
-                "tool_choice": "auto",
-                "tool_count": expected,
-                "api_surface": api_surface,
-            },
-        )
-        == 1
-    )
-    assert b"private-function" not in generate_latest(registry)
+    emitted = [
+        sample
+        for family in registry.collect()
+        for sample in family.samples
+        if sample.name == "vllm:tool_calls_emitted_total"
+    ]
+    assert len(emitted) == 1
+    assert emitted[0].labels == {"model_name": "test-model"}
+    assert emitted[0].value == 0
 
 
 def test_reinitializing_metrics_preserves_labeled_counts(registry):
@@ -189,72 +137,51 @@ def test_parser_failures_keep_existing_no_tool_call_classification(
         (2, True, False, "parse_failure"),
     ],
 )
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-def test_response_counts_use_bounded_labels_and_survive_reinitialization(
-    registry, count, failed, completed, status, api_surface
+def test_response_counts_survive_reinitialization(
+    registry, count, failed, completed, status
 ):
-    request = ChatCompletionRequest.model_construct(
-        tool_choice={"type": "function", "function": {"name": "private-function"}}
-    )
-    request._api_surface = api_surface
     metrics.record_tool_call_response(
-        request, tool_calls_count=count, parse_failed=failed, completed=completed
+        tool_calls_count=count, parse_failed=failed, completed=completed
     )
     metrics.init_parser_metrics(model_name="test-model")
     assert (
         registry.get_sample_value(
             "vllm:tool_call_responses_total",
-            {
-                "model_name": "test-model",
-                "status": status,
-                "tool_choice": "named",
-                "tool_count": "0",
-                "api_surface": api_surface,
-            },
+            {"model_name": "test-model", "status": status},
         )
         == 1
     )
     assert (
         registry.get_sample_value(
             "vllm:tool_calls_emitted_total",
-            {"model_name": "test-model", "api_surface": api_surface},
+            {"model_name": "test-model"},
         )
         == count
     )
-    assert b"private-function" not in generate_latest(registry)
 
 
 @pytest.mark.parametrize("count", [0, 2])
-@pytest.mark.parametrize("api_surface", ["chat_completions", "messages"])
-def test_interrupted_responses_only_count_emitted_calls(registry, count, api_surface):
-    request = ChatCompletionRequest.model_construct(tool_choice="auto")
-    request._api_surface = api_surface
-    metrics.record_tool_call_response(request, tool_calls_count=count, completed=False)
+def test_interrupted_responses_only_count_emitted_calls(registry, count):
+    metrics.record_tool_call_response(tool_calls_count=count, completed=False)
     for status in ("success", "parse_failure", "no_tool_calls"):
         assert (
             registry.get_sample_value(
                 "vllm:tool_call_responses_total",
-                {
-                    "model_name": "test-model",
-                    "status": status,
-                    "tool_choice": "auto",
-                    "tool_count": "0",
-                    "api_surface": api_surface,
-                },
+                {"model_name": "test-model", "status": status},
             )
-            is None
+            == 0
         )
     assert (
         registry.get_sample_value(
             "vllm:tool_calls_emitted_total",
-            {"model_name": "test-model", "api_surface": api_surface},
+            {"model_name": "test-model"},
         )
         == count
     )
 
 
 @pytest.mark.parametrize("is_streaming", [False, True])
-def test_converted_messages_keep_legacy_parser_attribution(registry, is_streaming):
+def test_converted_messages_keep_parser_attribution(registry, is_streaming):
     request = AnthropicServingMessages.to_chat_completion_request(
         AnthropicMessagesRequest(
             model="test-model",
@@ -266,20 +193,19 @@ def test_converted_messages_keep_legacy_parser_attribution(registry, is_streamin
         )
     )
     assert _record_and_read(registry, request, is_streaming) == 1
-    metrics.record_tool_call_response(request, tool_calls_count=1)
-    for surface in ("chat_completions", "messages"):
-        assert registry.get_sample_value(
+    metrics.record_tool_call_response(tool_calls_count=1)
+    assert (
+        registry.get_sample_value(
             "vllm:tool_call_responses_total",
-            {
-                "model_name": "test-model",
-                "status": "success",
-                "tool_choice": "named",
-                "tool_count": "1",
-                "api_surface": surface,
-            },
-        ) == (1 if surface == "messages" else None)
-        assert registry.get_sample_value(
+            {"model_name": "test-model", "status": "success"},
+        )
+        == 1
+    )
+    assert (
+        registry.get_sample_value(
             "vllm:tool_calls_emitted_total",
-            {"model_name": "test-model", "api_surface": surface},
-        ) == (1 if surface == "messages" else 0)
+            {"model_name": "test-model"},
+        )
+        == 1
+    )
     assert b"private-function" not in generate_latest(registry)
