@@ -56,14 +56,7 @@ INLINE_CONFIGS = [
         enable_expert_parallel=True,
         enable_eplb=True,
     ),
-    InlineConfig(
-        id="pp2",
-        pp_size=2,
-        skip_reason=(
-            "DeepSeek MTP pipeline-parallel support is in flight upstream; "
-            "see https://github.com/vllm-project/vllm/pull/44698"
-        ),
-    ),
+    InlineConfig(id="pp2", pp_size=2),
 ]
 
 

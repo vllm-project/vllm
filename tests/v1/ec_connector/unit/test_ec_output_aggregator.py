@@ -5,6 +5,7 @@
 import pytest
 
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
+from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.v1.outputs import (
@@ -29,6 +30,16 @@ class FakeWorkerMeta(ECConnectorWorkerMetadata):
         return FakeWorkerMeta(self.saves + other.saves)
 
 
+class FakeConnectorStats(ECConnectorStats):
+    """Records merge order, mirroring FakeWorkerMeta above."""
+
+    def __init__(self, saves: list[str]):
+        self.saves = saves
+
+    def aggregate(self, other: "FakeConnectorStats") -> "FakeConnectorStats":
+        return FakeConnectorStats(self.saves + other.saves)
+
+
 def _worker_output(ec_output: ECConnectorOutput | None) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[], req_id_to_index={}, ec_connector_output=ec_output
@@ -38,19 +49,23 @@ def _worker_output(ec_output: ECConnectorOutput | None) -> ModelRunnerOutput:
 def test_aggregate_folds_every_rank_onto_output_rank():
     """EC work done on any rank reaches the scheduler via output_rank's output.
 
-    The middle rank reports no worker metadata: it must neither seed nor clobber
-    the accumulator.
+    The middle rank reports no worker metadata or stats: it must neither seed
+    nor clobber either accumulator.
     """
     outputs = [
         _worker_output(
             ECConnectorOutput(
                 finished_sending={"mm0"},
+                ec_connector_stats=FakeConnectorStats(["mm0"]),
                 ec_connector_worker_meta=FakeWorkerMeta(["mm0"]),
             )
         ),
         _worker_output(ECConnectorOutput(finished_recving={"mm1"})),
         _worker_output(
-            ECConnectorOutput(ec_connector_worker_meta=FakeWorkerMeta(["mm2"]))
+            ECConnectorOutput(
+                ec_connector_stats=FakeConnectorStats(["mm2"]),
+                ec_connector_worker_meta=FakeWorkerMeta(["mm2"]),
+            )
         ),
     ]
 
@@ -59,6 +74,7 @@ def test_aggregate_folds_every_rank_onto_output_rank():
     assert result is outputs[2]
     assert result.ec_connector_output.finished_sending == {"mm0"}
     assert result.ec_connector_output.finished_recving == {"mm1"}
+    assert result.ec_connector_output.ec_connector_stats.saves == ["mm0", "mm2"]
     assert result.ec_connector_output.ec_connector_worker_meta.saves == ["mm0", "mm2"]
 
 

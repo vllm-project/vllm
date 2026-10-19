@@ -49,15 +49,21 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    redact_sensitive_namespace,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+_SENSITIVE_ARG_FIELDS = ("header",)
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -116,8 +122,22 @@ async def _align_prompts_to_server_tokenizer(
 
         try:
             first_tokens = await _tokenize(input_requests[0].prompt)
-        except Exception:
-            print("WARNING: /tokenize unavailable, skipping alignment.")
+        except aiohttp.ClientConnectionError as e:
+            print(f"WARNING: {base_url} unreachable ({e!r}), skipping alignment.")
+            return input_requests
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                hint = (
+                    "404 Not Found: either this server has no /tokenize route,"
+                    f" or it does not serve a model named `{model_id}`"
+                    " (its served names are listed by GET /v1/models)"
+                )
+            else:
+                hint = f"HTTP {e.status}"
+            print(f"WARNING: /tokenize unavailable ({hint}), skipping alignment.")
+            return input_requests
+        except Exception as e:
+            print(f"WARNING: /tokenize probe failed ({e!r}), skipping alignment.")
             return input_requests
 
         expected = input_requests[0].prompt_len
@@ -247,7 +267,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -309,7 +329,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -402,13 +422,15 @@ async def get_request(
     ramp_up_end_rps: int | None = None,
     self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """
-    Asynchronously generates requests at a specified rate
+    """Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
             A list of input requests, each represented as a SampleRequest.
+        self_timed:
+            If True, the requests carry their own arrival timing and no
+            request rate, burstiness or ramp-up is applied.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -426,6 +448,7 @@ async def get_request(
             The starting request rate for ramp-up.
         ramp_up_end_rps (optional):
             The ending request rate for ramp-up.
+
     """
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}."
@@ -521,6 +544,7 @@ def calculate_metrics_for_embeddings(
 
     Returns:
         The calculated benchmark metrics.
+
     """
     total_input = 0
     total_input_sequences = 0
@@ -580,6 +604,7 @@ def calculate_metrics(
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
+
     """
     actual_output_lens: list[int] = []
     total_input = 0
@@ -812,22 +837,25 @@ async def benchmark(
     # Reuses connections across requests to reduce TLS handshake overhead.
     # Use ssl_context if provided, otherwise default to True for https URLs
     ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
-    connector = aiohttp.TCPConnector(
-        limit=max_concurrency or 0,
-        limit_per_host=max_concurrency or 0,
-        ttl_dns_cache=300,
-        use_dns_cache=True,
-        keepalive_timeout=60,
-        enable_cleanup_closed=True,
-        force_close=False,
-        ssl=ssl_setting,
-    )
 
-    session = aiohttp.ClientSession(
-        connector=connector,
-        trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
-    )
+    def make_session(limit: int) -> aiohttp.ClientSession:
+        connector = aiohttp.TCPConnector(
+            limit=limit,
+            limit_per_host=limit,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=60,
+            enable_cleanup_closed=True,
+            force_close=False,
+            ssl=ssl_setting,
+        )
+        return aiohttp.ClientSession(
+            connector=connector,
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        )
+
+    session = make_session(max_concurrency or 0)
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
@@ -926,22 +954,10 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
+        profile_output = await async_request_profile(
+            base_url + "/start_profile",
+            session,
             extra_headers=extra_headers,
-            extra_body=test_extra_body,
-            chat_messages=test_chat_messages,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
         )
         if profile_output.success:
             print("Profiler started")
@@ -998,11 +1014,16 @@ async def benchmark(
             chat_messages=None,
         )
         interval = 1 / probe_request_rate
-        while not probe_stop.is_set():
-            probe_outputs.append(
-                await request_func(request_func_input=probe_input, session=session)
-            )
-            await asyncio.sleep(interval)
+        # The main session's pool is capped at max_concurrency, so probes use
+        # their own connection.
+        async with make_session(1) as probe_session:
+            while not probe_stop.is_set():
+                probe_outputs.append(
+                    await request_func(
+                        request_func_input=probe_input, session=probe_session
+                    )
+                )
+                await asyncio.sleep(interval)
 
     probe_task: asyncio.Task | None = None
     if probe_request_rate > 0:
@@ -1081,14 +1102,16 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if probe_task is not None:
-        probe_stop.set()
-        await probe_task
-
     if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    # Stop probes after measuring the duration, so the final probe interval
+    # is not counted toward the main workload's throughput.
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
@@ -1459,16 +1482,10 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(
-            request_func_input=profile_input, session=session
+        profile_output = await async_request_profile(
+            base_url + "/stop_profile",
+            session,
+            extra_headers=extra_headers,
         )
         if profile_output.success:
             print("Profiler stopped")
@@ -1536,7 +1553,7 @@ def save_to_pytorch_benchmark_format(
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
+        args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
         extra_info={
             k: results[k]
@@ -1566,6 +1583,7 @@ def compute_result_filename(
 
     Returns:
         The computed filename path or None if no result saving is requested
+
     """
     if not (args.plot_timeline or args.save_result or args.append_result):
         return None
@@ -1659,8 +1677,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--input-len",
         type=int,
         default=None,
-        help="General input length for datasets. Maps to dataset-specific "
-        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        help="General input length for datasets. Maps to --random-input-len. "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -1668,7 +1685,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=None,
         help="General output length for datasets. Maps to dataset-specific "
-        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "output length arguments (e.g., --random-output-len, --hf-output-len). "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -1684,7 +1701,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
         - "hf" will use the fast tokenizer if available.\n
-        - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
         - Other custom values can be supported via plugins.""",
@@ -2013,7 +2029,7 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
-    print(args)
+    print(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
     if args.max_concurrency is not None and args.max_concurrency <= 0:
         raise ValueError("--max-concurrency must be greater than 0")
 
@@ -2122,18 +2138,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
             "Please specify the appropriate --dataset-name (e.g., "
-            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            "'sharegpt', 'custom', 'hf') for your dataset file: "
             f"{args.dataset_path}"
         )
 
-    # Map general --input-len and --output-len to all dataset-specific arguments
+    # Map general length options to dataset-specific arguments.
     if args.input_len is not None:
         args.random_input_len = args.input_len
-        args.sonnet_input_len = args.input_len
 
     if args.output_len is not None:
         args.random_output_len = args.output_len
-        args.sonnet_output_len = args.output_len
         args.sharegpt_output_len = args.output_len
         args.custom_output_len = args.output_len
         args.hf_output_len = args.output_len

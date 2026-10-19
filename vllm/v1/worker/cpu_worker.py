@@ -7,15 +7,14 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import Any
 
 import psutil
 import torch
 
-from vllm.config import VllmConfig
+from vllm import envs
+from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
@@ -105,18 +104,6 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
-        # Torch profiler. Enabled and configured through profiler_config.
-        self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU"],
-            )
-
     def init_device(self):
         self.device = torch.device("cpu")
 
@@ -197,8 +184,26 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        raise RuntimeError("Selective discard is not supported on CPU.")
+
+    def _should_warm_up_model(self) -> bool:
+        # VLLM_CPU_CI_ENV always skips warmup to save CI time.
+        if envs.VLLM_CPU_CI_ENV:
+            return False
+        # With eager (CompilationMode.NONE) execution and an explicit KV
+        # cache size, warmup serves no purpose: there's no compiled graph to
+        # prewarm, and the auto KV-cache-size calc below -- which relies on
+        # a warmup forward pass having already bumped RSS to a realistic
+        # steady-state value -- is bypassed whenever the size is explicit.
+        return not (
+            self.compilation_config.mode == CompilationMode.NONE
+            and self.cache_config.kv_cache_memory_bytes is not None
+        )
+
     def determine_available_memory(self) -> int:
-        self.model_runner.warming_up_model()
+        if self._should_warm_up_model():
+            self.model_runner.warming_up_model()
 
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
@@ -229,10 +234,24 @@ class CPUWorker(Worker):
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
-            if (
-                requested_memory_for_kv <= 0
-                or requested_memory_for_kv > available_memory
-            ):
+            if requested_memory_for_kv <= 0:
+                # The worker's own footprint already fills its reservation, so
+                # freeing memory elsewhere cannot help: only a larger
+                # reservation or an explicit KV cache size can.
+                in_use = math.ceil(consumed_memory / memory_status.total_memory * 100)
+                raise ValueError(
+                    f"The worker already uses {format_gib(consumed_memory)} GiB "
+                    "(model weights and runtime), more than the "
+                    f"{format_gib(self.requested_cpu_memory)} GiB of CPU memory "
+                    f"reserved for it on node {cpu_core.numa_node}, leaving none "
+                    "for the KV cache. On the CPU backend, the "
+                    "`--gpu-memory-utilization` flag controls the fraction of CPU "
+                    "memory reserved (despite its name). To resolve: increase "
+                    f"`--gpu-memory-utilization` to more than {in_use / 100:.2f}, "
+                    "or set the KV cache size explicitly with "
+                    "`--kv-cache-memory-bytes` or VLLM_CPU_KVCACHE_SPACE."
+                )
+            if requested_memory_for_kv > available_memory:
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
@@ -259,20 +278,14 @@ class CPUWorker(Worker):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
-        if len(self.model_runner.kv_caches) == 0:
+        if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
-
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
-        else:
-            self.profiler.stop()

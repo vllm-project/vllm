@@ -450,6 +450,8 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
+    if block_shape is not None:
+        BLOCK_K = min(BLOCK_K, min(block_shape[0], block_shape[1]))
 
     grid = (
         expert_num_tokens.size(0),
@@ -551,8 +553,7 @@ def invoke_moe_batched_triton_kernel(
 
 
 class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
-    """
-    A reference MoE expert class that operates on expert batched format,
+    """A reference MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
@@ -775,8 +776,7 @@ def batched_moe_kernel_quantize_input(
 
 
 class BatchedTritonExperts(mk.FusedMoEExpertsModular):
-    """
-    A Triton based MoE expert class that operates on expert batched format,
+    """A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """

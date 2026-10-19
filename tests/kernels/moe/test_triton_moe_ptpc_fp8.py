@@ -57,7 +57,6 @@ def fp8_mask(a, mask):
 def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
     """This function performs fused moe with per-column int8
     quantization using native torch."""
-
     B, D = a.shape
     # Perform per-token quantization
     a_q, a_s = ops.scaled_fp8_quant(a, use_per_token_if_dynamic=True)

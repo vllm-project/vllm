@@ -79,7 +79,7 @@ def _post_pooling(server: RemoteOpenAIServer, data: dict):
     ret = requests.post(server.url_for("pooling"), json=request_payload)
     ret.raise_for_status()
     response = ret.json()
-    parsed_response = IOProcessorResponse(**response).data
+    parsed_response: object = IOProcessorResponse(**response).data
     assert parsed_response
     return parsed_response
 
