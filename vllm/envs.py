@@ -146,7 +146,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
@@ -170,7 +169,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = True
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -246,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
+    VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
@@ -1335,11 +1334,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
     ),
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
-    ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
     # ROCM_AITER_MLA_SPARSE backend (DeepSeek V3.2, GLM-5.x) and DeepSeek
@@ -1485,12 +1479,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which indices are used for the Ray bundle, for every worker.
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES": lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-    # Deprecated and ignored: RayExecutorV2 is the only Ray executor. Kept so
-    # out-of-tree platforms that still read it keep working; will be removed
-    # in v0.34.
-    "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
-    ),
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH": lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
@@ -1843,6 +1831,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enforce function parameter schemas in structural-tag based tool calling.
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
         os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
+    # Constrain every `beam` output to its response template's format, also
+    # without tool or structured output constraints.
+    "VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT": lambda: (
+        os.getenv("VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT", "True").lower() in ("true", "1")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
@@ -2366,6 +2359,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_RAY_BUNDLE_INDICES",
         "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",

@@ -277,6 +277,12 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-dockerignore-tracked
+    name: Check .dockerignore does not exclude tracked files
+    entry: python tools/pre_commit/check_dockerignore_tracked.py
+    language: python
+    always_run: true
+    pass_filenames: false
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py
