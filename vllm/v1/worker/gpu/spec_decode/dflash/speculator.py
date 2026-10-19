@@ -637,7 +637,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             pcp_group = get_pcp_group()
             pcp_group.broadcast(self.draft_tokens[:num_reqs], src=0)
             if self.draft_logits is not None:
-                pcp_group.broadcast(self.draft_logits[:num_reqs], src=0)
+                # Logits are indexed by persistent request slots.
+                draft_logits = self.draft_logits.index_select(
+                    0, input_batch.idx_mapping
+                )
+                pcp_group.broadcast(draft_logits, src=0)
+                self.draft_logits.index_copy_(0, input_batch.idx_mapping, draft_logits)
             if self.enable_adaptive_verification:
                 pcp_group.broadcast(self.draft_token_confidence_probs[:num_reqs], src=0)
 
