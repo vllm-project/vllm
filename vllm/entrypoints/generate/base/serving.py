@@ -75,7 +75,11 @@ def build_per_request_timing_metrics(
     if scheduled_ts > 0 and first_token_ts > 0:
         time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
 
-    if scheduled_ts > 0 and first_content_token_ts is not None:
+    if (
+        scheduled_ts > 0
+        and first_content_token_ts is not None
+        and first_content_token_ts > 0
+    ):
         time_to_first_content_token_ms = (first_content_token_ts - scheduled_ts) * 1000
 
     if first_token_ts > 0 and last_token_ts > 0:

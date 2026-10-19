@@ -448,7 +448,12 @@ class OpenAIServingChat(GenerateBaseServing):
             parser=parser,
             content_timing_parser=(
                 self._make_parser(request, tokenizer, chat_template_kwargs)
-                if self.enable_per_request_metrics and parser is not None
+                if (
+                    self.enable_per_request_metrics
+                    and parser is not None
+                    and not request.use_beam_search
+                    and (request.n or 1) == 1
+                )
                 else None
             ),
             mm_token_counts=mm_token_counts,
@@ -735,7 +740,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                     if (
-                        first_content_token_ts is None
+                        self.enable_per_request_metrics
+                        and num_choices == 1
+                        and first_content_token_ts is None
                         and delta_message is not None
                         and delta_message.content
                         and res.metrics is not None
