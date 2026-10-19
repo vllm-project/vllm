@@ -29,6 +29,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
+        # MiMo's predictors consume the same target state (as in SGLang's MiMo
+        # worker), rather than feeding one draft layer's output to the next.
+        self.chain_mtp_hidden_states = (
+            self.draft_model_config.hf_config.model_type != "mimo_v2_mtp"
+        )
+
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
@@ -452,7 +458,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
             self.draft_tokens[:num_reqs, step] = draft_tokens
             if step < self.num_speculative_steps - 1:
-                self.hidden_states[:num_tokens] = hidden_states
+                self._update_mtp_hidden_states(hidden_states, num_tokens)
                 # Mid-prefill requests append the known future prefill token
                 # instead of the sampled draft.
                 overrides = self.draft_input_id_overrides[:num_reqs, step]
@@ -475,6 +481,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 )
                 # Advance the draft sampling key.
                 sample_src_positions += 1
+
+    def _update_mtp_hidden_states(self, hidden_states: torch.Tensor, num_tokens: int):
+        if self.chain_mtp_hidden_states:
+            self.hidden_states[:num_tokens] = hidden_states
 
 
 @triton.jit

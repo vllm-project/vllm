@@ -83,3 +83,23 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   per lm_head weight, e.g. 0.6 or 0.35 GiB for a 248k x 2560 head; it is
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it.
+
+## MiMo V2 checkpoint MTP layers
+
+For MiMo V2 Pro and Flash, the MTP configuration preserves the checkpoint's
+`num_nextn_predict_layers` (one to three; absent means one). The number of
+loaded modules is bounded by `num_speculative_tokens`. Distinct modules use
+the same target hidden state; their outputs are not chained. This follows the
+MiMo predictor contract also used by SGLang. Omni keeps its single-module
+configuration.
+
+Multi-module MiMo MTP requires Model Runner V2. Set
+`VLLM_USE_V2_MODEL_RUNNER=1` and use, for example:
+
+```json
+{"method": "mtp", "num_speculative_tokens": 3}
+```
+
+Use one speculative token for a single-module comparison. More draft modules
+do not imply higher throughput: measure acceptance, decode throughput, and
+prefill latency for the intended workload, including chunked prefill.

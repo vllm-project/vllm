@@ -32,6 +32,51 @@ mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_mimo_mtp_preserves_checkpoint_layer_count(count):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.mimo_v2_mtp import get_mimo_mtp_layer_count
+
+    assert (
+        get_mimo_mtp_layer_count(SimpleNamespace(num_nextn_predict_layers=count))
+        == count
+    )
+    assert get_mimo_mtp_layer_count(SimpleNamespace()) == 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("count", [0, -1, 4, None, True, 1.5])
+def test_mimo_mtp_rejects_unqualified_checkpoint_layer_count(count):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.mimo_v2_mtp import get_mimo_mtp_layer_count
+
+    with pytest.raises(ValueError, match="one to three"):
+        get_mimo_mtp_layer_count(SimpleNamespace(num_nextn_predict_layers=count))
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("chain", [False, True])
+def test_multi_module_mtp_hidden_state_contract(chain):
+    from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
+        MultiModuleMTPSpeculator,
+    )
+
+    speculator = object.__new__(MultiModuleMTPSpeculator)
+    speculator.chain_mtp_hidden_states = chain
+    target = torch.randn(4, 8)
+    speculator.hidden_states = target.clone()
+    draft = torch.randn(3, 8)
+    for _ in range(3):
+        speculator._update_mtp_hidden_states(draft, 3)
+    expected = target.clone()
+    if chain:
+        expected[:3] = draft
+    torch.testing.assert_close(speculator.hidden_states, expected)
+
+
 def test_glm_mtp_defers_lm_head(default_vllm_config):
     from vllm.model_executor.models import deepseek_mtp
     from vllm.models.glm5next.common import mtp

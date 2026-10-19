@@ -48,10 +48,16 @@ from .interfaces import (
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
-# MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
-# only the first layer
+# Single-layer fallback for older checkpoints and the Omni path.
 _MIMO_V2_PRO_NUM_MTP_LAYERS = 1
 _MIMO_V2_FLASH_NUM_MTP_LAYERS = 1
+
+
+def get_mimo_mtp_layer_count(config: PreTrainedConfig) -> int:
+    count = getattr(config, "num_nextn_predict_layers", 1)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 3:
+        raise ValueError("MiMo MTP supports checkpoints with one to three draft layers")
+    return count
 
 
 class MiMoV2MTPLayer(nn.Module):
@@ -174,7 +180,9 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         spec_cfg = vllm_config.speculative_config
         assert spec_cfg is not None
-        num_mtp_layers = 1
+        num_mtp_layers = min(
+            get_mimo_mtp_layer_count(config), spec_cfg.num_speculative_tokens
+        )
 
         self.num_mtp_layers = num_mtp_layers
 
