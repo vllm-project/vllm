@@ -414,6 +414,10 @@ class GenerateChoiceBase(BaseModel):
     # `None` if (a) the request was aborted before any forward pass,
     # or (b) `enable_return_routed_experts` is off server-side.
     routed_experts: str | None = None
+    # Token index of the first row. Equals `routed_experts_prompt_start`,
+    # except on a P/D decode instance, where the rows start at its first
+    # forward; a proxy prepends the prefill rows before it.
+    routed_experts_start: int | None = None
     sampling_mask: list[list[int]] | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -451,6 +455,7 @@ class GenerateStreamChoiceBase(BaseModel):
     stop_reason: int | str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
+    routed_experts_start: int | None = None
     sampling_mask: list[list[int]] | None = None
     # Set on the final chunk only; covers the whole output.
     weight_versions: list[WeightVersionSpan] | None = None

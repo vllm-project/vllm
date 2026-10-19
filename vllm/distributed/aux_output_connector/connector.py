@@ -49,6 +49,9 @@ class AuxOutputSchedulerConnector:
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
+        # First token computed here by each P/D decode request; the prefill
+        # instance returns the rows before it.
+        self._decode_emit_floors: dict[str, int] = {}
         self._generation = 0
 
     def build_connector_meta(
@@ -68,13 +71,23 @@ class AuxOutputSchedulerConnector:
             self._sent_hash_counts[request_id] = len(request.block_hashes)
             assert request.sampling_params is not None
             # A P/D prefiller may cut the prompt short of the requested start.
-            scheduled_requests[request_id] = max(
+            emit_start = max(
                 min(
                     request.sampling_params.routed_experts_prompt_start,
                     request.num_prompt_tokens,
                 ),
                 0 if request.num_output_tokens == 0 else request.num_tokens - 1,
             )
+            params = request.kv_transfer_params
+            if params is not None and not params.get("do_remote_decode"):
+                # Fixed at the first schedule, after any failed KV load was
+                # rewound; kept across preemption, since this instance has no
+                # rows for the KV it loaded.
+                floor = self._decode_emit_floors.setdefault(
+                    request_id, request.num_computed_tokens
+                )
+                emit_start = max(emit_start, floor)
+            scheduled_requests[request_id] = emit_start
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -135,6 +148,8 @@ class AuxOutputSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
+        if request.is_finished():
+            self._decode_emit_floors.pop(request_id, None)
         num_sent = self._sent_hash_counts.pop(request_id, None)
         if num_sent is None:
             return

@@ -690,6 +690,10 @@ class CompletionResponseChoice(OpenAIBaseModel):
     routed_experts: str | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+    # Token index of the first row. Equals ``routed_experts_prompt_start``,
+    # except on a P/D decode instance, where the rows start at its first
+    # forward; a proxy prepends the prefill rows before it.
+    routed_experts_start: int | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
