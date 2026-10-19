@@ -1281,26 +1281,10 @@ class LoRAModelManager:
                 )
 
     def _validate_classification_head_lora(self, lora_model: LoRAModel) -> None:
-        if self._classification_head is not None:
-            module_name, wrapper = self._classification_head
-            if (
-                isinstance(wrapper, ClassificationHeadWithLoRA)
-                and self._pooling_task == "token_classify"
-                and (
-                    self._get_module_to_save_weights(lora_model, module_name)
-                    is not None
-                    or self._get_lora_layer_weights(lora_model, module_name) is not None
-                )
-            ):
-                raise ValueError(
-                    f"Classification head {module_name!r} uses request routing; "
-                    "token_classify requires a token-routed classification head."
-                )
-
-        if not lora_model.modules_to_save:
-            return
-        saved_module_name = next(iter(lora_model.modules_to_save))
         if self._classification_head is None:
+            if not lora_model.modules_to_save:
+                return
+            saved_module_name = next(iter(lora_model.modules_to_save))
             raise ValueError(
                 f"Cannot load full module {saved_module_name!r}: the model does "
                 "not expose a unique classification head."
@@ -1308,6 +1292,23 @@ class LoRAModelManager:
 
         module_name, wrapper = self._classification_head
         full_module = self._get_module_to_save_weights(lora_model, module_name)
+        head_lora = self._get_lora_layer_weights(lora_model, module_name)
+        has_head_weights = full_module is not None or head_lora is not None
+
+        # DispatchPooler does not replace the classifier in its token branch.
+        if (
+            self._pooling_task == "token_classify"
+            and isinstance(wrapper, ClassificationHeadWithLoRA)
+            and has_head_weights
+        ):
+            raise ValueError(
+                f"Classification head {module_name!r} uses request routing; "
+                "token_classify requires a token-routed classification head."
+            )
+
+        if not lora_model.modules_to_save:
+            return
+        saved_module_name = next(iter(lora_model.modules_to_save))
         if full_module is None:
             raise ValueError(
                 f"Full module {saved_module_name!r} does not match the model's "
@@ -1328,17 +1329,14 @@ class LoRAModelManager:
                 f"received {received_weight_shape}."
             )
 
-        if isinstance(wrapper, TokenClassificationHeadWithLoRA):
-            if self._get_lora_layer_weights(lora_model, module_name) is not None:
-                raise ValueError(
-                    "Token classification heads cannot combine modules_to_save "
-                    "with LoRA A/B weights."
-                )
-            if full_module.weight.size(0) != wrapper.output_size:
-                raise ValueError(
-                    "Token classification heads require the same number of labels "
-                    f"as the base model ({wrapper.output_size})."
-                )
+        if (
+            isinstance(wrapper, TokenClassificationHeadWithLoRA)
+            and full_module.weight.size(0) != wrapper.output_size
+        ):
+            raise ValueError(
+                "Token classification heads require the same number of labels "
+                f"as the base model ({wrapper.output_size})."
+            )
 
         if full_module.bias is None:
             return
