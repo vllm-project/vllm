@@ -9,7 +9,7 @@ from typing import Any, ClassVar, NamedTuple, cast
 import numpy as np
 import torch
 
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -67,8 +67,75 @@ def _shared_adapter(device: torch.device):
     return Step5FlashInferSparse(device)
 
 
+@functools.cache
+def _shared_prims_ts_adapter(device: torch.device, max_model_len: int, topk: int):
+    from .prims_ts import Step5PrimsTSSparse
+
+    return Step5PrimsTSSparse(device, max_model_len, topk)
+
+
 class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
     """FlashAttention using the canonical packed-content KV cache."""
+
+    def __init__(
+        self,
+        num_heads,
+        head_size,
+        scale,
+        num_kv_heads,
+        alibi_slopes,
+        sliding_window,
+        kv_cache_dtype,
+        *args,
+        **kwargs,
+    ):
+        config = get_current_vllm_config_or_none()
+        self.use_prims_ts = (
+            config is not None
+            and config.kernel_config.step5_attention_backend == "prims_ts"
+        )
+        # FA2 validates the BF16 path; PrimTS handles all E4M3 attention.
+        parent_cache_dtype = (
+            "auto"
+            if self.use_prims_ts and kv_cache_dtype in ("fp8", "fp8_e4m3")
+            else kv_cache_dtype
+        )
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            parent_cache_dtype,
+            *args,
+            **kwargs,
+        )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.num_speculative_tokens = (
+            config.speculative_config.num_speculative_tokens
+            if config is not None and config.speculative_config is not None
+            else 0
+        )
+        if self.use_prims_ts:
+            if not current_platform.is_device_capability(103):
+                raise NotImplementedError("Step5 PrimTS attention requires SM103")
+            from .prims_ts import Step5PrimsTSSWA
+
+            self.prims_ts_swa = Step5PrimsTSSWA(
+                cast(VllmConfig, config).model_config.max_model_len,
+                self.sliding_window[0] + 1,
+            )
+            self.supports_quant_query_input = False
+
+    def uses_prims_ts(self, metadata) -> bool:
+        if not self.use_prims_ts:
+            return False
+        from .prims_ts import uses_prims_ts_attention
+
+        return uses_prims_ts_attention(
+            metadata, self.num_speculative_tokens, self.kv_cache_dtype
+        )
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
@@ -81,6 +148,23 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
     def forward_with_headwise_gate(
         self, layer, query, key, value, kv_cache, attn_metadata, output, gate
     ):
+        if self.uses_prims_ts(attn_metadata):
+            from .prims_ts import get_kv_cache_and_scales
+
+            cache, qk_scale, v_scale = get_kv_cache_and_scales(query, kv_cache, layer)
+            return self.prims_ts_swa.run(
+                query,
+                cache,
+                attn_metadata,
+                output,
+                gate,
+                self.scale * qk_scale,
+                v_scale,
+            )
+        if gate is None:
+            return self.forward(
+                layer, query, key, value, kv_cache, attn_metadata, output
+            )
         if (
             attn_metadata is None
             or not attn_metadata.num_actual_tokens
@@ -140,6 +224,13 @@ class Step5SplitKVFlashAttentionImpl(FlashAttentionImpl):
         return output
 
 
+class Step5PrimsTSSWAImpl(Step5SplitKVFlashAttentionImpl):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.sliding_window[0] < 0 or self.sliding_window[1] != 0:
+            raise NotImplementedError("Step5 PrimTS SWA requires a causal window")
+
+
 def _validate_step5_dsa_attention_contract(
     *,
     dtype: torch.dtype,
@@ -184,7 +275,16 @@ def _validate_step5_dsa_attention_contract(
         raise NotImplementedError("Step5 DSA does not support attention sinks.")
 
 
-class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
+class Step5FlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        step5_metadata = cast(Any, metadata)
+        step5_metadata.num_actual_reqs = common_attn_metadata.num_reqs
+        step5_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        return metadata
+
+
+class Step5DSAMetadataBuilder(Step5FlashAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     supports_update_block_table = False
 
@@ -198,8 +298,6 @@ class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         step5_metadata = cast(Any, metadata)
-        step5_metadata.num_actual_reqs = common_attn_metadata.num_reqs
-        step5_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         step5_metadata.step5_runtime = None
         self._plan_prefill(step5_metadata, common_attn_metadata)
         return metadata
@@ -337,10 +435,13 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         self.max_num_seqs = max_num_seqs or 1
         self.max_num_regions = ((max_model_len or 1048576) + 7) // 8
         # Created with the model so memory profiling counts its workspace.
-        self.adapter = _shared_adapter(
-            torch.device(
-                current_platform.device_type, torch.accelerator.current_device_index()
-            )
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
+        self.adapter = (
+            _shared_prims_ts_adapter(device, max_model_len or 1048576, self.sparse_topk)
+            if self.use_prims_ts
+            else _shared_adapter(device)
         )
         self.summary_cache = None
         self.csa_ring = None
@@ -368,7 +469,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("Step5 does not support output quantization")
         if output is None:
-            output = torch.empty_like(query)
+            output = torch.empty_like(query, dtype=torch.get_default_dtype())
         if attn_metadata is None:
             return output.zero_()
         assert self.summary_cache is not None and self.adapter is not None
@@ -384,6 +485,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         is_decode = n == attn_metadata.num_actual_reqs * query_len and (
             query_len <= self.num_speculative_tokens + 1
         )
+        prims_ts = self.uses_prims_ts(attn_metadata)
         if (dsa_summary_updated or defer_inactive_clear) and not is_decode:
             raise ValueError("Decode attention fusions cannot be used for prefill")
         # The sparse decode kernel applies the gate while writing out; prefill
@@ -407,11 +509,19 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             gated = headwise_sigmoid_gate(output[:n].flatten(1), dsa_gate[:n])
             output[:n].copy_(gated.view_as(output[:n]))
             return output
-        kv_scales = (
-            (layer._k_scale, layer._v_scale)
-            if kv_cache.dtype in (torch.uint8, torch.float8_e4m3fn)
-            else (None, None)
-        )
+        if prims_ts:
+            from .prims_ts import get_kv_cache_and_scales
+
+            kv_cache, qk_scale, v_scale = get_kv_cache_and_scales(
+                query, kv_cache, layer
+            )
+            kv_scales = (qk_scale, v_scale)
+        else:
+            kv_scales = (
+                (layer._k_scale, layer._v_scale)
+                if kv_cache.dtype in (torch.uint8, torch.float8_e4m3fn)
+                else (None, None)
+            )
         groups = kv_cache.shape[1]
         if not is_decode and attn_metadata.step5_runtime is None:
             # Fallback when the builder could not plan ahead: one host sync.
@@ -429,6 +539,16 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     kv_cache.shape[2],
                     kv_page_stride(kv_cache),
                 ),
+            )
+        if prims_ts and not is_decode:
+            plan = attn_metadata.step5_runtime[5]
+            plan.bind(
+                query[:n],
+                kv_cache,
+                attn_metadata.block_table[: attn_metadata.num_actual_reqs],
+                output[:n],
+                qk_scale=kv_scales[0],
+                v_scale=kv_scales[1],
             )
         if groups > 1 and is_decode:
             # Fold (token, KV group) into rows: one launch chain for all groups.
@@ -453,14 +573,22 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         if groups > 1:
             heads = query.shape[1] // groups
             # FlashInfer's output rows are contiguous even when KV is strided.
-            grouped_output = torch.empty(
-                (groups, n, heads, query.shape[2]),
-                device=output.device,
-                dtype=output.dtype,
+            grouped_output = (
+                None
+                if prims_ts
+                else torch.empty(
+                    (groups, n, heads, query.shape[2]),
+                    device=output.device,
+                    dtype=output.dtype,
+                )
             )
             for group in range(groups):
                 group_query = query[:n, group * heads : (group + 1) * heads]
-                group_output = grouped_output[group]
+                group_output = (
+                    output[:n, group * heads : (group + 1) * heads]
+                    if prims_ts
+                    else cast(torch.Tensor, grouped_output)[group]
+                )
                 args = (
                     group_query,
                     kv_cache[:, group : group + 1],
@@ -474,9 +602,10 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                 self._forward_prefill(
                     *args, summary_updated=group > 0, kv_scales=kv_scales
                 )
-            output[:n].view(n, groups, heads, query.shape[2]).copy_(
-                grouped_output.transpose(0, 1)
-            )
+            if grouped_output is not None:
+                output[:n].view(n, groups, heads, query.shape[2]).copy_(
+                    grouped_output.transpose(0, 1)
+                )
             return output
         if is_decode:
             return self._forward_decode(
@@ -534,21 +663,32 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
         # FP8 and multi-group (strided) caches cannot feed the paged FA2
         # kernels directly; stage live pages into dense BF16 per layer
         # instead of gathering ~4K tokens of KV for every query row.
-        staging = layout.quantized or groups > 1
+        staging = (layout.quantized or groups > 1) and not self.use_prims_ts
         staged_pages = int(((lengths + block_size - 1) // block_size).sum())
         paged_plan = None
         if not staging or (
             staged_pages * block_size * layout.head_size * 4 <= _PREFILL_STAGING_BYTES
         ):
+            options = (
+                dict(request_offsets=starts, num_kv_groups=groups)
+                if self.use_prims_ts
+                else {}
+            )
+            query_dtype = (
+                torch.float8_e4m3fn
+                if self.use_prims_ts and layout.quantized
+                else layout.dtype
+            )
             paged_plan = self.adapter.prepare_prefill_attention(
                 (n, layout.heads_per_group, layout.head_size),
-                layout.dtype,
+                query_dtype,
                 device,
                 block_size,
                 host_positions,
                 min(num_regions, self.sparse_topk) + 1,
                 self.scale,
                 contiguous_query=groups == 1,
+                **options,
             )
         if paged_plan is None and not exact:
             return None
@@ -582,6 +722,11 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                 paged_plan.page_metadata(attn_table, owners, page_stride)
                 if paged_plan is not None and num_regions <= self.sparse_topk
                 else None
+            ),
+            **(
+                dict(prims_output=cast(Any, paged_plan).metadata_output())
+                if self.use_prims_ts
+                else {}
             ),
         )
         # Pairs of consecutive rows of one request fill the logits MMA with
@@ -689,9 +834,14 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
                     # Attention is order-independent; skipping the 1K sort
                     # makes selection ~2x cheaper.
                     sort=False,
+                    **(
+                        dict(prims_output=paged_plan.selection_output(start, end))
+                        if self.use_prims_ts
+                        else {}
+                    ),
                 )
             if paged_plan is not None:
-                if paged_plan.query_buffer is not None:
+                if paged_plan.query_buffer is not None and not self.use_prims_ts:
                     paged_plan.prepare_chunk(
                         start,
                         query[start:end],
@@ -789,6 +939,11 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             v_scale=kv_scales[1],
             query_len=query_len,
             gate=gate,
+            **(
+                dict(use_prims_ts=self.uses_prims_ts(metadata))
+                if self.use_prims_ts
+                else {}
+            ),
         )
         return output
 
@@ -803,6 +958,60 @@ class Step5SplitKVFlashAttentionBackend(FlashAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type[FlashAttentionImpl]:
         return Step5SplitKVFlashAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        config = get_current_vllm_config_or_none()
+        if (
+            config is not None
+            and config.kernel_config.step5_attention_backend == "prims_ts"
+        ):
+            return Step5FlashAttentionMetadataBuilder
+        return FlashAttentionMetadataBuilder
+
+
+class Step5PrimsTSSWABackend(Step5SplitKVFlashAttentionBackend):
+    @staticmethod
+    def get_impl_cls():
+        return Step5PrimsTSSWAImpl
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype):
+        return kv_cache_dtype in (None, "auto", "bfloat16", "fp8", "fp8_e4m3")
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_mla,
+        has_sink,
+        use_sparse,
+        use_mm_prefix,
+        device_capability,
+    ):
+        if (
+            head_size != 192
+            or dtype != torch.bfloat16
+            or device_capability != DeviceCapability(10, 3)
+            or use_mla
+            or has_sink
+            or use_mm_prefix
+        ):
+            return "Step5 PrimTS SWA requires BF16 D192 on SM103 without sinks or MLA"
+        return super().supports_combination(
+            head_size,
+            dtype,
+            "auto",
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            device_capability,
+        )
 
 
 class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):

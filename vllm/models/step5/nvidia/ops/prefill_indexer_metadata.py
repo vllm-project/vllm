@@ -10,6 +10,7 @@ from vllm.triton_utils import tl, triton
 
 from .sparse_indexer import (
     PagedPrefillMetadata,
+    PrimsTSSelectionOutput,
     _emit_all_regions,
     _emit_indexer_schedule,
     _emit_prefill_pages,
@@ -59,22 +60,46 @@ def _prepare_prefill_indexer(
     PAGE_INDPTR_STRIDE: tl.constexpr = 1,
     BLOCK_SIZE: tl.constexpr = 8,
     PAGE_STRIDE: tl.constexpr = 1,
+    PRIMS_TS: tl.constexpr = False,
+    PRIMS_ROW: tl.constexpr = 0,
+    PRIMS_HEAD: tl.constexpr = 0,
+    PRIMS_GROUPS: tl.constexpr = 1,
+    PRIMS_WIDTH: tl.constexpr = 0,
+    RouteOwners=None,
+    RoutePositions=None,
 ):
     page_tile = tl.program_id(0)
     row = tl.program_id(1)
     if page_tile == 0:
         position = tl.load(Positions + row * POSITION_STRIDE).to(tl.int64)
         current = position >> 3
+        if PRIMS_TS:
+            tl.store(
+                RouteOwners + row, tl.load(Owners + row * OWNER_STRIDE).to(tl.int32)
+            )
+            tl.store(RoutePositions + row, position)
         tl.store(Current + row, current)
         tl.store(Lengths + row, current + 1)
         tl.store(TopKLengths + row, current)
         if not NEED_SCORES:
-            _emit_all_regions(
-                current,
-                Selected + row.to(tl.int64) * (REGIONS + 1),
-                REGIONS,
-                BLOCK_REGIONS,
-            )
+            if PRIMS_TS:
+                # All-history selections are identical across KV heads.
+                for group in tl.static_range(PRIMS_GROUPS):
+                    _emit_all_regions(
+                        current,
+                        Selected + row.to(tl.int64) * PRIMS_ROW + group * PRIMS_HEAD,
+                        REGIONS,
+                        BLOCK_REGIONS,
+                        True,
+                        PRIMS_WIDTH,
+                    )
+            else:
+                _emit_all_regions(
+                    current,
+                    Selected + row.to(tl.int64) * (REGIONS + 1),
+                    REGIONS,
+                    BLOCK_REGIONS,
+                )
         if PREPARE_PAGES:
             col = tl.arange(0, BLOCK_REGIONS)
             region = col - (REGIONS - current)
@@ -139,8 +164,10 @@ def prepare_prefill_indexer(
     num_sms: int,
     *,
     paged_prefill: PagedPrefillMetadata | None = None,
+    prims_output: PrimsTSSelectionOutput | None = None,
 ) -> list[PrefillIndexerMetadata]:
     """Prepare bounded FI query chunks once; reuse them for every DSA layer."""
+    prims_ids = prims_output.ids if prims_output is not None else None
     rows = positions.numel()
     chunk_size = prefill_indexer_chunk_size(regions)
     need_scores = regions > topk
@@ -176,7 +203,13 @@ def prepare_prefill_indexer(
         else None
     )
     selected = (
-        torch.empty((rows, regions + 1), device=positions.device, dtype=torch.int64)
+        (
+            prims_ids
+            if prims_ids is not None
+            else torch.empty(
+                (rows, regions + 1), device=positions.device, dtype=torch.int64
+            )
+        )
         if not need_scores
         else None
     )
@@ -204,6 +237,13 @@ def prepare_prefill_indexer(
             chunk_size.bit_length(),
             num_warps=4,
             **paged_kwargs,
+            RouteOwners=prims_output.owners if prims_output is not None else None,
+            RoutePositions=prims_output.positions if prims_output is not None else None,
+            PRIMS_TS=prims_ids is not None,
+            PRIMS_ROW=prims_ids.stride(0) if prims_ids is not None else 0,
+            PRIMS_HEAD=prims_ids.stride(1) if prims_ids is not None else 0,
+            PRIMS_GROUPS=prims_ids.shape[1] if prims_ids is not None else 1,
+            PRIMS_WIDTH=prims_ids.shape[2] if prims_ids is not None else 0,
         )
     return [
         PrefillIndexerMetadata(

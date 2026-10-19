@@ -27,19 +27,9 @@ def _headwise_sigmoid_gate(
 ):
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    gate = tl.load(
-        Gate + row * GATE_ROW + (col // HEAD_DIM) * GATE_COL,
-        col < WIDTH,
-        other=0,
-    ).to(tl.float32)
-    sigmoid = tl.div_rn(1.0, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
-    # PyTorch materializes sigmoid in gate dtype before the multiply.
-    sigmoid = sigmoid.to(Gate.dtype.element_ty).to(tl.float32)
-    value = tl.load(
-        Attention + row.to(tl.int64) * ATTENTION_ROW + col * ATTENTION_COL,
-        col < WIDTH,
-        other=0,
-    ).to(tl.float32)
+    # Inactive attention and gate values may be undefined. Mask both loads:
+    # clearing attention alone still leaves 0 * sigmoid(NaN) as NaN.
+    active = True
     if MASK_INACTIVE:
         active = tl.load(
             Active + row * ACTIVE_STRIDE,
@@ -48,8 +38,19 @@ def _headwise_sigmoid_gate(
         )
         if MASK_IS_SLOT:
             active = active >= 0
-        # Clear attention before multiplication: 0 * sigmoid(NaN) remains NaN.
-        value = tl.where(active, value, 0.0)
+    gate = tl.load(
+        Gate + row * GATE_ROW + (col // HEAD_DIM) * GATE_COL,
+        (col < WIDTH) & active,
+        other=0,
+    ).to(tl.float32)
+    sigmoid = tl.div_rn(1.0, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
+    # PyTorch materializes sigmoid in gate dtype before the multiply.
+    sigmoid = sigmoid.to(Gate.dtype.element_ty).to(tl.float32)
+    value = tl.load(
+        Attention + row.to(tl.int64) * ATTENTION_ROW + col * ATTENTION_COL,
+        (col < WIDTH) & active,
+        other=0,
+    ).to(tl.float32)
     tl.store(Output + row.to(tl.int64) * WIDTH + col, value * sigmoid, col < WIDTH)
 
 
@@ -59,11 +60,23 @@ def headwise_sigmoid_gate(
     active: torch.Tensor | None = None,
     *,
     slot_mapping: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if active is not None and slot_mapping is not None:
         raise ValueError("Pass either active flags or decode slots")
     mask = active if active is not None else slot_mapping
-    output = attention.new_empty(attention.shape)
+    if out is not None and (
+        out.shape != attention.shape
+        or out.dtype != attention.dtype
+        or out.device != attention.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError(
+            "Gate output must be contiguous and match attention shape/dtype/device"
+        )
+    # Reuse attention's contiguous view to avoid another allocation and copy.
+    # Each element is read before its store; other overlapping views are unsupported.
+    output = attention.new_empty(attention.shape) if out is None else out
     head_dim = attention.shape[1] // gate.shape[1]
     _headwise_sigmoid_gate[(attention.shape[0], triton.cdiv(attention.shape[1], 1024))](
         attention,

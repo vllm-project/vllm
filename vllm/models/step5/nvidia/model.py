@@ -168,7 +168,7 @@ def step5_swa_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    gate: torch.Tensor,
+    gate: torch.Tensor | None,
 ) -> None:
     metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     typing.cast(Any, layer.impl).forward_with_headwise_gate(
@@ -1162,9 +1162,17 @@ class Step5Attention(nn.Module):
         if self.use_dsa_backend:
             attn_backend = Step5DSAAttentionBackend
         else:
-            from .sparse_attention import Step5SplitKVFlashAttentionBackend
+            from .sparse_attention import (
+                Step5PrimsTSSWABackend,
+                Step5SplitKVFlashAttentionBackend,
+            )
 
-            attn_backend = Step5SplitKVFlashAttentionBackend
+            attn_backend = (
+                Step5PrimsTSSWABackend
+                if vllm_config is not None
+                and vllm_config.kernel_config.step5_attention_backend == "prims_ts"
+                else Step5SplitKVFlashAttentionBackend
+            )
         sparse_impl_args: dict[str, Any] = {}
         if self.use_dsa_backend:
             dsa_vllm_config = typing.cast(VllmConfig, vllm_config)
@@ -1254,6 +1262,7 @@ class Step5Attention(nn.Module):
             and current_platform.is_device_capability(103)
             and typing.cast(Any, self.attn.impl).supports_fused_swa_decode()
         )
+        self.prims_ts_attention = getattr(self.attn.impl, "use_prims_ts", False)
 
     def forward(
         self,
@@ -1273,7 +1282,12 @@ class Step5Attention(nn.Module):
             qkzg = None
             extra_dims = None
 
-        if self.fuse_swa_gate and extra_dims is None:
+        if (
+            (self.fuse_swa_gate or self.prims_ts_attention)
+            and not self.use_dsa_backend
+            and self.use_head_wise_attn_gate
+            and extra_dims is None
+        ):
             extra_dims, _ = self.g_proj(hidden_states)
 
         attn_metadata, _, kv_cache, slot_mapping = get_attention_context(
@@ -1304,6 +1318,10 @@ class Step5Attention(nn.Module):
             key_cache, value_cache = typing.cast(Any, self.attn.impl)._split_kv_cache(
                 kv_cache
             )
+            fp8_query = self.prims_ts_attention and key_cache.dtype in (
+                torch.uint8,
+                torch.float8_e4m3fn,
+            )
             if (
                 self.sparse_attn is not None
                 and self.sparse_attn.fuse_qkv_preparation
@@ -1319,6 +1337,7 @@ class Step5Attention(nn.Module):
                     key_cache,
                     value_cache,
                     decode_slots,
+                    fp8_query=fp8_query,
                 )
             else:
                 q, k, v = ops.fused_qknorm_rope_cache(
@@ -1339,6 +1358,8 @@ class Step5Attention(nn.Module):
                     self.attn.kv_cache_dtype,
                     self.attn._k_scale,
                     self.attn._v_scale,
+                    fp8_query=fp8_query,
+                    q_scale=self.attn._q_scale_float,
                 )
             kv_cache_dummy_dep = q.new_empty(0)
         else:
@@ -1368,8 +1389,7 @@ class Step5Attention(nn.Module):
                 decode_slots=decode_slots,
                 prepared_indexer=prepared_indexer,
             )
-        elif self.fuse_swa_gate:
-            assert extra_dims is not None
+        elif self.fuse_swa_gate or self.prims_ts_attention:
             key = k.view(-1, self.num_kv_heads, self.head_dim)
             value = v.view(-1, self.num_kv_heads, self.head_dim)
             if (
@@ -1380,7 +1400,7 @@ class Step5Attention(nn.Module):
                 unified_kv_cache_update(key, value, self.attn.layer_name)
             attn_output = torch.empty(
                 (q.shape[0], self.num_heads, self.head_dim),
-                dtype=q.dtype,
+                dtype=k.dtype,
                 device=q.device,
             )
             step5_swa_attention_with_output(
@@ -1404,6 +1424,7 @@ class Step5Attention(nn.Module):
         if (
             self.use_head_wise_attn_gate
             and not self.fuse_swa_gate
+            and not self.prims_ts_attention
             and self.sparse_attn is None
         ):
             assert extra_dims is not None
@@ -1449,6 +1470,8 @@ class Step5SparseAttention:
         key_cache,
         value_cache,
         decode_slots,
+        *,
+        fp8_query=False,
     ):
         from .ops.qkv_indexer_norm_rope import qkv_indexer_norm_rope
 
@@ -1489,6 +1512,8 @@ class Step5SparseAttention:
             decode_ring=impl.csa_ring if cache is not None else None,
             decode_z=index_z if cache is not None else None,
             decode_slots=decode_slots,
+            fp8_query=fp8_query,
+            q_scale=owner.attn._q_scale_float,
         )
         return (q, k, v), (
             index_q,
@@ -1560,7 +1585,7 @@ class Step5SparseAttention:
         hidden_size = attn.num_heads * attn.head_size_v
         output = torch.empty(
             (query.shape[0], hidden_size),
-            dtype=query.dtype,
+            dtype=key.dtype,
             device=query.device,
         )
 
