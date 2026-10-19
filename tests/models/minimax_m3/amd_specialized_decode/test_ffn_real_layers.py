@@ -27,8 +27,35 @@ def _supported() -> bool:
     return on_gfx950() and Path(CHECKPOINT, "config.json").exists()
 
 
-pytestmark = pytest.mark.skipif(
-    not _supported(), reason="needs 4 gfx950 GPUs and the MiniMax-M3-MXFP4 checkpoint"
+pytestmark = [
+    pytest.mark.optional,
+    pytest.mark.distributed(num_gpus=4),
+    pytest.mark.skipif(
+        not _supported(),
+        reason="needs 4 gfx950 GPUs and the MiniMax-M3-MXFP4 checkpoint",
+    ),
+]
+
+ENV = {
+    "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+    "VLLM_USE_BREAKABLE_CUDAGRAPH": "0",
+    "VLLM_ROCM_USE_AITER": "1",
+    "VLLM_ROCM_USE_AITER_MOE": "1",
+    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1",
+    "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1",
+}
+ENGINE = dict(
+    model=CHECKPOINT,
+    tensor_parallel_size=4,
+    trust_remote_code=True,
+    max_model_len=4096,
+    max_num_seqs=max(WIDTHS),
+    kv_cache_dtype="fp8",
+    block_size=128,
+    moe_backend="aiter",
+    attention_backend="TRITON_ATTN",
+    attention_config={"indexer_kv_dtype": "fp8"},
+    language_model_only=True,
 )
 
 
@@ -134,32 +161,11 @@ def _replay(worker):
 
 
 def test_ffn_launch_matches_native_layers(monkeypatch):
-    for name, value in {
-        "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-        "VLLM_USE_BREAKABLE_CUDAGRAPH": "0",
-        "VLLM_ROCM_USE_AITER": "1",
-        "VLLM_ROCM_USE_AITER_MOE": "1",
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "1",
-        "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1",
-    }.items():
+    for name, value in ENV.items():
         monkeypatch.setenv(name, value)
     from vllm import LLM, SamplingParams
 
-    llm = LLM(
-        model=CHECKPOINT,
-        tensor_parallel_size=4,
-        trust_remote_code=True,
-        max_model_len=4096,
-        max_num_seqs=max(WIDTHS),
-        kv_cache_dtype="fp8",
-        block_size=128,
-        moe_backend="aiter",
-        attention_backend="TRITON_ATTN",
-        attention_config={"indexer_kv_dtype": "fp8"},
-        enforce_eager=True,
-        language_model_only=True,
-        enable_prefix_caching=False,
-    )
+    llm = LLM(**ENGINE, enforce_eager=True, enable_prefix_caching=False)
     question = (
         "Natalia sold clips to 48 of her friends in April, and then she sold "
         "half as many clips in May. How many clips did she sell altogether?"
@@ -180,3 +186,28 @@ def test_ffn_launch_matches_native_layers(monkeypatch):
         for out, res in results["chain"].values():
             assert out[0] > 0.9999 and out[1] < 1e-2
             assert res[0] > 0.99999
+
+
+def _abort(worker, rank):
+    executor = worker.model_runner.model_state.backbone.specialized_decode.executor
+    if executor.rank == rank:
+        executor.abort()
+
+
+def test_rank_failure_returns_no_tokens_from_full_graphs(monkeypatch):
+    """--monokernel under FULL decode graphs: one rank marks itself failed
+    between steps; the next step raises instead of returning tokens."""
+    for name, value in ENV.items():
+        monkeypatch.setenv(name, value)
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        **ENGINE,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        monokernel=True,
+    )
+    params = SamplingParams(max_tokens=8, temperature=0)
+    assert llm.generate(["The capital of France is"], params)[0].outputs[0].text
+    llm.collective_rpc(_abort, args=(2,))
+    with pytest.raises(Exception, match="EngineCore|discarded"):
+        llm.generate(["The capital of Italy is"], params)
