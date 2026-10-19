@@ -114,6 +114,12 @@ class KVPolicy:
         """Opt out only when a signal needs no request or session demand values."""
         return True
 
+    def needs_request_observation_for_view(
+        self, payload: SignalPayload, view: CacheObservation
+    ) -> bool:
+        """Refine request reads using physical counters before demand queries."""
+        return self.needs_request_observation(payload)
+
     def on_signal(
         self,
         signal: PolicySignal,
@@ -228,17 +234,43 @@ class ToolWaitPolicy(KVPolicy):
         self._load_seconds = 0.0
         self._kept: OrderedDict[str, tuple[str, ...]] = OrderedDict()
 
-    def _worth_moving(self, pause: float | None) -> bool:
+    def _worth_moving(
+        self, pause: float | None, view: CacheObservation | None = None
+    ) -> bool:
+        minimum_window = max(
+            self.min_pause_seconds, self._store_seconds + self._load_seconds
+        )
         return (
             not self.consider_pause_duration
             or pause is None
-            or pause
-            > max(self.min_pause_seconds, self._store_seconds + self._load_seconds)
+            or pause > minimum_window
+            or (
+                view is not None
+                and self._has_admission_pressure(view)
+                and any(
+                    r.waiting and r.waiting_seconds > minimum_window
+                    for r in view.requests
+                )
+            )
+        )
+
+    def _has_admission_pressure(self, view: CacheObservation) -> bool:
+        return (
+            self.prefetch_on_admission
+            and view.referenced_blocks > 0
+            and view.referenced_blocks >= self.min_pressure * view.total_blocks
         )
 
     def needs_request_observation(self, payload: SignalPayload) -> bool:
         return payload.signal == "tool_wait" and self._worth_moving(
             payload.resume_after_seconds
+        )
+
+    def needs_request_observation_for_view(
+        self, payload: SignalPayload, view: CacheObservation
+    ) -> bool:
+        return self.needs_request_observation(payload) or (
+            payload.signal == "tool_wait" and self._has_admission_pressure(view)
         )
 
     def on_result(
@@ -332,7 +364,7 @@ class ToolWaitPolicy(KVPolicy):
             projected = view.referenced_blocks + sum(
                 max(0, r.estimated_blocks - r.held_blocks) for r in view.requests
             )
-            worthwhile = self._worth_moving(payload.resume_after_seconds)
+            worthwhile = self._worth_moving(payload.resume_after_seconds, view)
             if not worthwhile or projected < self.min_pressure * view.total_blocks:
                 self._kept[signal.owner_id] = signal.owners
                 self._kept.move_to_end(signal.owner_id)

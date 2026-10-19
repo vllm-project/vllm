@@ -392,6 +392,25 @@ sessions; explicit importance still applies. Task completion cancels unused
 preparation before draining results. Failed control work stays failed even when
 its result records are acknowledged, and measured cleanup includes worker drain.
 
+The four-family fit workload exposes a separate decision failure in forced
+pressure mode: 258.6 GB stored with only 2.67 GB loaded, 526 preparations already
+past admission, and 503.27 s compared with about 170 s native. The same workload
+needs at most about 65% KV without the policy. Projected demand alone does not
+justify a short-pause round trip. In normal admission-coupled mode, a short tool
+may also amortize movement when current referenced occupancy reaches the
+configured pressure threshold and an already waiting request has waited longer
+than max(minimum pause window, measured store plus load cost). This is a bounded
+backlog heuristic, not an oracle for a particular request's remaining wait.
+Long/unknown pauses retain their existing policy contract; the forced-pressure
+option remains an explicit ablation. The benchmark exposes the movement pressure
+threshold and uses 0.8 for the normal admission profile. Tests must distinguish
+actual occupancy from projected demand and use completed transfers to establish
+the cost boundary before repeating pressure, fit and live tool workloads.
+Signal observations read physical counters first. An optional concrete-policy
+predicate can then request per-request demand; low-occupancy short pauses retain
+the counters-only path and cached scheduler age history. Unknown subclasses keep
+the existing full-observation default.
+
 `integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.
 The supplied diagram's future KVCR G1 path requires its own agreed integration and is not represented as current support.

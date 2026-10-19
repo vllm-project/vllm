@@ -201,6 +201,12 @@ not exceed `min_pause_seconds` (default 0.5) or its observed store-plus-load tim
 estimates keep pressure-based demotion. Skipped movement history is bounded and
 cleaned with its logical owners; explicit movement commands are unaffected.
 This heuristic does not estimate GPU recomputation cost or guarantee residency.
+In admission-coupled mode a short tool can also use a sustained GPU backlog:
+current referenced occupancy must reach `min_pressure`, and an observed waiting
+request must have waited longer than the minimum window or measured store/load
+round trip, whichever is larger. With low current occupancy a short pause keeps
+G1 content even when projected demand is high. Observed queue age is a heuristic
+for this decision, not a prediction of the target request's remaining wait.
 
 `prefetch_on_admission=true` enables scheduler coordination for the movement
 policy. Under queued demand, a matching session's GPU COPY waits until that
@@ -214,8 +220,11 @@ Custom policies emitting `PolicyProposal.wait_for_admission` must enable
 A concrete policy may implement `needs_request_observation(payload)` and return
 false when it does not read request or session demand. The observation still
 contains time and physical counters, but request/session tuples are empty and
-arrival history is preserved. Subclasses default to full observations unless
-they explicitly implement this method. A concrete scheduler policy may also set
+arrival history is preserved. Alternatively, it can implement
+`needs_request_observation_for_view(payload, counters)` to refine that decision
+using a counters-only observation before request queries. Subclasses default to
+full observations unless they explicitly implement one of these methods.
+A concrete scheduler policy may also set
 `signal_updates_guidance=false` if its signals cannot change request guidance.
 The built-in quota importance signal continues to invalidate cached guidance.
 

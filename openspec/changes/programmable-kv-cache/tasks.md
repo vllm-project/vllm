@@ -146,5 +146,6 @@ performance. The previous requested stop boundary is superseded for this work.
 - [x] 12.9 Keep completed/resident prefix members protected until multi-block preparation finishes, preserving shared cancellation and reset safety.
 - [x] 12.10 Cancel unused preparations before final result drain and acknowledge timed-out operations without hiding their failure; retain failure correlation.
 - [x] 12.11 Check complete preparation capacity before starting; preserve admission fairness and skip automatic resume work after admission without suppressing explicit importance.
+- [x] 12.12 Amortize short-pause movement against current KV occupancy and sustained admission backlog; preserve ample-capacity reuse and retain forced-pressure regression evidence.
 - [ ] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
 - [ ] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.

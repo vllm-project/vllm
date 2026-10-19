@@ -241,6 +241,7 @@ def main():
         "--prediction-mode", choices=("fixed", "adaptive"), default="adaptive"
     )
     parser.add_argument("--movement-min-pause-seconds", type=float, default=0.5)
+    parser.add_argument("--movement-min-pressure", type=float, default=0.8)
     parser.add_argument("--prefetch-on-admission", action="store_true")
     parser.add_argument("--movement-pressure-only", action="store_true")
     parser.add_argument("--oracle", action="store_true")
@@ -279,6 +280,11 @@ def main():
         or args.movement_min_pause_seconds < 0
     ):
         parser.error("movement-min-pause-seconds must be nonnegative and finite")
+    if (
+        not math.isfinite(args.movement_min_pressure)
+        or not 0 <= args.movement_min_pressure <= 1
+    ):
+        parser.error("movement-min-pressure must be finite and between zero and one")
     if (
         not math.isfinite(args.prediction_seconds)
         or not 0 < args.prediction_seconds <= 300
@@ -491,7 +497,7 @@ def main():
                             "name": "movement",
                             "implementation": "tool_wait",
                             "options": {
-                                "min_pressure": 0.6,
+                                "min_pressure": args.movement_min_pressure,
                                 "min_pause_seconds": args.movement_min_pause_seconds,
                                 "prefetch_on_admission": args.prefetch_on_admission,
                                 "consider_pause_duration": (

@@ -80,10 +80,35 @@ PYTHONPATH=../verl \
 | `--prediction-mode fixed` / `--prediction-seconds` | 固定预测对照；`prediction-seconds` 也作为自适应估计的初始值 |
 | `--oracle` | 回放时使用真实暂停时长，明确标为 oracle；不能作为应用未知未来时的成绩 |
 | `--movement-min-pause-seconds` | movement 的最低预计暂停窗口，默认 0.5 秒；还须覆盖已观测的存出加加载耗时 |
-| `--movement-pressure-only` | 忽略暂停时长的消融，保留压力判断 |
+| `--movement-min-pressure` | 搬运压力阈值，默认 0.8；短暂停利用排队窗口时还检查当前引用占用 |
+| `--movement-pressure-only` | 忽略暂停和等待成本的压力消融；容量充足时可能产生大量无效存出 |
 | `--prefetch-on-admission` | 有排队需求时等调度器选中对应 session 再准备，失败后回退重算；结果收集期限包含准入等待预算 |
 | `--enforce-eager` / `--disable-custom-all-reduce` | 显式诊断选项；不与默认编译/图执行的速度混算 |
 | `--profile` | 服务预热后启用 Yappi 多线程 CPU 计时；GPU 默认跳过 128 个迭代后采集 32 个迭代，由 `--profile-delay-iterations` / `--profile-iterations` 调整。与普通计时实验分开 |
+
+准入协同配置将应用暂停窗口、已观测搬运耗时、当前 KV 占用和持续等待用于搬运判断。
+短工具使用排队窗口时，要求实际占用达到配置阈值，且已观察等待超过搬运成本。
+选中对应请求、整组容量足够时准备前缀。
+实测收益与容量范围见[2026-10-19 报告](../../docs/programmable-kvc/rollout-report-2026-10-19.md)。
+
+```bash
+.venv/bin/python -m benchmarks.programmable_kv_cache.run_rollout_matrix \
+  --model /home/youwei/bzh/model/Qwen/Qwen3.8-27B \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --trace benchmarks/programmable_kv_cache/results/rollout-2026-10-18/baseline/trace.json.gz \
+  --gpus 0,3 --gpu-memory-utilization 0.5 \
+  --concurrency 64 --max-num-seqs 64 \
+  --policy-max-wait-seconds 120 --quota-aging-seconds 30 \
+  --prefetch-on-admission --movement-min-pressure 0.8 \
+  --arms native,policy --repeats 3 \
+  --output-dir /tmp/kv-admission-pressure
+```
+
+quota 对照另设 `--policy-components quota` 和独立输出目录。
+V3 强制压力消融配置使用 `--movement-pressure-only --movement-min-pressure 0.6`，结果单列。
+整组准备期间，已完成和原有驻留成员持续持有引用；取消/reset 继续等待已派发设备访问结束。
+任务结束时先取消无消费者的准备，再收齐结果；普通计时包含设备搬运排空。
+超时仍判失败，取消与 ACK 仅回收控制记录。
 
 `--concurrency` 设置客户端并发；服务并发由 `--max-num-seqs` 设置，省略时沿用客户端并发。
 CPU profiling 需要 `uv pip install yappi`。

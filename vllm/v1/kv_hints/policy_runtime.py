@@ -541,12 +541,16 @@ class KVPolicyRuntime:
             for _, policy in consumers
         ):
             self._view = None
+        view = self.observation(include_requests=False)
         include_requests = any(
-            "needs_request_observation" not in type(policy).__dict__
+            policy.needs_request_observation_for_view(payload, view)
+            if "needs_request_observation_for_view" in type(policy).__dict__
+            else "needs_request_observation" not in type(policy).__dict__
             or policy.needs_request_observation(payload)
             for _, policy in consumers
         )
-        view = self.observation(include_requests=include_requests)
+        if include_requests:
+            view = self.observation()
         binding = (
             request_id
             if isinstance(payload.target, RequestTarget)

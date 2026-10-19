@@ -6969,14 +6969,19 @@ def test_custom_policy_without_signal_filter_receives_all_signals():
     assert parent.status == OperationStatus.COMPLETED
 
 
-def test_short_pause_control_preserves_scheduler_observation_without_request_scan(
-    monkeypatch,
+@pytest.mark.parametrize("held_blocks,min_pressure", [(0, 0), (1, 0.6)])
+def test_short_pause_under_low_pressure_preserves_observation_without_request_scan(
+    monkeypatch, held_blocks, min_pressure
 ):
     from vllm.v1.kv_hints.policy import ToolWaitPolicy
 
     manager, request, controller, _, target = make_movement_controller()
+    if held_blocks:
+        assert manager.allocate_slots(request, 4 * held_blocks) is not None
     runtime, _ = install_movement_policies(manager, controller)
-    runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
+    runtime.policies["movement"] = ToolWaitPolicy(
+        prefetch_on_admission=True, min_pressure=min_pressure
+    )
     runtime.requests = lambda: (request,)
     runtime.observe_requests()
     view = runtime._view
@@ -7092,6 +7097,71 @@ def test_short_tool_pause_preserves_resident_content_without_a_round_trip():
     )
     assert len(derived_results(controller, result)) == 1
     assert len(adapter.jobs) == 1
+
+
+@pytest.mark.parametrize(
+    "busy_blocks,queue_age,store_seconds,offload",
+    [
+        (1, 1, 0, False),
+        (2, 0.1, 0, False),
+        (2, 1, 0, True),
+        (2, 1, 2, False),
+        (2, 3, 2, True),
+    ],
+)
+def test_short_pause_offloads_only_with_current_pressure_and_sustained_wait(
+    busy_blocks, queue_age, store_seconds, offload
+):
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    busy = make_request("busy", list(range(20, 29)), 4, sha256)
+    assert manager.allocate_slots(busy, 4 * busy_blocks) is not None
+    busy.status = RequestStatus.RUNNING
+    runtime, now = install_movement_policies(manager, controller)
+    runtime.policies["movement"] = ToolWaitPolicy(
+        prefetch_on_admission=True, min_pressure=0.6
+    )
+    runtime.requests = lambda: (busy,)
+    if store_seconds:
+        submit_movement(
+            controller,
+            "learn",
+            "signal",
+            {"target": target, "signal": "tool_wait", "resume_after_seconds": 10},
+        )
+        assert len(adapter.jobs) == 1
+        now[0] += store_seconds
+        adapter.finish(bytes_transferred=16)
+        controller.executor.progress()
+        runtime.before_acknowledge()
+        assert manager.allocate_slots(request, 4) is not None
+        manager.cache_blocks(request, 4)
+        manager.free(request)
+    waiting = make_request("waiting", list(range(30, 35)), 4, sha256)
+    runtime.requests = lambda: (busy, waiting)
+    runtime.observation()
+    now[0] += queue_age
+    result = submit_movement(
+        controller,
+        "decide",
+        "signal",
+        {"target": target, "signal": "tool_wait", "resume_after_seconds": 0.01},
+    )
+    assert len(result.derived_operations) == int(offload)
+    assert len(adapter.jobs) == int(offload)
+    if offload:
+        adapter.finish()
+        controller.executor.progress()
+    else:
+        resumed = submit_movement(
+            controller, "resume", "signal", {"target": target, "signal": "resume"}
+        )
+        assert not resumed.derived_operations and not adapter.jobs
+    assert manager.get_computed_blocks(request)[1] == (0 if offload else 4)
 
 
 def test_tool_pause_must_amortize_observed_store_time():
