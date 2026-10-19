@@ -69,7 +69,7 @@ class DualQueueThreadPool:
         self,
         n_read_threads: int,
         n_write_threads: int,
-        thread_name_prefix: str = "fs_secondary_tier",
+        thread_name_prefix: str = "secondary_tier",
     ) -> None:
         self._load_q: deque = deque()
         self._store_q: deque = deque()

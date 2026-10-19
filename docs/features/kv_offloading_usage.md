@@ -164,7 +164,7 @@ Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the sa
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
-The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. Both tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
+The filesystem, object-store, and Valkey tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. These tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
@@ -249,6 +249,50 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+
+### Valkey
+
+The Valkey tier (`type: "valkey"`) stores each chunk as a string key on a Valkey server or cluster through [valkey-glide-sync](https://pypi.org/project/valkey-glide-sync/) (`pip install valkey-glide-sync`). Stores `SET` straight from the CPU KV cache and loads `GET` straight into it.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `valkey`. |
+| `startup_nodes` | yes | — | Comma-separated `host:port` seed nodes. |
+| `cluster_mode` | no | `false` | Connect as a cluster client. |
+| `key_prefix` | no | `vllm` | Prefix for every key the tier writes. |
+| `ttl_seconds` | no | none | Expire stored chunks after this many seconds. |
+| `timeout_ms` | no | `5000` | Per-request timeout; size it for one chunk. |
+| `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
+| `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+| `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+
+```json
+"secondary_tiers": [{
+  "type": "valkey",
+  "startup_nodes": "kv.internal:6379",
+  "cluster_mode": true,
+  "ttl_seconds": 3600
+}]
+```
+
+Keys are `<key_prefix>/<type>/` followed by the filesystem tier's layout (see [On-Disk Layout](#on-disk-layout)), so the [Cross-Process Sharing](#cross-process-sharing) behavior applies to instances sharing a Valkey. vLLM does not evict from Valkey: set `ttl_seconds`, or configure `maxmemory` with an eviction `maxmemory-policy` on the server. A chunk evicted between lookup and load fails that load and is recomputed. At startup the tier writes its run configuration to `<key_prefix>/<type>/<model>_<digest>/config.json` and fails fast if the server is unreachable.
+
+### Valkey Large Object
+
+The Valkey large-object tier (`type: "valkey-large-object"`) stores chunks with the [valkey-large-object](https://github.com/valkey-io/valkey-large-object) module and moves them by RDMA: the CPU KV cache is registered once and the server reads and writes it directly. It requires an RDMA-enabled build of valkey-glide-sync and libfabric. It accepts every [Valkey](#valkey) key plus:
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `valkey-large-object`. |
+| `rdma_provider` | no | `efa-direct` | `efa-direct`, or `tcp` for RDMA emulated over TCP (development and CI). |
+| `rdma_interface` | no | first | Fabric domain to pin to when a host has more than one. |
+| `rdma_region_bytes` | no | `16777216` (16 MiB) | Target size of each registered RDMA region, rounded down to whole chunks (at least one). |
+| `timeout_ms` | no | `5000` | Deadline for one chunk transfer. |
+
+The CPU KV cache is registered as consecutive regions of about `rdma_region_bytes`, so registered memory totals one copy of the cache. A region serves one transfer at a time: transfers to chunks in different regions run in parallel, and transfers within a region take turns. Smaller regions allow more parallelism at the cost of more registrations, which count against the fabric's limit on the number of memory registrations.
+
+RDMA transfers cannot time out on their own. When a transfer overruns `timeout_ms` or the connection fails, the tier closes the client, which cancels every in-flight transfer and revokes the server's access to the CPU KV cache, then reconnects and registers the cache again. The cancelled transfers fail and their chunks are recomputed.
 
 ### P2P (Including P/D)
 

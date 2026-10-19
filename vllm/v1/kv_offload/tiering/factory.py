@@ -172,3 +172,15 @@ SecondaryTierFactory.register_tier(
     "vllm.v1.kv_offload.tiering.kvcr.manager",
     "KVCRSecondaryTierManager",
 )
+
+SecondaryTierFactory.register_tier(
+    "valkey",
+    "vllm.v1.kv_offload.tiering.valkey.manager",
+    "ValkeyTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "valkey-large-object",
+    "vllm.v1.kv_offload.tiering.valkey_large_object.manager",
+    "ValkeyLargeObjectTierManager",
+)

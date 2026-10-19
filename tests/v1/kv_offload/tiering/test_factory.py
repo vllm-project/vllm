@@ -50,6 +50,8 @@ def test_pre_registered_tiers_can_be_imported():
         "fs": CacheHitSource.DISK,
         "obj": CacheHitSource.DISK,
         "p2p": CacheHitSource.P2P,
+        "valkey": CacheHitSource.DISK,
+        "valkey-large-object": CacheHitSource.DISK,
     }
     for tier_type in SecondaryTierFactory._registry:
         # KVCR is an optional external dependency and may not be installed.
