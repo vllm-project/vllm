@@ -1419,7 +1419,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
     ),
-    # Fuse conv, gated delta, and RMSNorm on flat Qwen MTP verify. Default off.
+    # Fuse conv, gated delta, and RMSNorm for Qwen GDN MTP verify. Default off.
     "VLLM_ROCM_QWEN_MTP_GDN": lambda: (
         os.getenv("VLLM_ROCM_QWEN_MTP_GDN", "0").lower() in ("true", "1")
     ),

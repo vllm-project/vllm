@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen3.8-27B MTP verify kernel against stock conv, gated delta, and RMSNorm."""
+"""Qwen GDN MTP verify kernel against stock conv, gated delta, and RMSNorm."""
 
 from __future__ import annotations
+
+import itertools
 
 import pytest
 import torch
@@ -13,7 +15,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.mamba.ops.rocm_qwen_mtp_conv_gdn_norm import (
     launch_conv_gdn_norm,
-    launch_conv_gdn_norm_varlen,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
@@ -29,6 +30,7 @@ H = 16
 HV = 48
 K = 128
 V = 128
+SHAPE = (H, HV, K, V)
 DIM = 2 * H * K + HV * V
 CONV_LEN = 6
 EPS = 1e-6
@@ -50,27 +52,33 @@ CASES = [
 ]
 
 
-def _make_inputs(tokens: int, accepted: int, seed: int):
+def _make_inputs(
+    tokens: int,
+    accepted: int,
+    seed: int,
+    shape: tuple[int, int, int, int] = SHAPE,
+    dtype: torch.dtype = torch.bfloat16,
+):
     torch.manual_seed(seed)
     device = "cuda"
-    mixed = 0.1 * torch.randn(tokens, DIM, dtype=torch.bfloat16, device=device)
-    weight = 0.1 * torch.randn(DIM, 4, dtype=torch.bfloat16, device=device)
-    conv_row = 0.1 * torch.randn(DIM, CONV_LEN, dtype=torch.bfloat16, device=device)
-    ssm_rows = 0.01 * torch.randn(
-        tokens, HV, V, K, dtype=torch.float32, device=device
-    )
+    h, hv, k, v = shape
+    dim = 2 * h * k + hv * v
+    mixed = 0.1 * torch.randn(tokens, dim, dtype=dtype, device=device)
+    weight = 0.1 * torch.randn(dim, 4, dtype=dtype, device=device)
+    conv_row = 0.1 * torch.randn(dim, CONV_LEN, dtype=dtype, device=device)
+    ssm_rows = 0.01 * torch.randn(tokens, hv, v, k, dtype=torch.float32, device=device)
     # chunk leaves a and b non-contiguous, as split_ba does on the model path.
-    ba = 0.1 * torch.randn(tokens, 2 * HV, dtype=torch.bfloat16, device=device)
+    ba = 0.1 * torch.randn(tokens, 2 * hv, dtype=dtype, device=device)
     b, a = ba.chunk(2, dim=-1)
     if tokens > 1:
         assert not a.is_contiguous()
         assert not b.is_contiguous()
-    a_log = 0.5 * torch.randn(HV, dtype=torch.float32, device=device)
-    dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
-    z = 0.1 * torch.randn(tokens, HV, V, dtype=torch.bfloat16, device=device)
-    norm_w = torch.randn(V, dtype=torch.float32, device=device)
+    a_log = 0.5 * torch.randn(hv, dtype=torch.float32, device=device)
+    dt_bias = 0.1 * torch.randn(hv, dtype=torch.float32, device=device)
+    z = 0.1 * torch.randn(tokens, hv, v, dtype=dtype, device=device)
+    norm_w = torch.randn(v, dtype=torch.float32, device=device)
     norm = RMSNormGated(
-        V,
+        v,
         eps=EPS,
         group_size=None,
         norm_before_gate=True,
@@ -83,10 +91,16 @@ def _make_inputs(tokens: int, accepted: int, seed: int):
     return mixed, weight, conv_row, ssm_rows, a, b, a_log, dt_bias, z, norm, accepted_t
 
 
-def _pool(n_slots: int):
+def _pool(
+    n_slots: int,
+    shape: tuple[int, int, int, int] = SHAPE,
+    dtype: torch.dtype = torch.bfloat16,
+):
     device = "cuda"
-    conv = torch.empty(n_slots, DIM, CONV_LEN, dtype=torch.bfloat16, device=device)
-    ssm = torch.empty(n_slots, HV, V, K, dtype=torch.float32, device=device)
+    h, hv, k, v = shape
+    dim = 2 * h * k + hv * v
+    conv = torch.empty(n_slots, dim, CONV_LEN, dtype=dtype, device=device)
+    ssm = torch.empty(n_slots, hv, v, k, dtype=torch.float32, device=device)
     return conv, ssm
 
 
@@ -97,9 +111,9 @@ def _plant(conv, ssm, block: int, conv_row, ssm_rows) -> None:
 
 
 def _indices(block: int, tokens: int) -> torch.Tensor:
-    return torch.arange(
-        block, block + tokens, dtype=torch.int32, device="cuda"
-    ).view(1, tokens)
+    return torch.arange(block, block + tokens, dtype=torch.int32, device="cuda").view(
+        1, tokens
+    )
 
 
 def _run_stock(
@@ -118,6 +132,8 @@ def _run_stock(
     out,
 ) -> None:
     tokens = mixed.shape[0]
+    _, hv, v, k = ssm.shape
+    h = (mixed.shape[1] - hv * v) // (2 * k)
     cu = torch.tensor([0, tokens], dtype=torch.int32, device=mixed.device)
     y = causal_conv1d_update(
         mixed,
@@ -131,18 +147,18 @@ def _run_stock(
         max_query_len=tokens,
         validate_data=False,
     )
-    q = y[:, : H * K].view(1, tokens, H, K)
-    k = y[:, H * K : 2 * H * K].view(1, tokens, H, K)
-    v = y[:, 2 * H * K :].view(1, tokens, HV, V)
+    q = y[:, : h * k].view(1, tokens, h, k)
+    key = y[:, h * k : 2 * h * k].view(1, tokens, h, k)
+    value = y[:, 2 * h * k :].view(1, tokens, hv, v)
     core, _ = fused_sigmoid_gating_delta_rule_update(
         A_log=a_log,
         a=a,
         b=b,
         dt_bias=dt_bias,
         q=q,
-        k=k,
-        v=v,
-        scale=K**-0.5,
+        k=key,
+        v=value,
+        scale=k**-0.5,
         initial_state=ssm,
         inplace_final_state=True,
         cu_seqlens=cu,
@@ -170,8 +186,6 @@ def _run_fused(
     norm: RMSNormGated,
     out,
 ) -> None:
-    tokens = mixed.shape[0]
-    core = torch.empty(tokens, HV, V, dtype=torch.bfloat16, device=mixed.device)
     launch_conv_gdn_norm(
         mixed,
         weight,
@@ -183,7 +197,7 @@ def _run_fused(
         indices,
         accepted,
         ssm,
-        core,
+        out,
         z,
         norm.weight,
         EPS,
@@ -216,7 +230,7 @@ def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]
     indices = _indices(block, tokens)
     _plant(conv, ssm, block, conv_row, ssm_rows)
 
-    fused_out = torch.empty(tokens, HV, V, dtype=torch.bfloat16, device="cuda")
+    fused_out = torch.empty_like(z)
     _run_fused(
         mixed.clone(),
         weight,
@@ -282,18 +296,44 @@ def test_high_block_id_matches_block_one(tokens, accepted, default_vllm_config):
     torch.testing.assert_close(high[2], low[2], atol=0, rtol=0, msg=where)
 
 
-def _compare_packed(batch: int, lengths: list[int], accepted: int, block0: int) -> None:
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        pytest.param((16, 32, 128, 128), torch.bfloat16, id="h16-hv32"),
+        pytest.param((8, 16, 64, 96), torch.bfloat16, id="k64-v96"),
+        pytest.param((4, 8, 256, 128), torch.bfloat16, id="k256"),
+        pytest.param(SHAPE, torch.float16, id="fp16"),
+    ],
+)
+@pytest.mark.parametrize("tokens,accepted", [(1, 1), (4, 2)])
+@torch.inference_mode()
+def test_other_shapes_match_stock_ops(
+    shape, dtype, tokens, accepted, default_vllm_config
+):
+    """Head counts, head sizes, and dtype come from the tensors."""
+    del default_vllm_config
+    inputs = _make_inputs(tokens, accepted, seed=400 + tokens, shape=shape, dtype=dtype)
+    conv, ssm = _pool(tokens + 2, shape=shape, dtype=dtype)
+    _compare_at_block(inputs, conv, ssm, block=1)
+
+
+def _compare_packed(
+    batch: int, lengths: list[int], accepted: int, block0: int, pad: int = 0
+) -> None:
+    """``pad`` trailing rows sit outside every sequence, like graph padding;
+    the varlen path must leave them untouched."""
     torch.manual_seed(300 + batch * 17 + block0 + sum(lengths))
     device = "cuda"
     total = sum(lengths)
     width = max(lengths)
-    mixed = 0.1 * torch.randn(total, DIM, dtype=torch.bfloat16, device=device)
+    rows_total = total + pad
+    mixed = 0.1 * torch.randn(rows_total, DIM, dtype=torch.bfloat16, device=device)
     weight = 0.1 * torch.randn(DIM, 4, dtype=torch.bfloat16, device=device)
-    ba = 0.1 * torch.randn(total, 2 * HV, dtype=torch.bfloat16, device=device)
+    ba = 0.1 * torch.randn(rows_total, 2 * HV, dtype=torch.bfloat16, device=device)
     b, a = ba.chunk(2, dim=-1)
     a_log = 0.5 * torch.randn(HV, dtype=torch.float32, device=device)
     dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
-    z = 0.1 * torch.randn(total, HV, V, dtype=torch.bfloat16, device=device)
+    z = 0.1 * torch.randn(rows_total, HV, V, dtype=torch.bfloat16, device=device)
     norm_w = torch.randn(V, dtype=torch.float32, device=device)
     norm = RMSNormGated(
         V,
@@ -312,10 +352,7 @@ def _compare_packed(batch: int, lengths: list[int], accepted: int, block0: int) 
         rows.append(torch.arange(cursor, cursor + length, device=device))
         cursor += length
     indices = torch.stack(
-        [
-            torch.nn.functional.pad(row, (0, width - row.numel()))
-            for row in rows
-        ]
+        [torch.nn.functional.pad(row, (0, width - row.numel())) for row in rows]
     ).to(torch.int32)
     pool = cursor + 2
     conv_row = 0.1 * torch.randn(
@@ -336,19 +373,34 @@ def _compare_packed(batch: int, lengths: list[int], accepted: int, block0: int) 
     conv_s, ssm_s = _pool(pool)
     plant(conv_f, ssm_f)
     plant(conv_s, ssm_s)
-    fused_out = torch.empty(total, HV, V, dtype=torch.bfloat16, device=device)
-    core = torch.empty_like(fused_out)
-    if len(set(lengths)) == 1:
-        launch_conv_gdn_norm(
-            mixed, weight, conv_f, a, b, a_log, dt_bias, indices[:, : lengths[0]],
-            accepted_t, ssm_f, core, z, norm.weight, EPS, fused_out,
-            gate_sigmoid=False, n_seq=batch,
+    fused_out = torch.zeros(rows_total, HV, V, dtype=torch.bfloat16, device=device)
+    varlen = len(set(lengths)) > 1 or pad > 0
+    cu_seqlens = None
+    if varlen:
+        cu_seqlens = torch.tensor(
+            [0, *itertools.accumulate(lengths)], dtype=torch.int32, device=device
         )
-    else:
-        launch_conv_gdn_norm_varlen(
-            mixed, weight, conv_f, a, b, a_log, dt_bias, indices, accepted_t,
-            ssm_f, z, norm.weight, EPS, fused_out, lengths, gate_sigmoid=False,
-        )
+    launch_conv_gdn_norm(
+        mixed if varlen else mixed[:total],
+        weight,
+        conv_f,
+        a if varlen else a[:total],
+        b if varlen else b[:total],
+        a_log,
+        dt_bias,
+        indices if varlen else indices[:, : lengths[0]],
+        accepted_t,
+        ssm_f,
+        fused_out if varlen else fused_out[:total],
+        z if varlen else z[:total],
+        norm.weight,
+        EPS,
+        fused_out if varlen else fused_out[:total],
+        gate_sigmoid=False,
+        n_seq=batch,
+        cu_seqlens=cu_seqlens,
+    )
+    assert not fused_out[total:].any(), "rows outside every sequence were written"
 
     offset = 0
     for seq, length in enumerate(lengths):
@@ -401,3 +453,9 @@ def test_uniform_batch_high_block_id(batch, default_vllm_config):
 def test_mixed_widths_match_stock_ops(default_vllm_config):
     del default_vllm_config
     _compare_packed(5, [4, 1, 4, 2, 3], accepted=1, block0=1)
+
+
+@torch.inference_mode()
+def test_mixed_widths_leave_padding_rows(default_vllm_config):
+    del default_vllm_config
+    _compare_packed(4, [2, 4, 1, 3], accepted=1, block0=HIGH_BLOCK, pad=5)

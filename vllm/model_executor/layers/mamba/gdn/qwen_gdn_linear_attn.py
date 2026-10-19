@@ -52,7 +52,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.rocm_qwen_mtp_conv_gdn_norm import (
-    launch_conv_gdn_norm_varlen,
+    launch_conv_gdn_norm,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -1061,39 +1061,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
-    def _try_rocm_qwen_mtp_gdn(
-        self,
-        mixed_qkv: torch.Tensor,
-        b: torch.Tensor,
-        a: torch.Tensor,
-        z: torch.Tensor,
-    ) -> torch.Tensor | None:
-        """Fused MTP output, or None when this step is not MTP-only."""
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        attn_metadata = None
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.prefix)
-        if not isinstance(attn_metadata, GDNAttentionMetadata):
-            return None
-        if (
-            attn_metadata.spec_sequence_masks is None
-            or attn_metadata.num_prefills != 0
-            or attn_metadata.num_decodes != 0
-        ):
-            return None
-
-        reasons: list[str] = []
-        n_seq = attn_metadata.num_spec_decodes
-        indices = attn_metadata.spec_state_indices_tensor
-        accepted = attn_metadata.num_accepted_tokens
-        lengths = self._rocm_mtp_verify_lengths(attn_metadata)
-        if n_seq < 1 or lengths is None:
-            reasons.append(
-                f"num_spec_decodes={n_seq}, could not read per-sequence lengths"
-            )
-        elif any(not 1 <= length <= 4 for length in lengths):
-            reasons.append(f"per-sequence widths {lengths}, each must be 1..4")
+    @functools.cached_property
+    def _rocm_qwen_mtp_layer_reasons(self) -> list[str]:
+        reasons = []
         if self.tp_size != 1:
             reasons.append(f"tp_size={self.tp_size}, supported value is 1")
         if self.conv1d.bias is not None:
@@ -1104,99 +1074,117 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             reasons.append(f"norm activation={self.norm.activation}")
         if self.norm.group_size is not None or not self.norm.norm_before_gate:
             reasons.append("norm must be full-row and norm-before-gate")
-        if (
-            self.num_k_heads != 16
-            or self.num_v_heads != 48
-            or self.head_k_dim != 128
-            or self.head_v_dim != 128
-        ):
+        if self.conv1d.weight.size(-1) != 4:
             reasons.append(
-                f"heads={self.num_k_heads}/{self.num_v_heads}/"
-                f"{self.head_k_dim}/{self.head_v_dim}, supported shape is 16/48/128/128"
+                f"conv width={self.conv1d.weight.size(-1)}, supported value is 4"
             )
+        if self.num_v_heads % self.num_k_heads != 0:
+            reasons.append(
+                f"num_v_heads={self.num_v_heads} is not a multiple of "
+                f"num_k_heads={self.num_k_heads}"
+            )
+        return reasons
+
+    def _try_rocm_qwen_mtp_gdn(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        z: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> bool:
+        """Write normed MTP output into ``core_attn_out``. False when this
+        step is not MTP-only."""
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if not isinstance(attn_metadata, GDNAttentionMetadata):
+            return False
+        if (
+            attn_metadata.spec_sequence_masks is None
+            or attn_metadata.num_prefills != 0
+            or attn_metadata.num_decodes != 0
+        ):
+            return False
+
+        reasons = list(self._rocm_qwen_mtp_layer_reasons)
+        n_seq = attn_metadata.num_spec_decodes
+        indices = attn_metadata.spec_state_indices_tensor
+        accepted = attn_metadata.num_accepted_tokens
+        uniform = attn_metadata.uniform_spec_sequence_length
+        cu_seqlens = attn_metadata.spec_query_start_loc
+        if n_seq < 1:
+            reasons.append(f"num_spec_decodes={n_seq}")
+        if uniform is None and cu_seqlens is None:
+            reasons.append("ragged batch without spec_query_start_loc")
+        max_len = uniform
+        if max_len is None and indices is not None:
+            max_len = indices.size(1)
+        if max_len is None or not 1 <= max_len <= 4:
+            reasons.append(f"max tokens per sequence={max_len}, must be 1..4")
+        if mixed_qkv.dtype not in (torch.bfloat16, torch.float16):
+            reasons.append(f"dtype={mixed_qkv.dtype}, expected bf16 or fp16")
         if indices is None or accepted is None:
             reasons.append("spec state indices and num_accepted_tokens are required")
-        elif lengths is not None and (
+        elif max_len is not None and (
             indices.size(0) < n_seq
-            or indices.size(1) < max(lengths)
+            or indices.size(1) < max_len
             or accepted.shape[0] < n_seq
         ):
             reasons.append(
                 f"indices {tuple(indices.shape)} accepted {tuple(accepted.shape)} "
-                f"for {n_seq} sequences of widths {lengths}"
+                f"for {n_seq} sequences of up to {max_len} tokens"
             )
         if reasons:
             raise ValueError(
-                "VLLM_ROCM_QWEN_MTP_GDN cannot run this MTP step: "
-                + "; ".join(reasons)
+                "VLLM_ROCM_QWEN_MTP_GDN cannot run this MTP step: " + "; ".join(reasons)
             )
 
-        assert indices is not None and accepted is not None and lengths is not None
+        assert indices is not None and accepted is not None and max_len is not None
         conv_state = (
             self.kv_cache[0]
             if is_conv_state_dim_first()
             else self.kv_cache[0].transpose(-1, -2)
         )
-        if conv_state.shape[-1] < max(lengths) + 2:
+        if conv_state.shape[-1] < max_len + 2:
             raise ValueError(
                 f"conv state length {conv_state.shape[-1]} is shorter than "
-                f"{max(lengths) + 2}"
+                f"{max_len + 2}"
             )
-        if not torch.cuda.is_current_stream_capturing():
-            slot = int(indices[:n_seq, : max(lengths)].max().item())
-            if slot >= self.kv_cache[1].shape[0] or slot >= conv_state.shape[0]:
-                raise ValueError(
-                    f"state slot {slot} is outside conv "
-                    f"{tuple(conv_state.shape)} or ssm "
-                    f"{tuple(self.kv_cache[1].shape)}"
-                )
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
-        total = sum(lengths)
-        out = torch.empty(
-            (total, self.num_v_heads, self.head_v_dim),
-            dtype=mixed_qkv.dtype,
-            device=mixed_qkv.device,
-        )
-        launch_conv_gdn_norm_varlen(
-            mixed_qkv,
+        if uniform is not None:
+            tokens = n_seq * uniform
+            varlen_loc = None
+        else:
+            tokens = mixed_qkv.size(0)
+            varlen_loc = cu_seqlens[: n_seq + 1]
+        out = core_attn_out[:tokens]
+        launch_conv_gdn_norm(
+            mixed_qkv[:tokens],
             conv_weights,
             conv_state,
-            a,
-            b,
+            a[:tokens],
+            b[:tokens],
             self.A_log,
             self.dt_bias,
-            indices,
-            accepted,
+            indices[:n_seq, :max_len],
+            accepted[:n_seq],
             self.kv_cache[1],
-            z,
+            out,
+            z[:tokens],
             self.norm.weight,
             self.norm.eps,
             out,
-            lengths,
             gate_sigmoid=self.norm.activation == "sigmoid",
+            n_seq=n_seq,
+            cu_seqlens=varlen_loc,
         )
         logger.info_once("Using ROCm fused Qwen MTP conv+GDN+norm kernel")
-        return out
-
-    def _rocm_mtp_verify_lengths(
-        self, attn_metadata: GDNAttentionMetadata
-    ) -> list[int] | None:
-        """Per-sequence widths. A uniform batch does not sync the host."""
-        n_seq = attn_metadata.num_spec_decodes
-        if n_seq < 1:
-            return None
-        uniform = attn_metadata.uniform_spec_sequence_length
-        if uniform is not None:
-            return [int(uniform)] * n_seq
-        if torch.cuda.is_current_stream_capturing():
-            return None
-        loc = attn_metadata.spec_query_start_loc
-        if loc is None:
-            return None
-        starts = loc[: n_seq + 1].tolist()
-        return [int(starts[i + 1] - starts[i]) for i in range(n_seq)]
+        return True
 
     def _forward_core_rocm_qwen_mtp(
         self,
@@ -1206,13 +1194,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
-        """Fused path is already normed. The stock path norms here, once."""
-        normed = self._try_rocm_qwen_mtp_gdn(mixed_qkv, b, a, z)
-        if normed is not None:
-            core_attn_out.zero_()
-            core_attn_out[: normed.size(0)].copy_(normed)
+        """Fused path is already normed. The stock path norms here, once.
+
+        ``core_attn_out`` arrives zeroed; the fused path leaves padded rows
+        untouched."""
+        if self._try_rocm_qwen_mtp_gdn(mixed_qkv, b, a, z, core_attn_out):
             return
-        self._forward_core(mixed_qkv=mixed_qkv, b=b, a=a, core_attn_out=core_attn_out)
+        self._forward_core(
+            mixed_qkv=mixed_qkv,
+            b=b.contiguous(),
+            a=a.contiguous(),
+            core_attn_out=core_attn_out,
+        )
         core_attn_out.copy_(self.norm(core_attn_out, z))
 
     def forward_hip(
@@ -1315,8 +1308,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             torch.ops.vllm.qwen_gdn_attention_core_rocm_mtp(
                 mixed_qkv,
-                b.contiguous(),
-                a.contiguous(),
+                b,
+                a,
                 z,
                 core_attn_out,
                 layer_name=_encode_layer_name(self.prefix),
