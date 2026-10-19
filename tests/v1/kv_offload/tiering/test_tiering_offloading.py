@@ -248,25 +248,21 @@ def _make_deferred_promotion_job(alloc_fn, keys=None):
 
 
 class TestPromotionTransferJob:
-    def test_keys_raise_before_get(self):
-        """Accessing .keys/.chunk_ids before get() raises ValueError."""
-        job = _make_deferred_promotion_job(
-            lambda keys, ctx: (list(keys), np.array([0, 1]))
-        )
+    def test_materialization_contract(self):
+        """Accessing .keys/.chunk_ids before get() raises ValueError.
+        Accessing them after materialization should be fine.
+        """
+        keys = to_keys([1, 2])
+        chunk_ids = np.array([3, 7], dtype=np.int32)
+
+        job = _make_deferred_promotion_job(lambda keys, ctx: (list(keys), chunk_ids))
         with pytest.raises(ValueError):
             _ = job.keys
         with pytest.raises(ValueError):
             _ = job.chunk_ids
 
-    def test_successful_get(self):
-        """get() returns the alloc_fn claim; properties expose it."""
-        keys = to_keys([1, 2])
-        chunk_ids = np.array([3, 7], dtype=np.int32)
-        job = _make_deferred_promotion_job(
-            lambda k, ctx: (list(k), chunk_ids), keys=keys
-        )
-
         assert job.get() == (keys, chunk_ids)
+
         assert list(job.keys) == keys
         assert np.array_equal(job.chunk_ids, chunk_ids)
 
@@ -1686,8 +1682,7 @@ class TestTieringOffloadingManager:
         tier1_lookup.assert_called()
 
     def test_promotion_keys_lifecycle(self, manager_setup):
-        """_inflight_promotion_keys tracks in-flight promotions and is cleared
-        correctly.
+        """_inflight_promotion_keys tracks in-flight promotions.
 
         Lifecycle: two keys looked up across two requests → both appear in
         _inflight_promotion_keys → on_schedule_end flushes and completes → both cleared.
@@ -1836,29 +1831,30 @@ def test_parse_tier_filter_skips_bad_entries():
 class TestPromotionAllocation:
     """Unit tests for TieringOffloadingManager._promotion_allocation."""
 
-    def _make_manager(self, num_chunks: int, secondary_tiers):
+    def _make_manager(self, num_chunks: int):
         mmap = _mock_mmap_region(num_chunks)
         primary = CPUPrimaryTierOffloadingManager(
             num_chunks=num_chunks, mmap_region=mmap
         )
+
+        secondary_tiers = [
+            ExampleSecondaryTierManager(
+                offloading_spec=_MOCK_OFFLOADING_SPEC,
+                primary_kv_view=mmap.create_kv_memoryview(),
+                tier_type="example",
+            )
+        ]
+
         return TieringOffloadingManager(
             primary_tier=primary, secondary_tiers=secondary_tiers
         ), mmap
-
-    def _make_eager_tier(self, mmap):
-        return ExampleSecondaryTierManager(
-            offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mmap.create_kv_memoryview(),
-            tier_type="example",
-        )
 
     def test_returns_none_and_fires_failure_metric_when_primary_full(self):
         """When prepare_write returns None (primary full), _promotion_allocation
         returns None and increments the allocation-failure counter."""
         num_chunks = 1
-        manager, mmap = self._make_manager(
-            num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
-        )
+        manager, mmap = self._make_manager(num_chunks)
+
         req_ctx = ReqContext(req_id="req")
         key = to_keys([1])[0]
 
@@ -1884,9 +1880,7 @@ class TestPromotionAllocation:
         eager tiers call it at initiate, deferred tiers via the job's alloc_fn
         when get() redeems the claim."""
         num_chunks = 4
-        manager, mmap = self._make_manager(
-            num_chunks, [self._make_eager_tier(_mock_mmap_region(num_chunks))]
-        )
+        manager, mmap = self._make_manager(num_chunks)
         req_ctx = ReqContext(req_id="req")
         key = to_keys([1])[0]
 
@@ -2004,7 +1998,7 @@ class TestProtectedLookupKeys:
         )
         assert not primary._protected_lookup_keys
 
-        # 4. Re-protect k1; storing k3 must evict k2 (not k1).
+        # 4. Re-protect k1
         primary.lookup(k1, ReqContext(req_id="req3"))
         assert k1 in primary._protected_lookup_keys
 
@@ -2017,10 +2011,6 @@ class TestProtectedLookupKeys:
         # 5. reset_cache clears the protection set.
         primary.reset_cache()
         assert not primary._protected_lookup_keys
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
 
 
 def test_tiering_manager_reports_one_config_info_series_for_each_tier():
@@ -2404,3 +2394,7 @@ class TestTieringOffloadingManagerWithFsTier:
             assert manager.lookup(k, req_ctx) == LookupResult.HIT
 
         manager._metrics.assert_idle()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
