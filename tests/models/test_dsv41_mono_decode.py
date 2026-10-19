@@ -22,9 +22,10 @@ M = 6
 class _Runner:
     def __init__(self):
         self.calls = []
+        self.draft = None
 
     def forward(self, *args, **kwargs):
-        self.calls.append((args, kwargs))
+        self.calls.append((args, {**kwargs, "draft_runner": self.draft}))
         return ("mono outputs",)
 
     def first_pre_mix(self, rows):
@@ -86,6 +87,7 @@ def run(monkeypatch):
         ffn_only=False,
         entry=None,
         layer=None,
+        mono=None,
         **inputs,
     ):
         if metadata is None:
@@ -97,10 +99,15 @@ def run(monkeypatch):
         runner = _Runner()
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
+
+        def pick(device, draft=None):
+            runner.draft = draft
+            return runner
+
+        monkeypatch.setattr(md, "_mono_runner", pick)
         monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
         args = {**_inputs(), **inputs}
-        mono = md.MonoDecodeLayer(ffn_only)
+        mono = mono or md.MonoDecodeLayer(ffn_only)
         if (entry or ("ffn" if ffn_only else "layer")) == "ffn":
             # x stands for wo_b's unreduced output; the first layer's attention
             # has no compressed cache
@@ -133,6 +140,49 @@ def test_first_layer_runs_mono_from_the_embedding(run):
     assert out == ("mono outputs",) and len(calls) == 1
     args, kwargs = calls[0]
     assert args[2].shape == (M, 4, 5120) and not kwargs["fold"]
+
+
+DRAFT_WIDTH = 192  # the DSpark draft's non-causal SWA rows: window 128 + 5 drafts
+
+
+def _draft(**overrides):
+    """A DSpark draft layer's mono path, and the metadata its step carries."""
+    layer = _layer(comp=None)
+    layer.attn.compress_ratio = 0
+    swa = _swa(
+        decode_swa_width=DRAFT_WIDTH,
+        decode_swa_indices=torch.zeros(64, 1, DRAFT_WIDTH, dtype=torch.int32),
+    )
+    mono = md.MonoDecodeLayer(draft=True, experts=128, topk=3, swa_width=DRAFT_WIDTH)
+    return dict(layer=layer, mono=mono, metadata={"swa": swa}, **overrides)
+
+
+def test_draft_layer_runs_mono_on_its_own_runner(run):
+    out, calls = run(**_draft())
+    assert out == ("mono outputs",) and len(calls) == 1
+    assert calls[0][0][9].stride(0) == DRAFT_WIDTH  # the non-causal SWA rows
+    assert calls[0][1]["draft_runner"] is not None  # not the target's runner
+
+
+def test_draft_first_layer_takes_the_broadcast_embedding(run):
+    """The draft hands its first layer the embedding already repeated to the
+    hc copies: K1 takes it as the settled residual."""
+    x = torch.zeros(M, 4, 5120, dtype=torch.bfloat16)
+    out, calls = run(
+        **_draft(residual=None, post_mix=None, res_mix=None, pre_mix=None, x=x)
+    )
+    assert out == ("mono outputs",)
+    args, kwargs = calls[0]
+    assert args[1].shape == (M, 5120) and args[2] is x and not kwargs["fold"]
+
+
+def test_draft_and_target_layers_take_only_their_own_swa_rows(run):
+    causal = {"swa": _swa(), "comp": SimpleNamespace(block_size=128)}
+    out, calls = run(**{**_draft(), "metadata": causal})
+    assert out is None and not calls
+    target = {"swa": _draft()["metadata"]["swa"], "comp": causal["comp"]}
+    out, calls = run(metadata=target)
+    assert out is None and not calls
 
 
 def test_index_source_selects_between_the_kernels(run):
