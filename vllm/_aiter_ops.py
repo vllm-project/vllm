@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 import functools
+import inspect
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -2680,6 +2681,18 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
+    def is_triton_qk_norm_mrope_cache_supported() -> bool:
+        try:
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+        except ImportError:
+            return False
+        params = inspect.signature(fused_qkv_split_qk_norm_rope_cache).parameters
+        return "mrope_section" in params and "return_gate" in params
+
+    @staticmethod
     def _gdn_triton_kernels_importable() -> bool:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
@@ -4099,6 +4112,9 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        use_shuffle_layout: bool = False,
+        gemma_norm: bool = False,
+        k_out: torch.Tensor | None = None,
     ) -> None:
         from aiter.ops.fused_qk_norm_mrope_cache_quant import (
             fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
@@ -4125,13 +4141,14 @@ class rocm_aiter_ops:
             slot_mapping,
             k_scale,
             v_scale,
+            k_out,
             None,
-            None,
-            False,
-            False,
+            k_out is not None,
+            use_shuffle_layout,
             block_size,
             x,
             rotary_dim,
+            gemma_norm,
         )
 
     @staticmethod
@@ -4156,7 +4173,49 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         kv_cache_dtype: str,
         rotary_dim: int = 0,
+        use_shuffle_layout: bool = False,
+        gemma_norm: bool = False,
+        gated_q: bool = False,
+        k_out: torch.Tensor | None = None,
     ) -> None:
+        """gemma_norm: (1 + w) norm; gated_q: [q | gate] heads (Triton kernel); k_out: K."""
+        if gated_q:
+            assert gemma_norm and not kv_cache_dtype.startswith("fp8")
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+
+            num_tokens = qkv.shape[0]
+            half = (rotary_dim or cos_sin_cache.shape[-1]) // 2
+            fused_qkv_split_qk_norm_rope_cache(
+                qkv,
+                q_weight,
+                k_weight,
+                cos_sin_cache[:, :half],
+                cos_sin_cache[:, half : 2 * half],
+                positions,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                num_heads_q,
+                num_heads_k,
+                head_dim,
+                is_neox=is_neox,
+                reuse_freqs_front_part=True,
+                attn_output_gate=True,
+                eps=rms_norm_eps,
+                gated_qkv_layout="interleaved",
+                kv_cache_layout="SHUFFLE" if use_shuffle_layout else "NHD",
+                mrope_section=tuple(mrope_section) if positions.ndim == 2 else None,
+                mrope_interleaved=is_interleaved,
+                return_gate=False,
+                return_v=False,
+                q_out=q_out.view(num_tokens, num_heads_q, head_dim),
+                k_out=None
+                if k_out is None
+                else k_out.view(num_tokens, num_heads_k, head_dim),
+            )
+            return
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
@@ -4183,6 +4242,9 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=rotary_dim,
+            use_shuffle_layout=use_shuffle_layout,
+            gemma_norm=gemma_norm,
+            k_out=k_out,
         )
 
     @staticmethod
