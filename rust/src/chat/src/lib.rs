@@ -10,6 +10,8 @@
 //! blocks. It is closer to vLLM's internal chat-rendering flow than to a full
 //! OpenAI-compatible surface.
 
+use std::sync::Once;
+
 pub use backend::hf::HfChatBackend;
 pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
@@ -60,9 +62,11 @@ mod renderer;
 mod request;
 mod stream;
 
+use tracing::warn;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
@@ -83,6 +87,8 @@ pub struct ChatRequestProcessor {
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
 }
+
+static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
@@ -245,11 +251,24 @@ impl ChatRequestProcessor {
         // Initialize the output processor from the final prompt token IDs and apply
         // the output grammar to the request, if any.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        let grammar = {
-            output_processor.initialize(prompt_token_ids)?;
-            output_processor.build_output_grammar()?
-        };
-        apply_output_grammar(&mut text_request, grammar)?;
+        output_processor.initialize(prompt_token_ids)?;
+        let grammar = output_processor.build_output_grammar()?;
+        // Output grammars are xgrammar structural tags. With another backend the
+        // request keeps its own constraint and parsing runs unconstrained.
+        match text_processor.structured_outputs_backend() {
+            StructuredOutputBackend::Xgrammar => apply_output_grammar(&mut text_request, grammar)?,
+            backend => {
+                if grammar.is_some() {
+                    OUTPUT_GRAMMAR_SKIPPED_ONCE.call_once(|| {
+                        warn!(
+                            ?backend,
+                            "output grammars need the xgrammar structured outputs backend; \
+                             tool calls and composed response formats are not constrained"
+                        );
+                    });
+                }
+            }
+        }
 
         Ok((text_request, output_processor))
     }
