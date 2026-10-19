@@ -387,6 +387,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
                 )
             else:
                 generator = self.engine_client.generate(
@@ -478,6 +479,44 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
+        try:
+            async for chunk in self.chat_completion_stream_generator_raw(
+                request,
+                result_generator,
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
+            ):
+                if isinstance(chunk, ErrorResponse):
+                    data = chunk.model_dump_json()
+                else:
+                    data = chunk.model_dump_json(
+                        exclude_unset=True, exclude_none=not chunk.choices
+                    )
+                yield f"data: {data}\n\n"
+        except Exception as e:
+            logger.exception("Error serializing chat completion stream.")
+            data = self.create_streaming_error_response(e)
+            yield f"data: {data}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def chat_completion_stream_generator_raw(
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+        model_name: str,
+        conversation: list[ConversationMessage],
+        tokenizer: TokenizerLike,
+        request_metadata: RequestResponseMetadata,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
+    ) -> AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None]:
+        """Yield chat chunks or errors without serializing them into SSE frames."""
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -510,9 +549,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 parsers = [None] * num_choices
         except Exception as e:
             logger.exception("Error in parser creation.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-            yield "data: [DONE]\n\n"
+            yield self.create_error_response(e)
             return
 
         stream_options = request.stream_options
@@ -583,8 +620,7 @@ class OpenAIServingChat(GenerateBaseServing):
                                 ),
                             )
 
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
+                        yield chunk
 
                     # Send response to echo the input portion of the
                     # last message
@@ -624,8 +660,7 @@ class OpenAIServingChat(GenerateBaseServing):
                                         ),
                                     )
 
-                                data = chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield chunk
                     first_iteration = False
 
                 for output in res.outputs:
@@ -651,17 +686,21 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     delta_text = output.text
 
-                    if (
+                    nothing_generated = (
                         not delta_text
                         and not output.token_ids
                         and not previous_num_tokens[i]
-                    ):
+                    )
+                    if nothing_generated and output.finish_reason is None:
                         # Chunked prefill case, don't return empty chunks
                         continue
 
                     delta_message: DeltaMessage | None
 
-                    if parser is not None:
+                    if nothing_generated:
+                        # Finished without output: send the final chunk unparsed.
+                        delta_message = DeltaMessage()
+                    elif parser is not None:
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
                             delta_token_ids=as_list(output.token_ids),
@@ -773,6 +812,11 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
+                            weight_versions=(
+                                output.weight_versions
+                                if request.return_weight_versions
+                                else None
+                            ),
                         )
 
                         finish_reason_sent[i] = True
@@ -812,8 +856,7 @@ class OpenAIServingChat(GenerateBaseServing):
                             ),
                         )
 
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
+                    yield chunk
 
             if self._include_reasoning_tokens_details and not include_continuous_usage:
                 for i, parser in enumerate(parsers):
@@ -873,10 +916,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     system_fingerprint=self.system_fingerprint,
                     metrics=stream_per_request_metrics,
                 )
-                final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True
-                )
-                yield f"data: {final_usage_data}\n\n"
+                yield final_usage_chunk
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
@@ -910,13 +950,12 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
         except GenerationError as e:
-            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            yield self.create_error_response(
+                str(e), err_type="InternalServerError", status_code=e.status_code
+            )
         except Exception as e:
             logger.exception("Error in chat completion stream generator.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-        # Send the final done message after all response.n are finished
-        yield "data: [DONE]\n\n"
+            yield self.create_error_response(e)
 
     async def chat_completion_full_generator(
         self,
@@ -1097,6 +1136,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                weight_versions=(
+                    output.weight_versions if request.return_weight_versions else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

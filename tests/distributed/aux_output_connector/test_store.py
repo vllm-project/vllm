@@ -1282,6 +1282,33 @@ def test_store_does_not_evict_referenced_aux_outputs():
     store.close()
 
 
+def test_store_eviction_does_not_rescan_referenced_keys():
+    hashes = 0
+
+    class CountingKey(str):
+        def __hash__(self):
+            nonlocal hashes
+            hashes += 1
+            return super().__hash__()
+
+    store = _make_store(max_bytes=4 * 1000)
+    referenced = [CountingKey(f"referenced-{i}") for i in range(900)]
+    store.put([BlockObject(key, b"rrrr") for key in referenced], retain_keys=referenced)
+    old = [f"old-{i}" for i in range(100)]
+    store.put([BlockObject(key, b"oooo") for key in old])
+    hashes = 0
+
+    for i in range(100):
+        store.put([BlockObject(f"new-{i}", b"nnnn")])
+
+    assert hashes < len(referenced)
+    assert store.get_concatenated(referenced) == b"rrrr" * 900
+    for key in old:
+        with pytest.raises(BlockObjectStoreError):
+            store.get_concatenated([key])
+    store.close()
+
+
 def test_store_terminal_put_preserves_tail_first_eviction_order():
     store = _make_store(max_bytes=8)
     keys = ["first", "second", "third"]
