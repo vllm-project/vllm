@@ -2355,6 +2355,7 @@ class NixlBaseConnectorWorker:
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
+            self.pending_request_metrics.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
 
             # Skip KV sync and post-processing for failed requests
