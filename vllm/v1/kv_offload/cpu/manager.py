@@ -456,6 +456,8 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
+        if self.events is not None:
+            self.events.clear()
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

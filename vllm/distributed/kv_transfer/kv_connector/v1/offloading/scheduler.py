@@ -2224,9 +2224,9 @@ class OffloadingConnectorScheduler:
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
 
-        # The manager pool is empty; pending event payloads and announced
-        # reference counts are stale.
-        self._events_tracker.reset()
+        # The CPU primary pool is empty; invalidate only its event residency.
+        # Persistent secondary-tier inventory remains valid across this reset.
+        self._events_tracker.reset_primary()
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.

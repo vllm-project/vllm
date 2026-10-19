@@ -1057,6 +1057,18 @@ def test_take_events_prunes_retried_cleanup_and_drains_once():
     assert [event.keys for event in drain] == [to_keys([3])]
 
 
+def test_reset_cache_discards_queued_events():
+    manager = make_cpu_manager(num_chunks=1, enable_events=True)
+
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+    assert list(manager.events or [])
+
+    manager.reset_cache()
+
+    assert list(manager.take_events()) == []
+
+
 def test_filter_reused_manager():
     """Tests CPUOffloadingManager reuse filtering (store_threshold=2)."""
     manager = make_cpu_manager(

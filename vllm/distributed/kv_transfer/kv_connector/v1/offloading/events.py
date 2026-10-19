@@ -25,6 +25,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    OffloadingBlocksCleared,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
@@ -116,6 +117,7 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        self._pending_control_events: list[KVCacheEvent] = []
 
     def record_store(
         self,
@@ -257,6 +259,12 @@ class OffloadingEventsTracker:
             the underlying :class:`OffloadingEvent` stream.
 
         """
+        control_events, self._pending_control_events = (
+            self._pending_control_events,
+            [],
+        )
+        yield from control_events
+
         removed_keys: set[OffloadKey] = set()
         for event in events:
             if event.removed:
@@ -277,6 +285,20 @@ class OffloadingEventsTracker:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+        self._pending_control_events.clear()
+
+    def reset_primary(self) -> None:
+        """Invalidate CPU primary residency while preserving secondary tiers."""
+        if self.self_describing_enabled:
+            for key, meta in list(self._pending_event_metadata.items()):
+                meta.active_residencies.discard(_PRIMARY_RESIDENCY)
+                if not meta.active_residencies:
+                    self._pending_event_metadata.pop(key)
+
+        if self.config.enable_kv_cache_events:
+            self._pending_control_events.append(
+                OffloadingBlocksCleared(medium=MEDIUM_CPU)
+            )
 
     def _build_event_metadata(
         self,

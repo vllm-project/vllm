@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -10,8 +11,12 @@ from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
+    MEDIUM_STORAGE,
     BlockRemoved,
     BlockStored,
+    KVEventAggregator,
+    KVEventBatch,
+    OffloadingBlocksCleared,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -814,6 +819,96 @@ def test_reset_cache_clears_side_table():
     tracker.reset()
 
     assert not tracker._pending_event_metadata
+
+
+def test_reset_primary_emits_scoped_clear_and_drops_cpu_metadata():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    group_config = _group_config(block_size=4)
+    key = _record_lookup_chunks(tracker, req, group_config, num_chunks=1)[0]
+
+    tracker.reset_primary()
+    [cleared] = list(tracker.take_events([]))
+
+    assert isinstance(cleared, OffloadingBlocksCleared)
+    assert cleared.medium == "CPU"
+    assert cleared.locality is None
+    assert cleared.ownership is None
+    assert key not in tracker._pending_event_metadata
+
+
+def test_reset_primary_emits_clear_for_placeholder_events():
+    tracker = _tracker(self_describing_kv_events=False)
+
+    tracker.reset_primary()
+    [cleared] = list(tracker.take_events([]))
+
+    assert isinstance(cleared, OffloadingBlocksCleared)
+    assert cleared.medium == "CPU"
+
+
+def test_reset_primary_clear_precedes_new_store():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    group_config = _group_config(block_size=4)
+    key = _record_lookup_chunks(tracker, req, group_config, num_chunks=1)[0]
+
+    tracker.reset_primary()
+    events = list(tracker.take_events([_stored_event([key])]))
+
+    assert isinstance(events[0], OffloadingBlocksCleared)
+    assert isinstance(events[1], BlockStored)
+
+
+def test_reset_primary_preserves_secondary_residency():
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    group_config = _group_config(block_size=4)
+    key = _record_lookup_chunks(tracker, req, group_config, num_chunks=1)[0]
+
+    [stored] = list(
+        tracker.take_events(
+            [
+                _stored_event(
+                    [key],
+                    Medium.STORAGE,
+                    ownership="kvcr",
+                    removal_expected=True,
+                )
+            ]
+        )
+    )
+    tracker.reset_primary()
+    [cleared] = list(tracker.take_events([]))
+    [removed] = list(
+        tracker.take_events([_removed_event([key], Medium.STORAGE, ownership="kvcr")])
+    )
+
+    assert isinstance(stored, BlockStored)
+    assert isinstance(cleared, OffloadingBlocksCleared)
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == stored.block_hashes
+    assert key not in tracker._pending_event_metadata
+
+
+def test_scoped_clear_event_round_trip():
+    event = OffloadingBlocksCleared(
+        medium=MEDIUM_STORAGE,
+        locality="remote",
+        ownership="kvcr",
+    )
+    batch = KVEventBatch(ts=0.0, events=[event])
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=KVEventBatch)
+
+    assert decoded.events == [event]
+
+
+def test_scoped_clear_event_aggregates():
+    event = OffloadingBlocksCleared(medium=MEDIUM_CPU)
+    aggregator = KVEventAggregator(1)
+    aggregator.add_events([event])
+
+    assert aggregator.get_common_events() == [event]
 
 
 def test_tiering_accepts_self_describing_kv_events():

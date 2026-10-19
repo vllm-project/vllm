@@ -138,8 +138,21 @@ class AllBlocksCleared(KVCacheEvent):
     pass
 
 
+class OffloadingBlocksCleared(KVCacheEvent):
+    """Signals that one offloading residency was invalidated."""
+
+    medium: str
+    locality: str | None = None
+    ownership: str | None = None
+
+    def __hash__(self) -> int:
+        return hash((self.medium, self.locality, self.ownership))
+
+
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[
+        BlockStored | BlockRemoved | AllBlocksCleared | OffloadingBlocksCleared
+    ]
 
 
 class KVEventAggregator:
