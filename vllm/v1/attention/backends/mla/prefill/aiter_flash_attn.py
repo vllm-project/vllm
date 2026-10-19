@@ -6,14 +6,21 @@ This backend calls ``aiter.flash_attn_varlen_func`` directly, which natively
 supports different q/k and v head dims (qk headdim 192, v headdim 128) without
 padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
 gfx942/gfx950 (fp16/bf16).
+
+With ``VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8=1`` on gfx950, attention instead runs
+AITER's FlyDSL FP8 kernel on per-tensor dynamically quantized Q/K/V.
 """
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
@@ -22,6 +29,127 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
     from vllm.platforms.interface import DeviceCapability
+
+logger = init_logger(__name__)
+
+
+def _quant_fp8_per_tensor(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # scaled_fp8_quant's absmax does one atomicMax per row; a row per token-head
+    # serializes millions of them on the scale, so use at most 256 rows.
+    x = x.contiguous()
+    rows = math.gcd(x.numel(), 256) if x.numel() else 1
+    x8, scale = ops.scaled_fp8_quant(x.view(rows, -1))
+    return x8.view(x.shape), scale
+
+
+# Two-pass K/V per-tensor FP8 quant ported from ATOM
+# atom/model_ops/triton_fused_qkv_quant.py
+# (MIT, Copyright (C) 2026, Advanced Micro Devices, Inc.).
+# Sizes and worker counts stay runtime args so new prefill lengths do not
+# trigger a Triton recompile.
+@triton.jit
+def _kv_amax(K, V, Partial, NK, NV, PARTS: tl.constexpr, BLOCK: tl.constexpr):
+    part = tl.program_id(0)
+    kind = tl.program_id(1)
+    X = K if kind == 0 else V
+    n = NK if kind == 0 else NV
+    offsets = part * BLOCK + tl.arange(0, BLOCK)
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    for start in range(tl.cdiv(n, PARTS * BLOCK)):
+        index = offsets + start * PARTS * BLOCK
+        x = tl.load(X + index, index < n, 0).to(tl.float32)
+        acc = tl.maximum(acc, tl.abs(x))
+    tl.store(Partial + kind * PARTS + part, tl.max(acc, 0))
+
+
+@triton.jit
+def _kv_quant(
+    K,
+    V,
+    K8,
+    V8,
+    Partial,
+    Scales,
+    NK,
+    NV,
+    WORKERS,
+    PARTS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    SINGLE_PASS: tl.constexpr,
+):
+    worker = tl.program_id(0)
+    kind = tl.program_id(1)
+    X = K if kind == 0 else V
+    Y = K8 if kind == 0 else V8
+    n = NK if kind == 0 else NV
+    offsets = worker * BLOCK + tl.arange(0, BLOCK)
+    if SINGLE_PASS:
+        x = tl.load(X + offsets, offsets < n, 0).to(tl.float32)
+        amax = tl.max(tl.abs(x), 0)
+    else:
+        amax = tl.max(tl.load(Partial + kind * PARTS + tl.arange(0, PARTS)), 0)
+    # Positive descale for all-zero inputs keeps the FMHA free of NaNs.
+    raw_descale = amax * (1.0 / 448.0)
+    descale = tl.where(raw_descale > 0, raw_descale, 1e-6)
+    inv = 1.0 / descale
+    if worker == 0:
+        tl.store(Scales + kind, descale)
+    if SINGLE_PASS:
+        value = tl.minimum(tl.maximum(x * inv, -448.0), 448.0)
+        tl.store(Y + offsets, value, offsets < n)
+    else:
+        for start in range(tl.cdiv(n, WORKERS * BLOCK)):
+            index = offsets + start * WORKERS * BLOCK
+            x = tl.load(X + index, index < n, 0).to(tl.float32)
+            value = tl.minimum(tl.maximum(x * inv, -448.0), 448.0)
+            tl.store(Y + index, value, index < n)
+
+
+def _kv_config(n: int) -> tuple[int, int, int, int]:
+    if n <= 8192:
+        return 1, max(256, triton.next_power_of_2(n)), 1, 4
+    if n <= 2**24:
+        return 256, 4096, min(1024, triton.cdiv(n, 4096)), 4
+    if n <= 2**26:
+        return 512, 4096, min(2048, triton.cdiv(n, 4096)), 4
+    return 512, 8192, min(4096, triton.cdiv(n, 8192)), 8
+
+
+def _quant_fp8_kv_per_tensor(
+    k: torch.Tensor, v: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return ``(k8, v8, k_descale, v_descale)`` with independent per-tensor scales.
+
+    Descales are fp32 of shape ``[1]``; an all-zero tensor gets descale 1e-6.
+    """
+    k, v = k.contiguous(), v.contiguous()
+    nk, nv = k.numel(), v.numel()
+    n = max(nk, nv)
+    assert n < 2**31, "int32 element offsets"
+    parts, block, workers, warps = _kv_config(n)
+    k8 = torch.empty(k.shape, dtype=torch.float8_e4m3fn, device=k.device)
+    v8 = torch.empty(v.shape, dtype=torch.float8_e4m3fn, device=v.device)
+    scales = torch.empty(2, dtype=torch.float32, device=k.device)
+    partial = torch.empty((2, parts), dtype=torch.float32, device=k.device)
+    single = n <= 8192
+    if not single:
+        _kv_amax[(parts, 2)](k, v, partial, nk, nv, parts, block, num_warps=warps)
+    _kv_quant[(workers, 2)](
+        k,
+        v,
+        k8,
+        v8,
+        partial,
+        scales,
+        nk,
+        nv,
+        workers,
+        parts,
+        block,
+        single,
+        num_warps=warps,
+    )
+    return k8, v8, scales[:1], scales[1:]
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
@@ -80,6 +208,49 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.fp8_attn_func = None
+        if envs.VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8:
+            from aiter.ops.flydsl import (
+                flydsl_flash_attn_fp8_func,
+                flydsl_flash_attn_fp8_supported,
+            )
+
+            device = torch.device("cuda", torch.accelerator.current_device_index())
+            qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+            # The FP8 kernel always writes a bf16 output.
+            if vllm_config.model_config.dtype == torch.bfloat16 and (
+                flydsl_flash_attn_fp8_supported(
+                    device, num_heads, num_heads, qk_head_dim, v_head_dim
+                )
+            ):
+                self.fp8_attn_func = flydsl_flash_attn_fp8_func
+                logger.info_once("MLA prefill uses FlyDSL FP8 attention")
+            else:
+                logger.warning_once(
+                    "VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8=1 but FlyDSL FP8 attention "
+                    "does not support dtype=%s, %d heads, qk_dim=%d, v_dim=%d "
+                    "on %s; using the default attention.",
+                    vllm_config.model_config.dtype,
+                    num_heads,
+                    qk_head_dim,
+                    v_head_dim,
+                    device,
+                )
+
+    def _fp8_attn(self, q, k, v, **kwargs):
+        q8, q_descale = _quant_fp8_per_tensor(q)
+        k8, v8, k_descale, v_descale = _quant_fp8_kv_per_tensor(k, v)
+        assert self.fp8_attn_func is not None
+        return self.fp8_attn_func(
+            q8,
+            k8,
+            v8,
+            softmax_scale=self.scale,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            **kwargs,
+        )
 
     def run_prefill_new_tokens(
         self,
@@ -93,6 +264,19 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         assert output_scale is None, (
             "AiterFlashAttnPrefillBackend does not support fused quantized output."
         )
+        if self.fp8_attn_func is not None:
+            return self._fp8_attn(
+                q,
+                k,
+                v,
+                cu_seqlens_q=self._prefill_metadata.query_start_loc,
+                cu_seqlens_kv=self._prefill_metadata.query_start_loc,
+                max_seqlen_q=self._prefill_metadata.max_query_len,
+                max_seqlen_kv=self._prefill_metadata.max_query_len,
+                cross_seqlen=False,
+                causal=True,
+                return_lse=return_softmax_lse,
+            )
         result = self.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -125,6 +309,19 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
             "AiterFlashAttnPrefillBackend does not report supports_out(), so it "
             "is never given a context-chunk `out` to write into."
         )
+        if self.fp8_attn_func is not None:
+            return self._fp8_attn(
+                q,
+                k,
+                v,
+                cu_seqlens_q=chunk.query_start_loc,
+                cu_seqlens_kv=chunk.cu_seq_lens,
+                max_seqlen_q=chunk.max_query_len,
+                max_seqlen_kv=chunk.max_seq_len,
+                cross_seqlen=True,
+                causal=False,
+                return_lse=True,
+            )
         out, lse = self.flash_attn_varlen_func(
             q=q,
             k=k,
