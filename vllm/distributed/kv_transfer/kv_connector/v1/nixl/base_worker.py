@@ -107,6 +107,7 @@ _SHARED_REGION_GROUP_ID = -1
 # invalidated, eg due to a persistent RDMA fault.
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
+_MAX_HYBRID_BLOCK_SPLIT = 128
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -2246,6 +2247,57 @@ class NixlBaseConnectorWorker:
         )
         return handle, blocks_data
 
+    def _split_remote_blocks(self, meta: NixlAgentMetadata) -> None:
+        """View remote blocks as gcd-sized kernel blocks when the local block
+        size is not a multiple of the remote one.
+
+        Hybrid blocks are sized to cover the TP-sharded SSM page, so P and D
+        differ with TP. Backends that accept any kernel block size keep them
+        whole, and non-multiples cannot otherwise be paired.
+        """
+        if self.block_size % meta.block_size == 0:
+            return
+        unit = math.gcd(self.block_size, meta.block_size)
+        split = meta.block_size // unit
+        if max(split, self.block_size // unit) > _MAX_HYBRID_BLOCK_SPLIT:
+            logger.warning(
+                "Not pairing remote %d-token blocks with local %d-token blocks: "
+                "their %d-token common unit would split each block into more "
+                "than %d transfers.",
+                meta.block_size,
+                self.block_size,
+                unit,
+                _MAX_HYBRID_BLOCK_SPLIT,
+            )
+            return
+        if (
+            meta.block_strides != meta.block_lens
+            or meta.ple_block_len is not None
+            or any(block_len % split for block_len in meta.block_lens)
+        ):
+            logger.warning(
+                "Not pairing remote %d-token blocks with local %d-token blocks: "
+                "the remote KV layout cannot be split into %d-token units.",
+                meta.block_size,
+                self.block_size,
+                unit,
+            )
+            return
+        logger.info_once(
+            "Transferring remote %d-token blocks as %d-token kernel blocks to "
+            "pair them with local %d-token blocks.",
+            meta.block_size,
+            unit,
+            self.block_size,
+        )
+        meta.block_size //= split
+        meta.physical_blocks_per_logical_kv_block *= split
+        meta.num_blocks *= split
+        meta.block_lens = [block_len // split for block_len in meta.block_lens]
+        meta.block_strides = list(meta.block_lens)
+        if meta.region_num_blocks is not None:
+            meta.region_num_blocks = [n * split for n in meta.region_num_blocks]
+
     def add_remote_agent(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2355,6 +2407,9 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
                     start:end
                 ]
+        # The push WRITE path is not validated with split remote blocks.
+        if self._has_mamba and self.use_mla and self._TRANSFER_MODE == "pull":
+            self._split_remote_blocks(nixl_agent_meta)
 
         if (
             self._packed_member_layouts
