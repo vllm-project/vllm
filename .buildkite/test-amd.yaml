@@ -1378,6 +1378,22 @@ steps:
   # the long TP4 hand-off stress
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
+- label: ":amd: (MI355) DeepSeek V4.1 Unit Tests"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/deepseek_v4/
+  - vllm/models/deepseek_v41/
+  - vllm/platforms/rocm.py
+  - tests/models/test_deepseek_v41_prefill_fusion_above_mono.py
+  commands:
+  - pytest -v -s models/test_deepseek_v41_prefill_fusion_above_mono.py
+
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
