@@ -712,7 +712,6 @@ def test_sampling_metadata_prompt_embeds_use_vocab_size_as_token_id_pad():
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[1],
     )
     input_batch.token_ids_cpu[:].fill(VOCAB_SIZE + 1)
