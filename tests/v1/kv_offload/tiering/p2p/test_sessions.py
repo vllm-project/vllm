@@ -36,6 +36,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
     _LOAD_TIMEOUT_S,
+    _LOOKUP_TIMEOUT_S,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
@@ -56,6 +57,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _MAX_CONSECUTIVE_DISPATCH_ERRORS,
+    _PEER_FAULT_DRAIN_S,
 )
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,8 @@ class FakeDataTransport:
         self._poll_failed: list[int] = []
         self._cancel_still_inflight: set[int] = set()
         self._cancel_calls: list[tuple[list[int], str]] = []
+        # peer_id → cause, reported by scoped poll() like NixlTransport.
+        self._peer_faults: dict[str, str] = {}
 
     @property
     def base_addr(self) -> int:
@@ -159,6 +163,7 @@ class FakeDataTransport:
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
+        self._peer_faults.pop(peer_id, None)
 
     def write_blocks(self, peer_id, local_idxs, remote_idxs) -> int | None:
         if peer_id not in self._remote_peers:
@@ -171,7 +176,11 @@ class FakeDataTransport:
     def poll(self, peer_id=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
-        result = PollResult(done=list(self._poll_done), failed=list(self._poll_failed))
+        result = PollResult(
+            done=list(self._poll_done),
+            failed=list(self._poll_failed),
+            peer_fault=self._peer_faults.get(peer_id) if peer_id else None,
+        )
         self._poll_done.clear()
         self._poll_failed.clear()
         return result
@@ -838,6 +847,216 @@ class TestClientFlows:
 
 class TestLookupFlow:
     """Consumer-side state machine for do_p2p_fetch lookups."""
+
+    def test_lookup_deadline_starts_after_handshake(self, lookup_clock):
+        session, conn, _ = _make_session()
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        # Complete the handshake before its independent timeout expires.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        session.poll()
+        assert session.alive
+
+        _activate(session, conn)
+        session.flush_pending_lookups()
+        lookups = [m for m in conn._sent if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(lookups) == 1
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
+        session.poll()
+        assert session.alive
+        lookup_clock.now += 1
+        session.poll()
+        assert not session.alive
+        assert session.close().failed_req_ids == ["req-1"]
+
+    def test_partial_response_rearms_lookup_deadline(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is None
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+
+        lookup_clock.now += 1
+        session.poll()
+        assert session.alive
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
+        session.poll()
+        assert not session.alive
+        assert session.death_reason == "lookup response timed out"
+        assert session.close().failed_req_ids == ["req-1"]
+
+    def test_lookup_progress_keeps_overlapping_batches_alive(self, lookup_clock):
+        """Prompt batch replies keep a long-running lookup phase alive."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        previous_key = b"key-0"
+        session.register_lookup("req-1", previous_key)
+        session.flush_pending_lookups()
+
+        for step in range(1, int(2 * _LOOKUP_TIMEOUT_S) + 1):
+            lookup_clock.now = float(step)
+            next_key = f"key-{step}".encode()
+            hit = step % 2 == 0
+            session.register_lookup("req-1", next_key)
+            session.flush_pending_lookups()
+            conn.enqueue(
+                {
+                    TYPE_KEY: LookupRespMsg.TYPE,
+                    LookupRespMsg.KV_REQUEST_ID: "req-1",
+                    LookupRespMsg.KEYS: [previous_key],
+                    LookupRespMsg.HITS: [hit],
+                }
+            )
+            session.poll()
+            assert session.alive
+            assert session.register_lookup("req-1", previous_key) is hit
+            previous_key = next_key
+
+    def test_buffered_lookup_response_precedes_expiry(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        session.poll()
+        assert session.alive
+        assert session.register_lookup("req-1", b"hA") is True
+
+    def test_duplicate_responses_and_new_keys_do_not_rearm(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        response = {
+            TYPE_KEY: LookupRespMsg.TYPE,
+            LookupRespMsg.KV_REQUEST_ID: "req-1",
+            LookupRespMsg.KEYS: [b"hA", b"unknown"],
+            LookupRespMsg.HITS: [True, False],
+        }
+        conn.enqueue(response)
+        session.poll()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        conn.enqueue(response)
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+        session.poll()
+        assert session.alive
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        session.poll()
+        assert not session.alive
+
+    @pytest.mark.parametrize("partial_fetch", [False, True])
+    def test_lookup_expiry_preserves_completed_transfers(
+        self, lookup_clock, partial_fetch
+    ):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.register_lookup("stalled", b"key")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        session.request_blocks(1, "load", [b"key"], [0])
+        session.add_stored_blocks("store", [b"key"], [1], 2)
+        if partial_fetch:
+            session.add_stored_blocks("store", [b"unused"], [2], 3)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "store",
+                FetchMsg.KEYS: [b"key"],
+                FetchMsg.BLOCK_INDEXES: [0],
+                FetchMsg.ROUND_SEQ: 0,
+            }
+        )
+        session.poll()
+        transport._poll_done = list(transport._transfers)
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "load",
+                TransferDoneMsg.SUCCESS: True,
+                TransferDoneMsg.ROUND_SEQ: 0,
+            }
+        )
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        result = session.poll()
+        assert not session.alive
+        assert result.loads == [LoadResult(1, "load", True)]
+        expected_stores = [StoreResult(2, True)]
+        if partial_fetch:
+            expected_stores.append(StoreResult(3, True))
+        assert result.stores == expected_stores
+        closed = session.close()
+        assert closed.failed_req_ids == ["stalled"]
+        assert closed.failed_jobs == []
+        assert closed.failed_stores == []
+
+    @pytest.mark.parametrize("action", ["resolve", "finish", "fetch"])
+    def test_lookup_deadline_cleared_before_next_batch(self, lookup_clock, action):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        if action == "resolve":
+            conn.enqueue(
+                {
+                    TYPE_KEY: LookupRespMsg.TYPE,
+                    LookupRespMsg.KV_REQUEST_ID: "req-1",
+                    LookupRespMsg.KEYS: [b"hB"],
+                    LookupRespMsg.HITS: [False],
+                }
+            )
+            session.poll()
+        elif action == "finish":
+            session.finish_request("req-1")
+        else:
+            session.request_blocks(1, "req-1", [b"hA"], [0])
+
+        lookup_clock.now += 2
+        session.poll()
+        assert session.alive
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
+        session.poll()
+        assert session.alive
+        lookup_clock.now += 1
+        session.poll()
+        assert not session.alive
 
     def test_aggregate_flush_resolve_round_trip(self):
         """register_lookup → flush sends one LookupMsg → response
@@ -2390,18 +2609,22 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
-    def test_write_blocks_failure_finalizes_with_failure(self):
-        """write_blocks returning None must not leave the request hanging.
-
-        The matched blocks are gone from req.demanded but no inflight
-        will satisfy them, so remaining > 0 forever. Setting finishing
-        and calling _finalize_outbound(success=False) immediately (no
-        other inflight) tells the peer + emits StoreResult(success=False)
-        without waiting on _STORE_TIMEOUT_S or _LOAD_TIMEOUT_S.
-        """
+    @pytest.mark.parametrize(
+        "store_first,finish_before_fetch",
+        [(False, False), (True, False), (True, True)],
+        ids=["fetch-first", "store-first", "finish-before-fetch"],
+    )
+    def test_write_blocks_failure_finalizes_with_failure(
+        self, store_first, finish_before_fetch
+    ):
+        """Submission failure finalizes once in either store/fetch ordering."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        # Decoder demands b"k1".
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        if store_first:
+            session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+            if finish_before_fetch:
+                session.finish_request("req-1")
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2411,21 +2634,22 @@ class TestFinishRequestServerSide:
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
-        session.poll()
-        # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
-
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+        stores = session.poll().stores
+        if not store_first:
+            session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+        stores.extend(session.poll().stores)
 
         # Outbound was finalized immediately (no other inflight).
         assert _srv_outbound(session, "req-1") is None
+        assert session._dispatch_error_count == 0
+        assert stores == [StoreResult(job_id=42, success=False)]
+        assert session.poll().stores == []
         # Peer notified with success=False.
-        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(done) == 1
+        msg = done[0]
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        # Local store job surfaces on the next poll.
-        stores = session.poll().stores
-        assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
 
     def test_partial_match_completes_in_two_rounds(self):
@@ -2531,20 +2755,19 @@ class TestFinishRequestServerSide:
 
         # Transfer 1 completes — now ``_has_inflight_for("req-1")`` is False
         # and the elif branch in collect_results fires _finalize(success=False).
-        # The k1 success result is direct; the k2 failure result is queued
-        # in _pending_store_results and surfaces on the NEXT poll.
+        # Both the k1 success and the deferred k2 failure surface in this poll.
         transport._poll_done.append(tid_1)
-        stores_first = session.poll().stores
-        assert StoreResult(job_id=100, success=True) in stores_first
+        assert session.poll().stores == [
+            StoreResult(job_id=100, success=True),
+            StoreResult(job_id=200, success=False),
+        ]
         # Outbound state cleaned up; peer notified with success=False.
         assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is False
 
-        # Next poll drains the queued failure.
-        stores_second = session.poll().stores
-        assert StoreResult(job_id=200, success=False) in stores_second
+        assert session.poll().stores == []
 
 
 # ---------------------------------------------------------------------------
@@ -3298,3 +3521,98 @@ class TestHandshakeDeadline:
         ]
         session.poll()
         assert session._last_activity_at >= before
+
+
+# ---------------------------------------------------------------------------
+# Data-plane peer fault → connection death
+# ---------------------------------------------------------------------------
+
+
+def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.ROUND_SEQ: 0,
+            FetchMsg.KV_REQUEST_ID: kv_request_id,
+            FetchMsg.KEYS: keys,
+            FetchMsg.BLOCK_INDEXES: idxs,
+        }
+    )
+
+
+class TestPeerFaultEscalation:
+    """A transport peer fault ends the session through the normal reap
+    path (see "Failure model" in data/base.py): no new WRITE is submitted,
+    inflight ones drain, then DisconnectMsg and a dead connection."""
+
+    def test_fault_with_nothing_inflight_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        transport._peer_faults["peer:8000"] = "NIXL_ERR_REMOTE_DISCONNECT"
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason == "data plane: NIXL_ERR_REMOTE_DISCONNECT"
+        assert session.data_plane_fault == "NIXL_ERR_REMOTE_DISCONNECT"
+
+    def test_fault_waits_for_inflight_then_disconnects(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+
+        transport._peer_faults["peer:8000"] = "3 consecutive transfer failures"
+        session.poll()
+        assert session.alive
+
+        # A new round while draining is failed fast, without a WRITE.
+        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        stores = session.poll().stores
+        assert len(transport._transfers) == 1
+        assert StoreResult(job_id=2, success=False) in stores
+        assert any(
+            m[TYPE_KEY] == TransferDoneMsg.TYPE
+            and m[TransferDoneMsg.KV_REQUEST_ID] == "req-2"
+            and m[TransferDoneMsg.SUCCESS] is False
+            for m in conn._sent
+        )
+        assert session.alive
+
+        # The last inflight WRITE drains; only now does the session go.
+        transport._poll_done.append(tid)
+        session.poll()
+        assert not session.alive
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert session.death_reason.startswith("data plane: 3 consecutive")
+
+    def test_fault_disconnects_after_drain_deadline(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        transport._peer_faults["peer:8000"] = "stuck"
+        session.poll()
+        assert session.alive
+        session._peer_fault_at = time.monotonic() - _PEER_FAULT_DRAIN_S - 1.0
+        session.poll()
+        assert not session.alive
+
+    def test_death_reasons(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        assert session.death_reason == "control connection lost"
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        session.poll()
+        assert session.death_reason == "peer disconnected"
+
+    def test_first_death_reason_wins(self):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue({TYPE_KEY: DisconnectMsg.TYPE})
+        transport._peer_faults["peer:8000"] = "late"
+        session.poll()
+        assert session.death_reason == "peer disconnected"
