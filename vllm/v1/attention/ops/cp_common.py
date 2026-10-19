@@ -96,14 +96,6 @@ class DirectCPCollective(CustomOp):
         CustomOp.default_on()  # Validate the global all/none mode.
         return True
 
-    def forward_cpu(self, *args: Any, **kwargs: Any) -> Any:
-        # Preserve the pre-CustomOp paths on other platforms as well.
-        return self.forward_cuda(*args, **kwargs)
-
-    forward_xpu = forward_cpu
-    forward_tpu = forward_cpu
-    forward_oot = forward_cpu
-
 
 class DirectCPWorkspace:
     def __init__(

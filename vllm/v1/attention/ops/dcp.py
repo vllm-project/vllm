@@ -1419,6 +1419,8 @@ class DirectDCPQGather(DirectCPCollective):
         )
         return output
 
+    forward_xpu = forward_cuda
+
 
 @CustomOp.register("direct_dcp_a2a_lse_reduce")
 class DirectDCPA2AReduce(DirectCPCollective):
@@ -1509,6 +1511,9 @@ class DirectDCPA2AReduce(DirectCPCollective):
         )
         return output
 
+    # XPU retains the Triton path without inheriting CUDA-only plugin overrides.
+    forward_xpu = forward_cuda
+
 
 @CustomOp.register("direct_dcp_kv_gather")
 class DirectDCPKVGather(DirectCPCollective):
@@ -1551,6 +1556,8 @@ class DirectDCPKVGather(DirectCPCollective):
             kv_multicast_ptr,
             signal_multicast_ptr,
         )
+
+    forward_xpu = forward_cuda
 
 
 class DCPCombine(Protocol):

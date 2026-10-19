@@ -30,8 +30,6 @@ class _OOTQGather(dcp.DirectDCPQGather):
         self.calls += 1
         return super().forward_cuda(*args, **kwargs)
 
-    forward_cpu = forward_cuda
-
 
 class _OOTA2AReduce(dcp.DirectDCPA2AReduce):
     calls: int = 0
@@ -40,8 +38,6 @@ class _OOTA2AReduce(dcp.DirectDCPA2AReduce):
         self.calls += 1
         return super().forward_cuda(*args, **kwargs)
 
-    forward_cpu = forward_cuda
-
 
 class _OOTKVGather(dcp.DirectDCPKVGather):
     calls: int = 0
@@ -49,8 +45,6 @@ class _OOTKVGather(dcp.DirectDCPKVGather):
     def forward_cuda(self, *args: Any, **kwargs: Any) -> None:
         self.calls += 1
         super().forward_cuda(*args, **kwargs)
-
-    forward_cpu = forward_cuda
 
 
 @pytest.mark.parametrize(
@@ -76,10 +70,10 @@ def test_oot_collective_dispatch_preserves_cuda_fallback(
     workspace_state: str,
 ) -> None:
     monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
+    for platform in ("rocm", "cpu", "tpu", "xpu", "out_of_tree"):
+        monkeypatch.setattr(custom_op.current_platform, f"is_{platform}", lambda: False)
     if use_oot:
         op_cls.register_oot(oot_cls)
-    else:
-        monkeypatch.setattr(op_cls, "forward_cpu", op_cls.forward_cuda)
     op_name = op_cls.__name__ if use_oot else op_cls.name
     directives = {
         "eager_default": [],
@@ -199,22 +193,85 @@ def test_oot_collective_dispatch_preserves_cuda_fallback(
 @pytest.mark.parametrize(
     "platform", ["cuda", "rocm", "cpu", "xpu", "tpu", "out_of_tree"]
 )
-def test_direct_dcp_preserves_platform_fallback(
-    monkeypatch: pytest.MonkeyPatch, platform: str
+@pytest.mark.parametrize(
+    "op_cls, oot_cls",
+    [
+        (dcp.DirectDCPQGather, _OOTQGather),
+        (dcp.DirectDCPA2AReduce, _OOTA2AReduce),
+        (dcp.DirectDCPKVGather, _OOTKVGather),
+    ],
+)
+@pytest.mark.parametrize("use_oot", [False, True])
+def test_direct_dcp_platform_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    op_cls: type[CustomOp],
+    oot_cls: type[CustomOp],
+    use_oot: bool,
 ) -> None:
+    monkeypatch.setattr(custom_op, "op_registry_oot", custom_op.op_registry_oot.copy())
+    if use_oot:
+        op_cls.register_oot(oot_cls)
     config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["none"]))
     group = SimpleNamespace(
-        all_gather=MagicMock(side_effect=lambda query, dim: query),
+        world_size=2,
+        device_group=object(),
+        all_gather=MagicMock(
+            side_effect=lambda query, dim: torch.cat((query, query + 2), dim=dim)
+        ),
     )
+    collective_calls: list[str] = []
+
+    def all_gather(
+        destination: torch.Tensor, source: torch.Tensor, *, group: Any
+    ) -> None:
+        collective_calls.append("gather")
+        destination.copy_(torch.cat((source, source + 2)))
+
+    def all_to_all(
+        destination: torch.Tensor, source: torch.Tensor, *, group: Any
+    ) -> None:
+        collective_calls.append("a2a")
+        destination.copy_(source[0].expand_as(source))
+        destination[1, ..., :-1].add_(2)
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", all_gather)
+    monkeypatch.setattr(dist, "all_to_all_single", all_to_all)
+    a2a_fallback = MagicMock(return_value=torch.full((2, 1, 2), 2.0))
+    monkeypatch.setattr(dcp, "dcp_a2a_lse_reduce", a2a_fallback)
     with set_current_vllm_config(config):
         for name in ("cuda", "rocm", "cpu", "xpu", "tpu", "out_of_tree"):
             monkeypatch.setattr(
                 custom_op.current_platform, f"is_{name}", lambda n=name: n == platform
             )
-        op = dcp.DirectDCPQGather(group)
-    query = torch.ones(2, 2, 4)
-    assert op(query) is query, "Each platform must retain its existing gather path"
-    group.all_gather.assert_called_once_with(query, dim=1)
+        op = op_cls(group)
+    if op_cls is dcp.DirectDCPQGather:
+        result = op(torch.ones(2, 1, 2))
+        expected = torch.tensor([[[1.0, 1.0], [3.0, 3.0]]] * 2)
+    elif op_cls is dcp.DirectDCPA2AReduce:
+        result = op(torch.ones(2, 2, 2), torch.zeros(2, 2), True)
+        expected = torch.full((2, 1, 2), 2.0)
+    else:
+        result = torch.empty(4, 2)
+        op(result, torch.ones(2, 2))
+        expected = torch.tensor([[1.0, 1.0]] * 2 + [[3.0, 3.0]] * 2)
+    assert torch.equal(result, expected), (
+        "Platform fallback must compute the collective"
+    )
+    legacy_gpu = platform in ("cuda", "rocm", "xpu")
+    assert group.all_gather.call_count == int(
+        legacy_gpu and op_cls is dcp.DirectDCPQGather
+    ), "GPU query gather must retain the platform communicator"
+    assert a2a_fallback.call_count == int(
+        legacy_gpu and op_cls is dcp.DirectDCPA2AReduce
+    ), "Only supported GPU platforms may launch the Triton A2A fallback"
+    assert len(collective_calls) == int(
+        not legacy_gpu or op_cls is dcp.DirectDCPKVGather
+    ), "CPU/TPU/OOT must execute the Torch-native collective"
+    if use_oot:
+        assert op.calls == int(platform in ("cuda", "rocm")), (
+            "CUDA-only plugin overrides must not run on CPU/XPU/TPU/OOT"
+        )
 
 
 @pytest.mark.parametrize("backend", ["native", "cuda"])
