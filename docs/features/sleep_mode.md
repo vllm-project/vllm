@@ -230,6 +230,10 @@ before level-1 memory suspension. A complete wake resumes inference eagerly;
 after the first request completes, the engine captures at most one pending
 graph per idle iteration. Captured shapes become usable immediately. Other
 shapes continue eagerly. Ordinary sleep behavior is unchanged by default.
+When combined with `sleep_mode_offload_cudagraph`, graph discard takes
+precedence: graphs use a fresh ordinary graph pool after wake, with no retained
+graph-pool storage to back up. Graph-pool offloading remains unchanged when
+graph discard is disabled.
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 VLLM_SLEEP_DISCARD_GRAPHS=1 \
@@ -258,17 +262,20 @@ Other architectures can be opted in through the comma-separated
 own risk (validated once on H20 with the hybrid linear-attention
 `Qwen3_5ForConditionalGeneration`, whose GDN backend resolves to
 FULL_DECODE_ONLY). Additional weight offloaders, KV transfer, microbatching,
-LoRA, speculative decoding, live weight updates and communicator suspension
+LoRA, encoder graphs, speculative decoding, live weight updates and communicator suspension
 are excluded. Level 0 retains its existing behavior. Level 2, selective KV
 discard and another sleep after a partial wake are rejected. Partial wake does
 not permit inference or recapture until all memory is awake.
 
 Under tensor parallelism, every rank discards and recaptures graphs in
 lockstep through the executor's collective RPCs: the graphs embed cross-rank
-collectives, so ranks must never diverge on graph availability. If a capture
-fails with a recoverable allocation error on any rank, the engine discards
-graphs on all ranks within the same idle boundary and serves eagerly until the
-next full wake, which re-arms recapture from the full pending set.
+collectives, so ranks must never diverge on graph availability. A capture failure in a multi-rank executor terminates the engine: peers may
+already be waiting in a collective, so one rank cannot recover independently.
+The multiprocess and Ray executors use
+`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` for capture, sleep and wake RPCs.
+The in-process (`uni`) executor cannot interrupt a blocked device operation.
+A recoverable single-rank allocation failure discards the graphs and serves
+eagerly until the next full wake, which re-arms recapture.
 
 Graph destruction does not guarantee that the CUDA driver returns its cached
 physical memory. vLLM does not request driver cache reclamation or explicitly
@@ -285,18 +292,18 @@ before-suspension measurement.
 
 Recapture never overlaps an inference step, but a request or sleep arriving
 during capture waits for the current descriptor to finish. Continuous traffic
-can defer completion indefinitely. A recoverable capture allocation failure
-leaves the engine eager; unknown CUDA/capture failures terminate the engine so
-requests receive an error instead of waiting indefinitely. A failed destructive
+can defer completion indefinitely. A recoverable single-rank capture allocation failure
+leaves the engine eager; other reported CUDA/capture failures terminate the
+engine and return an error to waiting requests. A failed destructive
 sleep or wake refuses further resume operations and requires restarting the
 engine. The main loop reports these failures through the EngineDead path,
 including failures delivered by deferred sleep callbacks, so queued requests
 do not remain waiting. Repeated completed sleep/wake calls remain supported.
 
-Recapture can also increase the cost of subsequent sleeps: PyTorch graph
-capture may clear cached pinned host allocations, requiring weight backup
-buffers to be allocated again. Measure repeated sleep latency as well as
-wake and inference latency for the installed PyTorch version.
+Idle recapture reuses its capture stream and retains the host allocator's
+cached weight-backup buffers. It still runs warmups and allocates graph memory;
+measure repeated sleep, wake and inference latency for the installed PyTorch
+version.
 
 Eager and graph execution can have different floating-point results even
 without sleep. This option does not promise cross-mode or batch-invariant
