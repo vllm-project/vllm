@@ -122,8 +122,10 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
+    beam="BeamConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
+    ultravbert="ColUltraVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
