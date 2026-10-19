@@ -513,7 +513,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! v_cache, int head_dim, int num_q_heads, int num_kv_heads, "
       "int rotary_pairs, float epsilon, float norm_weight_bias, "
       "str kv_cache_dtype=\"auto\", Tensor? k_scale=None, Tensor? "
-      "v_scale=None) -> ()");
+      "v_scale=None, float q_scale=1.0) -> ()");
 #endif
 
   ops.def(

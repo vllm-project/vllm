@@ -377,7 +377,7 @@ void fused_qknorm_rope_cache(
     int64_t rotary_pairs, double epsilon, double norm_weight_bias,
     const std::string& kv_cache_dtype,
     std::optional<torch::stable::Tensor> k_scale,
-    std::optional<torch::stable::Tensor> v_scale);
+    std::optional<torch::stable::Tensor> v_scale, double q_scale);
 }  // namespace vllm
 #endif
 
