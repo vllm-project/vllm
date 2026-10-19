@@ -42,7 +42,9 @@ def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=300)
+        # A scale-up onto fresh nodes compiles and captures there, past 300 s.
+        timeout = float(os.getenv("VLLM_TEST_ELASTIC_EP_SCALE_TIMEOUT_S", "300"))
+        response = requests.post(url, json=payload, headers=headers, timeout=timeout)
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
