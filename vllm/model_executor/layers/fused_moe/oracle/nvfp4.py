@@ -102,8 +102,12 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
         )
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_w4a16_moe import (  # noqa: E501
+            FlashInferCuteDSLW4A16Experts,
+        )
 
-        return [FlashInferCuteDSLExperts]
+        # W4A4 first; the W4A16 class only accepts activation_key=None.
+        return [FlashInferCuteDSLExperts, FlashInferCuteDSLW4A16Experts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
@@ -262,22 +266,18 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-        candidates = backend_to_kernel_cls(backend)
-        if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL and activation_key is None:
-            from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_w4a16_moe import (  # noqa: E501
-                FlashInferCuteDSLW4A16Experts,
-            )
-
-            candidates = [FlashInferCuteDSLW4A16Experts]
-        for k_cls in candidates:
+        reasons = []
+        for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
+            if reason:
+                reasons.append(reason)
 
-        raise ValueError(_make_log_unsupported(backend, reason))
+        raise ValueError(_make_log_unsupported(backend, "; ".join(reasons)))
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend

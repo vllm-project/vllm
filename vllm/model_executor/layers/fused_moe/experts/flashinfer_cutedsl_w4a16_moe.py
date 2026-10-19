@@ -19,7 +19,6 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
@@ -39,11 +38,11 @@ def w4a16_tactic(num_tokens, batch_invariant):
     return ((128, 8, 256), (1, 1), True)
 
 
-def nemotron_w4a16_support(config, model_type):
-    """Limit explicit backend selection to the supported Nemotron recipe."""
+def nemotron_w4a16_support(config):
+    """Limit explicit backend selection to the validated Nemotron-H geometry."""
     parallel = config.moe_parallel_config
-    if model_type != "nemotron_h" or config.moe_backend != "flashinfer_cutedsl":
-        return False, "requires explicit Nemotron flashinfer_cutedsl selection"
+    if config.moe_backend != "flashinfer_cutedsl":
+        return False, "requires explicit moe_backend=flashinfer_cutedsl"
     if config.in_dtype != torch.bfloat16:
         return False, "requires BF16 activations"
     if config.activation != MoEActivation.RELU2_NO_MUL:
@@ -80,10 +79,7 @@ def prepare_w4a16_scales(scale):
 class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
     @staticmethod
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        current = get_current_vllm_config_or_none()
-        model = current.model_config if current is not None else None
-        model_type = getattr(getattr(model, "hf_config", None), "model_type", None)
-        supported, reason = nemotron_w4a16_support(config, model_type)
+        supported, reason = nemotron_w4a16_support(config)
         if not supported:
             return supported, reason
         try:
