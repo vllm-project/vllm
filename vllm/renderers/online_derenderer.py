@@ -47,14 +47,16 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
-from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+    make_tool_call_id,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
 )
-from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.v1.engine.detokenizer import uses_fast_detokenizer
 
@@ -334,7 +336,10 @@ class OnlineDerenderer:
             reasoning = None
 
         tc_items = (
-            [ToolCall(id=random_uuid(), function=tc) for tc in tool_calls]
+            [
+                ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                for tc in tool_calls
+            ]
             if tool_calls
             else []
         )
@@ -829,6 +834,9 @@ class OnlineDerenderer:
         total_completion_tokens = 0
         index = 0
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_token_ids = (
+            completion_request is not None and completion_request.return_token_ids
+        )
 
         for gen, pt, seed_ids_override in zip(
             generate_responses, prompt_tokens_list, prompt_token_ids_list
@@ -872,6 +880,7 @@ class OnlineDerenderer:
                         finish_reason=choice.finish_reason,
                         stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
+                        token_ids=choice.token_ids if return_token_ids else None,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
@@ -937,6 +946,9 @@ class OnlineDerenderer:
         updated_state = state
 
         top_limit = _completion_top_logprobs_limit(completion_request)
+        return_token_ids = (
+            completion_request is not None and completion_request.return_token_ids
+        )
         for choice in generate_chunk.choices:
             delta_tids = choice.token_ids or []
             new_text, updated_state = await self._detokenize_delta_async(
@@ -977,6 +989,7 @@ class OnlineDerenderer:
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=choice.stop_reason,
+                    token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
 
