@@ -1836,16 +1836,17 @@ def test_serving_chat_starts_without_tokenizer():
 
 
 @pytest.mark.asyncio
-async def test_serving_chat_mistral_token_ids_prompt_is_validated():
-    """Regression test: when the Mistral tokenizer path returns token IDs
-    directly, we must still apply input length validation and clamp the
-    generation budget to the context the prompt leaves over.
+@pytest.mark.parametrize(
+    "prompt_length,max_tokens,truncate_prompt_tokens,expected_max_tokens",
+    [(95, 10, None, 5), (200, None, -1, 1)],
+)
+async def test_serving_chat_mistral_token_ids_prompt_is_validated(
+    prompt_length, max_tokens, truncate_prompt_tokens, expected_max_tokens
+):
+    """Token-ID prompts must leave a generation budget after truncation.
 
-    `max_tokens` is an upper bound on generation rather than a reservation off
-    the context window, so a 95-token prompt against `max_model_len=100` is
-    accepted even though the client asked for 10 output tokens. Genuine
-    overflow is covered by
-    test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected.
+    A large requested output limit is capped to the remaining context. An
+    omitted limit must still reserve one output token for automatic truncation.
     """
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -1857,12 +1858,11 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
         MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
-    # Force the Mistral chat template renderer to return token IDs. The prompt
-    # fits the context on its own; only the naive prompt+output sum overflows.
+    # Exercise the renderer path that returns token IDs directly.
     mock_renderer.render_messages_async = AsyncMock(
         return_value=(
             [],
-            TokensPrompt(prompt_token_ids=list(range(95))),
+            TokensPrompt(prompt_token_ids=list(range(prompt_length))),
         )
     )
     mock_engine.renderer = mock_renderer
@@ -1872,15 +1872,16 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "what is 1+1?"}],
-        max_tokens=10,
+        max_tokens=max_tokens,
+        truncate_prompt_tokens=truncate_prompt_tokens,
     )
 
-    # Must not raise: the prompt alone fits within max_model_len.
+    # Both an already fitting prompt and an auto-truncated one must succeed.
     await serving_chat.create_chat_completion(req)
 
-    # get_max_tokens() clamps the sampling budget to the 5 tokens left over.
+    # The generation budget fits the remaining context.
     sampling_params = mock_engine.generate.call_args.args[1]
-    assert 1 <= sampling_params.max_tokens <= 5
+    assert sampling_params.max_tokens == expected_max_tokens
 
 
 @pytest.mark.asyncio
