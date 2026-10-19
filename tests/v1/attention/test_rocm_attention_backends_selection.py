@@ -787,7 +787,12 @@ def turboquant_run_config():
 
 def test_turboquant_boundary_selection_is_not_cached_from_ordinary_run(
     cleared_attention_selector_cache,
+    monkeypatch,
 ):
+    import vllm.platforms.rocm as rocm
+
+    # The ordinary run expects vLLM's default order (gfx1201 swaps it).
+    monkeypatch.setattr(rocm, "on_gfx1201", lambda: False)
     from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
     from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
     from vllm.v1.attention.selector import get_attn_backend
