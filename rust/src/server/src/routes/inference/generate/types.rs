@@ -50,6 +50,7 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
@@ -62,6 +63,16 @@ pub struct GenerateRequest {
 }
 
 impl Normalizable for GenerateRequest {}
+
+/// Response level of the generate API, mirroring Python's `OutputMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerateOutputMode {
+    /// Token IDs only. The default when absent.
+    Tokens,
+    /// Token IDs plus detokenized text and decoded logprobs. Not supported.
+    Text,
+}
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
 ///
