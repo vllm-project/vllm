@@ -135,7 +135,7 @@ def allocate_shared_offload(
         ),
         cpu_page_size=0,
         barrier=group.barrier,
-        populate_only_on_creator=True,
+        populate_shard=(local_rank, local_size),
     )
     cpu_caches = {
         name: region.create_next_canonical_view(num_blocks * tensor[0].nbytes)
