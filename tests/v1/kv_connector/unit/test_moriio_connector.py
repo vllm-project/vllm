@@ -146,6 +146,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.is_producer = False
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
+    scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
     scheduler.unmap_request_id = MagicMock()
     return scheduler
@@ -158,6 +159,10 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = True
     scheduler.block_size = block_size
+    scheduler._has_mamba = False
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
+    )
     scheduler.blocks_per_sw = [0]
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
@@ -193,6 +198,17 @@ def _build_meta(
         num_scheduled_tokens=num_scheduled_tokens or {},
     )
     return scheduler.build_connector_meta(scheduler_output)
+
+
+def test_write_mode_does_not_reload_remote_kv_after_preemption():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    request = create_request(request_id=1, num_tokens=32, do_remote_prefill=True)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
+
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["do_remote_prefill"] = False
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
 
 
 class FakeMoRIIOWrapper:
@@ -562,15 +578,14 @@ def test_send_transfer_release_sends_structured_release_message():
     scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
 
     payload = sock.send.call_args.args[0]
-    # WRITE-mode release advertises the consumer (decode) TP size so the prefill
-    # side counts the right number of ACKs via get_moriio_expected_ack_count,
-    # mirroring the READ-mode release in _pop_done_transfers (see
-    # test_read_completion_sends_structured_release_with_consumer_tp_size). The
-    # fixture's tp_size is 2, so consumer_tp_size == 2.
+    # Unlike the READ-mode release in _pop_done_transfers, which every decode
+    # rank sends, the decode scheduler sends this one once per prefill rank on
+    # behalf of all decode ranks (the fixture's tp_size is 2), so the prefill
+    # rank must count it as its only ACK.
     assert msgspec.msgpack.decode(payload) == {
         "type": "release",
         "transfer_id": "xfer-7",
-        "consumer_tp_size": 2,
+        "consumer_tp_size": 1,
     }
 
 
@@ -933,6 +948,7 @@ def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
     # their own prompt-block count; a sliding-window group is left untouched.
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._has_mamba = False
     scheduler._group_block_sizes = [16, 32, 16]
 
     req = SimpleNamespace(num_prompt_tokens=40)

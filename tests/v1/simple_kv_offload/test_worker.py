@@ -29,11 +29,11 @@ from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
-from vllm.v1.core.kv_cache_utils import (
+from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
-    resolve_kv_cache_block_sizes,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -369,6 +369,69 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
         (num_blocks, expected_block_bytes)
     }
+
+
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_explicit_cpu_blocks_bound_live_worker_allocation(monkeypatch, num_layers):
+    """Different live KV strides must honor the same explicit CPU pool size."""
+    num_blocks = 4
+    names = [f"layer.{i}" for i in range(num_layers)]
+    raw = torch.zeros(
+        num_layers * num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda"
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=num_blocks * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    caches = dict(zip(names, raw.view(num_layers, num_blocks, BLOCK_BYTES)))
+    worker = SimpleCPUOffloadWorker(None, config, 8 * BLOCK_BYTES, num_cpu_blocks=4)
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+    try:
+        worker.register_kv_caches(caches)
+        assert worker.num_cpu_blocks == 4
+        assert worker.cpu_kv_caches is not None
+        assert all(t.shape[0] == 4 for t in worker.cpu_kv_caches.values())
+        assert sum(t.nbytes for t in worker.cpu_kv_caches.values()) <= 8 * BLOCK_BYTES
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()
+
+
+@pytest.mark.parametrize(
+    "capacity_bytes, count, local_capacity",
+    [(8 * BLOCK_BYTES, 5, 4), (BLOCK_BYTES, 1, 0)],
+)
+def test_explicit_cpu_blocks_reject_heavier_worker_before_allocation(
+    capacity_bytes, count, local_capacity
+):
+    """A count that fits the scheduler's stage must fail on a smaller worker."""
+    names = ["layer.0", "layer.1"]
+    raw = torch.zeros(2 * 4 * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw.nbytes,
+                layers=names,
+                layer_stride=4 * BLOCK_BYTES,
+                block_stride=BLOCK_BYTES,
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    worker = SimpleCPUOffloadWorker(None, config, capacity_bytes, num_cpu_blocks=count)
+    caches = dict(zip(names, raw.view(2, 4, BLOCK_BYTES)))
+    with pytest.raises(ValueError, match=f"local offload capacity {local_capacity}"):
+        worker.register_kv_caches(caches)
+    assert worker.cpu_kv_caches is None
 
 
 def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
