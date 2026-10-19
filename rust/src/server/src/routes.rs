@@ -142,6 +142,8 @@ fn build_router_with_options(
         // TODO: implement the Anthropic Messages API.
         .route("/v1/messages", post(not_supported))
         .route("/v1/messages/count_tokens", post(not_supported))
+        // TODO: implement batched chat completions.
+        .route("/v1/chat/completions/batch", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));

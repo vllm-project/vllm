@@ -806,6 +806,7 @@ async fn unimplemented_python_routes_return_not_implemented() {
     for (method, uri) in [
         ("POST", "/v1/messages"),
         ("POST", "/v1/messages/count_tokens"),
+        ("POST", "/v1/chat/completions/batch"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
