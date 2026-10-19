@@ -7,6 +7,7 @@ use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
     RendererSelection,
 };
+use vllm_text::backend::hf::ModelSource;
 
 use super::{BenchCommand, Cli, Command};
 
@@ -38,6 +39,8 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B-Instruct",
         "--revision",
         "release",
+        "--tokenizer",
+        "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
         "--max-model-len",
@@ -58,6 +61,14 @@ fn render_args_build_config_without_tls() {
 
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
     assert_eq!(config.revision.as_deref(), Some("release"));
+    assert_eq!(
+        config.tokenizer,
+        Some(ModelSource {
+            id: "Qwen/Qwen2.5-0.5B".to_string(),
+            revision: Some("release".to_string()),
+        })
+    );
+    assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, Some(32768));
@@ -178,6 +189,11 @@ fn serve_args_forward_python_flags_with_separator() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        model_source: ModelSourceArgs {
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1081,6 +1097,11 @@ fn frontend_args_accept_json() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        model_source: ModelSourceArgs {
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1190,6 +1211,103 @@ fn frontend_args_json_ignores_engine_owned_max_model_len() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+}
+
+#[test]
+fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "org/weights",
+        "--revision",
+        "release",
+        "--tokenizer",
+        "org/tokenizer",
+        "--hf-config-path",
+        "org/config",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string());
+    expect![[r#"
+        (
+            Some(
+                ModelSource {
+                    id: "org/tokenizer",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+            Some(
+                ModelSource {
+                    id: "org/config",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+        )
+    "#]]
+    .assert_debug_eq(&(config.tokenizer, config.hf_config));
+    expect![[r#"
+        [
+            "--tokenizer",
+            "org/tokenizer",
+            "--hf-config-path",
+            "org/config",
+            "--revision",
+            "release",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(1234).python_args);
+}
+
+#[test]
+fn frontend_args_json_resolve_tokenizer_revision_against_model() {
+    let payload = r#"{"model_tag":"org/weights","revision":"release","tokenizer_revision":"tokenizer-fix","hf_config_path":"org/config"}"#;
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        payload,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+
+    let config = args.into_config();
+    expect![[r#"
+        (
+            Some(
+                ModelSource {
+                    id: "org/weights",
+                    revision: Some(
+                        "tokenizer-fix",
+                    ),
+                },
+            ),
+            Some(
+                ModelSource {
+                    id: "org/config",
+                    revision: Some(
+                        "release",
+                    ),
+                },
+            ),
+        )
+    "#]]
+    .assert_debug_eq(&(config.tokenizer, config.hf_config));
 }
 
 #[test]
@@ -1753,6 +1871,11 @@ fn serve_args_accept_handshake_aliases() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
+                        model_source: ModelSourceArgs {
+                            tokenizer: None,
+                            tokenizer_revision: None,
+                            hf_config_path: None,
+                        },
                         hf_overrides: HfOverrides(
                             {},
                         ),
@@ -1907,6 +2030,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            hf_config: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2002,6 +2127,8 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            hf_config: None,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2142,6 +2269,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             model: "Qwen/Qwen3-0.6B",
             revision: None,
+            tokenizer: None,
+            hf_config: None,
             hf_overrides: HfOverrides(
                 {},
             ),

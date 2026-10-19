@@ -7,6 +7,7 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod model_source;
 mod ssl;
 mod unsupported;
 
@@ -37,6 +38,7 @@ use vllm_server::{
 };
 use vllm_text::backend::hf::HfOverrides;
 
+use crate::cli::model_source::ModelSourceArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
@@ -116,6 +118,9 @@ pub struct RenderArgs {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     #[arg(long)]
     revision: Option<String>,
+    /// Tokenizer and config sources that differ from the model.
+    #[command(flatten)]
+    model_source: ModelSourceArgs,
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
     hf_overrides: HfOverrides,
@@ -168,10 +173,14 @@ pub struct RenderArgs {
 impl RenderArgs {
     pub(super) fn into_config(self) -> RenderConfig {
         let tls = self.ssl.tls_config();
+        let tokenizer = self.model_source.tokenizer_source(&self.model, self.revision.as_deref());
+        let hf_config = self.model_source.hf_config_source(self.revision.as_deref());
 
         RenderConfig {
             model: self.model,
             revision: self.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
@@ -216,6 +225,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub revision: Option<String>,
+
+    /// Tokenizer and config sources that differ from the model.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub model_source: ModelSourceArgs,
 
     /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
     /// Objects merge recursively and arrays/scalars replace existing values.
@@ -530,6 +544,8 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let tokenizer = self.model_source.tokenizer_source(&self.model, self.revision.as_deref());
+        let hf_config = self.model_source.hf_config_source(self.revision.as_deref());
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -546,6 +562,8 @@ impl SharedRuntimeArgs {
             },
             model: self.model,
             revision: self.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -596,6 +614,8 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let tokenizer = self.model_source.tokenizer_source(&self.model, self.revision.as_deref());
+        let hf_config = self.model_source.hf_config_source(self.revision.as_deref());
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -609,6 +629,8 @@ impl SharedRuntimeArgs {
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             revision: self.revision,
+            tokenizer,
+            hf_config,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -853,7 +875,9 @@ impl ServeArgs {
             serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
         });
 
-        self.managed_engine.clone().into_config(
+        let mut managed_engine = self.managed_engine.clone();
+        managed_engine.python_args.extend(self.runtime.model_source.python_args());
+        managed_engine.into_config(
             self.runtime.model.clone(),
             self.runtime.revision.clone(),
             self.runtime.max_logprobs,
