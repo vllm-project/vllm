@@ -2,8 +2,9 @@ group: Quantization XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: ':nvidia: (H200 MIG 35GB) Quantization'
+- label: ':nvidia: (H200 MIG 35GB) Quantization %N'
   key: quantization-2
+  parallelism: 4
   device: intel_gpu
   timeout_in_minutes: 40
   optional: true
