@@ -2722,6 +2722,13 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        if compilation_config.pass_config.fuse_gemm_add_rms:
+            max_token_num = (
+                compilation_config.pass_config.gemm_add_rms_fusion_max_token_num
+            )
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
+
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)

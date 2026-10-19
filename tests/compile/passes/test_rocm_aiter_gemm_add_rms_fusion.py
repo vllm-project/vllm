@@ -17,6 +17,8 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.scheduler import SchedulerConfig
+from vllm.config.utils import Range
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
 
@@ -159,3 +161,25 @@ def test_fuse_gemm_add_rms(
             dict(zip(names, n.args), **n.kwargs)["gemma_norm"] == gemma_norm
             for n in fused
         )
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
+def test_fuse_gemm_add_rms_compile_range():
+    compilation_config = CompilationConfig(
+        pass_config=PassConfig(fuse_gemm_add_rms=True),
+    )
+    VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=compilation_config,
+    )
+    assert compilation_config.get_compile_ranges() == [
+        Range(start=1, end=256),
+        Range(start=257, end=8192),
+    ]

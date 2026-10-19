@@ -154,7 +154,10 @@ class PassConfig:
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     fuse_gemm_add_rms: bool = None  # type: ignore[assignment]
-    """Fuse GEMM + residual add + RMSNorm on ROCm/AITER (ranges <= 256 tokens)."""
+    """Fuse GEMM + residual add + RMSNorm on ROCm/AITER for small compile ranges."""
+
+    gemm_add_rms_fusion_max_token_num: int = 256
+    """Largest compile range (tokens) for the GEMM + add RMSNorm fusion."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.

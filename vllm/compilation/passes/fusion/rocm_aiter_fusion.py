@@ -1434,10 +1434,11 @@ class AiterGemmAddRMSNormPattern(VllmPatternReplacement):
 class RocmAiterGemmAddRMSNormFusionPass(VllmFusionPatternMatcherPass):
     """Fuse unquantized GEMM + residual add + RMSNorm on decode-sized ranges."""
 
-    max_token_num = 256
-
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_gemm_add_rmsnorm_fusion_pass")
+        self.max_token_num = (
+            config.compilation_config.pass_config.gemm_add_rms_fusion_max_token_num
+        )
 
         if not rocm_aiter_ops.is_fused_reduce_add_rmsnorm_supported():
             logger.warning_once(
