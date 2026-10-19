@@ -142,14 +142,14 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
         output = super().forward(input_)
         output = output[0] if isinstance(output, tuple) else output
         adapter_output = torch.zeros(
-            (1, output.size(0), self.output_size),
+            (1, output.size(0), self.padded_num_labels),
             dtype=torch.float32,
             device=output.device,
         )
         self.punica_wrapper.add_shrink(
             adapter_output,
             input_.to(self.full_weight_stacked.dtype),
-            (self.full_weight_stacked[:, :, : self.output_size],),
+            (self.full_weight_stacked,),
             1.0,
         )
         indices = self.punica_wrapper.token_lora_indices
@@ -158,9 +158,9 @@ class TokenClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
         )
         safe_indices = indices.clamp_min(0)
         use_full = (indices >= 0) & self.full_module_enabled[safe_indices]
-        adapter_output = adapter_output[0].to(output.dtype) + self.full_bias_stacked[
-            safe_indices, : self.output_size
-        ].to(output.dtype)
+        adapter_output = adapter_output[0, :, : self.output_size].to(
+            output.dtype
+        ) + self.full_bias_stacked[safe_indices, : self.output_size].to(output.dtype)
         return torch.where(use_full.unsqueeze(-1), adapter_output, output)
 
     def _apply_lora_to_output(
