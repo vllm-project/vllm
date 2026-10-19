@@ -1505,15 +1505,15 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
 @pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
 def test_scheduler_connector_sends_only_computed_hashes_off_schedule(finish):
     connector = _make_connector()
-    hashes = [b"a" * 32, b"b" * 32]
-    request = _scheduler_request("request", hashes, num_tokens=9)
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=9)
     request.num_computed_tokens = 0
     requests = {request.request_id: request}
     metadata = connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]), requests
     )
-    assert list(metadata.block_hashes[request.request_id]) == hashes[:1]
+    assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
 
+    request.block_hashes.append(b"b" * 32)
     request.num_computed_tokens = 7
     if finish:
         connector.request_finished(request)
@@ -1524,7 +1524,7 @@ def test_scheduler_connector_sends_only_computed_hashes_off_schedule(finish):
     if not finish:
         request.num_computed_tokens = 8
         metadata = connector.build_connector_meta(_step_output([], [], []), requests)
-        assert list(metadata.block_hashes[request.request_id]) == hashes[1:]
+        assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
 def test_scheduler_starts_worker_output_at_requested_prompt_token():
