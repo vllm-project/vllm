@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from argparse import Namespace
 
+from vllm.entrypoints.common import startup
 from vllm.entrypoints.common.startup import redact_sensitive_args
 
 
@@ -42,9 +43,9 @@ class TestRedactSensitiveArgs:
             "enable_auto_tool_choice": True,
             "tool_call_parser": "qwen3_coder",
         }
-        monkeypatch.setattr(setup, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.common.setup"):
-            setup.log_non_default_args(args=Namespace())
+        monkeypatch.setattr(startup, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.common.startup"):
+            startup.log_non_default_args(args=Namespace())
         message = caplog.text
         assert self.API_KEY not in message
         assert "'api_key': '***'" in message
@@ -59,9 +60,9 @@ class TestRedactSensitiveArgs:
             "hf_token": hf_token,
             "tool_call_parser": "qwen3_coder",
         }
-        monkeypatch.setattr(setup, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.common.setup"):
-            setup.log_non_default_args(args=Namespace())
+        monkeypatch.setattr(startup, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.common.startup"):
+            startup.log_non_default_args(args=Namespace())
         message = caplog.text
         assert hf_token not in message
         assert "'hf_token': '***'" in message

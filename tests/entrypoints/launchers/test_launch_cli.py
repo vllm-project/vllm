@@ -24,6 +24,7 @@ from vllm.entrypoints.cli.launch import (
     RenderSubcommand,
     cmd_init,
 )
+from vllm.entrypoints.common import startup
 from vllm.snapshot.controller import (
     LocalSnapshotTools,
     SnapshotCreateError,
@@ -159,7 +160,7 @@ def test_snapshot_environment_contract(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ):
-    monkeypatch.setattr(setup, "cli_env_setup", pytest.fail)
+    monkeypatch.setattr(startup, "cli_env_setup", pytest.fail)
     secret = "snapshot-secret"
     monkeypatch.setenv("VLLM_API_KEY", secret)
     monkeypatch.setenv("VLLM_USER_SETTING", secret)
