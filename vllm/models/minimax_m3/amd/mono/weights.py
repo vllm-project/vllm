@@ -5,16 +5,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterMxfp4Experts,
+)
 
 HIDDEN = 6144
 QKV_ROWS = 2560
 O_K = 2048
 EXPERTS = 129
 INTER = 768
+
+
+class EffectiveActivationMode(Enum):
+    BF16 = "bf16"
+    MXFP4 = "mxfp4"
+    UNSUPPORTED = "unsupported"
+
+
+def effective_activation_mode(experts) -> EffectiveActivationMode:
+    quant_method = getattr(experts, "quant_method", None)
+    moe_kernel = getattr(quant_method, "moe_kernel", None)
+    fused_experts = getattr(moe_kernel, "fused_experts", None)
+    if not isinstance(fused_experts, AiterMxfp4Experts):
+        return EffectiveActivationMode.UNSUPPORTED
+    if not fused_experts.expects_unquantized_inputs:
+        return EffectiveActivationMode.MXFP4
+    if getattr(fused_experts.moe_config, "use_mxfp4_w4a4_dsv4", False):
+        return EffectiveActivationMode.MXFP4
+    return EffectiveActivationMode.BF16
 
 
 def _require(condition: bool, message: str) -> None:
@@ -80,7 +102,6 @@ class MonoLayerWeights:
         moe = layer.block_sparse_moe
         runner = moe.experts
         experts = getattr(runner, "routed_experts", runner)
-        backend = getattr(getattr(experts, "quant_method", None), "mxfp4_backend", None)
 
         _require(
             moe.is_fused_shared_expert_enabled and moe.use_aiter_moe_fse,
@@ -91,8 +112,8 @@ class MonoLayerWeights:
             f"layer {layer_id} requires top-4 routing",
         )
         _require(
-            backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-            f"layer {layer_id} requires AITER_MXFP4_MXFP4, found {backend}",
+            effective_activation_mode(experts) is EffectiveActivationMode.BF16,
+            f"layer {layer_id} requires effective BF16 expert activations",
         )
         _require(
             float(moe.routed_scaling_factor) == 2.0,

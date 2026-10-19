@@ -6,12 +6,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterMxfp4Experts,
+)
 from vllm.models.minimax_m3.amd.mono.weights import (
     EXPERTS,
     HIDDEN,
     INTER,
+    EffectiveActivationMode,
     MonoLayerWeights,
+    effective_activation_mode,
 )
 
 
@@ -25,6 +29,11 @@ def _layer():
     w2 = _parameter((EXPERTS, HIDDEN, INTER // 2), torch.float4_e2m1fn_x2)
     w13.is_shuffled = True
     w2.is_shuffled = True
+    fused_experts = object.__new__(AiterMxfp4Experts)
+    fused_experts.moe_config = SimpleNamespace(
+        use_mori_kernels=False,
+        use_mxfp4_w4a4_dsv4=False,
+    )
     experts = SimpleNamespace(
         top_k=4,
         renormalize=True,
@@ -32,7 +41,9 @@ def _layer():
         swiglu_alpha=1.702,
         swiglu_beta=1.0,
         swiglu_limit=7.0,
-        quant_method=SimpleNamespace(mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4),
+        quant_method=SimpleNamespace(
+            moe_kernel=SimpleNamespace(fused_experts=fused_experts)
+        ),
         w13_weight=w13,
         w2_weight=w2,
         w13_weight_scale=_parameter((EXPERTS * 2 * INTER, HIDDEN // 32), torch.uint8),
@@ -87,6 +98,14 @@ def test_weight_views_preserve_checkpoint_formats():
     assert weights.w13.dtype == torch.float4_e2m1fn_x2
     assert weights.routed_scale == 2.0
     assert weights.shared_weight == 1.0
+
+
+def test_effective_activation_mode_is_explicitly_bf16():
+    experts = _layer().block_sparse_moe.experts.routed_experts
+    assert effective_activation_mode(experts) is EffectiveActivationMode.BF16
+
+    experts.quant_method.moe_kernel.fused_experts.moe_config.use_mori_kernels = True
+    assert effective_activation_mode(experts) is EffectiveActivationMode.MXFP4
 
 
 def test_bf16_router_is_refused():
