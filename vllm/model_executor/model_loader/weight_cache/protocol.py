@@ -242,6 +242,28 @@ def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> s
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
+def hash_rope_parameters(model_config: ModelConfig) -> str:
+    """Fingerprint the text RoPE parameters used to construct cached buffers."""
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
 def _safetensors_header(path: str) -> bytes:
     """Return the raw safetensors header (length prefix + JSON) of a file.
 
@@ -293,6 +315,7 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    rope_parameters_hash: str
     revision: str | None
     vllm_version: str
     pp_size: int = 1
@@ -347,6 +370,7 @@ class WeightCacheKey:
                 quant_config=quant_config,
                 runtime_quant_config=model_config.quantization_config,
             ),
+            rope_parameters_hash=hash_rope_parameters(model_config),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
             is_draft=is_draft,
