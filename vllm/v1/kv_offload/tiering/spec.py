@@ -469,8 +469,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 logger.warning(
                     "Secondary-tier KV is only valid for engines with the same "
                     "parallel configuration; sharing it across TP sizes needs "
-                    "canonical_layout=true in kv_connector_extra_config and "
-                    "parallelism-agnostic KV cache layers."
+                    "canonical_layout=true in kv_connector_extra_config, "
+                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
                 )
 
         return self._manager
