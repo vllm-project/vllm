@@ -1410,6 +1410,9 @@ class EngramBatch(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        # Same allocator as the send buffer: NCCL hangs this all-to-all when its
+        # buffers mix the cumem pool and the caching allocator.
+        self.exchanged_rows = torch.empty_like(self.packed_rows)
         width = table.n_hash_cols * table.dim
         self.fp8_values = torch.empty(
             len(layers), max_tokens, width, dtype=torch.uint8, device=device
@@ -1477,7 +1480,7 @@ class EngramBatch(nn.Module):
                 )
             group = get_engram_dp_group()
             assert group is not None
-            sent, rows = rows, torch.empty_like(rows)
+            sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
             torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
