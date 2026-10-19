@@ -212,16 +212,15 @@ def test_b12x_attention_sinks_refresh_in_place_after_reload() -> None:
     impl = object.__new__(B12xPagedAttentionImpl)
     source = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
     impl._sinks_source = source
-    impl.sinks = None
+    layer = torch.nn.Module()
 
-    impl.process_weights_after_loading(torch.bfloat16)
-    assert impl.sinks is not None
-    sinks_ptr = impl.sinks.data_ptr()
+    impl.process_weights_after_loading(torch.bfloat16, layer)
+    sinks_ptr = layer.get_buffer("_sinks_fp32").data_ptr()
     source.copy_(torch.tensor([3.0, 4.0], dtype=torch.bfloat16))
-    impl.process_weights_after_loading(torch.bfloat16)
+    impl.process_weights_after_loading(torch.bfloat16, layer)
 
-    assert impl.sinks.data_ptr() == sinks_ptr
-    torch.testing.assert_close(impl.sinks, source.float())
+    assert layer._sinks_fp32.data_ptr() == sinks_ptr
+    torch.testing.assert_close(layer._sinks_fp32, source.float())
 
 
 @pytest.mark.parametrize(

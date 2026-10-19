@@ -252,7 +252,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=(
+                    layer.alibi_slopes if self.alibi_slopes is not None else None
+                ),
                 window_size=sliding_window_size,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,

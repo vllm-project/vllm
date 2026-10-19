@@ -251,6 +251,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             shape = [num_tokens, num_heads * head_size]
 
         """
+        alibi_slopes = layer.alibi_slopes if self.alibi_slopes is not None else None
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
@@ -313,7 +314,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=softmax_scale,
                 causal=True,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
@@ -344,7 +345,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=softmax_scale,
                 causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,

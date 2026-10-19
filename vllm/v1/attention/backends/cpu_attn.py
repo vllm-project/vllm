@@ -315,8 +315,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
 
         self.num_kv_heads = num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = -1
@@ -373,6 +371,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
 
         """
+        alibi_slopes = layer.alibi_slopes if self.alibi_slopes is not None else None
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
@@ -402,7 +401,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                     attn_metadata,
                     self.scale,
                     self.sliding_window,
-                    self.alibi_slopes,
+                    alibi_slopes,
                 )
                 return output
             # For encoder attention,
@@ -446,7 +445,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             seq_lens=attn_metadata.seq_lens,
             scale=self.scale,
             causal=attn_metadata.causal,
-            alibi_slopes=self.alibi_slopes,  # type: ignore
+            alibi_slopes=alibi_slopes,
             sliding_window=self.sliding_window,
             block_table=attn_metadata.block_table,
             softcap=self.logits_soft_cap,

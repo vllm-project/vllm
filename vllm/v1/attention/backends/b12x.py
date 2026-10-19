@@ -837,17 +837,22 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
             for page_size in _B12X_SUPPORTED_PAGE_SIZES
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
+    ) -> None:
         del act_dtype
         source_sinks = self._sinks_source
-        if source_sinks is None:
+        if source_sinks is None or layer is None:
             return
+        sinks = getattr(layer, "_sinks_fp32", None)
         if source_sinks.dtype == torch.float32:
-            self.sinks = source_sinks
-        elif self.sinks is None or self.sinks.dtype != torch.float32:
-            self.sinks = source_sinks.to(torch.float32)
+            sinks = source_sinks.detach()
+        elif sinks is None or sinks.dtype != torch.float32:
+            sinks = source_sinks.to(torch.float32)
         else:
-            self.sinks.copy_(source_sinks)
+            sinks.copy_(source_sinks)
+        layer.register_buffer("_sinks_fp32", sinks, persistent=False)
+        self.sinks = sinks  # warmup compiles without a layer
 
     def _prepare_fp8_descales(
         self,
@@ -1066,7 +1071,9 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
             cu_seqlens_q=cu_seqlens_q,
             window_left=self.window_left,
             active_total_q=(None if plan.caps.mode == "extend" else num_actual_tokens),
-            attention_sink_bias=self.sinks,
+            attention_sink_bias=(
+                layer._sinks_fp32 if self._sinks_source is not None else None
+            ),
             k_descale=k_descale,
             v_descale=v_descale,
         )

@@ -264,8 +264,6 @@ class RocmAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
@@ -445,7 +443,7 @@ class RocmAttentionImpl(AttentionImpl):
             max_query_len=max_seqlen_q,
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,
-            alibi_slopes=self.alibi_slopes,
+            alibi_slopes=layer.alibi_slopes if self.alibi_slopes is not None else None,
             # self.sliding_window[0] is the FlashAttention-style left span (W - 1).
             # chunked_prefill_paged_decode expects the full window length W.
             sliding_window=1 + self.sliding_window[0],

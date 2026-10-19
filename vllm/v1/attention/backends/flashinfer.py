@@ -1861,8 +1861,6 @@ class FlashInferImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
@@ -1890,17 +1888,14 @@ class FlashInferImpl(AttentionImpl):
                 "FlashInferImpl"
             )
 
-        self.sinks: torch.Tensor | None = None
         # Keep the source so RL weight updates can refresh the runtime tensor.
         self._sinks_source = sinks
-        if sinks is not None:
-            if sinks.shape[0] != num_heads:
-                raise ValueError(
-                    "Sinks must have the same number of heads as the number of "
-                    f"heads in the layer. Expected {num_heads}, but got "
-                    f"{sinks.shape[0]}."
-                )
-            self.sinks = sinks
+        if sinks is not None and sinks.shape[0] != num_heads:
+            raise ValueError(
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Expected {num_heads}, but got "
+                f"{sinks.shape[0]}."
+            )
 
         self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             num_heads, num_kv_heads, is_prefill=False
@@ -1960,16 +1955,20 @@ class FlashInferImpl(AttentionImpl):
         )
 
     # FlashInfer requires attention sinks to be float32
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
+    ):
         source_sinks = self._sinks_source
-        if source_sinks is None:
+        if source_sinks is None or layer is None:
             return
+        sinks = getattr(layer, "_sinks_fp32", None)
         if source_sinks.dtype == torch.float32:
-            self.sinks = source_sinks
-        elif self.sinks is None or self.sinks.dtype != torch.float32:
-            self.sinks = source_sinks.to(torch.float32)
+            sinks = source_sinks.detach()
+        elif sinks is None or sinks.dtype != torch.float32:
+            sinks = source_sinks.to(torch.float32)
         else:
-            self.sinks.copy_(source_sinks)
+            sinks.copy_(source_sinks)
+        layer.register_buffer("_sinks_fp32", sinks, persistent=False)
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale
@@ -2035,6 +2034,7 @@ class FlashInferImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
 
         """
+        sinks = layer._sinks_fp32 if self._sinks_source is not None else None
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
@@ -2250,11 +2250,11 @@ class FlashInferImpl(AttentionImpl):
                     if isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):
-                        assert self.sinks is not None
+                        assert sinks is not None
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            self.sinks,
+                            sinks,
                             self.scale * layer._q_scale_float * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
@@ -2373,7 +2373,7 @@ class FlashInferImpl(AttentionImpl):
                     cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
                     cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
                     window_left=self.window_left,
-                    sinks=self.sinks,
+                    sinks=sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
@@ -2442,7 +2442,7 @@ class FlashInferImpl(AttentionImpl):
                         lse=lse,
                         return_lse=True,
                         kv_cache_sf=kv_cache_sf,
-                        sinks=self.sinks,
+                        sinks=sinks,
                     )
                     output[:num_decode_tokens] = self.dcp_combine(
                         output_tmp,
@@ -2458,7 +2458,7 @@ class FlashInferImpl(AttentionImpl):
                         v_scale=layer._v_scale_float,
                         out=out_decode,
                         kv_cache_sf=kv_cache_sf,
-                        sinks=self.sinks,
+                        sinks=sinks,
                     )
 
                 if needs_fp8_out:
@@ -2526,7 +2526,7 @@ class FlashInferImpl(AttentionImpl):
                         bmm2_scale=self.bmm2_scale,
                         window_left=self.window_left,
                         out=output_padded[:decode_query_tokens],
-                        sinks=self.sinks,
+                        sinks=sinks,
                         kv_layout=get_flashinfer_layout_string(kv_cache_layout),
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
@@ -2591,7 +2591,7 @@ class FlashInferImpl(AttentionImpl):
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
-                    sinks=self.sinks,
+                    sinks=sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_layout=get_flashinfer_layout_string(kv_cache_layout),

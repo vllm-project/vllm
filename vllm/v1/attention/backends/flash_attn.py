@@ -1071,8 +1071,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
@@ -1209,6 +1207,7 @@ class FlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
 
         """
+        alibi_slopes = layer.alibi_slopes if self.alibi_slopes is not None else None
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
@@ -1302,6 +1301,7 @@ class FlashAttentionImpl(AttentionImpl):
                 q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
+                alibi_slopes=alibi_slopes,
             )
             return output
         else:
@@ -1407,7 +1407,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=causal,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=alibi_slopes,
                 window_size=sliding_window_size,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
@@ -1472,6 +1472,7 @@ class FlashAttentionImpl(AttentionImpl):
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
+        alibi_slopes: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
@@ -1494,7 +1495,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=max_seqlen_q,
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=alibi_slopes,
                 window_size=list(self.sliding_window)
                 if self.sliding_window is not None
                 else None,
@@ -1556,7 +1557,7 @@ class FlashAttentionImpl(AttentionImpl):
                 attn_metadata.dcp_context_kv_lens,
                 attn_metadata.max_dcp_context_kv_len,
                 self.scale,
-                self.alibi_slopes,
+                alibi_slopes,
                 sliding_window_size,
                 block_table,
                 self.logits_soft_cap,
@@ -1584,7 +1585,7 @@ class FlashAttentionImpl(AttentionImpl):
                 max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
                 softmax_scale=self.scale,
                 causal=False,
-                alibi_slopes=self.alibi_slopes,
+                alibi_slopes=alibi_slopes,
                 window_size=sliding_window_size,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
@@ -1616,7 +1617,7 @@ class FlashAttentionImpl(AttentionImpl):
             max_seqlen_k=max_seqlen_q,
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
-            alibi_slopes=self.alibi_slopes,
+            alibi_slopes=alibi_slopes,
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             return_softmax_lse=True,
@@ -1656,6 +1657,7 @@ class FlashAttentionImpl(AttentionImpl):
             layer: The attention layer
 
         """
+        alibi_slopes = layer.alibi_slopes if self.alibi_slopes is not None else None
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
@@ -1692,7 +1694,7 @@ class FlashAttentionImpl(AttentionImpl):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=False,  # Encoder attention is bidirectional
-            alibi_slopes=self.alibi_slopes,
+            alibi_slopes=alibi_slopes,
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,

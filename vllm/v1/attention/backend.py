@@ -768,6 +768,8 @@ class AttentionLayer(Protocol):
     _k_scale_float: float
     _v_scale_float: float
     _prob_scale: torch.Tensor
+    alibi_slopes: torch.Tensor | None
+    _sinks_fp32: torch.Tensor
 
     def forward(
         self,
@@ -874,7 +876,9 @@ class AttentionImplBase(ABC, Generic[T]):
         )
         return self
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
+    ):
         pass
 
     def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:

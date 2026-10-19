@@ -68,6 +68,7 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = create_humming_locks(layer.weight.device)
+        layer.register_buffer("humming_locks", self.locks, persistent=False)
 
     def apply_weights(
         self,

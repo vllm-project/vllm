@@ -149,8 +149,8 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._q_scale_float = 1.0
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
-    layer._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
-    layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
+    layer._k_scale_cpu = torch.tensor(1.0, dtype=torch.float32, device="cpu")
+    layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32, device="cpu")
     layer._prob_scale_float = 1.0
 
 
@@ -430,6 +430,13 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        if alibi_slopes is not None:
+            # Layer-owned (like the KV scales); impls read it in forward.
+            self.register_buffer(
+                "alibi_slopes",
+                torch.tensor(alibi_slopes, dtype=torch.float32),
+                persistent=False,
+            )
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -587,7 +594,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+        self.impl.process_weights_after_loading(act_dtype, layer=self)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

@@ -250,7 +250,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             None  # per-tensor dequant scale (FP8 W8A16)
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(
+        self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
+    ) -> None:
         # forward_mha (unlike forward_mqa) receives no `layer` argument, so it
         # cannot read the generic layer.W_UK_T/W_UV/._v_up_proj that
         # MLAAttention.process_weights_after_loading already computes. This

@@ -235,12 +235,13 @@ class Gemma4DSparkModel(DFlashQwen3Model):
             [a.k_norm.weight.data for a in layers_attn], dim=0
         ).contiguous()
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        self._v_norm_weights = torch.ones(
+        v_norm_weights = torch.ones(
             len(layers_attn),
             layers_attn[0].head_dim,
             dtype=self._k_norm_weights.dtype,
             device=self._k_norm_weights.device,
         )
+        self.register_buffer("_v_norm_weights", v_norm_weights, persistent=False)
 
     def _project_context_kv(
         self,

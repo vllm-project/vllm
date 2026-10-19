@@ -186,12 +186,14 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 "wo_a group."
             )
         self.n_wv_group = self.padded_heads // WV_GROUP_SIZE
-        q_perm = q_fused_permutation(self.n_local_heads, self.head_dim)
+        # On CPU: the loaders keep these, and weights-pool copies die in sleep.
+        with torch.device("cpu"):
+            q_perm = q_fused_permutation(self.n_local_heads, self.head_dim)
+            o_perm = o_fused_permutation(WV_GROUP_SIZE, self.head_dim)
+            o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wq_b.weight, q_perm, dim=0)
         permute_on_load(self.wq_b.weight_scale, q_perm, dim=0)
-        o_perm = o_fused_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wo_a.weight, o_perm, dim=1)
-        o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
 
     # ---- interface contract ------------------------------------------------
