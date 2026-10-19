@@ -462,6 +462,18 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
+            if secondary_tiers and not self.config.canonical_layout:
+                logger.warning(
+                    "Secondary-tier KV is only reusable by engines with the same "
+                    "parallel configuration; set canonical_layout=true in "
+                    "kv_connector_extra_config to share it across TP sizes."
+                )
+            elif secondary_tiers and not self.config.parallel.is_parallelism_agnostic:
+                logger.warning(
+                    "canonical_layout could not certify every KV cache layer as "
+                    "parallelism-agnostic; secondary-tier KV is only reusable by "
+                    "engines with the same parallel configuration."
+                )
 
         return self._manager
 
