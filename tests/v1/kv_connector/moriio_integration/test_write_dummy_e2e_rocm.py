@@ -903,7 +903,8 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
     changes the top tokens entirely, so log-probs only show the transfer did
     not hang and decode consumed the transferred KV. That every head and state
     slice lands at the right offset is pinned byte for byte by
-    tests/v1/kv_connector/unit/test_moriio_hetero_tp_{write,read}.py.
+    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py and
+    tests/v1/kv_connector/unit/test_moriio_read_tp.py.
     """
     _, devices = _visible_devices()
     if len(devices) < case.prefill_tp + case.decode_tp:

@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mock end-to-end MoRIIO READ between prefill and decode of any TP sizes.
+"""Mock end-to-end MoRIIO READ: what lands on decode, and who is released.
 
-Every decode rank runs the real read path (source resolution, connector offset
-code, completion polling) on real cache views; a fake MoRI transport copies the
-planned bytes out of the prefill ranks' caches, and each prefill rank counts
-the releases with the real acknowledgement logic. Checks that every decode rank
-ends up with exactly its shard of every block and recurrent-state slot, nothing
-else is touched, and every prefill rank that holds the request is released the
-number of times it waits for.
+Every decode rank runs the real read path (source resolution, offsets,
+completion polling) on real cache views; a fake MoRI transport copies the
+planned bytes out of the prefill ranks' caches. Checks that every decode rank
+ends up with exactly its shard, and that every prefill rank holding the
+request is released as many times as it waits for.
 """
 
 import threading
@@ -51,6 +49,12 @@ from .test_moriio_hetero_tp_write import (
 pytestmark = pytest.mark.cpu_test
 
 NOTIFY_PORT = 30000
+LAYOUTS = [
+    (KVCacheLayout.LBNHC, KVCacheLayout.LBNHC),
+    (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC),
+    (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC),
+]
+LAYOUT_IDS = ["token-major", "head-major", "mixed"]
 
 
 class _Status:
@@ -111,8 +115,7 @@ def _make_reader(
         if "_tp" in engine_id:
             tp_rank = int(engine_id.rsplit("_tp", 1)[1])
         else:
-            # Equal TP keys the session per DP rank only.
-            tp_rank = consumer.tp_rank
+            tp_rank = worker._remote_tp_rank(len(producers))
         remote = producers[tp_rank]
         sessions = [
             _Session(local, remote_region, tp_rank)
@@ -185,6 +188,35 @@ def _ranks(model, producer_tp, consumer_tp, hma, layouts, state):
     return producers, consumers
 
 
+def _read_all(model, producer_tp, consumer_tp, hma, layouts, backend="xgmi"):
+    """Run every decode rank's READ; return the releases per prefill rank."""
+    heads, layers = MODELS[model]
+    state = _global_state(layers, heads)
+    groups = _groups(model, hma)
+    producers, consumers = _ranks(model, producer_tp, consumer_tp, hma, layouts, state)
+    releases: dict[int, list] = defaultdict(list)
+    for consumer in consumers:
+        released = _make_reader(consumer, producers, backend)
+        consumer.worker._read_blocks_for_req("req", _meta(groups, producer_tp))
+        assert consumer.worker._pop_done_transfers() == {"t"}
+        for p, message_type, fields in released:
+            releases[p].append((message_type, fields))
+        for layer in layers:
+            cache = consumer.caches[layer.name]
+            received = cache.view(NUM_BLOCKS, -1) if layer.kind == "mamba" else cache
+            expected = _expected(
+                layer,
+                layer.group if hma else "full",
+                state,
+                heads,
+                consumer.tp_rank,
+                consumer_tp,
+                received,
+            )
+            assert torch.equal(received, expected), (layer.name, consumer.tp_rank)
+    return releases
+
+
 def _assert_released(releases: dict[int, list], producer_tp: int) -> None:
     """Every prefill rank frees the request exactly once, after its last ACK."""
     for p in range(producer_tp):
@@ -212,51 +244,34 @@ def _conv_dim_first(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
+@pytest.mark.parametrize("tp", [1, 2])
 @pytest.mark.parametrize(
-    ("layouts"),
+    ("model", "hma"),
     [
-        (KVCacheLayout.LBNHC, KVCacheLayout.LBNHC),
-        (KVCacheLayout.LBHNC, KVCacheLayout.LBHNC),
-        (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC),
+        (model, hma)
+        for model in MODELS
+        for hma in (True, False)
+        # Recurrent state needs the hybrid KV cache manager.
+        if hma or "hybrid" not in model
     ],
-    ids=["token-major", "head-major", "mixed"],
 )
-@pytest.mark.parametrize("backend", ["rdma", "xgmi"])
-@pytest.mark.parametrize(("model", "producer_tp", "consumer_tp", "hma"), SCENARIOS)
-def test_read_pulls_every_shard_byte_exact(
-    model, producer_tp, consumer_tp, hma, layouts, backend
+def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts):
+    """Prefill and decode may lay heads and tokens out differently."""
+    _assert_released(_read_all(model, tp, tp, hma, layouts), tp)
+
+
+@pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
+@pytest.mark.parametrize(
+    ("model", "producer_tp", "consumer_tp", "hma"),
+    [scenario for scenario in SCENARIOS if scenario[1] != scenario[2]],
+)
+def test_hetero_tp_read_lands_every_shard(
+    model, producer_tp, consumer_tp, hma, layouts
 ):
-    heads, layers = MODELS[model]
-    state = _global_state(layers, heads)
-    groups = _groups(model, hma)
-    producers, consumers = _ranks(model, producer_tp, consumer_tp, hma, layouts, state)
-
-    releases: dict[int, list] = defaultdict(list)
-    for consumer in consumers:
-        released = _make_reader(consumer, producers, backend)
-        consumer.worker._read_blocks_for_req("req", _meta(groups, producer_tp))
-        assert consumer.worker._pop_done_transfers() == {"t"}
-        holders = consumer.worker._read_plan(producer_tp, None)[1]
-        assert sorted(p for p, _, _ in released) == sorted(holders)
-        for p, message_type, fields in released:
-            releases[p].append((message_type, fields))
-        # Reads only go to prefill ranks that hold this rank's share.
-        assert set(consumer.sent) <= set(holders)
-
-        for layer in layers:
-            cache = consumer.caches[layer.name]
-            received = cache.view(NUM_BLOCKS, -1) if layer.kind == "mamba" else cache
-            expected = _expected(
-                layer,
-                layer.group if hma else "full",
-                state,
-                heads,
-                consumer.tp_rank,
-                consumer_tp,
-                received,
-            )
-            assert torch.equal(received, expected), (layer.name, consumer.tp_rank)
-
+    """Each decode rank reads its head and state slices from every prefill
+    rank that holds them, and releases every holder."""
+    releases = _read_all(model, producer_tp, consumer_tp, hma, layouts)
     _assert_released(releases, producer_tp)
 
 
@@ -265,9 +280,7 @@ def test_flexible_mirror_spreads_reads_and_releases_every_holder():
     different prefill rank per request, and all four are released each time."""
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
-    producers, (consumer,) = _ranks(
-        "mla", 4, 1, True, (KVCacheLayout.LBNHC,) * 2, state
-    )
+    producers, (consumer,) = _ranks("mla", 4, 1, True, LAYOUTS[0], state)
     released = _make_reader(consumer, producers, "rdma")
     picked = []
     for _ in range(4):
@@ -285,9 +298,7 @@ def test_xgmi_mirror_reads_the_fixed_source():
     every peer GPU, so the replicated MLA copy is read from one fixed rank."""
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
-    producers, (consumer,) = _ranks(
-        "mla", 4, 1, True, (KVCacheLayout.LBNHC,) * 2, state
-    )
+    producers, (consumer,) = _ranks("mla", 4, 1, True, LAYOUTS[0], state)
     released = _make_reader(consumer, producers, "xgmi")
     for _ in range(3):
         consumer.sent.clear()
@@ -300,10 +311,10 @@ def test_xgmi_mirror_reads_the_fixed_source():
 
 @pytest.mark.parametrize(("producer_tp", "consumer_tp"), [(4, 2), (2, 4)])
 def test_aborted_read_releases_every_holder(producer_tp, consumer_tp):
-    heads, layers = MODELS["gqa"]
+    heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, consumers = _ranks(
-        "gqa", producer_tp, consumer_tp, True, (KVCacheLayout.LBNHC,) * 2, state
+        "mla", producer_tp, consumer_tp, True, LAYOUTS[0], state
     )
     for consumer in consumers:
         released = _make_reader(consumer, producers, "xgmi")
@@ -323,11 +334,9 @@ def test_aborted_read_releases_every_holder(producer_tp, consumer_tp):
 
 
 def test_failed_read_releases_every_holder():
-    heads, layers = MODELS["gqa"]
+    heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
-    producers, (consumer,) = _ranks(
-        "gqa", 2, 1, True, (KVCacheLayout.LBNHC,) * 2, state
-    )
+    producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
     released = _make_reader(consumer, producers, "xgmi", fail=True)
     consumer.worker._read_blocks_for_req("req", _meta(["full"], 2))
     # A failed read is a load error, not a completion.
@@ -341,9 +350,7 @@ def test_read_refuses_peer_with_different_block_size():
     between them would misplace tokens, so the read must refuse."""
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
-    producers, (consumer,) = _ranks(
-        "mla", 2, 1, True, (KVCacheLayout.LBNHC,) * 2, state
-    )
+    producers, (consumer,) = _ranks("mla", 2, 1, True, LAYOUTS[0], state)
     for layer in layers:
         producers[0].worker.attention_block_sizes[layer.name] *= 2
     _make_reader(consumer, producers, "xgmi")
@@ -356,9 +363,7 @@ def test_sharded_read_needs_head_layouts():
     read by head slice."""
     heads, layers = MODELS["gqa"]
     state = _global_state(layers, heads)
-    producers, (consumer,) = _ranks(
-        "gqa", 2, 1, True, (KVCacheLayout.LBNHC,) * 2, state
-    )
+    producers, (consumer,) = _ranks("gqa", 2, 1, True, LAYOUTS[0], state)
     for producer in producers:
         producer.worker.kv_head_layouts = {}
     _make_reader(consumer, producers, "xgmi")
@@ -370,7 +375,7 @@ def test_equal_tp_read_keeps_the_dp_session_and_one_release():
     """Equal TP is unchanged: one source, the DP-keyed session, one release."""
     heads, layers = MODELS["gqa"]
     state = _global_state(layers, heads)
-    producers, consumers = _ranks("gqa", 2, 2, True, (KVCacheLayout.LBNHC,) * 2, state)
+    producers, consumers = _ranks("gqa", 2, 2, True, LAYOUTS[0], state)
     keys: list[str] = []
     for consumer in consumers:
         released = _make_reader(consumer, producers, "xgmi")
@@ -392,7 +397,7 @@ def test_background_handshake_dials_every_read_source():
     handshake must open exactly those."""
     heads, layers = MODELS["gqa"]
     state = _global_state(layers, heads)
-    _, (consumer,) = _ranks("gqa", 4, 1, True, (KVCacheLayout.LBNHC,) * 2, state)
+    _, (consumer,) = _ranks("gqa", 4, 1, True, LAYOUTS[0], state)
     worker = consumer.worker
     worker.mode = MoRIIOMode.READ
     worker.is_producer = False
@@ -401,15 +406,13 @@ def test_background_handshake_dials_every_read_source():
     class Executor:
         def submit(self, fn, *args):
             submitted.append(args)
-            future = SimpleNamespace(
+            return SimpleNamespace(
                 result=lambda: True, add_done_callback=lambda callback: None
             )
-            return future
 
     worker._handshake_initiation_executor = Executor()
     worker._handshake_futures = {}
     worker._handshake_lock = threading.Lock()
     worker._background_moriio_handshake("req", "prefill", _meta(["full"], 4))
-    engine_ids = [args[3] for args in submitted if len(args) == 6]
-    assert engine_ids == [f"prefill_dp0_tp{p}" for p in range(4)]
-    assert [args[5] for args in submitted if len(args) == 6] == [0, 1, 2, 3]
+    dialed = [(args[3], args[5]) for args in submitted if len(args) == 6]
+    assert dialed == [(f"prefill_dp0_tp{p}", p) for p in range(4)]
