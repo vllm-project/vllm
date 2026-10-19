@@ -28,6 +28,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
+    _step_open_arg_string_fast_path,
+    _try_arm_open_arg_string_fast_path,
     consume_space,
     find_common_prefix,
     is_complete_json,
@@ -46,12 +48,19 @@ class Granite20bFCToolParser(ToolParser):
     are all set
     """
 
+    _open_arg_key: str | None = None
+    _open_arg_consumed_pos: int = 0
+    _open_arg_pending_delta: str = ""
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.bot_token = "<function_call>"
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
@@ -129,6 +138,45 @@ class Granite20bFCToolParser(ToolParser):
         if not current_text.startswith(self.bot_token):
             return DeltaMessage(content=delta_text)
 
+        if (
+            self._open_arg_key is not None
+            and self.current_tool_name_sent
+            and 0 <= self.current_tool_id < len(self.prev_tool_call_arr)
+            and 0 <= self.current_tool_id < len(self.streamed_args_for_tool)
+            and current_text.startswith(previous_text)
+            and len(previous_text) >= self._open_arg_consumed_pos
+        ):
+            (
+                handled,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                argument_diff,
+            ) = _step_open_arg_string_fast_path(
+                current_text,
+                self._open_arg_key,
+                self._open_arg_consumed_pos,
+                self._open_arg_pending_delta,
+                self.prev_tool_call_arr[self.current_tool_id],
+                self.streamed_args_for_tool,
+                self.current_tool_id,
+            )
+            if handled:
+                if argument_diff is None:
+                    return None
+                return DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff
+                            ).model_dump(exclude_none=True),
+                        )
+                    ]
+                )
+        self._open_arg_key = None
+        self._open_arg_consumed_pos = 0
+        self._open_arg_pending_delta = ""
+
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
@@ -141,10 +189,14 @@ class Granite20bFCToolParser(ToolParser):
                 start_idx = len(self.bot_token)
                 start_idx = consume_space(start_idx, current_text)
 
+                last_call_start = 0
+                last_call_end = 0
                 while start_idx < len(current_text):
                     (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
+                    last_call_start = start_idx
+                    last_call_end = start_idx + end_idx
                     is_complete.append(
-                        is_complete_json(current_text[start_idx : start_idx + end_idx])
+                        is_complete_json(current_text[last_call_start:last_call_end])
                     )
                     start_idx += end_idx
                     start_idx = consume_space(start_idx, current_text)
@@ -262,6 +314,23 @@ class Granite20bFCToolParser(ToolParser):
                         )
                         self.streamed_args_for_tool[self.current_tool_id] += (
                             argument_diff
+                        )
+
+                    if (
+                        not is_complete[self.current_tool_id]
+                        and self.current_tool_id == len(tool_call_arr) - 1
+                        and last_call_end == len(current_text)
+                    ):
+                        (
+                            self._open_arg_key,
+                            self._open_arg_consumed_pos,
+                            self._open_arg_pending_delta,
+                        ) = _try_arm_open_arg_string_fast_path(
+                            current_text[last_call_start:last_call_end],
+                            last_call_start,
+                            cur_arguments,
+                            cur_args_json,
+                            self.streamed_args_for_tool[self.current_tool_id],
                         )
 
             self.prev_tool_call_arr = tool_call_arr
