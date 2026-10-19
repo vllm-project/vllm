@@ -987,10 +987,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # InputBatch.make_dummy registers no sampling params, so the sampler
-        # would skip apply_sampling_params here while warmup_kernels (run after
-        # the KV cache is sized) pays for it. Profile with the same params.
         assert self.sampler is not None
+        # Default pass: compiles the kernels the first real step uses (logits in
+        # the model dtype, no per-request processing).
+        self.sampler(logits, dummy_input_batch)
+        # Warmup-param pass: warmup_kernels (run after the KV cache is sized)
+        # pays for the fp32 logits pipeline, so the profiled peak must too.
         warmup_params = SamplingParams.for_sampler_warmup()
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, warmup_params)
