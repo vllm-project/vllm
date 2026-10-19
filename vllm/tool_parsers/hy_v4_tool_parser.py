@@ -379,6 +379,7 @@ class HYV4ToolExtractor:
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        self._scanned_args_len: int = 0  # end offset of last closed kv pair
 
         self.tool_calls_start_token: str = f"<tool_calls{token_suffix}>"
         self.tool_calls_end_token: str = f"</tool_calls{token_suffix}>"
@@ -572,6 +573,7 @@ class HYV4ToolExtractor:
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._scanned_args_len = 0
 
     def extract_tool_calls_streaming(
         self,
@@ -621,6 +623,9 @@ class HYV4ToolExtractor:
             # misclassify every tool delta as plain content.
             marker = self.tool_calls_start_token
             marker_pos = current_text.find(marker)
+            prev_safe_end = len(previous_text) - partial_tag_overlap(
+                previous_text, marker
+            )
 
             if marker_pos == -1:
                 # Marker not seen yet. The tail of ``current_text`` might still
@@ -628,8 +633,8 @@ class HYV4ToolExtractor:
                 # that tail back and only stream the safe portion as content.
                 safe_end = len(current_text) - partial_tag_overlap(current_text, marker)
                 # Emit only the newly-arrived, safe content (delta relative to
-                # what was previously streamed).
-                content = current_text[len(previous_text) : safe_end]
+                # what was previously streamed, including any held-back prefix).
+                content = current_text[prev_safe_end:safe_end]
                 return StreamDelta(
                     content=content if content else None,
                     tool_calls=[],
@@ -644,7 +649,11 @@ class HYV4ToolExtractor:
             # while remaining correct when the marker itself was split across
             # sub-word tokens.
             content_end = marker_pos
-            content = current_text[len(previous_text) : content_end]
+            content = (
+                ""
+                if marker in previous_text
+                else current_text[prev_safe_end:content_end]
+            )
 
             payload_start = marker_pos + len(marker)
             # How much of the payload had already been buffered before this
@@ -663,11 +672,16 @@ class HYV4ToolExtractor:
             if self.tool_calls_start_token_id not in current_token_ids:
                 return StreamDelta(content=delta_text, tool_calls=[])
 
-            if self.tool_calls_start_token in delta_text:
-                text_parts = delta_text.split(self.tool_calls_start_token)
-                self._buffer += text_parts[-1]
-                if text_parts[0]:
-                    content_delta = text_parts[0]
+            if (
+                self.tool_calls_start_token_id not in previous_token_ids
+                and self.tool_calls_start_token in delta_text
+            ):
+                content_prefix, tool_suffix = delta_text.split(
+                    self.tool_calls_start_token, 1
+                )
+                self._buffer += tool_suffix
+                if content_prefix:
+                    content_delta = content_prefix
             else:
                 self._buffer += delta_text
 
@@ -802,19 +816,17 @@ class HYV4ToolExtractor:
             args_text = buf
             remaining = ""
 
-        # --- scan all fully closed kv pairs ---
-        arg_pairs = self.func_args_regex.findall(args_text)
-        for key, value in arg_pairs:
-            key = key.strip()
+        # --- scan newly closed kv pairs and detect partial kv at the tail ---
+        last_closed_end = self._scanned_args_len
+        for m in self.func_args_regex.finditer(args_text, last_closed_end):
+            key = m.group(1).strip()
+            value = m.group(2)
             if key not in self._completed_args:
                 self._completed_args[key] = _parse_value(
                     value, self._streaming_tool_name or "", key, tools
                 )
-
-        # --- detect partial (unclosed) kv at the tail ---
-        last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
             last_closed_end = m.end()
+        self._scanned_args_len = last_closed_end
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None

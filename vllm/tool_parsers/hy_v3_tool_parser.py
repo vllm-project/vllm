@@ -269,6 +269,7 @@ class HYV3ToolParser(ToolParser):
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        self._scanned_args_len: int = 0  # end offset of last closed kv pair
 
         init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
         self.suffix: str = init_kwargs.get("token_suffix") or ""
@@ -404,6 +405,7 @@ class HYV3ToolParser(ToolParser):
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._scanned_args_len = 0
 
     def extract_tool_calls_streaming(
         self,
@@ -421,10 +423,15 @@ class HYV3ToolParser(ToolParser):
 
         # Encountered tool_calls start tag; extract preceding content and buffer
         content_delta: str | None = None
-        if self.tool_calls_start_token in delta_text:
-            text_parts = delta_text.split(self.tool_calls_start_token)
-            self._buffer += text_parts[-1]
-            content_delta = text_parts[0] or None
+        if (
+            self.tool_calls_start_token_id not in previous_token_ids
+            and self.tool_calls_start_token in delta_text
+        ):
+            content_prefix, tool_suffix = delta_text.split(
+                self.tool_calls_start_token, 1
+            )
+            self._buffer += tool_suffix
+            content_delta = content_prefix or None
         else:
             self._buffer += delta_text
 
@@ -556,20 +563,18 @@ class HYV3ToolParser(ToolParser):
             args_text = buf
             remaining = ""
 
-        # --- scan all fully closed kv pairs ---
-        arg_pairs = self.func_args_regex.findall(args_text)
-        for key, value in arg_pairs:
-            key = key.strip()
+        # --- scan newly closed kv pairs and detect partial kv at the tail ---
+        last_closed_end = self._scanned_args_len
+        for m in self.func_args_regex.finditer(args_text, last_closed_end):
+            key = m.group(1).strip()
+            value = m.group(2)
             if key not in self._completed_args:
                 parsed_value = HYV3ToolParser._parse_value(
                     value, self._streaming_tool_name or "", key, request.tools
                 )
                 self._completed_args[key] = parsed_value
-
-        # --- detect partial (unclosed) kv at the tail ---
-        last_closed_end = 0
-        for m in self.func_args_regex.finditer(args_text):
             last_closed_end = m.end()
+        self._scanned_args_len = last_closed_end
         tail = args_text[last_closed_end:]
 
         partial_key: str | None = None
@@ -617,13 +622,7 @@ class HYV3ToolParser(ToolParser):
             # WITHOUT the closing quote, so the prefix stays stable
             # as the value grows.  The closing `"` and `}` will be
             # sent when the value or tool_call closes.
-            escaped_val = (
-                partial_value.replace("\\", "\\\\")
-                .replace('"', '\\"')
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t")
-            )
+            escaped_val = json.dumps(partial_value, ensure_ascii=False)[1:-1]
             # Note: no closing " here – it's appended only on close
             snapshot_parts.append(f'{k_json}: "{escaped_val}')
 
