@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import mimetypes
+import os
 import types
 from collections import Counter
 from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any, Final, TypeAlias, Union, cast, get_args, get_origin
 
+import pybase64
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -14,7 +17,8 @@ from openai.types.chat import (
     ChatCompletionContentPartRefusalParam,
     ChatCompletionToolMessageParam,
 )
-from openai.types.responses import ResponseInputImageParam
+from openai.types.chat.chat_completion_content_part_param import File
+from openai.types.responses import ResponseInputFileParam, ResponseInputImageParam
 from PIL import Image
 from pydantic import TypeAdapter
 
@@ -70,6 +74,32 @@ _RESERVED_PLACEHOLDER_IN_TEXT_ERROR: Final[str] = (
     "positions in the tokenized prompt."
 )
 
+_FILE_TEXT_MEDIA_TYPES: Final = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+    }
+)
+# Text file extensions that `mimetypes` may not know on every platform.
+_FILE_TEXT_EXTENSIONS: Final = frozenset(
+    {
+        ".csv",
+        ".json",
+        ".log",
+        ".markdown",
+        ".md",
+        ".rst",
+        ".toml",
+        ".tsv",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
+
 
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
@@ -83,6 +113,8 @@ _PILImageParser = partial(cast, CustomChatCompletionContentPILImageParam)
 _ThinkParser = partial(cast, CustomThinkCompletionContentParam)
 _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
+_FileParser = partial(cast, File)
+_ResponsesInputFileParser = partial(cast, ResponseInputFileParam)
 
 # Need to validate url objects
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
@@ -117,6 +149,8 @@ MM_PARSER_MAP: dict[
     "tool_reference": lambda part: cast(
         CustomChatCompletionContentToolReferenceParam, part
     ).get("name", None),
+    "file": lambda part: _FileParser(part).get("file", {}),
+    "input_file": lambda part: _ResponsesInputFileParser(part),
 }
 
 
@@ -341,8 +375,10 @@ PART_TYPES_TO_SKIP_NONE_CONTENT = (
 TEXT_PART_TYPES = frozenset(
     {"text", "input_text", "output_text", "refusal", "thinking"}
 )
+# File content part types whose inline data is decoded into text.
+_FILE_PART_TYPES = frozenset({"file", "input_file"})
 # Content part types that carry no multimodal data.
-_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
+_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | _FILE_PART_TYPES | {"tool_reference"}
 # Keys that mark a content part as multimodal, whatever its ``type``.
 _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
@@ -430,6 +466,86 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
         )
 
 
+def _file_part_to_text(file: dict[str, Any], part_type: str) -> str:
+    """Decode the inline data of a `file` / `input_file` part into text.
+
+    Only text-like files sent inline via `file_data`, either as a base64
+    data URL or as raw base64, are supported.
+
+    Args:
+        file: The file object, with `file_data`, `filename`, etc.
+        part_type: The content part type, used in error messages.
+
+    Returns:
+        The file text, preceded by a `File: <filename>` line if a filename
+        is given.
+
+    Raises:
+        VLLMValidationError: If the file is referenced by ID or URL, is not
+            a text file, or cannot be decoded as base64-encoded UTF-8.
+
+    """
+    filename = file.get("filename")
+    file_data = file.get("file_data")
+    if not file_data:
+        if file.get("file_id") or file.get("file_url"):
+            msg = (
+                f"{part_type!r} content parts referenced by 'file_id' or "
+                "'file_url' are not supported; pass the content inline via "
+                "'file_data'."
+            )
+        else:
+            msg = f"{part_type!r} content part requires 'file_data'."
+        raise VLLMValidationError(msg, parameter=part_type)
+
+    media_type: str | None = None
+    if file_data.startswith("data:"):
+        data_spec, sep, file_data = file_data[5:].partition(",")
+        media_type, _, encoding = data_spec.rpartition(";")
+        if not sep or encoding != "base64":
+            raise VLLMValidationError(
+                f"Only base64 data URLs are supported for {part_type!r} content parts.",
+                parameter=part_type,
+            )
+        media_type = media_type.partition(";")[0].strip().lower()
+    # Fall back to the filename if the data URL gives no specific type.
+    if filename and media_type in (None, "", "application/octet-stream"):
+        media_type = mimetypes.guess_type(filename)[0] or media_type
+        if os.path.splitext(filename)[1].lower() in _FILE_TEXT_EXTENSIONS:
+            media_type = "text/plain"
+
+    if not media_type:
+        raise VLLMValidationError(
+            f"Could not determine the media type of {part_type!r} content part; "
+            "pass 'file_data' as a data URL or set 'filename'.",
+            parameter=part_type,
+        )
+    if not (media_type.startswith("text/") or media_type in _FILE_TEXT_MEDIA_TYPES):
+        raise VLLMValidationError(
+            f"Unsupported media type {media_type!r} for {part_type!r} content "
+            "part: only text files are supported. Extract the text client-side "
+            "and send it as a 'text' part, or send images via 'image_url'.",
+            parameter=part_type,
+        )
+
+    try:
+        data = pybase64.b64decode(file_data, validate=True)
+    except ValueError as e:
+        raise VLLMValidationError(
+            f"Invalid base64 'file_data' in {part_type!r} content part.",
+            parameter=part_type,
+        ) from e
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise VLLMValidationError(
+            f"'file_data' in {part_type!r} content part is not valid UTF-8 text.",
+            parameter=part_type,
+        ) from e
+
+    return f"File: {filename}\n{text}" if filename else text
+
+
 def parse_chat_message_content_part(
     part: ChatCompletionContentPartParam,
     mm_parser: BaseMultiModalContentParser,
@@ -461,6 +577,13 @@ def parse_chat_message_content_part(
             part_type,
         )
         return None
+
+    if part_type in _FILE_PART_TYPES:
+        file_text = _file_part_to_text(cast(dict[str, Any], content), part_type)
+        _reject_reserved_placeholder_in_text(file_text, mm_parser.model_config)
+        if wrap_dicts:
+            return {"type": "text", "text": file_text}
+        return file_text
 
     if part_type in TEXT_PART_TYPES:
         str_content = cast(str, content)

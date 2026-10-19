@@ -1246,6 +1246,31 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
     system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
     same way.
 
+### File Inputs
+
+Text files can be passed inline as a `file` content part (Chat Completions API) or
+an `input_file` content part (Responses API). The file is decoded and inserted
+into the prompt as text, prefixed with a `File: <filename>` line if `filename` is
+set, so this works with any model, including text-only ones.
+
+```python
+import base64
+
+file_data = base64.b64encode(b"vLLM is a fast LLM inference engine.").decode()
+
+# Chat Completions API
+{"type": "file", "file": {"filename": "notes.txt", "file_data": f"data:text/plain;base64,{file_data}"}}
+
+# Responses API
+{"type": "input_file", "filename": "notes.txt", "file_data": f"data:text/plain;base64,{file_data}"}
+```
+
+`file_data` may be a base64 data URL or raw base64; for raw base64 or an
+`application/octet-stream` data URL, the media type is inferred from `filename`. Only UTF-8 text files are supported (`text/*`,
+`application/json`, `application/xml` and `application/yaml`). Files referenced by
+`file_id` or `file_url`, and binary files such as PDFs, are rejected with a `400`
+error; extract their text client-side, or send pages as images via `image_url`.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
