@@ -1035,6 +1035,7 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
         ):
             return
         buffer = state.buffer
+        t0 = time.perf_counter()
         # Go solo first: the buffer's destroy() is a barrier over the live
         # world.
         buffer.stage_topology(num_active_sms=state.num_sms, active_ranks=[self.rank])
@@ -1044,6 +1045,11 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
             buffer.commit_topology()
         buffer.destroy()
         NixlEPV2All2AllManager._state = None
+        logger.info(
+            "nixl_ep_v2 destroy %d: teardown_s=%.3f",
+            self.rank,
+            time.perf_counter() - t0,
+        )
 
     @property
     def num_sms(self) -> int:
