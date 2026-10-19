@@ -103,12 +103,13 @@ def test_strategy_selection():
     )
     lfm = "Lfm2VlForConditionalGeneration"
     assert select_read_strategy(model(lfm), generate) is LiquidStrategy
-    for gemma4 in (
+    for arch in (
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
         "Gemma4UnifiedForConditionalGeneration",
+        "Qwen3VLForConditionalGeneration",
     ):
-        assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
+        assert select_read_strategy(model(arch), generate) is NextTokenStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -250,23 +251,34 @@ def test_labels_start_the_reply(qwen):
 
 
 @pytest.mark.parametrize(
-    "model_name,reply_start",
+    "model_name,architecture,reply_start",
     [
         # E2B and E4B: the reply starts right after the model turn.
-        ("google/gemma-4-E2B-it", "<|turn>model\n"),
+        ("google/gemma-4-E2B-it", "Gemma4ForConditionalGeneration", "<|turn>model\n"),
         # 12B, 26B and 31B: the template closes an empty thought first.
-        ("google/gemma-4-12B-it", "<|turn>model\n<|channel>thought\n<channel|>"),
+        (
+            "google/gemma-4-12B-it",
+            "Gemma4UnifiedForConditionalGeneration",
+            "<|turn>model\n<|channel>thought\n<channel|>",
+        ),
+        (
+            "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen3VLForConditionalGeneration",
+            "<|im_start|>assistant\n",
+        ),
     ],
 )
-def test_gemma4_labels_start_the_reply(model_name, reply_start):
+def test_multimodal_labels_start_the_reply(model_name, architecture, reply_start):
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(model_name)
+    engine = SimpleNamespace(model_config=model(architecture, multimodal=True))
     renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
-    context = ReadContext(None, SimpleNamespace(renderer=renderer), None, "auto", {})
+    context = ReadContext(engine, SimpleNamespace(renderer=renderer), None, "auto", {})
     # Construction fails unless every label is one token at the reply's start.
     strategy = NextTokenStrategy(context)
     assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
+    assert strategy.modalities == frozenset({"image"})
 
 
 @pytest.fixture
