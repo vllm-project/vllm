@@ -109,6 +109,8 @@ class QuestionRead:
     #: Where a joint read found this answer. Usage sits on each canvas's first read.
     slot: JointSlot | None = None
 
+    confidence: float | None = None
+
 
 class ReadPromptRequest(OpenAIBaseModel):
     """Chat options for one read, ending at the generation prompt so the label
@@ -1555,6 +1557,21 @@ def select_read_strategy(
     model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
 ) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
+    config = getattr(model_config, "hf_config", None)
+    protocol = getattr(config, "decision_read_strategy", None)
+    if protocol == "winnow":
+        from .winnow import WinnowStrategy
+
+        if model_config.architecture not in {
+            "Gemma4ForCausalLM",
+            "Gemma4ForConditionalGeneration",
+        }:
+            raise ValueError(
+                "Winnow requires a Gemma4 causal or conditional-generation export"
+            )
+        if model_config.logprobs_mode != "raw_logprobs":
+            raise ValueError("Winnow requires raw_logprobs")
+        return WinnowStrategy
     strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
         raise ValueError(

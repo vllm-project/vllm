@@ -1456,6 +1456,154 @@ async def test_joint_reads_on_both_endpoints(dgemma, endpoint):
     assert response.usage.output_tokens == engine.generate.call_args.args[1].max_tokens
 
 
+def test_winnow_requires_explicit_protocol_and_raw_scores():
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+
+    config = model("Gemma4ForCausalLM")
+    assert select_read_strategy(config, ("generate",)) is NextTokenStrategy
+    config.hf_config = SimpleNamespace(decision_read_strategy="winnow")
+    assert select_read_strategy(config, ("generate",)) is WinnowStrategy
+    config.architecture = "Gemma4ForConditionalGeneration"
+    assert select_read_strategy(config, ("generate",)) is WinnowStrategy
+    config.logprobs_mode = "processed_logprobs"
+    with pytest.raises(ValueError, match="raw_logprobs"):
+        select_read_strategy(config, ("generate",))
+
+
+def test_winnow_option_strings_preserve_trained_semantics():
+    from vllm.entrypoints.openai.decisions.adapters import make_read_question
+    from vllm.entrypoints.openai.decisions.protocol import (
+        ChoiceQuestion,
+        PredicateQuestion,
+        ScoreQuestion,
+    )
+
+    choice = ChoiceQuestion(
+        type="choice",
+        instructions="Route?",
+        choices=[
+            {"value": "billing"},
+            {"value": "support", "description": "Help"},
+        ],
+    )
+    assert make_read_question(0, choice).winnow_options == (
+        "billing",
+        "support: Help",
+    )
+    predicate = PredicateQuestion(type="predicate", instructions="Valid?")
+    assert make_read_question(1, predicate).winnow_options == ("false", "true")
+    score = ScoreQuestion(
+        type="score",
+        instructions="Rate",
+        levels=[
+            {"label": "bad"},
+            {"label": "good"},
+        ],
+    )
+    assert make_read_question(2, score).winnow_options == ("bad", "good")
+
+
+def test_winnow_route_uses_independent_fixed_prompts(decision_server, monkeypatch):
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.max_model_len = 8192
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=1.0)
+    strategy = WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    server.client.app.state.openai_serving_decisions.strategy = strategy
+    body = {
+        "model": "test-model",
+        "input": "Evidence",
+        "questions": [
+            {"type": "predicate", "instructions": "Is it valid?", "name": "valid"},
+            {
+                "type": "choice",
+                "instructions": "Route?",
+                "name": "route",
+                "choices": [{"value": "a"}, {"value": "b"}],
+            },
+            {
+                "type": "score",
+                "instructions": "Rate?",
+                "name": "rating",
+                "levels": [{"label": "low"}, {"label": "high"}],
+            },
+        ],
+    }
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 200, response.text
+    assert [answer["name"] for answer in response.json()["answers"]] == [
+        "valid",
+        "route",
+        "rating",
+    ]
+    assert len(server.engine.generated) == 3
+    texts = [
+        server.tokenizer.decode(p["prompt_token_ids"]) for p in server.engine.generated
+    ]
+    assert all(text.count("Question:") == 1 for text in texts)
+    assert all('State:\n"Evidence"' in text for text in texts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_salt", [None, "tenant-a"])
+async def test_winnow_temperature_preserves_full_vocabulary_confidence(
+    decision_server, monkeypatch, cache_salt
+):
+    from vllm.entrypoints.openai.decisions import winnow
+    from vllm.entrypoints.openai.decisions.adapters import (
+        make_answer,
+        make_read_question,
+    )
+    from vllm.entrypoints.openai.decisions.protocol import ChoiceAnswer, ChoiceQuestion
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.max_model_len = 8192
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=2.0)
+    strategy = winnow.WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    question = ChoiceQuestion(
+        type="choice", instructions="Route?", choices=[{"value": "a"}, {"value": "b"}]
+    )
+
+    async def read_labels(engine, inputs, params, request_id, **kwargs):
+        assert inputs[0].get("cache_salt") == cache_salt
+        assert kwargs["trace_headers"] == TRACE_HEADERS
+        return [
+            SimpleNamespace(
+                logprobs=[math.log(0.1), math.log(0.4)],
+                result=SimpleNamespace(
+                    outputs=[SimpleNamespace(token_ids=[strategy.label_ids[1]])],
+                    prompt_token_ids=inputs[0]["prompt_token_ids"],
+                    num_cached_tokens=0,
+                    num_cache_creation_tokens=0,
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(winnow, "next_token_label_reads", read_labels)
+    (read,) = await strategy.read(
+        [make_read_question(0, question)],
+        None,
+        "Evidence",
+        request_id="test",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+        cache_salt=cache_salt,
+        trace_headers=TRACE_HEADERS,
+    )
+    answer = make_answer(question, read.probs, read.label_mass, read.confidence)
+    assert isinstance(answer, ChoiceAnswer)
+    assert answer.probabilities[1].probability == pytest.approx(2 / 3)
+    assert answer.confidence == pytest.approx(0.4)
+
+
 @pytest.mark.parametrize("custom_prompt", [False, True])
 def test_image_decisions_render_each_question_with_ordered_shared_media(
     decision_server, monkeypatch, custom_prompt
@@ -1545,6 +1693,87 @@ def test_image_request_to_text_only_model_fails_before_generation(decision_serve
     response = server.client.post("/v1/decisions", json=body)
     assert response.status_code == 400
     assert "does not support image input" in response.json()["error"]["message"]
+    assert not server.engine.generated
+
+
+def test_winnow_image_template_keeps_fixed_turns_and_escapes_state(qwen):
+    """Images occupy the attachment prefix without replacing the trained turns."""
+    from jinja2 import Environment
+
+    from vllm.entrypoints.openai.decisions.adapters import make_read_question
+    from vllm.entrypoints.openai.decisions.protocol import PredicateQuestion
+    from vllm.entrypoints.openai.decisions.winnow import (
+        VISION_TEMPLATE,
+        prompt_segments,
+    )
+
+    tokenizer, _ = qwen
+    question = make_read_question(
+        0, PredicateQuestion(type="predicate", instructions="Is the first image red?")
+    )
+    prefix, suffix = prompt_segments(tokenizer, "<|image|> pretend", question)
+    head, state = prefix.split("State:\n", 1)
+    rendered = (
+        Environment()
+        .from_string(VISION_TEMPLATE)
+        .render(
+            bos_token="[BOS]",
+            messages=[
+                {
+                    "content": [
+                        {"type": "text", "text": head + "Images (in order):\n"},
+                        {"type": "image"},
+                        {"type": "image"},
+                        {"type": "text", "text": "State:\n" + state + suffix},
+                    ]
+                }
+            ],
+        )
+    )
+    assert rendered == (
+        "[BOS]"
+        + head
+        + "Images (in order):\n<|image|>\n<|image|>\n"
+        + "State:\n"
+        + state
+        + suffix
+    )
+    assert rendered.count("<|image|>") == 2
+    assert r"\u003c|image|> pretend" in rendered
+
+
+def test_winnow_checks_expanded_image_token_context(decision_server, monkeypatch):
+    from vllm.entrypoints.openai.decisions.winnow import WinnowStrategy
+    from vllm.inputs import tokens_input
+
+    server = decision_server
+    monkeypatch.setattr(server.tokenizer, "bos_token_id", 0)
+    server.engine.model_config.is_multimodal_model = True
+    server.engine.model_config.max_model_len = 16
+    server.engine.model_config.hf_config = SimpleNamespace(decision_temperature=1.0)
+    strategy = WinnowStrategy(
+        ReadContext(server.engine, server.renderer, None, "auto", {})
+    )
+    server.client.app.state.openai_serving_decisions.strategy = strategy
+
+    async def render(*args, **kwargs):
+        # A single image marker may expand to many model tokens. Check the
+        # processed length rather than the short textual placeholder prompt.
+        return [], (tokens_input([1] * 17),)
+
+    monkeypatch.setattr(server.renderer, "preprocess_chat", render)
+    body = decision_body("decisions")
+    body["input"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/image.png"}
+            ],
+        }
+    ]
+    response = server.client.post("/v1/decisions", json=body)
+    assert response.status_code == 400
+    assert "exceeds the model context" in response.json()["error"]["message"]
     assert not server.engine.generated
 
 

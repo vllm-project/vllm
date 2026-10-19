@@ -389,12 +389,60 @@ vllm serve LiquidAI/d1-3B
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
 
+## Winnow checkpoints
+
+Winnow-trained Gemma4 checkpoints use a fixed turn serialization and candidate
+labels rather than the generic chat prompt. Opt in explicitly:
+
+```bash
+vllm serve /path/to/winnow-checkpoint \
+  --hf-overrides '{"decision_read_strategy":"winnow","decision_temperature":1.0}' \
+  --logprobs-mode raw_logprobs --enable-prefix-caching
+```
+
+This uses the shared Decisions API and label-read backend. Each question is
+scheduled independently with the same state prefix. Request-specific chat
+instructions or chat-template overrides are rejected. The upstream limits of
+64 questions and 26 options apply. The API's confidence and response schemas
+remain unchanged; they differ from Ollaya's Jev wire responses.
+
+`decision_temperature` divides candidate log probabilities before their
+conditional softmax. Use 1 when the required scale is folded into the exported
+weights. An additional validation-fitted temperature in `calibration.json` is
+external: set `decision_temperature` to that value for that calibrated variant.
+Temperature changes conditional answer probabilities; `confidence` retains the
+winning label's original full-vocabulary probability from the engine read.
+Preserve the exported
+Gemma logit-softcap configuration. Loading an unrelated Gemma4 checkpoint does
+not make it Winnow-trained.
+
+The checkpoint must be compatible with the installed engine's model and
+quantization loaders. This strategy does not add or change model loaders.
+
+The Decisions API accepts text. For a checkpoint deployment that interprets
+input as a JSON state, set `decision_state_format` to `json` in `--hf-overrides`
+and send a JSON document as the `input` string. The strategy parses that document
+before applying Winnow's canonical state serialization. This preserves object
+and array states when comparing against Ollaya. The default `text` mode treats
+input literally. Invalid JSON in `json` mode fails before inference.
+
 ### Images through the Decisions endpoint
 
 `/v1/decisions` also accepts ordered user content containing `input_text` and
 `input_image` parts. Image URLs use the existing multimodal renderer, media
 restrictions and processor cache. Text-only models reject images. Context limits
 include expanded image tokens. Each question retains the input's media order.
+
+### Winnow image checkpoints
+
+After enabling the Winnow read strategy, image requests require a native
+`Gemma4ForConditionalGeneration` export containing the matching vision tower
+and projector. A text-only `Gemma4ForCausalLM` export cannot gain vision by
+changing its architecture name. Winnow keeps its trained turn serialization,
+attaches images in order, and checks context length after image expansion.
+The original text prompt and raw-confidence/conditional-temperature semantics
+remain unchanged. These compatibility checks do not establish visual accuracy
+or image-specific calibration.
 
 Ordered image inputs are interpreted by the selected read strategy. Generic
 next-token reads preserve interleaved text and images. Fixed image-prefix

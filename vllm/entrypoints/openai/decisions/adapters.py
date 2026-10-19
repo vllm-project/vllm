@@ -45,22 +45,42 @@ def make_read_question(
         raise StructuredDecisionError(
             f"This model supports at most {limit} choices per question"
         )
+    winnow_options: tuple[str, ...]
+    if isinstance(question, PredicateQuestion):
+        winnow_options = ("false", "true")
+    elif isinstance(question, ChoiceQuestion):
+        winnow_options = tuple(
+            (
+                c.value
+                if isinstance(c.value, str)
+                else json.dumps(c.value, ensure_ascii=False)
+            )
+            + (": " + c.description if c.description else "")
+            for c in question.choices
+        )
+    else:
+        winnow_options = tuple(level.label for level in question.levels)
     return Question(
         id=str(index),
         type=LabelQuestion(),
         instructions=question.instructions,
         options=tuple(options),
         labels=LABELS[: len(options)],
+        winnow_options=winnow_options,
     )
 
 
 def make_answer(
-    question: DecisionQuestion, probs: list[float], label_mass: float
+    question: DecisionQuestion,
+    probs: list[float],
+    label_mass: float,
+    confidence: float | None = None,
 ) -> DecisionAnswer:
     if isinstance(question, PredicateQuestion):
         return PredicateAnswer(name=question.name, probability=probs[1])
     top = argmax(probs)
-    confidence = probs[top] * label_mass
+    if confidence is None:
+        confidence = probs[top] * label_mass
     if isinstance(question, ChoiceQuestion):
         return ChoiceAnswer(
             name=question.name,
