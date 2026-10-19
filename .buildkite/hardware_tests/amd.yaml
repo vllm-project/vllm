@@ -5,7 +5,7 @@ group: Hardware - AMD Build
 # 2. Build ci_base from either the stable base or the newly selected base.
 # 3. Build the build-scoped ROCm CI image and smoke-test it before GPU jobs run.
 steps:
-  - label: "AMD: :docker: refresh ROCm base"
+  - label: ":docker: Refresh ROCm base"
     key: refresh-rocm-base-amd
     depends_on: []
     device: amd_cpu
@@ -31,7 +31,7 @@ steps:
   # Compares a content hash of ci_base-affecting files against the remote
   # image label. If hashes match the build is skipped (< 30 s); if they
   # differ ci_base is rebuilt and pushed automatically.
-  - label: "AMD: :docker: ensure ci_base"
+  - label: ":docker: Ensure ROCm ci_base"
     key: ensure-ci-base-amd
     soft_fail: false
     depends_on:
@@ -60,7 +60,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 1
 
-  - label: "AMD: :docker: build test image and artifacts"
+  - label: ":docker: Build ROCm test image and artifacts"
     key: image-build-amd
     soft_fail: false
     depends_on:

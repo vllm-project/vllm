@@ -90,7 +90,7 @@ steps:
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) %N"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) Shard %N"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
