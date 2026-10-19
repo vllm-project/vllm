@@ -309,12 +309,13 @@ def test_tiering_spec_warns_when_secondary_tiers_are_topology_bound(
 
     spec.get_manager().shutdown()
 
-    warned = any(
-        record.name == tiering_spec_module.__name__
-        and record.levelno == logging.WARNING
+    warnings = [
+        record
         for record in caplog_vllm.records
-    )
-    assert warned == warns
+        if record.name == tiering_spec_module.__name__
+        and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == int(warns)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
