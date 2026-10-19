@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -32,7 +33,9 @@ FP4_DTYPE = torch.uint8
 MLA_ATTN_OP = torch.ops.vllm.unified_mla_attention_with_output.default
 
 
-class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
+class MLAAttnFp8StaticQuantPattern(
+    VllmPatternReplacement[..., torch.Tensor | tuple[torch.Tensor, torch.Tensor]]
+):
     """Fusion for MLA Attention+Fp8StaticQuant.
 
     Matches the pattern: MLA attention -> static FP8 quant, and replaces
@@ -50,8 +53,20 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         self._dtype = dtype
         self._quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
+    def _quantize(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self._quant_matcher(value, scale)[0]
+
+    def _output(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return value
+
     @property
-    def pattern(self) -> Callable[..., torch.Tensor]:
+    def pattern(
+        self,
+    ) -> Callable[..., torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
@@ -77,7 +92,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 # MLA output is already 2D (T, N*V), no reshape needed
-                return self._quant_matcher(at1[1], scale)[0]
+                return self._quantize(at1[1], scale)
 
             return _pattern_with_ln
 
@@ -94,12 +109,14 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             # MLA output is already 2D (T, N*V), no reshape needed
-            return self._quant_matcher(at1[1], scale)[0]
+            return self._quantize(at1[1], scale)
 
         return _pattern
 
     @property
-    def replacement(self) -> Callable[..., torch.Tensor]:
+    def replacement(
+        self,
+    ) -> Callable[..., torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
         _ln = _encode_layer_name(self._layer_name)
 
         if _USE_LAYERNAME:
@@ -130,7 +147,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                     output_block_scale=None,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
-                return at1[1]
+                return self._output(at1[1], scale)
 
             return _replacement_with_ln
 
@@ -152,7 +169,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-            return at1[1]
+            return self._output(at1[1], scale)
 
         return _replacement
 
@@ -168,6 +185,28 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         if _USE_LAYERNAME:
             inputs.append(_encode_layer_name(self._layer_name))
         return inputs
+
+
+class RocmMLAAttnFp8StaticQuantPattern(MLAAttnFp8StaticQuantPattern):
+    """Fuse AITER static quantization while preserving its scale output."""
+
+    def __init__(self, layer: MLAAttention, dtype: torch.dtype) -> None:
+        super().__init__(layer, dtype)
+        self._quant_matcher = MatcherQuantFP8(
+            kFp8StaticTensorSym, match_rocm_aiter=True
+        )
+
+    def _quantize(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The shared AITER op declares scale mutable for its dynamic variant.
+        # Static quant preserves it; keep this graph output when replacing it.
+        return self._quant_matcher(value, scale)
+
+    def _output(
+        self, value: torch.Tensor, scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return value, scale
 
 
 class MLAAttnNvfp4QuantPattern(
@@ -595,6 +634,8 @@ class MLAAttnQuantFusionPass(VllmFusionPatternMatcherPass):
         for layer in layers:
             if layer.impl.fused_output_quant_supported(kFp8StaticTensorSym):
                 self.register(MLAAttnFp8StaticQuantPattern(layer, dtype))
+                if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+                    self.register(RocmMLAAttnFp8StaticQuantPattern(layer, dtype))
                 if _USE_LAYERNAME:
                     break
 

@@ -77,7 +77,8 @@ impl Error {
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
-            )) => true,
+            ))
+            | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
         }
     }
