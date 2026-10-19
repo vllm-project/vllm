@@ -434,9 +434,10 @@ class INCARKLinearMethod(INCXPULinearBase):
         layer.ark_weight_type = ark_linear.wdt
         layer.ark_scale_type = ark_linear.sdt
 
-        if hasattr(layer, "qzeros"):
-            del layer.qzeros
-        del layer.scales
+        # ARK holds its own qzeros/scales; keep the loaded params with empty storage.
+        if getattr(layer, "qzeros", None) is not None:
+            replace_parameter(layer, "qzeros", layer.qzeros.new_empty(0))
+        replace_parameter(layer, "scales", layer.scales.new_empty(0))
 
     def apply_weights(
         self,

@@ -13,7 +13,14 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     permute_param_layout_,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    get_live_param,
+    kernel_parameters,
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_kernel_parameter,
+)
 
 
 @pytest.fixture
@@ -238,6 +245,54 @@ def test_replace_parameter_registers_new_param_for_requantization_source() -> No
     assert layer.weight is not old_param
     assert torch.equal(old_param, torch.zeros(4, 4))
     assert torch.equal(layer.weight, torch.ones(4, 4))
+
+
+def test_move_parameter_aliases_one_param(single_rank_tp: None) -> None:
+    """Both names refer to the loaded param; a later replace updates both."""
+
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        pass
+
+    layer = torch.nn.Module()
+    src = ModelWeightParameter(
+        data=torch.ones(4, 4), input_dim=1, output_dim=0, weight_loader=weight_loader
+    )
+    layer.register_parameter("weight_packed", src)
+
+    move_parameter(layer, "weight_packed", "weight")
+    replace_parameter(layer, "weight", torch.full((2, 8), 2.0))
+
+    assert layer.weight_packed is src and layer.weight is src
+    assert torch.equal(src.data, torch.full((2, 8), 2.0))
+    assert src.weight_loader is weight_loader
+    assert src._input_dim == 1 and src._output_dim == 0
+    assert list(kernel_parameters(layer)) == ["weight"]
+
+    # Kernels writing through the checkpoint name make it the runtime name again.
+    set_kernel_parameter(layer, "weight_packed", torch.ones(2, 8))
+    assert list(kernel_parameters(layer)) == ["weight_packed"]
+
+
+def test_move_parameter_rejects_another_param(single_rank_tp: None) -> None:
+    layer = torch.nn.Module()
+    layer.register_parameter("a", torch.nn.Parameter(torch.ones(2)))
+    layer.register_parameter("b", torch.nn.Parameter(torch.ones(2)))
+    with pytest.raises(ValueError):
+        move_parameter(layer, "a", "b")
+
+
+def test_retired_param_keeps_data_but_is_not_live(single_rank_tp: None) -> None:
+    layer = torch.nn.Module()
+    layer.register_parameter("scale", torch.nn.Parameter(torch.ones(2)))
+    layer.register_parameter("weight", torch.nn.Parameter(torch.ones(4)))
+
+    retire_parameter(layer, "scale")
+
+    assert torch.equal(layer.scale, torch.ones(2))
+    assert get_live_param(layer, "scale") is None
+    assert list(kernel_parameters(layer)) == ["weight"]
+    set_kernel_parameter(layer, "scale", torch.zeros(2))
+    assert get_live_param(layer, "scale") is layer.scale
 
 
 def test_replace_parameter_with_own_parameter_keeps_layout(single_rank_tp) -> None:

@@ -151,12 +151,7 @@ class QuarkW8A8Int8(QuarkScheme):
     # Checkpoints are serialized in quark format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.register_parameter("weight_zero_point", None)
-        delattr(layer, "weight_zero_point")
-        if self.input_symmetric:
-            layer.register_parameter("input_zero_point", None)
-            delattr(layer, "input_zero_point")
-
+        # The loaded (symmetric) zero points stay registered; kernels ignore them.
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(

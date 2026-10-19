@@ -101,7 +101,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             packed_zp = getattr(layer, self.w_zp_name)
         else:
             # w4a8 kernel always requires zp, allocate a fake zp
-            assert self.w_zp_name
+            self.w_zp_name = "w_zp"
             replace_parameter(
                 layer,
                 self.w_zp_name,
@@ -143,8 +143,9 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         packed_zp.data = blocked_zp
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        if (not self.config.zero_points) and (self.w_zp_name is not None):
-            setattr(layer, self.w_zp_name, None)
+        if not self.config.zero_points:
+            # Keep a loaded but unused zero-point param registered.
+            self.w_zp_name = None
 
         weights = getattr(layer, self.w_q_name)
         # Require GPTQ pack format

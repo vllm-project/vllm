@@ -92,7 +92,8 @@ class MarlinLinearKernel(MPLinearKernel):
 
         # Default name since marlin requires empty parameter for zp,
         # TODO: remove this requirement from marlin (allow optional tensors)
-        if self.w_zp_name is None:
+        # A loaded but unused zero-point param stays registered.
+        if self.w_zp_name is None or not c.zero_points:
             self.w_zp_name = "w_zp"
 
         def transform_w_q(x):

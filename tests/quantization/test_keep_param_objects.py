@@ -11,6 +11,9 @@ from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
@@ -25,6 +28,7 @@ from vllm.model_executor.layers.quantization.online.mxfp4 import (
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
@@ -52,8 +56,18 @@ def _dims(param: torch.Tensor) -> tuple:
     )
 
 
-def _linear(quant_config: QuantizationConfig, output_size: int = SIZE):
-    layer = ReplicatedLinear(SIZE, output_size, bias=False, quant_config=quant_config)
+def _linear(
+    quant_config: QuantizationConfig,
+    output_size: int = SIZE,
+    params_dtype: torch.dtype | None = None,
+):
+    layer = ReplicatedLinear(
+        SIZE,
+        output_size,
+        bias=False,
+        quant_config=quant_config,
+        params_dtype=params_dtype,
+    )
     return layer, layer.quant_method
 
 
@@ -102,7 +116,19 @@ def _online_moe():
     return layer, method
 
 
+def _ct(fmt: str, group: str, group_size: int, input_activations: bool):
+    args = dict(num_bits=4, type="float", strategy=group, group_size=group_size)
+    args |= dict(symmetric=True, dynamic=False)
+    acts = args | dict(dynamic="local") if input_activations else None
+    group_0 = dict(targets=["Linear"], weights=args, input_activations=acts)
+    return CompressedTensorsConfig.from_config(
+        dict(format=fmt, config_groups=dict(group_0=group_0), ignore=[])
+    )
+
+
 NVFP4 = dict(is_checkpoint_nvfp4_serialized=True, kv_cache_quant_algo=None)
+CT_NVFP4 = ("nvfp4-pack-quantized", "tensor_group", 16, True)
+CT_MXFP4 = ("mxfp4-pack-quantized", "group", 32, False)
 
 CASES: list[Callable] = [
     lambda: _linear(Fp8Config(weight_block_size=[128, 128])),
@@ -117,11 +143,18 @@ CASES: list[Callable] = [
         output_size=SIZE + 64,
     ),
     lambda: _linear(ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})),
+    # The consumed per-tensor scales stay registered with their data.
+    lambda: _linear(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
+    # The packed weights are also registered under their runtime names.
+    lambda: _linear(_ct(*CT_NVFP4)),
+    lambda: _linear(_ct(*CT_MXFP4)),
     _online_linear,
     lambda: _moe(None),
     lambda: _moe(Fp8Config(weight_block_size=[128, 128])),
     lambda: _moe(ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})),
     lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
+    lambda: _moe(_ct(*CT_NVFP4)),
+    lambda: _moe(_ct(*CT_MXFP4)),
     lambda: _moe(Mxfp4Config()),
     _online_moe,
 ]
@@ -129,21 +162,23 @@ IDS = [
     "fp8-block-linear",
     "modelopt-fp8-pb-wo-linear",
     "modelopt-mxfp8-linear",
+    "modelopt-nvfp4-linear",
+    "ct-nvfp4-linear",
+    "ct-mxfp4-linear",
     "online-mxfp4-linear",
     "unquantized-moe",
     "fp8-block-moe",
     "modelopt-mxfp8-moe",
     "modelopt-nvfp4-moe",
+    "ct-nvfp4-moe",
+    "ct-mxfp4-moe",
     "mxfp4-moe",
     "online-mxfp4-moe",
 ]
 
 
-@pytest.mark.parametrize("build", CASES, ids=IDS)
-def test_process_weights_after_loading_keeps_param_objects(
-    build: Callable, default_vllm_config, dist_init
-) -> None:
-    default_vllm_config.model_config = ModelConfig()
+def _check_keeps_param_objects(build: Callable, vllm_config) -> None:
+    vllm_config.model_config = ModelConfig()
     with torch.device("cuda"):
         layer, method = build()
         _load(layer)
@@ -156,7 +191,45 @@ def test_process_weights_after_loading_keeps_param_objects(
     after = dict(layer.named_parameters(recurse=False, remove_duplicate=False))
     for name, (param, attrs, dims) in before.items():
         assert after.get(name) is param, name
+        # Never left with empty storage: renamed params alias the runtime name.
+        assert after[name].numel() > 0, name
         assert attrs <= param.__dict__.keys(), name
         # The loader shards by these on reload, so they keep the checkpoint layout.
         assert _dims(param) == dims, name
         assert callable(getattr(param, "weight_loader", None)), name
+
+
+@pytest.mark.parametrize("build", CASES, ids=IDS)
+def test_process_weights_after_loading_keeps_param_objects(
+    build: Callable, default_vllm_config, dist_init
+) -> None:
+    _check_keeps_param_objects(build, default_vllm_config)
+
+
+FORCED_CASES: list[Callable] = [
+    lambda: _linear(
+        ModelOptNvFp4Config(**NVFP4, exclude_modules=[]), params_dtype=torch.bfloat16
+    ),
+    lambda: _linear(_ct(*CT_NVFP4), params_dtype=torch.bfloat16),
+    lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
+    lambda: _moe(_ct(*CT_NVFP4)),
+]
+FORCED_IDS = [
+    "modelopt-nvfp4-linear",
+    "ct-nvfp4-linear",
+    "modelopt-nvfp4-moe",
+    "ct-nvfp4-moe",
+]
+
+
+@pytest.mark.parametrize("backend", ["marlin", "humming"])
+@pytest.mark.parametrize("build", FORCED_CASES, ids=FORCED_IDS)
+def test_forced_backend_keeps_param_objects(
+    build: Callable, backend: str, default_vllm_config, dist_init
+) -> None:
+    """Weight-only backends leave the input scales unused but registered."""
+    if backend == "humming" and not has_humming():
+        pytest.skip("humming is not installed")
+    default_vllm_config.kernel_config.linear_backend = backend
+    default_vllm_config.kernel_config.moe_backend = backend
+    _check_keeps_param_objects(build, default_vllm_config)

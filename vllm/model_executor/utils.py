@@ -149,6 +149,74 @@ def replace_parameter(
     setattr(layer, param_name, new_param)
 
 
+def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:
+    """Register the ``src_name`` parameter object under ``dst_name`` as well.
+
+    Both names then refer to one object and so to one storage: the loader writes
+    through the checkpoint name, kernels read the runtime name, and a later
+    `replace_parameter` on either name updates both. ``dst_name`` becomes the
+    name `kernel_parameters` reports for the object."""
+    param = getattr(layer, src_name)
+    existing = layer._parameters.get(dst_name)
+    if existing is not None and existing is not param:
+        raise ValueError(f"{dst_name!r} is already registered as another parameter")
+    layer.register_parameter(dst_name, param)
+    param.runtime_name = dst_name
+
+
+def retire_parameter(layer: torch.nn.Module, name: str) -> None:
+    """Mark a loaded parameter that no kernel reads after post-processing.
+
+    It stays registered with its loaded data (so it can be loaded again);
+    `kernel_parameters` and `get_live_param` skip it."""
+    getattr(layer, name).retired = True
+
+
+def set_kernel_parameter(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """`replace_parameter`, for a tensor kernels read under ``name``: the parameter
+    is live even if it was retired before, and ``name`` becomes its runtime name
+    if it is registered under several names (see `move_parameter`)."""
+    replace_parameter(layer, name, tensor)
+    param = getattr(layer, name)
+    param.__dict__.pop("retired", None)
+    if hasattr(param, "runtime_name"):
+        param.runtime_name = name
+
+
+def _is_live(param: torch.Tensor | None) -> bool:
+    return (
+        param is not None and not getattr(param, "retired", False) and param.numel() > 0
+    )
+
+
+def get_live_param(layer: torch.nn.Module, name: str) -> torch.Tensor | None:
+    """``getattr(layer, name, None)``, treating retired or empty params as absent."""
+    tensor = getattr(layer, name, None)
+    if isinstance(tensor, torch.nn.Parameter) and not _is_live(tensor):
+        return None
+    return tensor
+
+
+def kernel_parameters(layer: torch.nn.Module) -> dict[str, torch.nn.Parameter]:
+    """The layer's own parameters as kernels see them: live parameters only, each
+    object once, under its runtime name (see `move_parameter`)."""
+    names: dict[int, str] = {}
+    params: dict[str, torch.nn.Parameter] = {}
+    for name, param in layer._parameters.items():
+        if not _is_live(param):
+            continue
+        first = names.setdefault(id(param), name)
+        if first == name:
+            params[name] = param
+        elif getattr(param, "runtime_name", None) == name:
+            del params[first]
+            params[name] = param
+            names[id(param)] = name
+    return params
+
+
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
     parent_map = getattr(model, "packed_modules_mapping", None)
     parent_map = copy.deepcopy(parent_map) if parent_map is not None else {}

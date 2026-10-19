@@ -58,7 +58,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -453,16 +453,14 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
             )
         )
-        # Drop the original loader-side parameters: the MegaMoE kernels only
-        # consume the transformed views above. transform_weights_for_mega_moe
-        # allocates a fresh tensor for the L1 weight (see _interleave_l1_weights)
-        # and fresh SF tensors for L1/L2; the L2 weight is the only tensor that
-        # aliases the original storage, and _transformed_l2_weights still holds
-        # it, so the storage stays live after we drop the Parameter.
-        self.w13_weight = None
-        self.w13_weight_scale = None
-        self.w2_weight = None
-        self.w2_weight_scale = None
+        # The MegaMoE kernels only consume the transformed tensors above.
+        # transform_weights_for_mega_moe allocates fresh tensors for the L1
+        # weight (see _interleave_l1_weights) and for the L1/L2 SFs, so those
+        # loader-side params are emptied to free their memory. The L2 weight
+        # aliases the original storage (_transformed_l2_weights holds it), so
+        # w2_weight keeps its data at no cost.
+        for name in ("w13_weight", "w13_weight_scale", "w2_weight_scale"):
+            replace_parameter(self, name, getattr(self, name).new_empty(0))
 
     def get_symm_buffer(self):
         import vllm.third_party.deep_gemm as deep_gemm

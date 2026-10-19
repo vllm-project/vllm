@@ -111,7 +111,8 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         replace_parameter(
             layer, self.w_q_name, torch.nn.Parameter(w, requires_grad=False)
         )
-        setattr(layer, self.w_s_name, None)
+        # Scales are packed into the weight; keep the param with empty storage.
+        replace_parameter(layer, self.w_s_name, scales.new_empty(0))
 
     def apply_weights(
         self,

@@ -12,6 +12,7 @@ from torch.nn import LayerNorm
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
+from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.deep_gemm import per_block_cast_to_fp8
 
 from .vision_attention import (
@@ -230,7 +231,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
+        # Fused already, unless new expert weights were loaded (reload).
+        if not self.experts[0].fc1.weight.numel():
             return
 
         w13_weights = []
@@ -266,7 +268,11 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             torch.stack(w2_scales).contiguous(),
             persistent=False,
         )
-        del self.experts
+        # Keep the loaded expert params registered with empty storage.
+        for name, param in list(self.experts.named_parameters()):
+            module_name, _, param_name = name.rpartition(".")
+            module = self.experts.get_submodule(module_name)
+            replace_parameter(module, param_name, param.new_empty(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -555,9 +561,10 @@ class DotsMoEVitModel(PreTrainedModel):
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
         for block in self.blocks:
-            block.attn = torch.compile(block.attn, **compile_kwargs)
-            block.norm_1 = torch.compile(block.norm_1, **compile_kwargs)
-            block.norm_2 = torch.compile(block.norm_2, **compile_kwargs)
+            # In-place compile keeps the loaded parameter names (no ``_orig_mod``).
+            block.attn.compile(**compile_kwargs)
+            block.norm_1.compile(**compile_kwargs)
+            block.norm_2.compile(**compile_kwargs)
 
     def get_pos_ids_by_grid(self, grid_thw_cpu: torch.Tensor):
         # Mirrors ``cybertron`` ``AIMv2NativeModel.rot_pos_emb``: when ``pre_pixel_shuffle``

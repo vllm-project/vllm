@@ -31,6 +31,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
@@ -211,7 +212,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         weight = layer.weight
         out_features, in_features = weight.shape
         packed = pack_to_int32(weight.data.contiguous(), self.num_bits)
-        delattr(layer, "weight")
+        # Keep the loaded `weight` param registered, with empty storage.
+        replace_parameter(layer, "weight", weight.data.new_empty(0))
 
         def _noop_loader(*_, **__):
             return None
@@ -241,7 +243,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         if param is None:
             return None
         scale = param.data.clone()
-        delattr(layer, name)
         return None if float(scale.reshape(-1)[0]) == 0.0 else scale
 
     def apply_weights(

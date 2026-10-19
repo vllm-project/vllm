@@ -196,6 +196,7 @@ class Int8ScaledMMLinearKernel(
             getattr(layer, w_q),
             getattr(layer, w_s),
             getattr(layer, i_s, None),
-            getattr(layer, i_zp, None),
+            # A loaded zero point of a symmetric scheme stays registered, unused.
+            None if self.config.input_symmetric else getattr(layer, i_zp, None),
             getattr(layer, azp_adj, None),
         )

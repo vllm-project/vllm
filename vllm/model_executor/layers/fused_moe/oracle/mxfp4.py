@@ -81,6 +81,18 @@ if triton_kernels_version is not None:
         )
 
 
+def release_params_to_triton(layer: torch.nn.Module, *names: str) -> None:
+    """Free loaded params whose data now lives in triton_kernels tensors, keeping
+    them registered (the tensors are stored as `layer.<name>_triton`)."""
+    for name in names:
+        replace_parameter(layer, name, getattr(layer, name).data.new_empty(0))
+
+
+def triton_weight(layer: torch.nn.Module, name: str):
+    """The triton_kernels tensor stored for weight `name`, else the param."""
+    return getattr(layer, f"{name}_triton", getattr(layer, name))
+
+
 def _pack_deepgemm_mxfp4_scales(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
@@ -1394,8 +1406,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
         )
 
-        del layer.w13_weight
-        del layer.w2_weight
+        release_params_to_triton(layer, "w13_weight", "w2_weight")
 
         return (
             w13_weight,
@@ -1430,11 +1441,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         # The original mxfp4 block scales have been swizzled into the
         # precision configs above and are no longer read by the kernel, so
-        # drop the now-dead weight/scale Parameters to free their memory.
-        del layer.w13_weight
-        del layer.w2_weight
-        del layer.w13_weight_scale
-        del layer.w2_weight_scale
+        # free the now-dead weight/scale Parameters' memory.
+        release_params_to_triton(
+            layer, "w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"
+        )
 
         return (
             w13_weight,
@@ -1901,11 +1911,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         # The original mxfp4 block scales have been swizzled into the
         # precision configs above and are no longer read by the kernel, so
-        # drop the now-dead weight/scale Parameters to free their memory.
-        del layer.w13_weight
-        del layer.w2_weight
-        del layer.w13_weight_scale
-        del layer.w2_weight_scale
+        # free the now-dead weight/scale Parameters' memory.
+        release_params_to_triton(
+            layer, "w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"
+        )
 
         return (
             w13_weight,
