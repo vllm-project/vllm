@@ -14,12 +14,7 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import WarmupChoices
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    F32,
-    F64,
-    I32,
-    I64,
-    Bool,
-    Null,
+    Ptr,
     triton_warmup,
 )
 from vllm.triton_utils import tl, triton
@@ -736,27 +731,27 @@ def sample_recovered_tokens(
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton_warmup(
     synthetic_conditional_rates_ptr=lambda synthetic_mode: (
-        F32 if synthetic_mode else None
+        Ptr[tl.float32] if synthetic_mode else None
     ),
     SYNTHETIC_MODE=lambda synthetic_conditional_rates_ptr: (
         synthetic_conditional_rates_ptr is not None
     ),
     # Uniform probs are skipped only for all-greedy batches outside synthetic mode.
     uniform_probs_ptr=lambda is_greedy_ptr, SYNTHETIC_MODE: (
-        None if is_greedy_ptr is None and not SYNTHETIC_MODE else F64
+        None if is_greedy_ptr is None and not SYNTHETIC_MODE else Ptr[tl.float64]
     ),
 )
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
-    output_token_ids_ptr: I32,  # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens_ptr: I32,  # [batch_size]
-    draft_token_ids_ptr: I32,  # [num_tokens]
-    target_argmax_ptr: I64,  # [num_tokens]
-    bonus_token_ids_ptr: I64,  # [batch_size]
-    is_greedy_ptr: Bool | Null,  # [batch_size]; None if all greedy
+    output_token_ids_ptr: Ptr[tl.int32],  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr: Ptr[tl.int32],  # [batch_size]
+    draft_token_ids_ptr: Ptr[tl.int32],  # [num_tokens]
+    target_argmax_ptr: Ptr[tl.int64],  # [num_tokens]
+    bonus_token_ids_ptr: Ptr[tl.int64],  # [batch_size]
+    is_greedy_ptr: Ptr[tl.int1, None],  # [batch_size]; None if all greedy
     max_spec_len,
-    uniform_probs_ptr: F64 | Null,  # [num_tokens]
-    synthetic_conditional_rates_ptr: F32 | Null,  # [num_speculative_tokens]
+    uniform_probs_ptr: Ptr[tl.float64, None],  # [num_tokens]
+    synthetic_conditional_rates_ptr: Ptr[tl.float32, None],  # [num_speculative_tokens]
     SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -807,7 +802,7 @@ def rejection_greedy_sample_kernel(
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton_warmup(
     synthetic_conditional_rates_ptr=lambda synthetic_mode: (
-        F32 if synthetic_mode else None
+        Ptr[tl.float32] if synthetic_mode else None
     ),
     SYNTHETIC_MODE=lambda synthetic_conditional_rates_ptr: (
         synthetic_conditional_rates_ptr is not None
@@ -817,18 +812,18 @@ def rejection_greedy_sample_kernel(
 )
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
-    output_token_ids_ptr: I32,  # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens_ptr: I32,  # [batch_size]
-    draft_token_ids_ptr: I32,  # [num_tokens]
-    draft_probs_ptr: F32 | Null,  # [num_tokens, vocab_size]
-    target_probs_ptr: F32,  # [num_tokens, vocab_size]
-    bonus_token_ids_ptr: I64,  # [batch_size]
-    recovered_token_ids_ptr: I32,  # [num_tokens]
-    uniform_probs_ptr: F64,  # [num_tokens]
-    is_greedy_ptr: Bool,  # [batch_size]
+    output_token_ids_ptr: Ptr[tl.int32],  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr: Ptr[tl.int32],  # [batch_size]
+    draft_token_ids_ptr: Ptr[tl.int32],  # [num_tokens]
+    draft_probs_ptr: Ptr[tl.float32, None],  # [num_tokens, vocab_size]
+    target_probs_ptr: Ptr[tl.float32],  # [num_tokens, vocab_size]
+    bonus_token_ids_ptr: Ptr[tl.int64],  # [batch_size]
+    recovered_token_ids_ptr: Ptr[tl.int32],  # [num_tokens]
+    uniform_probs_ptr: Ptr[tl.float64],  # [num_tokens]
+    is_greedy_ptr: Ptr[tl.int1],  # [batch_size]
     max_spec_len,
     vocab_size,
-    synthetic_conditional_rates_ptr: F32 | Null,  # [num_speculative_tokens]
+    synthetic_conditional_rates_ptr: Ptr[tl.float32, None],  # [num_speculative_tokens]
     NO_DRAFT_PROBS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
 ):
@@ -893,9 +888,9 @@ def rejection_random_sample_kernel(
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
 def expand_kernel(
-    output_ptr: F32 | I32,  # [num_tokens]
-    input_ptr: F32 | I32,  # [batch_size]
-    cu_num_tokens_ptr: I32,  # [batch_size]
+    output_ptr: Ptr[tl.float32, tl.int32],  # [num_tokens]
+    input_ptr: Ptr[tl.float32, tl.int32],  # [batch_size]
+    cu_num_tokens_ptr: Ptr[tl.int32],  # [batch_size]
     replace_from,
     replace_to,
     MAX_NUM_TOKENS: tl.constexpr = MAX_SPEC_LEN,  # To avoid recompilation.
@@ -916,18 +911,20 @@ def expand_kernel(
 
 @triton_warmup(
     vocab_size=WarmupChoices(2, 16),
-    inv_q_ptr=lambda use_fp64_gumbel: F64 if use_fp64_gumbel else F32,
+    inv_q_ptr=lambda use_fp64_gumbel: Ptr[tl.float64]
+    if use_fp64_gumbel
+    else Ptr[tl.float32],
     NO_DRAFT_PROBS=lambda draft_probs_ptr: draft_probs_ptr is None,
     USE_FP64_GUMBEL=lambda inv_q_ptr: inv_q_ptr.dtype == torch.float64,
 )
 @triton.jit
 def sample_recovered_tokens_kernel(
-    output_token_ids_ptr: I32,  # [num_tokens]
-    cu_num_draft_tokens_ptr: I32,  # [batch_size]
-    draft_token_ids_ptr: I32,  # [num_tokens]
-    draft_probs_ptr: F32 | Null,  # [num_tokens, vocab_size]
-    target_probs_ptr: F32,  # [num_tokens, vocab_size]
-    inv_q_ptr: F32 | F64,  # [batch_size, vocab_size]
+    output_token_ids_ptr: Ptr[tl.int32],  # [num_tokens]
+    cu_num_draft_tokens_ptr: Ptr[tl.int32],  # [batch_size]
+    draft_token_ids_ptr: Ptr[tl.int32],  # [num_tokens]
+    draft_probs_ptr: Ptr[tl.float32, None],  # [num_tokens, vocab_size]
+    target_probs_ptr: Ptr[tl.float32],  # [num_tokens, vocab_size]
+    inv_q_ptr: Ptr[tl.float32, tl.float64],  # [batch_size, vocab_size]
     vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,
     USE_FP64_GUMBEL: tl.constexpr,

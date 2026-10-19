@@ -12,9 +12,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    F32,
-    I32,
-    I64,
+    Ptr,
     triton_warmup,
 )
 from vllm.triton_utils import tl, triton
@@ -549,31 +547,31 @@ class DFlashSpeculator(DraftModelSpeculator):
 @triton.jit(do_not_specialize=["block_table_stride"])
 def _prepare_dflash_inputs_kernel(
     # Outputs
-    out_input_ids_ptr: I32,
-    out_query_positions_ptr: I64,
-    out_query_start_loc_ptr: I32,
-    out_seq_lens_ptr: I32,
-    out_query_slot_mapping_ptr: I64,
-    out_context_positions_ptr: I64,
-    out_context_slot_mapping_ptr: I64,
-    out_sample_indices_ptr: I64,
-    out_sample_pos_ptr: I64,
-    out_sample_idx_mapping_ptr: I64,
-    out_temperature_ptr: F32,
-    out_seeds_ptr: I64,
+    out_input_ids_ptr: Ptr[tl.int32],
+    out_query_positions_ptr: Ptr[tl.int64],
+    out_query_start_loc_ptr: Ptr[tl.int32],
+    out_seq_lens_ptr: Ptr[tl.int32],
+    out_query_slot_mapping_ptr: Ptr[tl.int64],
+    out_context_positions_ptr: Ptr[tl.int64],
+    out_context_slot_mapping_ptr: Ptr[tl.int64],
+    out_sample_indices_ptr: Ptr[tl.int64],
+    out_sample_pos_ptr: Ptr[tl.int64],
+    out_sample_idx_mapping_ptr: Ptr[tl.int64],
+    out_temperature_ptr: Ptr[tl.float32],
+    out_seeds_ptr: Ptr[tl.int64],
     # Inputs from target batch
-    target_positions_ptr: I64,
-    target_query_start_loc_ptr: I32,
-    idx_mapping_ptr: I64,
-    last_sampled_ptr: I64,
-    next_prefill_tokens_ptr: I32,
-    num_sampled_ptr: I32,
-    num_rejected_ptr: I32,
+    target_positions_ptr: Ptr[tl.int64],
+    target_query_start_loc_ptr: Ptr[tl.int32],
+    idx_mapping_ptr: Ptr[tl.int64],
+    last_sampled_ptr: Ptr[tl.int64],
+    next_prefill_tokens_ptr: Ptr[tl.int32],
+    num_sampled_ptr: Ptr[tl.int32],
+    num_rejected_ptr: Ptr[tl.int32],
     # Sampling params
-    temperature_ptr: F32,
-    seeds_ptr: I64,
+    temperature_ptr: Ptr[tl.float32],
+    seeds_ptr: Ptr[tl.int64],
     # Block table for slot mapping lookup.
-    block_table_ptr: I32,
+    block_table_ptr: Ptr[tl.int32],
     block_table_stride,
     # Scalars
     parallel_drafting_token_id,

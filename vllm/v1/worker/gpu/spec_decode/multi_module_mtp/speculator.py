@@ -10,11 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    BF16,
-    F16,
-    F32,
-    I32,
-    I64,
+    Ptr,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -1001,11 +997,11 @@ def cache_inputs(
 
 @triton.jit
 def _shift_input_ids_kernel(
-    input_ids_ptr: I32,
-    idx_mapping_ptr: I64,
-    query_start_loc_ptr: I32,
-    last_token_indices_ptr: I64,
-    draft_tokens_ptr: I64,
+    input_ids_ptr: Ptr[tl.int32],
+    idx_mapping_ptr: Ptr[tl.int64],
+    query_start_loc_ptr: Ptr[tl.int32],
+    last_token_indices_ptr: Ptr[tl.int64],
+    draft_tokens_ptr: Ptr[tl.int64],
     BLOCK_SIZE: tl.constexpr = 1024,
 ):
     req_idx = tl.program_id(0)
@@ -1034,11 +1030,11 @@ def _shift_input_ids_kernel(
 @triton.jit
 def _shift_input_embeds_kernel(
     # Both embeddings are contiguous [*, hidden_size].
-    input_embeds_ptr: F16 | BF16 | F32,
-    draft_embeds_ptr: F16 | BF16 | F32,
-    idx_mapping_ptr: I64,
-    query_start_loc_ptr: I32,
-    last_token_indices_ptr: I64,
+    input_embeds_ptr: Ptr[tl.float16, tl.bfloat16, tl.float32],
+    draft_embeds_ptr: Ptr[tl.float16, tl.bfloat16, tl.float32],
+    idx_mapping_ptr: Ptr[tl.int64],
+    query_start_loc_ptr: Ptr[tl.int32],
+    last_token_indices_ptr: Ptr[tl.int64],
     hidden_size,
     BLOCK_SIZE_Q: tl.constexpr = 16,
     BLOCK_SIZE_H: tl.constexpr = 256,

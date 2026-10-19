@@ -4,9 +4,7 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup import WarmupIntRange
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    I32,
-    I64,
-    Bool,
+    Ptr,
     triton_warmup,
 )
 from vllm.platforms import current_platform
@@ -42,12 +40,14 @@ def next_power_of_2(n: int) -> int:
 )
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
-    positions_ptr: I64,  # [batch_size] - current positions (1D view for M-RoPE)
-    block_table_ptr: I32,  # [batch_size, n_blocks_per_req]
+    positions_ptr: Ptr[
+        tl.int64
+    ],  # [batch_size] - current positions (1D view for M-RoPE)
+    block_table_ptr: Ptr[tl.int32],  # [batch_size, n_blocks_per_req]
     block_table_stride,  # stride for block_table dim 1
-    seq_lens_ptr: I32,  # [batch_size] - read and write
-    out_clamped_positions_ptr: I64,  # [batch_size] (output)
-    out_slot_mapping_ptr: I64,  # [input_batch_size] (output)
+    seq_lens_ptr: Ptr[tl.int32],  # [batch_size] - read and write
+    out_clamped_positions_ptr: Ptr[tl.int64],  # [batch_size] (output)
+    out_slot_mapping_ptr: Ptr[tl.int64],  # [input_batch_size] (output)
     block_size: tl.constexpr,
     max_model_len: tl.constexpr,
     n_blocks_per_req: tl.constexpr,
@@ -149,11 +149,11 @@ def eagle_step_update_slot_mapping_and_metadata(
 
 @triton.jit
 def eagle_prepare_inputs_padded_kernel(
-    cu_num_draft_tokens_ptr: I32,  # [num_reqs]
-    valid_sampled_tokens_count_ptr: I32,  # [num_reqs]
-    query_start_loc_gpu_ptr: I32,  # [num_reqs + 1]
-    token_indices_to_sample_ptr: I32,  # [num_reqs] (output)
-    num_rejected_tokens_gpu_ptr: I32,  # [num_reqs] (output)
+    cu_num_draft_tokens_ptr: Ptr[tl.int32],  # [num_reqs]
+    valid_sampled_tokens_count_ptr: Ptr[tl.int32],  # [num_reqs]
+    query_start_loc_gpu_ptr: Ptr[tl.int32],  # [num_reqs + 1]
+    token_indices_to_sample_ptr: Ptr[tl.int32],  # [num_reqs] (output)
+    num_rejected_tokens_gpu_ptr: Ptr[tl.int32],  # [num_reqs] (output)
     num_reqs,  # tl.int32
 ):
     """Fused kernel for Eagle prepare_input_padded. This kernel computes the
@@ -201,11 +201,11 @@ def eagle_prepare_inputs_padded_kernel(
 )
 @triton.jit
 def eagle_prepare_next_token_padded_kernel(
-    sampled_token_ids_ptr: I32,  # [num_reqs, num_sampled_tokens_per_req]
-    discard_request_mask_ptr: Bool,  # [num_reqs]
-    backup_next_token_ids_ptr: I32,  # [num_reqs]
-    next_token_ids_ptr: I32,  # [num_reqs] (output)
-    valid_sampled_tokens_count_ptr: I32,  # [num_reqs] (output)
+    sampled_token_ids_ptr: Ptr[tl.int32],  # [num_reqs, num_sampled_tokens_per_req]
+    discard_request_mask_ptr: Ptr[tl.int1],  # [num_reqs]
+    backup_next_token_ids_ptr: Ptr[tl.int32],  # [num_reqs]
+    next_token_ids_ptr: Ptr[tl.int32],  # [num_reqs] (output)
+    valid_sampled_tokens_count_ptr: Ptr[tl.int32],  # [num_reqs] (output)
     vocab_size,  # tl.int32
     num_sampled_tokens_per_req,  # tl.int32 (num_spec_tokens + 1)
     num_reqs,  # tl.int32
@@ -333,19 +333,27 @@ def extend_all_queries_by_N(
 @triton.jit
 def copy_and_expand_eagle_inputs_kernel(
     # (Padded) Inputs from the target model
-    target_token_ids_ptr: I32,  # [total_tokens_in_batch]
-    target_positions_ptr: I64,  # [total_tokens_in_batch]
-    next_token_ids_ptr: I32,  # [num_reqs]
+    target_token_ids_ptr: Ptr[tl.int32],  # [total_tokens_in_batch]
+    target_positions_ptr: Ptr[tl.int64],  # [total_tokens_in_batch]
+    next_token_ids_ptr: Ptr[tl.int32],  # [num_reqs]
     # Outputs to the drafting buffers
-    out_input_ids_ptr: I32,  # [total_draft_tokens_in_batch] (output)
-    out_positions_ptr: I64,  # [total_draft_tokens_in_batch] (output)
-    out_is_rejected_token_mask_ptr: Bool,  # [total_draft_tokens_in_batch] (output)
-    out_is_masked_token_mask_ptr: Bool,  # [total_draft_tokens_in_batch] (output)
-    out_new_token_indices_ptr: I32,  # [num_padding_slots_per_request * num_reqs]
-    out_hidden_state_mapping_ptr: I32,  # [total_tokens_in_batch]
+    out_input_ids_ptr: Ptr[tl.int32],  # [total_draft_tokens_in_batch] (output)
+    out_positions_ptr: Ptr[tl.int64],  # [total_draft_tokens_in_batch] (output)
+    out_is_rejected_token_mask_ptr: Ptr[
+        tl.int1
+    ],  # [total_draft_tokens_in_batch] (output)
+    out_is_masked_token_mask_ptr: Ptr[
+        tl.int1
+    ],  # [total_draft_tokens_in_batch] (output)
+    out_new_token_indices_ptr: Ptr[
+        tl.int32
+    ],  # [num_padding_slots_per_request * num_reqs]
+    out_hidden_state_mapping_ptr: Ptr[tl.int32],  # [total_tokens_in_batch]
     # Input metadata
-    query_start_loc_ptr: I32,  # [num_reqs + 1], last value is total input tokens
-    query_end_loc_ptr: I32,  # [num_reqs]
+    query_start_loc_ptr: Ptr[
+        tl.int32
+    ],  # [num_reqs + 1], last value is total input tokens
+    query_end_loc_ptr: Ptr[tl.int32],  # [num_reqs]
     padding_token_id,  # tl.int32
     parallel_drafting_token_id,  # tl.int32
     # Sizing info
@@ -483,26 +491,30 @@ def copy_and_expand_eagle_inputs_kernel(
     num_query_per_req=lambda num_speculative_tokens: 1 + num_speculative_tokens,
     BLOCK_SIZE=WarmupIntRange(1, 257, advance=lambda value: value * 2),
     HAS_NUM_REJECTED=(False, True),
-    num_rejected_tokens_ptr=lambda HAS_NUM_REJECTED: I32 if HAS_NUM_REJECTED else 0,
+    num_rejected_tokens_ptr=lambda HAS_NUM_REJECTED: Ptr[tl.int32]
+    if HAS_NUM_REJECTED
+    else 0,
 )
 @triton.jit
 def copy_and_expand_dflash_inputs_kernel(
     # Inputs
-    next_token_ids_ptr: I32,  # [num_reqs]
-    target_positions_ptr: I64,  # [num_context]
+    next_token_ids_ptr: Ptr[tl.int32],  # [num_reqs]
+    target_positions_ptr: Ptr[tl.int64],  # [num_context]
     # Outputs
-    out_input_ids_ptr: I32,  # [num_query_total] (output)
-    out_context_positions_ptr: I64,  # [num_context] (output)
-    out_query_positions_ptr: I64,  # [num_query_total] (output)
-    out_context_slot_mapping_ptr: I64,  # [num_context] (output)
-    out_query_slot_mapping_ptr: I64,  # [num_query_total] (output)
-    out_token_indices_ptr: I32,  # [num_reqs * num_speculative_tokens] (output)
+    out_input_ids_ptr: Ptr[tl.int32],  # [num_query_total] (output)
+    out_context_positions_ptr: Ptr[tl.int64],  # [num_context] (output)
+    out_query_positions_ptr: Ptr[tl.int64],  # [num_query_total] (output)
+    out_context_slot_mapping_ptr: Ptr[tl.int64],  # [num_context] (output)
+    out_query_slot_mapping_ptr: Ptr[tl.int64],  # [num_query_total] (output)
+    out_token_indices_ptr: Ptr[
+        tl.int32
+    ],  # [num_reqs * num_speculative_tokens] (output)
     # Block table
-    block_table_ptr: I32,  # [max_reqs, max_blocks]
+    block_table_ptr: Ptr[tl.int32],  # [max_reqs, max_blocks]
     block_table_stride,  # stride of block_table dim 0 (in elements)
     # Metadata
-    query_start_loc_ptr: I32,  # [num_reqs + 1]
-    num_rejected_tokens_ptr: I32,  # [num_reqs] or null (0) when not padded
+    query_start_loc_ptr: Ptr[tl.int32],  # [num_reqs + 1]
+    num_rejected_tokens_ptr: Ptr[tl.int32],  # [num_reqs] or null (0) when not padded
     # Scalars
     parallel_drafting_token_id,  # tl.int32
     block_size,  # tl.int32
