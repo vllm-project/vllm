@@ -1,26 +1,21 @@
 # MiniMax M3 specialized decode
 
-This package contains the gfx950 layer-mode specialized decode selected by the
-project-wide `--monokernel` switch. Configuration selection is side-effect
-free; the executor is built after weight loading and caches are bound through
-the model state.
+`--monokernel` on MI355X/gfx950 runs each sparse layer (3-59) as vLLM's input
+norm and attention followed by one persistent FlyDSL launch for the rest of the
+layer (`mono/ffn.py`): the attention TP all-reduce and residual add, the Gemma
+post-attention norm, the FP32 router and top-4, the shared and routed experts,
+and the MoE TP all-reduce.
 
 Milestone one is deliberately narrow:
 
-- MI355X/gfx950 with all 256 CUs and dedicated GPU residency;
-- TP4, eager, plain decode widths 1/2/4/8/16;
-- layers 3-59 and the FFN half only;
-- BF16 expert activations with AITER-shuffled MXFP4 weights and E8M0 scales.
+- TP4 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU);
+- eager plain decode, 1-16 rows; everything else runs the stock layers;
+- BF16 expert activations against the `AITER_MXFP4_MXFP4` post-load weights
+  (AITER `(16, 16)` weight shuffle, `e8m0_shuffle` scales), matching what
+  native AITER computes at decode.
 
-`runtime/` owns refusals, planning, cache identity, health, and shutdown.
-`mono/` owns only kernel code. Unsupported static deployments are refused with
-all known reasons; unsupported steps run stock. Once a specialized launch
-starts, any reported failure stops the step before logits can be sampled.
-
-The FFN executor is not attached yet. The previous compile-only prototype used
-an A4W4 kernel and therefore did not match the effective A16W4 contract. The
-GLM-5.2 substrate is a source for its tested MXFP4 operand mapping and bounded
-peer protocol, but its TP8, top-8, 256-expert geometry is not directly reusable.
-`mono.viability.FfnViabilityEvidence` requires a MiniMax-shaped post-link
-resource report, one resident CTA per CU with no spills, and measured eager
-real-layer speedup before an executor may be selected.
+`runtime/` owns refusals, planning, health and shutdown; `mono/` owns the
+kernel and its host launcher. Unsupported static deployments are refused with
+all known reasons. In-kernel waits are bounded and set a sticky error word on
+every rank; any failure, including a rank-local exception in a layer, stops
+the step on every rank before logits are computed.

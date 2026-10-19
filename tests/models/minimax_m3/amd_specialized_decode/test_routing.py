@@ -136,10 +136,10 @@ def test_static_refusals_report_all_reasons():
         data_parallel_size=2,
         enable_expert_parallel=True,
     )
-    config.cache_config.enable_prefix_caching = True
+    config.cache_config.block_size = 64
     reasons = DECODE_CONFIG.refusal_reasons(config)
     assert any("tensor parallel" in reason for reason in reasons)
-    assert any("prefix caching" in reason for reason in reasons)
+    assert any("block size" in reason for reason in reasons)
 
 
 def test_step_layer_lookup_is_immutable():

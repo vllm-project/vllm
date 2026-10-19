@@ -1479,7 +1479,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         from .specialized_decode.runtime.decode import SpecializedDecode
 
         assert self.specialized_decode_config is not None
-        self.specialized_decode = SpecializedDecode(
+        self.specialized_decode = SpecializedDecode.build(
             self, self.specialized_decode_config
         )
 
@@ -1502,23 +1502,29 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         decode = self.specialized_decode
-        step = (
-            decode.plan(positions, intermediate_tensors) if decode is not None else None
-        )
-
-        # EAGLE3 is not yet compatible with pipeline parallel
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            kernel = step.layer(layer.layer_id) if step else None
-            hidden_states, residual = (kernel or layer)(
-                positions, hidden_states, residual
+        if decode is None:
+            # EAGLE3 is not yet compatible with pipeline parallel
+            aux_hidden_states = self._maybe_add_hidden_state(
+                [], 0, hidden_states, residual
             )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
-            )
-
-        if decode is not None:
-            decode.after_step(step)
+            for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+                hidden_states, residual = layer(positions, hidden_states, residual)
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, idx + 1, hidden_states, residual
+                )
+        else:
+            aux_hidden_states = []
+            step = decode.plan(positions, intermediate_tensors)
+            failure: Exception | None = None
+            try:
+                for layer in self.layers[self.start_layer : self.end_layer]:
+                    kernel = step.layer(layer.layer_id) if step else None
+                    hidden_states, residual = (kernel or layer)(
+                        positions, hidden_states, residual
+                    )
+            except Exception as err:
+                failure = err
+            decode.after_step(step, failure)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

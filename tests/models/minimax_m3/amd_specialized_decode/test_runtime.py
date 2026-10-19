@@ -55,6 +55,9 @@ class _Executor:
     def after_step(self):
         return None
 
+    def abort(self):
+        return None
+
     def close(self):
         return None
 
@@ -107,15 +110,24 @@ def test_plan_is_once_per_forward_and_returns_immutable_layer_map(
     assert executor.layer_calls == [3, 4]
     assert step.layer(3) is not None
     assert step.layer(4) is not None
-    assert instance.planned_steps == 1
-    assert instance.native_steps == 0
+    assert instance.mono_steps == 1
+    assert instance.stock_steps == 0
 
 
-def test_no_executor_keeps_the_stock_layer_path(decode):
-    instance, _ = decode
-    instance.executor = None
-    assert instance.plan(torch.zeros(1, dtype=torch.int64), None) is None
-    assert instance.native_steps == 1
+def test_executor_is_built_after_weight_checks(monkeypatch: pytest.MonkeyPatch):
+    order = []
+    monkeypatch.setattr(
+        runtime, "checked_weights", lambda model, config: order.append("weights")
+    )
+    model = SimpleNamespace(layers=[])
+
+    def factory(decode):
+        order.append("executor")
+        return _Executor()
+
+    instance = runtime.SpecializedDecode(model, DecodeConfig(), factory)
+    assert order == ["weights", "executor"]
+    assert isinstance(instance.executor, _Executor)
 
 
 def test_cache_bind_is_identity_stable_and_rebinds_replacements(

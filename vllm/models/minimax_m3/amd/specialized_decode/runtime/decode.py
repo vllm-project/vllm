@@ -31,6 +31,8 @@ class KernelExecutor(Protocol):
 
     def health(self) -> Any: ...
 
+    def abort(self) -> None: ...
+
     def after_step(self) -> None: ...
 
     def close(self) -> None: ...
@@ -59,7 +61,7 @@ class SpecializedDecode:
         self,
         model,
         config: DecodeConfig,
-        executor: KernelExecutor | None = None,
+        executor: KernelExecutor | Callable[[SpecializedDecode], KernelExecutor],
     ) -> None:
         self.model = model
         self.config = config
@@ -69,19 +71,29 @@ class SpecializedDecode:
             if config.first_layer <= layer.layer_id <= config.last_layer
         )
         self.weights = checked_weights(model, config)
-        self.executor = executor
+        self.executor = executor(self) if callable(executor) else executor
         self._cache_identities: dict[int, dict[str, TensorIdentity]] = {}
         self._closed = False
-        self.planned_steps = 0
-        self.native_steps = 0
+        self.mono_steps = 0
+        self.stock_steps = 0
+
+    @classmethod
+    def build(cls, model, config: DecodeConfig) -> SpecializedDecode:
+        from .executor import FfnExecutor
+
+        return cls(
+            model,
+            config,
+            lambda decode: FfnExecutor(
+                decode.layers, decode.weights, config.widths, config.tp_size
+            ),
+        )
 
     @staticmethod
     def _health_failed(health: Any) -> bool:
         return bool(getattr(health, "failed", health))
 
     def _check_health(self, phase: str) -> None:
-        if self.executor is None:
-            return
         failure: Exception | None = None
         health: Any = None
         try:
@@ -112,9 +124,8 @@ class SpecializedDecode:
                 raise RuntimeError(
                     "specialized-decode cache first-bind/rebind during graph capture"
                 )
-            if self.executor is not None:
-                for layer_id, binding in changed.items():
-                    self.executor.bind(layer_id, binding)
+            for layer_id, binding in changed.items():
+                self.executor.bind(layer_id, binding)
         except Exception as err:
             failure = err
 
@@ -141,7 +152,7 @@ class SpecializedDecode:
             or self._closed
             or not is_forward_context_available()
         ):
-            self.native_steps += 1
+            self.stock_steps += 1
             return None
         context = get_forward_context()
         all_metadata = context.attn_metadata
@@ -154,36 +165,39 @@ class SpecializedDecode:
             metadata,
         )
         if not decision.use_mono:
-            self.native_steps += 1
-            return None
-        if self.executor is None:
-            self.native_steps += 1
+            self.stock_steps += 1
             return None
         kernels = tuple(self.executor.layer(layer.layer_id) for layer in self.layers)
         if any(kernel is None for kernel in kernels):
             raise RuntimeError(
                 "MiniMax specialized-decode executor does not own every sparse layer"
             )
-        self.planned_steps += 1
+        self.mono_steps += 1
         return Step(self.config.first_layer, kernels)
 
     def health(self) -> Any:
-        return None if self.executor is None else self.executor.health()
+        return self.executor.health()
 
-    def after_step(self, step: Step | None) -> None:
-        if self.executor is None or step is None or not step.launched:
+    def after_step(self, step: Step | None, failure: Exception | None = None) -> None:
+        """Every rank that planned ``step`` completes it here, whether its layer
+        loop raised (``failure``) or not, so no rank is left in a collective."""
+        if step is None or not step.launched:
+            if failure is not None:
+                raise failure
             return
-        failure: Exception | None = None
-        try:
-            self.executor.after_step()
-        except Exception as err:
-            failure = err
+        if failure is not None:
+            self.executor.abort()
+        else:
+            try:
+                self.executor.after_step()
+            except Exception as err:
+                failure = err
 
         from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
 
         if not tp_agree(failure is None, get_tp_group().cpu_group):
             raise RuntimeError(
-                "MiniMax specialized-decode after-step hook failed"
+                "MiniMax specialized-decode step failed on a TP rank"
             ) from failure
         self._check_health("after step")
 
@@ -191,5 +205,4 @@ class SpecializedDecode:
         if self._closed:
             return
         self._closed = True
-        if self.executor is not None:
-            self.executor.close()
+        self.executor.close()

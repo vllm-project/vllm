@@ -14,7 +14,8 @@ class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
     max_rows: int = 16
-    widths: tuple[int, ...] = (1, 2, 4, 8, 16)
+    # eager steps are not padded: every row count up to max_rows
+    widths: tuple[int, ...] = tuple(range(1, 17))
     first_layer: int = 3
     last_layer: int = 59
 
@@ -43,8 +44,6 @@ class DecodeConfig:
             reasons.append("requires an FP8 KV cache")
         if cc.block_size != 128:
             reasons.append("requires KV cache block size 128")
-        if cc.enable_prefix_caching:
-            reasons.append("does not yet support prefix caching")
         if cc.kv_offloading_size is not None:
             reasons.append("does not support KV cache offloading")
 

@@ -22,6 +22,7 @@ class _Executor:
         self.after_calls = 0
         self.close_calls = 0
         self.after_failure: Exception | None = None
+        self.abort_calls = 0
 
     def health(self):
         return self.current_health
@@ -30,6 +31,9 @@ class _Executor:
         self.after_calls += 1
         if self.after_failure is not None:
             raise self.after_failure
+
+    def abort(self):
+        self.abort_calls += 1
 
     def close(self):
         self.close_calls += 1
@@ -74,9 +78,26 @@ def test_after_step_exception_is_fail_stop():
     executor.after_failure = ValueError("injected")
     decode = _decode(executor)
     kernel = lambda *args: (args[1], args[2])
-    with pytest.raises(RuntimeError, match="after-step hook failed") as error:
+    with pytest.raises(RuntimeError, match="failed on a TP rank") as error:
         decode.after_step(runtime.Step(3, (kernel,)))
     assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_layer_exception_aborts_peers_then_fails_on_every_rank():
+    executor = _Executor()
+    decode = _decode(executor)
+    kernel = lambda *args: (args[1], args[2])
+    with pytest.raises(RuntimeError, match="failed on a TP rank") as error:
+        decode.after_step(runtime.Step(3, (kernel,)), ValueError("launch"))
+    assert isinstance(error.value.__cause__, ValueError)
+    assert executor.abort_calls == 1
+    assert executor.after_calls == 0
+
+
+def test_stock_step_exception_is_reraised_unchanged():
+    decode = _decode(_Executor())
+    with pytest.raises(ValueError, match="stock"):
+        decode.after_step(None, ValueError("stock"))
 
 
 def test_close_is_idempotent():

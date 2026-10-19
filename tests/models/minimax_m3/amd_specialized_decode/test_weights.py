@@ -9,6 +9,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.weights import (
     EXPERTS,
     HIDDEN,
@@ -42,12 +43,13 @@ def _layer():
         swiglu_beta=1.0,
         swiglu_limit=7.0,
         quant_method=SimpleNamespace(
-            moe_kernel=SimpleNamespace(fused_experts=fused_experts)
+            mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            moe_kernel=SimpleNamespace(fused_experts=fused_experts),
         ),
         w13_weight=w13,
         w2_weight=w2,
-        w13_weight_scale=_parameter((EXPERTS * 2 * INTER, HIDDEN // 32), torch.uint8),
-        w2_weight_scale=_parameter((EXPERTS * HIDDEN, INTER // 32), torch.uint8),
+        w13_weight_scale=_parameter((EXPERTS, 2 * INTER, HIDDEN // 32), torch.uint8),
+        w2_weight_scale=_parameter((EXPERTS, HIDDEN, INTER // 32), torch.uint8),
     )
     moe = SimpleNamespace(
         is_fused_shared_expert_enabled=True,
@@ -106,6 +108,14 @@ def test_effective_activation_mode_is_explicitly_bf16():
 
     experts.quant_method.moe_kernel.fused_experts.moe_config.use_mori_kernels = True
     assert effective_activation_mode(experts) is EffectiveActivationMode.MXFP4
+
+
+def test_other_mxfp4_shuffle_is_refused():
+    layer = _layer()
+    quant_method = layer.block_sparse_moe.experts.routed_experts.quant_method
+    quant_method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    with pytest.raises(ValueError, match="AITER_MXFP4_MXFP4"):
+        MonoLayerWeights.from_layer(layer, require_cuda=False)
 
 
 def test_bf16_router_is_refused():

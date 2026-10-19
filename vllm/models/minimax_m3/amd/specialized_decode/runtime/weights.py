@@ -12,6 +12,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterMxfp4Experts,
 )
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
 HIDDEN = 6144
 QKV_ROWS = 2560
@@ -111,6 +112,13 @@ class MonoLayerWeights:
             getattr(experts, "top_k", None) == 4,
             f"layer {layer_id} requires top-4 routing",
         )
+        # the kernel reads e8m0_shuffle scales and (16, 16) shuffle_weight
+        # weights, which only this backend's post-load conversion produces
+        _require(
+            getattr(experts.quant_method, "mxfp4_backend", None)
+            is Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            f"layer {layer_id} requires the AITER_MXFP4_MXFP4 expert layout",
+        )
         _require(
             effective_activation_mode(experts) is EffectiveActivationMode.BF16,
             f"layer {layer_id} requires effective BF16 expert activations",
@@ -180,14 +188,14 @@ class MonoLayerWeights:
         )
         _require(
             s13.dtype == torch.uint8
-            and tuple(s13.shape) == (EXPERTS * 2 * INTER, HIDDEN // 32)
+            and tuple(s13.shape) == (EXPERTS, 2 * INTER, HIDDEN // 32)
             and s13.is_contiguous()
             and s13.storage_offset() == 0,
             f"layer {layer_id} w13 scales are not shuffled E8M0 group-32",
         )
         _require(
             s2.dtype == torch.uint8
-            and tuple(s2.shape) == (EXPERTS * HIDDEN, INTER // 32)
+            and tuple(s2.shape) == (EXPERTS, HIDDEN, INTER // 32)
             and s2.is_contiguous()
             and s2.storage_offset() == 0,
             f"layer {layer_id} w2 scales are not shuffled E8M0 group-32",
