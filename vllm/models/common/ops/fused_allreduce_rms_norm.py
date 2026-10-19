@@ -44,7 +44,8 @@ def fused_allreduce_rms_norm(
 
     ``hidden_states`` is the per-rank *partial* output of a row-parallel linear
     run with ``reduce_results=False``, or of a MoE layer whose reduction was
-    left open (``MoEOutput``); ``norm`` is the RMSNorm applied right after.
+    left open (``MoEOutput``, whose buffers the fused kernel path releases);
+    ``norm`` is the RMSNorm applied right after.
     Returns ``(normed_output, new_residual)``, equivalent to
     ``norm(all_reduce(hidden_states), residual)``. Falls back to an explicit
     all-reduce + RMSNorm when the flashinfer fast path is unavailable.
@@ -187,6 +188,11 @@ def _moe_finalize_allreduce_rms_norm(
                 expert_scale_factor=expert_weights,
                 routed_scaling_factor=moe_output.routed_scaling_factor,
             )
+            # The caller's layer loop holds moe_output until the consuming layer
+            # returns. Free the padded GEMM2 rows now, so the layer's later
+            # allocations can't be split around them (in a CUDA graph pool that
+            # costs a new segment per graph for the indexer logits).
+            del moe_output.routed, moe_output.shared_output, routed
             return norm_out, residual_out
 
     # Layers defer only when the fused kernel is available (see
