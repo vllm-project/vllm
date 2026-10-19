@@ -69,7 +69,7 @@ pub(crate) fn lower_completion_request(
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
@@ -82,7 +82,11 @@ pub async fn completions(
 
     let tokenizer = state.chat.text().tokenizer();
     let is_batch = body.prompt.is_batch();
-    let prompts = body.prompt.clone().into_prompts();
+    let prompts = std::mem::replace(
+        &mut body.prompt,
+        types::CompletionPrompt::Text(String::new()),
+    )
+    .into_prompts();
     let mut prepared_requests = Vec::with_capacity(prompts.len());
     for prompt in prompts {
         let mut item = body.clone();
