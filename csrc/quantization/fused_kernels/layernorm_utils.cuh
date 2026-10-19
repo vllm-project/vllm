@@ -546,6 +546,173 @@ __device__ void norm_and_quant(
   }
 }
 
+// Single-pass register-resident RMSNorm + dynamic per-block quantization
+// kernel for hidden_size <= 8192 and group_size in {64, 128}.
+// Loads input, residual, and weight once into registers, updates residual
+// in-place on Pass 1, computes RMS via warp + shared-memory block reduction,
+// and computes each group's absmax via sub-warp butterfly reduction
+// (VLLM_SHFL_XOR_SYNC_WIDTH) in registers without a second or third global
+// memory read.
+template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+          bool is_scale_transposed = false, int32_t group_size = 128,
+          int32_t VEC_PER_THREAD = 2>
+__device__ void rms_norm_per_block_quant_single_pass(
+    scalar_out_t* __restrict__ out, float* __restrict__ scales,
+    scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
+    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
+    int64_t outer_scale_stride = 1) {
+  constexpr int VEC_SIZE = 4;
+  constexpr int ELEMS_PER_THREAD = VEC_SIZE * VEC_PER_THREAD;
+  constexpr int THREADS_PER_GROUP = group_size / ELEMS_PER_THREAD;
+  static_assert(group_size % ELEMS_PER_THREAD == 0,
+                "group_size must be divisible by ELEMS_PER_THREAD");
+  static_assert(THREADS_PER_GROUP >= 1 && THREADS_PER_GROUP <= 32 &&
+                    (THREADS_PER_GROUP & (THREADS_PER_GROUP - 1)) == 0,
+                "THREADS_PER_GROUP must be a power of two in [1, 32]");
+
+  int64_t const input_token_offset =
+      blockIdx.x * static_cast<int64_t>(input_stride);
+  int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+
+  vec4_t<scalar_t> const* vec_input =
+      reinterpret_cast<vec4_t<scalar_t> const*>(&input[input_token_offset]);
+  vec4_t<scalar_t> const* vec_weight =
+      reinterpret_cast<vec4_t<scalar_t> const*>(weight);
+  vec4_t<scalar_t>* vec_residual = nullptr;
+  if constexpr (has_residual) {
+    vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
+  }
+
+  int32_t const num_vec_elems = hidden_size >> 2;
+  int32_t const vec_base = threadIdx.x * VEC_PER_THREAD;
+  bool const active = (vec_base < num_vec_elems);
+
+  vec4_t<float> x_vals[VEC_PER_THREAD];
+  vec4_t<scalar_t> w_vals[VEC_PER_THREAD];
+  float ss = 0.0f;
+
+  if (active) {
+#pragma unroll
+    for (int v = 0; v < VEC_PER_THREAD; ++v) {
+      vec4_t<scalar_t> const in = vec_input[vec_base + v];
+      w_vals[v] = vec_weight[vec_base + v];
+
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> r = vec_residual[vec_base + v];
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          float sum =
+              static_cast<float>(in.val[j]) + static_cast<float>(r.val[j]);
+          r.val[j] = static_cast<scalar_t>(sum);
+          x_vals[v].val[j] = static_cast<float>(r.val[j]);
+          ss += x_vals[v].val[j] * x_vals[v].val[j];
+        }
+        vec_residual[vec_base + v] = r;
+      } else {
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          x_vals[v].val[j] = static_cast<float>(in.val[j]);
+          ss += x_vals[v].val[j] * x_vals[v].val[j];
+        }
+      }
+    }
+  }
+
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask >>= 1) {
+    ss += VLLM_SHFL_XOR_SYNC(ss, mask);
+  }
+
+  __shared__ float s_warp_sums[32];
+  __shared__ float s_rms;
+  int const warp_id = threadIdx.x / WARP_SIZE;
+  int const lane_id = threadIdx.x % WARP_SIZE;
+  int const num_warps = blockDim.x / WARP_SIZE;
+
+  if (lane_id == 0) {
+    s_warp_sums[warp_id] = ss;
+  }
+  __syncthreads();
+
+  if (warp_id == 0) {
+    float block_ss = (lane_id < num_warps) ? s_warp_sums[lane_id] : 0.0f;
+#pragma unroll
+    for (int mask = WARP_SIZE / 2; mask >= 1; mask >>= 1) {
+      block_ss += VLLM_SHFL_XOR_SYNC(block_ss, mask);
+    }
+    if (lane_id == 0) {
+      s_rms = rsqrtf(block_ss / static_cast<float>(hidden_size) + var_epsilon);
+    }
+  }
+  __syncthreads();
+
+  if (!active) {
+    return;
+  }
+
+  float const rms = s_rms;
+  vec4_t<float> x_norm[VEC_PER_THREAD];
+  float local_absmax = 0.0f;
+
+#pragma unroll
+  for (int v = 0; v < VEC_PER_THREAD; ++v) {
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      scalar_t const norm_elem =
+          static_cast<scalar_t>(x_vals[v].val[j] * rms) * w_vals[v].val[j];
+      float const val = static_cast<float>(norm_elem);
+      x_norm[v].val[j] = val;
+      local_absmax = fmaxf(local_absmax, fabsf(val));
+    }
+  }
+
+  float group_absmax = local_absmax;
+#pragma unroll
+  for (int mask = THREADS_PER_GROUP / 2; mask >= 1; mask >>= 1) {
+    group_absmax =
+        fmaxf(group_absmax,
+              VLLM_SHFL_XOR_SYNC_WIDTH(group_absmax, mask, THREADS_PER_GROUP));
+  }
+
+  constexpr float qmax = quant_type_max_v<scalar_out_t>;
+  float group_scale = scale_ub ? fminf(group_absmax, *scale_ub) : group_absmax;
+  group_scale =
+      fmaxf(group_scale / qmax, min_scaling_factor<scalar_out_t>::val());
+
+  int const group_id = threadIdx.x / THREADS_PER_GROUP;
+  int const lane_in_group = threadIdx.x % THREADS_PER_GROUP;
+  int64_t const num_groups = hidden_size / group_size;
+
+  if (lane_in_group == 0) {
+    if constexpr (is_scale_transposed) {
+      int64_t const scale_rows = (gridDim.x + outer_scale_stride - 1) /
+                                 outer_scale_stride * outer_scale_stride;
+      scales[group_id * scale_rows + blockIdx.x] = group_scale;
+    } else {
+      scales[blockIdx.x * num_groups + group_id] = group_scale;
+    }
+  }
+
+  // Group quant multiplies by the reciprocal of the scale (one div per group),
+  // matching per_token_group_quant_8bit and norm_and_quant.
+  float const inv_scale = 1.0f / group_scale;
+
+  q8x4_t<scalar_out_t>* vec_output =
+      reinterpret_cast<q8x4_t<scalar_out_t>*>(&out[token_offset]);
+
+#pragma unroll
+  for (int v = 0; v < VEC_PER_THREAD; ++v) {
+    q8x4_t<scalar_out_t> q_out;
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      q_out.val[j] = ScaledQuant<scalar_out_t, true>::quant_fn(x_norm[v].val[j],
+                                                               inv_scale);
+    }
+    vec_output[vec_base + v] = q_out;
+  }
+}
+
 }  // namespace vectorized
 
 }  // namespace vllm
