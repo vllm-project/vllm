@@ -315,6 +315,43 @@ async def test_generate_logprobs(client, logprobs_value):
 
 
 @pytest.mark.asyncio
+async def test_generate_flat_logprobs_matches_logprobs(client):
+    """flat_logprobs carries logprobs.content's entries as [tokens, k + 1] arrays."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0, "logprobs": 3},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["logprobs"]["content"]
+
+    payload["sampling_params"]["flat_logprobs"] = True
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    assert choice["logprobs"] is None
+    flat = {
+        name: np.load(io.BytesIO(base64.b64decode(value)))
+        for name, value in choice["flat_logprobs"].items()
+    }
+    assert flat["token_ids"].shape == (len(content), 4)
+    for i, entry in enumerate(content):
+        # The sampled token comes first and is repeated when it is in the top-k,
+        # where the content shape lists it once.
+        assert flat["token_ids"][i, 0] == entry["token_id"]
+        assert dict(zip(flat["token_ids"][i].tolist(), flat["ranks"][i].tolist())) == {
+            t["token_id"]: t["rank"] or 0 for t in entry["top_logprobs"]
+        }
+        assert dict(
+            zip(flat["token_ids"][i].tolist(), flat["logprobs"][i].tolist())
+        ) == pytest.approx(
+            {t["token_id"]: t["logprob"] for t in entry["top_logprobs"]}, rel=1e-5
+        )
+
+
+@pytest.mark.asyncio
 async def test_generate_prompt_token_id_logprobs(client):
     token_ids = [11, 22, 33, 44, 55]
     rows = [[33], [44, 100], [55]]

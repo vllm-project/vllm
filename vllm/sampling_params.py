@@ -371,7 +371,10 @@ class SamplingParams(
     for better performance.
     NOTE: GC costs of FlatLogprobs is significantly smaller than
     list[dict[int, Logprob]]. After enabled, PromptLogprobs and
-    SampleLogprobs would populated as FlatLogprobs."""
+    SampleLogprobs would populated as FlatLogprobs. On
+    `/inference/v1/generate` in tokens mode, the response then carries
+    the sample logprobs as arrays in `flat_logprobs` instead of
+    `logprobs`."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.

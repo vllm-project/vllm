@@ -245,10 +245,11 @@ class GenerateRequest(BaseModel):
     output_mode: OutputMode = Field(
         default="tokens",
         description=(
-            "Response level. 'tokens' returns token IDs only. 'text' also "
-            "returns the detokenized text and logprobs with decoded token "
-            "strings. 'text' needs a server that loads a tokenizer and "
-            "sampling_params.detokenize to be true."
+            "Response level. 'tokens' returns token IDs only, and unless the "
+            "request sets sampling_params.detokenize, detokenizes only when "
+            "it has stop strings. 'text' also returns the detokenized text "
+            "and logprobs with decoded token strings. 'text' needs a server "
+            "that loads a tokenizer and sampling_params.detokenize to be true."
         ),
     )
 
@@ -394,6 +395,24 @@ class GenerateLogProbs(BaseModel):
     content: list[GenerateLogProbsContent] | None = None
 
 
+class GenerateFlatLogProbs(BaseModel):
+    """Output logprobs for one choice as arrays, sent instead of ``logprobs``
+    when ``sampling_params.flat_logprobs`` is set in tokens mode.
+
+    Each field is a base64-encoded ``.npy`` of shape ``[num_tokens, k + 1]``
+    (decode with ``np.load(io.BytesIO(base64.b64decode(s)))``): column 0 is
+    the sampled token, then the top-k in rank order, which repeat the sampled
+    token when it ranks among them. ``token_ids`` and ``ranks`` are int32,
+    ``logprobs`` the engine's float32 values, not clamped; a rank of 0 means
+    the engine reported none. A choice or stream chunk with no tokens carries
+    ``None`` instead, so chunks concatenate along axis 0.
+    """
+
+    token_ids: str
+    logprobs: str
+    ranks: str
+
+
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
@@ -429,6 +448,7 @@ class GenerateChoiceBase(BaseModel):
 class GenerateTokensChoice(GenerateChoiceBase):
     logprobs: GenerateLogProbs | None = None
     """Logprobs with integer token ids (no tokenizer on the generate server)."""
+    flat_logprobs: GenerateFlatLogProbs | None = None
 
 
 class GenerateTextChoice(GenerateChoiceBase):
@@ -458,6 +478,7 @@ class GenerateStreamChoiceBase(BaseModel):
 
 class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
     logprobs: GenerateLogProbs | None = None
+    flat_logprobs: GenerateFlatLogProbs | None = None
 
 
 class GenerateTextStreamChoice(GenerateStreamChoiceBase):
