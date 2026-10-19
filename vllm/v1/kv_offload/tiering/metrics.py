@@ -162,11 +162,6 @@ class TieringMetricsTracker:
     def on_primary_chunk_count(
         self, tier_idx: int, chunk_count: int, is_promotion: bool
     ):
-        """Apply a primary chunk-count delta (may be negative) directly.
-
-        Scheduler thread only; tier worker threads must use
-        safe_counter_update() instead.
-        """
         state = self._tier_states[tier_idx]
         if is_promotion:
             state.primary_write_chunk_count += chunk_count
@@ -174,17 +169,13 @@ class TieringMetricsTracker:
             state.primary_read_chunk_count += chunk_count
 
     def on_promotion_allocation_failure(self) -> None:
-        """Record a promotion allocation failure directly. Scheduler thread;
-        tier worker threads must use safe_counter_update() instead."""
         self._stats.increase_counter(
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         )
 
     def safe_counter_update(self, tier_idx: int, metric: str, count: int) -> None:
-        """Buffer a counter update under a lock. Safe from any thread.
-        Used by deferred promotion allocation, which runs on a tier worker
-        thread. The update is applied to the real counters by
-        drain_pending_updates() on the scheduler thread.
+        """Thread-safe updates to metrics that TieringMetricsTracker drains when
+        needed.
 
         Args:
             tier_idx: Secondary tier the update is attributed to.

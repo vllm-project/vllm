@@ -462,12 +462,11 @@ class TieringOffloadingManager(OffloadingManager):
 
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
-        tracker = TieringMetricsTracker(
+        self._metrics = TieringMetricsTracker(
             tier_types=[tier.tier_type for tier in self.secondary_tiers],
             num_primary_chunks=self.primary_tier._num_chunks,
             primary_chunk_size=primary_view.strides[0],
         )
-        self._metrics = tracker
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
