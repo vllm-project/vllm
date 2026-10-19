@@ -17,12 +17,24 @@ def pytest_addoption(parser):
     )
 
 
+def _list_keys() -> list[str]:
+    """The .yaml list sections this machine runs: ``common``, its platform's
+    device name and, on ROCm, its CDNA generation (``cdna3``, ``cdna4``)."""
+    keys = ["common", current_platform.device_name]
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import get_cdna_version
+
+        if cdna := get_cdna_version():
+            keys.append(f"cdna{cdna}")
+    return keys
+
+
 def _config_names(config_list_path: Path) -> list[str]:
-    """Config file names from a .txt list, or from a .yaml list's ``common``
-    entries followed by the entries under the current platform's device name."""
+    """Config file names from a .txt list, or from a .yaml list's sections
+    that this machine runs (see ``_list_keys``)."""
     if config_list_path.suffix in (".yaml", ".yml"):
         lists = yaml.safe_load(config_list_path.read_text()) or {}
-        return [*lists.get("common", []), *lists.get(current_platform.device_name, [])]
+        return [name for key in _list_keys() for name in lists.get(key, [])]
     lines = (line.strip() for line in config_list_path.read_text().splitlines())
     return [line for line in lines if line and not line.startswith("#")]
 
