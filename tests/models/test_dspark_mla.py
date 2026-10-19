@@ -242,7 +242,14 @@ def test_v41_dspark_loads_linear_scales(
         linear_scale_name=scale_name,
         pad_shared_expert=False,
         model=SimpleNamespace(
-            layers=[SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))],
+            layers=[
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        experts=SimpleNamespace(has_fused_shared_experts=False),
+                    )
+                )
+            ],
             confidence_head=None,
         ),
         named_parameters=lambda: [(runtime_name, param)],
@@ -251,8 +258,6 @@ def test_v41_dspark_loads_linear_scales(
     draft._remap_dspark_name = lambda name: (
         dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
     )
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_world_size", lambda: 4)
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         dspark, "fused_moe_make_expert_params_mapping", lambda *a, **kw: []
     )
@@ -303,8 +308,6 @@ def test_dsv4_dspark_fused_moe_expert_mapping_includes_redundant_experts(
     draft._remap_dspark_name = lambda name: (
         dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name(draft, name)
     )
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(dspark, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         dspark,
         "fused_moe_make_expert_params_mapping",
@@ -394,12 +397,13 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     """The draft's MLA layers must share a KV cache group with the target's."""
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_groups_uniform_page_size
+    from vllm.v1.core.kv_cache_planning import _get_kv_cache_groups_uniform_page_size
 
     vllm_config = SimpleNamespace(
         model_config=None, cache_config=SimpleNamespace(block_size=64)
     )
     target_attn = SimpleNamespace(
+        topk_buffer_width=None,
         kv_cache_dtype="fp8",
         head_size=576,
         sliding_window=None,

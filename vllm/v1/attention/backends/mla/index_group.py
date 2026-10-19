@@ -138,8 +138,6 @@ class SparseMLAIndexGroup:
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
         compute_stream = current_stream()
         if layer_index == 0:
-            # block_table may be built on the compute stream after the indexer
-            # recorded logical_topk_ready (the leader's batch block table is).
             self.side_stream.wait_stream(compute_stream)
             with self.side_stream:
                 triton_convert_req_index_to_global_index(
@@ -232,7 +230,10 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         cache = self.cache(layer_index)
         num_tokens = logical_topk_indices.shape[0]
         req_id_per_token = attn_metadata.req_id_per_token[:num_tokens]
-        if num_tokens > cache.runtime.max_swap_rows:
+        if num_tokens > cache.runtime.max_swap_rows or (
+            cache.all_context_pages_resident
+            and cache.num_decode_tokens < cache.num_actual_tokens
+        ):
             # Prefill-sized batches do not fit the decode residency workspace.
             # Non-resident prefills are staged before reaching this path.
             assert cache.all_context_pages_resident

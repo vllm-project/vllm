@@ -17,6 +17,7 @@ mod minimax_m3;
 mod parameters;
 mod qwen_coder;
 mod seed_oss;
+mod step5;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
@@ -40,13 +41,14 @@ pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use step5::Step5ToolParser;
 use tracing::warn;
 use xgrammar_structural_tag::ToolChoice;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::{AllowedToolsMode, ToolChoiceValue};
 
-use crate::output_grammar::{self, OutputGrammarContext};
+use crate::output_grammar::{self, OutputGrammarContext, ToolStrictLevel};
 use crate::utils;
 
 /// One function-style tool made available to the model.
@@ -197,6 +199,12 @@ pub trait ToolParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the tool strict level applied when the operator leaves
+    /// `--tool-strict-level` unset.
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        ToolStrictLevel::Auto
     }
 
     /// Build the language of everything the model may emit after reasoning
