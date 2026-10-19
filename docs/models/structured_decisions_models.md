@@ -11,6 +11,7 @@ used for classification and routing.
 | Architecture              | ReadStrategy        | Task             | Head              | Example HF Models       |
 |---------------------------|---------------------|------------------|-------------------|-------------------------|
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
+| `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
 
 ### Multimodal Models
@@ -18,14 +19,16 @@ used for classification and routing.
 !!! note
     For more information about multimodal models inputs, see [this page](./supported_models.md#list-of-multimodal-language-models).
 
-| Architecture                         | Inputs                              | ReadStrategy                   | Task             | Head              | Example HF Models                        |
-|--------------------------------------|-------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
-| `ClefOmniForJointSchema`             | T + I + V                           | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
-| `D3ForSequenceClassification`        | T + I + V                           | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
-| `Lfm2VlForConditionalGeneration`     | T + I<sup>+</sup>                   | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
-| `Qwen3_5ForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
-| `Qwen3_5MoeForConditionalGeneration` | T + I<sup>E+</sup> + V<sup>E+</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
-| `DiffusionGemmaForBlockDiffusion`    | T + I<sup>+</sup> + V<sup>+</sup>   | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
+| Architecture                            | Inputs                                | ReadStrategy                   | Task             | Head              | Example HF Models                        |
+|-----------------------------------------|---------------------------------------|--------------------------------|------------------|-------------------|------------------------------------------|
+| `ClefOmniForJointSchema`                | T + I + V                             | `JointSchemaStrategy`          | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-omni`                   |
+| `D3ForSequenceClassification`           | T + I + V                             | `D3Strategy`                   | `classify`       | Linear (`score`)  | `vllm-sr/d3`, `vllm-sr/d3-mini`, etc.    |
+| `Gemma4ForConditionalGeneration`        | T + I<sup>+</sup> + V + A<sup>*</sup> | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-E2B-it`, etc.            |
+| `Gemma4UnifiedForConditionalGeneration` | T + I<sup>+</sup> + V + A             | `NextTokenStrategy`            | `generate`       | N/A               | `google/gemma-4-12B-it`, etc.            |
+| `Lfm2VlForConditionalGeneration`        | T + I<sup>+</sup>                     | `LiquidStrategy`               | `generate`       | N/A               | `LiquidAI/d1-3B`                         |
+| `Qwen3_5ForConditionalGeneration`       | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-0.8B`, etc.                |
+| `Qwen3_5MoeForConditionalGeneration`    | T + I<sup>E+</sup> + V<sup>E+</sup>   | `NextTokenStrategy`            | `generate`       | N/A               | `Qwen/Qwen3.5-35B-A3B`, etc.             |
+| `DiffusionGemmaForBlockDiffusion`       | T + I<sup>+</sup> + V<sup>+</sup>     | `DiffusionGemmaCanvasStrategy` | `generate`       | N/A               | `google/diffusiongemma-26B-A4B-it`, etc. |
 
 ## Online Serving
 
@@ -304,12 +307,16 @@ vllm serve Cloudflare/clef-omni
 
 ### Decision 3.0
 
-The Decision 3.0 models ([`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) and
-its smaller variants such as `vllm-sr/d3-mini` and `vllm-sr/d3-edge`) are a
-Qwen3.5 backbone with an answer-code readout: one forward pass per question,
-and the readout scores the question's options at the last token. vLLM detects
-the checkpoint's `decision_config.json` and serves it as a classification
-model.
+The Decision 3.0 models are a Qwen3.5 backbone with an answer-code readout:
+one forward pass per question, and the readout scores the question's options
+at the last token. vLLM detects the checkpoint's `decision_config.json` and
+serves it as a classification model. All six sizes take the same command:
+[`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) (27B),
+[`vllm-sr/d3-flash`](https://huggingface.co/vllm-sr/d3-flash) (9B),
+[`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini) (4B),
+[`vllm-sr/d3-nano`](https://huggingface.co/vllm-sr/d3-nano) (2B),
+[`vllm-sr/d3-lite`](https://huggingface.co/vllm-sr/d3-lite) (0.8B) and
+[`vllm-sr/d3-edge`](https://huggingface.co/vllm-sr/d3-edge) (0.6B).
 
 ```bash
 vllm serve vllm-sr/d3
