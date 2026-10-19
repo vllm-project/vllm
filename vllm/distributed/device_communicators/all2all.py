@@ -901,7 +901,12 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     def checkpoint_prepare(self) -> None:
         if self.communication is not None:
-            self.communication.alltoall.checkpoint_prepare()
+            communication = self.communication
+            if hasattr(communication, "checkpoint_prepare"):
+                communication.checkpoint_prepare()
+            else:
+                # FlashInfer 0.7.2 exposes checkpoints on the wrapped backend.
+                communication.alltoall.checkpoint_prepare()
 
     def checkpoint_restore(self) -> None:
         if self.initialized:
@@ -910,7 +915,11 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             )
 
             communicator = CustomCommunicator(self.cpu_group)
-            self.get_communication().alltoall.checkpoint_restore(communicator)
+            communication = self.get_communication()
+            if hasattr(communication, "checkpoint_restore"):
+                communication.checkpoint_restore(communicator)
+            else:
+                communication.alltoall.checkpoint_restore(communicator)
 
 
 class MoriAll2AllManager(All2AllManagerBase):

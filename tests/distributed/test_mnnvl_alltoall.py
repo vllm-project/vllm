@@ -7,6 +7,7 @@ Run: pytest tests/distributed/test_mnnvl_alltoall.py -v
 """
 
 import os
+import sys
 import traceback
 from contextlib import contextmanager
 from functools import partial
@@ -105,31 +106,33 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
             init_test_distributed_environment(world_size, 1, rank, port)
         worker_fn(rank, world_size)
         torch.distributed.barrier()
-        if has_flashinfer_nvlink_one_sided():
-            from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
-
-            # Release cached tensor deleters while their JIT library is loaded,
-            # rather than during Python's extension-module finalization.
+        # Older FlashInfer releases retain process-wide workspaces. Newer
+        # backends release them in destroy() and remove these legacy classes.
+        legacy_one_sided = getattr(
+            sys.modules.get("flashinfer.comm.trtllm_moe_alltoall"), "MoeAlltoAll", None
+        )
+        if legacy_one_sided is not None and hasattr(
+            legacy_one_sided, "_WORKSPACE_CACHE"
+        ):
             torch.accelerator.synchronize()
-            MoeAlltoAll._WORKSPACE_CACHE.clear()
-        if has_flashinfer_nvlink_two_sided():
-            from flashinfer.comm.trtllm_alltoall import MnnvlMoe
-
+            legacy_one_sided._WORKSPACE_CACHE.clear()
+        legacy_two_sided = getattr(
+            sys.modules.get("flashinfer.comm.trtllm_alltoall"), "MnnvlMoe", None
+        )
+        if legacy_two_sided is not None:
             torch.accelerator.synchronize()
             torch.distributed.barrier()
             # Release cached tensor views before their memory owners while
             # the DLPack deleters are still alive.
-            MnnvlMoe.moe_workspace_tensor = None
-            MnnvlMoe.moe_prepare_workspace_tensor = None
-            MnnvlMoe.moe_workspace = None
-            MnnvlMoe.moe_prepare_workspace = None
-            MnnvlMoe.moe_mapping = None
+            legacy_two_sided.moe_workspace_tensor = None
+            legacy_two_sided.moe_prepare_workspace_tensor = None
+            legacy_two_sided.moe_workspace = None
+            legacy_two_sided.moe_prepare_workspace = None
+            legacy_two_sided.moe_mapping = None
     except Exception:
         err_queue.put(f"[Rank {rank}]\n{traceback.format_exc()}")
         # Don't re-raise: the parent reads errors from err_queue.
         # A non-zero exit from the re-raise would be redundant.
-        import sys
-
         sys.exit(1)
 
 
