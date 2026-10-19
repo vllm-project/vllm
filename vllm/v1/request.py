@@ -200,10 +200,10 @@ class Request:
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
 
-        # Block-aligned token position of a proven shared prefix worth pinning
-        # in the (sparse) prefix cache; 0 means none. Set at admission for
-        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
-        self.shared_prefix_boundary = 0
+        # Token positions of a proven shared prefix worth pinning in the
+        # (sparse) prefix cache; empty means none. Set at admission when the
+        # local or an external prefix-cache lookup detects one (Marconi-style).
+        self.shared_prefix_boundaries: tuple[int, ...] = ()
         # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
         # sliding-window KV below this position; 0 when nothing replays.
         self.replay_start = 0

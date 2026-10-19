@@ -1689,9 +1689,10 @@ class OffloadingConnectorScheduler:
 
             reachable_boundaries: tuple[int, ...] = ()
             if self.config.retention_interval is not None:
-                reachable_boundaries = (req.num_prompt_tokens - 1,)
-                if req.shared_prefix_boundary:
-                    reachable_boundaries += (req.shared_prefix_boundary,)
+                reachable_boundaries = (
+                    req.num_prompt_tokens - 1,
+                    *req.shared_prefix_boundaries,
+                )
 
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states

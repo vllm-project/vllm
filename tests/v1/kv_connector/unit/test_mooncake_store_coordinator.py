@@ -124,7 +124,9 @@ def test_coordinator_single_full_attention_all_hits():
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    masks, hit, *_ = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
     assert hit == 64
     assert masks[0] == [True, True, True, True]
 
@@ -134,7 +136,9 @@ def test_coordinator_single_full_attention_partial_prefix():
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(hs[0])), (0, bytes(hs[1]))})
-    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    masks, hit, *_ = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
     assert hit == 32
     assert masks[0] == [True, True]
 
@@ -144,7 +148,9 @@ def test_coordinator_single_full_attention_no_hits():
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, set())
-    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    masks, hit, *_ = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
     assert hit == 0
     assert masks[0] == []
 
@@ -156,7 +162,9 @@ def test_coordinator_single_swa_tautological_pool_masks_pre_window():
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)  # 4 chunks * 16 tokens
     cmap = ExternalCachedBlockPool(16)
-    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
+    masks, hit, *_ = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
     assert hit == 64
     # ceil((sw-1)/block_size) = ceil(31/16) = 2 tail blocks.
     assert masks[0][-2:] == [True, True]
@@ -174,7 +182,7 @@ def test_coordinator_hybrid_full_plus_swa_all_hit():
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(g, bytes(h)) for g in (0, 1) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 64
@@ -190,7 +198,7 @@ def test_coordinator_hybrid_hole_in_full_clips_both():
     exists = {(0, bytes(hs[0])), (0, bytes(hs[2])), (0, bytes(hs[3]))}
     exists |= {(1, bytes(h)) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 16
@@ -209,7 +217,7 @@ def test_coordinator_group_block_size_double_hash():
     exists = {(0, bytes(h)) for h in hs}
     exists |= {(1, bytes(bh)) for bh in big_hashes}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 64
@@ -233,7 +241,7 @@ def test_coordinator_fine_grained_partial_tail_hit():
     # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
     exists = {(g, bytes(h)) for g in (0, 1) for h in (hs[1], hs[2])}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 48
@@ -252,7 +260,7 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     exists = {(g, bytes(hs[1])) for g in (0, 1)}
     exists |= {(0, bytes(hs[2]))}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 32
@@ -458,7 +466,7 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
 
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hashes,
         max_length=96,
         cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
@@ -532,7 +540,7 @@ def test_lookup_with_eagle_pops_last_full_attention_block():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     # 4 blocks present, eagle pops 1 → 3 blocks = 48 tokens.
@@ -553,7 +561,7 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 48  # eagle popped 1 block
@@ -577,7 +585,7 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     # FullAttn dictates the convergence; eagle pops one block off it.
@@ -596,7 +604,7 @@ def test_load_mask_without_eagle_unchanged():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=False)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 64
@@ -632,7 +640,7 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
@@ -674,7 +682,7 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
         for i in range(128 // g.kv_cache_spec.block_size):
             if mask is None or mask[i]:
                 exists.add((g_idx, bytes(ghashes[i])))
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hs, max_length=128, cached_block_pool=ExternalCachedBlockPool(16, exists)
     )
     assert hit == 64
@@ -709,7 +717,7 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))
 
-    _masks, hit = coord.find_longest_cache_hit(
+    _masks, hit, *_ = coord.find_longest_cache_hit(
         hashes,
         max_length=token_len,
         cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
@@ -718,3 +726,116 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     # The final 256-token segment has no lookahead block, so EAGLE falls back
     # to the previous aligned boundary instead of consuming all 768 tokens.
     assert hit == 512
+
+
+# ----- Junction boundaries: the store as a junction source and consumer -----
+
+
+def test_store_mask_keeps_every_junction_position():
+    """A junction set with several positions keeps one SWA tail at each."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=0)
+
+    masks = coord.store_mask(
+        160, num_prompt_tokens=160, shared_prefix_boundaries=(48, 96)
+    )
+
+    # Tails at 48 (chunks 1-2) and 96 (chunks 4-5) + the replay tail (7-8).
+    assert masks[1] == [i in (1, 2, 4, 5, 7, 8) for i in range(10)]
+
+
+def test_store_mask_does_not_expand_junctions_for_eagle():
+    """store_mask adds the junction set verbatim: J - A (needed under a
+    dropping EAGLE group) is the caller's to include. A lone J=128 keeps the
+    tail at 128 (with the EAGLE peek chunk) and nothing at J - A = 64."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(64)),
+        KVCacheGroupSpec(["L1"], _swa(16, 32), is_eagle_group=True),
+    ]
+    coord = _make_coord(
+        groups, hash_block_size=16, use_eagle=True, retention_interval=0
+    )
+
+    masks = coord.store_mask(
+        192, num_prompt_tokens=208, shared_prefix_boundaries=(128,)
+    )
+
+    assert masks[0] is None
+    # Tail at 128 = window chunks 6-7 + peek chunk 8; no tail at 64 (2-4).
+    assert masks[1] == [i in (6, 7, 8) for i in range(12)]
+
+
+def test_store_mask_junctions_never_cover_mamba():
+    """Junction Mamba states travel the boundary-put hand-off, not the
+    positional save: the Mamba group stays all-False with junctions present."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=0)
+
+    masks = coord.store_mask(64, num_prompt_tokens=64, shared_prefix_boundaries=(32,))
+
+    assert masks[0] is None
+    assert masks[1] == [False] * 4
+
+
+def _salted_hashes(n: int, salt: int) -> list[BlockHash]:
+    return [BlockHash(bytes([salt * 64 + i + 1]) * 4) for i in range(n)]
+
+
+def test_store_junction_lets_prefix_only_sibling_hit_across_instances():
+    """Two instances, one store: save -> lookup -> save -> lookup.
+
+    Instance 1's request A saves under retention_interval=0: the full group
+    lands densely but the SWA group keeps only its prompt-end replay tail, so
+    a prefix-only sibling B on instance 2 (empty local cache) gets store hit
+    0. B's lookup still detects the junction (the full group's deeper hit),
+    and B's save keeps the SWA tail there, so the next sibling C hits the
+    shared prefix. Without the junction transport both B and C hit 0.
+    """
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _swa(16, 32)),
+    ]
+    exists: set[tuple[int, bytes]] = set()  # the one shared store
+
+    def save(coord, hashes, junctions=()):
+        num_prompt_tokens = len(hashes) * 16
+        masks = coord.store_mask(
+            num_prompt_tokens,
+            num_prompt_tokens=num_prompt_tokens,
+            shared_prefix_boundaries=junctions,
+        )
+        for gid, (group, mask) in enumerate(zip(groups, masks, strict=True)):
+            group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+            for chunk_id, block_hash in enumerate(group_hashes):
+                if mask is None or mask[chunk_id]:
+                    exists.add((gid, bytes(block_hash)))
+
+    def lookup(coord, hashes):
+        pool = ExternalCachedBlockPool(coord.hash_block_size, exists)
+        return coord.find_longest_cache_hit(
+            hashes, max_length=len(hashes) * 16, cached_block_pool=pool
+        )
+
+    coord1 = _make_coord(groups, hash_block_size=16, retention_interval=0)
+    coord2 = _make_coord(groups, hash_block_size=16, retention_interval=0)
+    a_hashes = _hashes(10)  # 160 tokens
+    save(coord1, a_hashes)
+
+    # B: shares 64 tokens (4 chunks) with A, then diverges; the salt keeps
+    # B's suffix hashes disjoint from A's.
+    b_hashes = a_hashes[:4] + _salted_hashes(6, salt=1)
+    _, b_hit, b_junctions = lookup(coord2, b_hashes)
+    assert b_hit == 0
+    assert b_junctions == (64,)
+    save(coord2, b_hashes, b_junctions)
+
+    # C: another prefix-only sibling on a fresh coordinator now hits.
+    c_hashes = a_hashes[:4] + _salted_hashes(6, salt=2)
+    _, c_hit, *_ = lookup(coord2, c_hashes)
+    assert c_hit == 64

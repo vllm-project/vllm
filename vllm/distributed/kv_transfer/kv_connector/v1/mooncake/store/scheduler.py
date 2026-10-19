@@ -239,6 +239,18 @@ class MooncakeStoreScheduler:
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
 
+        if lookup_result.shared_prefix_boundaries:
+            # Known before compute, so GPU retention, Mamba chunk stops and this
+            # request's own saves all act on the store's junctions.
+            request.shared_prefix_boundaries = tuple(
+                sorted(
+                    {
+                        *request.shared_prefix_boundaries,
+                        *lookup_result.shared_prefix_boundaries,
+                    }
+                )
+            )
+
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
         else:
@@ -354,6 +366,7 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                shared_prefix_boundaries=request_real.shared_prefix_boundaries,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -408,6 +421,7 @@ class MooncakeStoreScheduler:
                             else None
                         ),
                         prefill_end_tokens=len(prefill_tokens),
+                        shared_prefix_boundaries=request_real.shared_prefix_boundaries,
                     )
                     self._request_trackers[req_id] = request_tracker
 
@@ -488,6 +502,7 @@ class MooncakeStoreScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
+                    shared_prefix_boundaries=unfinished_req.shared_prefix_boundaries,
                 )
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(

@@ -156,6 +156,7 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         prefill_token_ids=None,
         block_ids=([0, 1],),
         block_hashes=[b"h0", b"h1"],
+        shared_prefix_boundaries=(),
     )
     return SimpleNamespace(
         request=request,
@@ -565,6 +566,7 @@ def _make_pending_load_unfinished_request(
         num_prompt_tokens=num_tokens,
         block_hashes=block_hashes,
         num_output_placeholders=0,
+        shared_prefix_boundaries=(),
     )
     scheduler._unfinished_requests["req-0"] = (request, block_ids)
 
@@ -633,6 +635,7 @@ def _make_resumed_unfinished_request(
         block_hashes=block_hashes,
         num_computed_tokens=num_computed_tokens,
         num_output_placeholders=0,
+        shared_prefix_boundaries=(),
     )
     scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
 
@@ -924,8 +927,9 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
 
 
 class _StubLookupClient:
-    def __init__(self, hit_tokens: int) -> None:
+    def __init__(self, hit_tokens: int, junctions: tuple[int, ...] = ()) -> None:
         self._hit_tokens = hit_tokens
+        self._junctions = junctions
         self.num_tokens: list[int] = []
 
     def lookup(
@@ -936,7 +940,9 @@ class _StubLookupClient:
         non_block: bool = False,
     ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
-        return MooncakeLookupResult(self._hit_tokens)
+        return MooncakeLookupResult(
+            self._hit_tokens, shared_prefix_boundaries=self._junctions
+        )
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -1105,6 +1111,132 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     assert load_async is False
     assert scheduler.client.num_tokens == []
     assert scheduler.load_specs == {}
+
+
+def test_store_lookup_junctions_union_into_request_boundaries():
+    # The store is a junction source: positions its lookup detects join the
+    # request's junction set even when the reconciled hit loads nothing.
+    scheduler = _make_bare_scheduler()
+    scheduler.client = _StubLookupClient(hit_tokens=0, junctions=(48,))
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=64,
+        block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        shared_prefix_boundaries=(32,),
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 0
+    assert load_async is False
+    assert request.shared_prefix_boundaries == (32, 48)
+    assert "req-0" not in scheduler.load_specs
+
+
+def test_store_junctions_reach_save_meta_through_tracker():
+    # lookup -> request -> tracker -> ReqMeta: the save carries the junction
+    # set for the worker's store_mask.
+    scheduler = _make_bare_scheduler()
+    new_output = _make_new_scheduler_output()
+    new_output.request.shared_prefix_boundaries = (16,)
+    scheduler._unfinished_requests["req-0"] = (
+        new_output.request,
+        new_output.request.block_ids,
+    )
+
+    meta = scheduler.build_connector_meta(new_output)
+
+    assert scheduler._request_trackers["req-0"].shared_prefix_boundaries == (16,)
+    assert meta.requests[0].shared_prefix_boundaries == (16,)
+
+
+def test_loading_sibling_keeps_junctions_for_later_saves():
+    # A store hit loads first and skips the save on that step, so the
+    # junction set must live on the tracker until a later step saves.
+    scheduler = _make_bare_scheduler()
+    request = SimpleNamespace(
+        req_id="req-0",
+        num_computed_tokens=32,
+        prompt_token_ids=list(range(64)),
+        num_prompt_tokens=64,
+        prefill_token_ids=None,
+        block_ids=([0, 1, 2, 3],),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        all_token_ids=list(range(64)),
+        num_output_placeholders=0,
+        shared_prefix_boundaries=(48,),
+    )
+    scheduler._unfinished_requests["req-0"] = (request, request.block_ids)
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True
+    )
+
+    load_step = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 16},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2, 3],)),
+    )
+    (load_meta,) = scheduler.build_connector_meta(load_step).requests
+    assert load_meta.can_save is False
+    assert scheduler._request_trackers["req-0"].shared_prefix_boundaries == (48,)
+
+    save_step = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[()],
+            num_computed_tokens=[48],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 16},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2, 3],)),
+    )
+    (save_meta,) = scheduler.build_connector_meta(save_step).requests
+    assert save_meta.can_save is True
+    assert save_meta.shared_prefix_boundaries == (48,)
+
+
+def test_junction_boundary_state_rides_the_save_meta():
+    # A block-aligned Mamba junction state handed off by core
+    # (boundary_state_offloads) in a step that also saves rides that save
+    # meta: an interior boundary below prefill_end_tokens is accepted and
+    # pinned.
+    scheduler = _make_bare_scheduler()
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(44)),
+        block_hashes=[b"h0", b"h1"],
+        prefill_end_tokens=48,
+    )
+    out = _make_scheduler_output(scheduled_spec_tokens=None)
+    out.kv_connector_block_state = _make_connector_block_state(
+        block_ids=([0, 1, 2],), offloads=[(1, 7, 32)]
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    (req_meta,) = meta.requests
+    assert req_meta.can_save is True
+    assert req_meta.boundary_puts == [BoundaryPut(1, 7, 32)]
+    store_job_id = req_meta.store_job_id
+    assert 7 in scheduler._pinned_saves[store_job_id][0]
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
+    assert scheduler._request_trackers["req-0"].has_pending_offload is True
 
 
 def _add_pending_partial_tail_request(

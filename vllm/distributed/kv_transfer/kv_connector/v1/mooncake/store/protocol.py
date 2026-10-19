@@ -17,8 +17,11 @@ Wire format (REQ/REP over IPC):
           frame 3: raw block hashes concatenated back-to-back (each hash_len
                    bytes); the server splits on hash_len
         Response: hit_length (u32 big-endian, first 4 bytes), followed by zero
-                  or more 8-byte tail-key boundaries. Each entry is group_id
-                  (u32), then boundary_tokens (u32).
+                  or more 8-byte entries. A tail-key boundary entry is
+                  group_id (u32), then boundary_tokens (u32). A junction entry
+                  is JUNCTION_GROUP_ID (u32 sentinel), then a junction
+                  position (u32). Payloads written before junction entries
+                  existed decode with an empty junction set.
 
       msg_type == RESET_MSG:
           (no payload frames)
@@ -49,16 +52,23 @@ RESP_ERR: bytes = b"\x00"
 # group_id (u32), boundary_tokens (u32).
 TAIL_KEY_BOUNDARY_ENTRY_SIZE: int = 8
 
+# Sentinel group_id marking an 8-byte entry as a junction position. Real
+# group ids are small non-negative ints, so old payloads never contain it.
+JUNCTION_GROUP_ID: int = (1 << 32) - 1
+
 
 def encode_lookup_response(result: MooncakeLookupResult) -> bytes:
     hit_length = result.hit_length.to_bytes(4, "big")
-    if not result.tail_key_boundaries:
+    if not result.tail_key_boundaries and not result.shared_prefix_boundaries:
         return hit_length
 
     payload = bytearray(hit_length)
     for boundary in result.tail_key_boundaries:
         payload.extend(boundary.group_id.to_bytes(4, "big"))
         payload.extend(boundary.num_tokens.to_bytes(4, "big"))
+    for position in result.shared_prefix_boundaries:
+        payload.extend(JUNCTION_GROUP_ID.to_bytes(4, "big"))
+        payload.extend(position.to_bytes(4, "big"))
     return bytes(payload)
 
 
@@ -67,15 +77,13 @@ def decode_lookup_response(payload: bytes) -> MooncakeLookupResult:
         raise ValueError("Invalid Mooncake lookup response")
 
     hit_length = int.from_bytes(payload[:4], "big")
-    if len(payload) == 4:
-        return MooncakeLookupResult(hit_length)
-
     boundaries = []
+    junctions = []
     for offset in range(4, len(payload), TAIL_KEY_BOUNDARY_ENTRY_SIZE):
-        boundaries.append(
-            TailKeyBoundary(
-                group_id=int.from_bytes(payload[offset : offset + 4], "big"),
-                num_tokens=int.from_bytes(payload[offset + 4 : offset + 8], "big"),
-            )
-        )
-    return MooncakeLookupResult(hit_length, tuple(boundaries))
+        group_id = int.from_bytes(payload[offset : offset + 4], "big")
+        num_tokens = int.from_bytes(payload[offset + 4 : offset + 8], "big")
+        if group_id == JUNCTION_GROUP_ID:
+            junctions.append(num_tokens)
+        else:
+            boundaries.append(TailKeyBoundary(group_id=group_id, num_tokens=num_tokens))
+    return MooncakeLookupResult(hit_length, tuple(boundaries), tuple(junctions))

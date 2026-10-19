@@ -86,6 +86,25 @@ def replay_boundaries(
     return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
 
 
+def junction_boundaries(
+    longest_hit: int, hit: int, alignment: int, expand_eagle: bool
+) -> tuple[int, ...]:
+    """Positions a sibling sharing a prefix up to ``longest_hit`` can resume at.
+
+    ``longest_hit`` is the longest single-group hit, ``hit`` the reconciled
+    one; a junction exists only where they diverge. With a dropping EAGLE
+    group in the lookup, a sibling diverging within that group's drop unit
+    past ``longest_hit`` cannot verify its peek block and resumes one
+    alignment unit lower, while one diverging further resumes at
+    ``longest_hit``, so both positions are kept.
+    """
+    if longest_hit <= hit:
+        return ()
+    if expand_eagle and longest_hit - alignment > hit:
+        return (longest_hit - alignment, longest_hit)
+    return (longest_hit,)
+
+
 class KVCacheCoordinator(ABC):
     """Coordinate the KV cache of different KV cache groups."""
 
@@ -461,10 +480,10 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
-        """Returns the per-group hit blocks, the hit length, and the number of
-        ``num_uncached_common_prefix_tokens`` (a shared prefix that a
-        sparse-retention group has not cached yet; 0 unless hybrid)."""
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, tuple[int, ...]]:
+        """Returns the per-group hit blocks, the hit length, and the junction
+        keep-set (positions a sibling sharing the prefix can resume at; empty
+        unless hybrid)."""
         pass
 
     def new_step_starts(self) -> None:
@@ -514,11 +533,11 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, tuple[int, ...]]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
         )
-        return blocks, 0, 0
+        return blocks, 0, ()
 
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
@@ -575,7 +594,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, tuple[int, ...]]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
@@ -588,7 +607,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=self.pcp_world_size,
         )
         # Single group: nothing "uncached common" -- no other group to lag it.
-        return hit_blocks, hit_length, 0
+        return hit_blocks, hit_length, ()
 
 
 class SpecGroup(NamedTuple):
@@ -763,6 +782,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.use_eagle:
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
+        # Mamba finders never drop the EAGLE block.
+        self.has_dropping_eagle_group = any(
+            g.use_eagle and not isinstance(g.spec, MambaSpec)
+            for g in self.attention_groups
+        )
 
     def _align_cacheable(self, num_tokens: int) -> int:
         """Largest prefix of ``num_tokens`` a future cache hit could match.
@@ -797,7 +821,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, tuple[int, ...]]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
         Each attention type either accepts the current candidate length or
@@ -813,8 +837,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             A tuple containing:
                 - A tuple of the cache hit blocks for each single type manager.
                 - The number of tokens of the reconciled (combined) cache hit.
-                - ``num_uncached_common_prefix_tokens``: a shared prefix that a
-                  sparse-retention group has not cached yet (0 unless hybrid).
+                - The junction keep-set: positions a sibling sharing the prefix
+                  can resume at (see ``junction_boundaries``).
 
         """
         num_groups = len(self.kv_cache_config.kv_cache_groups)
@@ -924,11 +948,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Uncached shared prefix detection: if any attn. group cached a longer
         # prefix than the reconciled hit, it is an uncached common prefix across
         # requests that a sparse-retention group hasn't cached yet.
-        num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        junctions = junction_boundaries(
+            longest_hit_length,
+            hit_length,
+            self._cache_hit_alignment_tokens,
+            expand_eagle=self.has_dropping_eagle_group,
+        )
         cache_hit_blocks = tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         )
-        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
+        return cache_hit_blocks, hit_length, junctions
 
     def find_longest_cache_hit_per_group(
         self,

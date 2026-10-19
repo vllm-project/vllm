@@ -924,10 +924,25 @@ def test_lookup_response_round_trip_preserves_tail_keys():
             TailKeyBoundary(group_id=0, num_tokens=24),
             TailKeyBoundary(group_id=1, num_tokens=20),
         ),
+        shared_prefix_boundaries=(16, 32),
     )
 
     assert protocol.decode_lookup_response(protocol.encode_lookup_response(result)) == (
         result
+    )
+
+
+def test_lookup_response_without_junction_entries_decodes_empty():
+    """A payload from a writer that predates junction entries (hit_length +
+    tail-key entries only) decodes with an empty junction set."""
+    payload = (20).to_bytes(4, "big") + (0).to_bytes(4, "big") + (24).to_bytes(4, "big")
+
+    decoded = protocol.decode_lookup_response(payload)
+
+    assert decoded == MooncakeLookupResult(
+        hit_length=20,
+        tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=24),),
+        shared_prefix_boundaries=(),
     )
 
 

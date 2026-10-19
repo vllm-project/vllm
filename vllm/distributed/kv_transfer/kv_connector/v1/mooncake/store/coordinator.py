@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import replay_boundaries
+from vllm.v1.core.kv_cache_coordinator import junction_boundaries, replay_boundaries
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
@@ -231,10 +231,12 @@ class MooncakeStoreCoordinator:
         cached_block_pool: ExternalCachedBlockPool,
         *,
         apply_eagle: bool = True,
-    ) -> tuple[tuple[list[bool], ...], int]:
-        """Returns ``(load_mask_per_group, hit_length)``. ``mask[g][i]`` is True iff
-        group ``g`` populates chunk ``i`` locally (e.g. SWA and Mamba tail-only);
-        recv-side callers skip False slots.
+    ) -> tuple[tuple[list[bool], ...], int, tuple[int, ...]]:
+        """Returns ``(load_mask_per_group, hit_length, shared_prefix_boundaries)``.
+        ``mask[g][i]`` is True iff group ``g`` populates chunk ``i`` locally
+        (e.g. SWA and Mamba tail-only); recv-side callers skip False slots.
+        ``shared_prefix_boundaries`` are the store-side junctions (see
+        ``junction_boundaries``).
 
         ``apply_eagle`` controls whether the per-spec ``use_eagle`` last-block
         pop is applied. Lookup callers want it (the drafter requires recomputing
@@ -242,14 +244,25 @@ class MooncakeStoreCoordinator:
         already reflects the eagle-pruned hit length and a second pop would
         leave the trailing block unloaded.
         """
-        blocks_per_group, hit_length = self._find_hit_blocks(
+        blocks_per_group, hit_length, longest_hit = self._find_hit_blocks(
             block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
         )
         masks = tuple(
             [blk is not cached_block_pool.null_block for blk in blocks]
             for blocks in blocks_per_group
         )
-        return masks, hit_length
+        alignment = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        junctions = junction_boundaries(
+            longest_hit,
+            hit_length,
+            alignment,
+            expand_eagle=apply_eagle and bool(self.eagle_proof_margin_by_group),
+        )
+        return masks, hit_length, junctions
 
     def load_mask(
         self,
@@ -266,7 +279,7 @@ class MooncakeStoreCoordinator:
         # thread would then silently skip the trailing chunk yielded by
         # ``db.process_tokens`` and leave that block uninitialized in the
         # local KV pool.
-        masks, _ = self.find_longest_cache_hit(
+        masks, _, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
             ExternalCachedBlockPool(self.hash_block_size),
@@ -279,6 +292,7 @@ class MooncakeStoreCoordinator:
         aligned_token_len: int,
         start_token: int = 0,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundaries: Sequence[int] = (),
     ) -> tuple[list[bool] | None, ...]:
         """Per-group store masks for the suffix starting at ``start_token``.
 
@@ -288,6 +302,9 @@ class MooncakeStoreCoordinator:
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
+
+        ``shared_prefix_boundaries`` (the request's junctions) join the
+        reachable boundaries, so sparse retention keeps the tails ending there.
 
         Mamba groups are always all-False: the normal save resolves blocks
         positionally from the connector's append-only block-ID snapshot, but
@@ -304,6 +321,7 @@ class MooncakeStoreCoordinator:
             start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
+            shared_prefix_boundaries=shared_prefix_boundaries,
             exclude_mamba=True,
         )
 
@@ -331,6 +349,7 @@ class MooncakeStoreCoordinator:
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        shared_prefix_boundaries: Sequence[int] = (),
         exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
@@ -342,7 +361,7 @@ class MooncakeStoreCoordinator:
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"{mask_alignment}"
         )
-        reachable_boundaries = (
+        replay = (
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
@@ -351,6 +370,7 @@ class MooncakeStoreCoordinator:
                 use_eagle=bool(self.eagle_group_ids),
             )
         )
+        reachable_boundaries = (*replay, *shared_prefix_boundaries)
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
@@ -394,9 +414,12 @@ class MooncakeStoreCoordinator:
         cached_block_pool: ExternalCachedBlockPool,
         *,
         apply_eagle: bool = True,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Mirrors HybridKVCacheCoordinator.find_longest_cache_hit but
         dispatches via spec_manager_map (we don't allocate managers).
+
+        Returns the per-group hit blocks, the reconciled hit length and the
+        longest single-group hit length.
 
         When ``apply_eagle`` is False, ignore each group's ``use_eagle`` —
         used by ``load_mask`` to avoid popping a second block on top of the
@@ -422,10 +445,11 @@ class MooncakeStoreCoordinator:
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
             for gid, blks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[gid] = blks
-            return tuple(blocks_by_group), hit_length
+            return tuple(blocks_by_group), hit_length, hit_length
 
         num_groups = len(self.kv_cache_groups)
         hit_length = max_length
+        longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
         hit_length_by_group: list[int] = [0] * num_groups
 
@@ -484,6 +508,8 @@ class MooncakeStoreCoordinator:
                     hit_blocks_by_group[gid] = blocks
                     hit_length_by_group[gid] = _new_hit_length
 
+                longest_hit_length = max(longest_hit_length, curr_hit_length)
+
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
@@ -506,6 +532,7 @@ class MooncakeStoreCoordinator:
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
             hit_length,
+            longest_hit_length,
         )
 
 
