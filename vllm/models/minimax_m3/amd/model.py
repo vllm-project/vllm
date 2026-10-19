@@ -1518,7 +1518,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
 
         if decode is not None:
-            decode.after_step()
+            decode.after_step(step)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

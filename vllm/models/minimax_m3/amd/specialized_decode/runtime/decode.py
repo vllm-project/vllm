@@ -47,6 +47,10 @@ class Step:
             return None
         return self.kernels[offset]
 
+    @property
+    def launched(self) -> bool:
+        return any(kernel is not None for kernel in self.kernels)
+
 
 class SpecializedDecode:
     """Built after weight loading; never replaces stock modules or parameters."""
@@ -70,6 +74,29 @@ class SpecializedDecode:
         self._closed = False
         self.planned_steps = 0
         self.native_steps = 0
+
+    @staticmethod
+    def _health_failed(health: Any) -> bool:
+        return bool(getattr(health, "failed", health))
+
+    def _check_health(self, phase: str) -> None:
+        if self.executor is None:
+            return
+        failure: Exception | None = None
+        health: Any = None
+        try:
+            health = self.executor.health()
+        except Exception as err:
+            failure = err
+
+        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+        local_ok = failure is None and not self._health_failed(health)
+        if not tp_agree(local_ok, get_tp_group().cpu_group):
+            detail = failure if failure is not None else health
+            raise RuntimeError(
+                f"MiniMax specialized-decode kernel failed {phase}: {detail}"
+            ) from failure
 
     def bind_caches(self) -> None:
         failure: Exception | None = None
@@ -108,6 +135,7 @@ class SpecializedDecode:
         positions: torch.Tensor,
         intermediate_tensors: object | None,
     ) -> Step | None:
+        self._check_health("before step")
         if (
             intermediate_tensors is not None
             or self._closed
@@ -128,24 +156,36 @@ class SpecializedDecode:
         if not decision.use_mono:
             self.native_steps += 1
             return None
-        kernels = tuple(
-            self.executor.layer(layer.layer_id) if self.executor is not None else None
-            for layer in self.layers
-        )
+        if self.executor is None:
+            self.native_steps += 1
+            return None
+        kernels = tuple(self.executor.layer(layer.layer_id) for layer in self.layers)
+        if any(kernel is None for kernel in kernels):
+            raise RuntimeError(
+                "MiniMax specialized-decode executor does not own every sparse layer"
+            )
         self.planned_steps += 1
         return Step(self.config.first_layer, kernels)
 
     def health(self) -> Any:
         return None if self.executor is None else self.executor.health()
 
-    def after_step(self) -> None:
-        if self.executor is None:
+    def after_step(self, step: Step | None) -> None:
+        if self.executor is None or step is None or not step.launched:
             return
-        self.executor.after_step()
-        health = self.executor.health()
-        failed = bool(getattr(health, "failed", health))
-        if failed:
-            raise RuntimeError(f"MiniMax specialized-decode kernel failed: {health}")
+        failure: Exception | None = None
+        try:
+            self.executor.after_step()
+        except Exception as err:
+            failure = err
+
+        from vllm.models.deepseek_v41.amd.mono.common.peer_memory import tp_agree
+
+        if not tp_agree(failure is None, get_tp_group().cpu_group):
+            raise RuntimeError(
+                "MiniMax specialized-decode after-step hook failed"
+            ) from failure
+        self._check_health("after step")
 
     def close(self) -> None:
         if self._closed:
