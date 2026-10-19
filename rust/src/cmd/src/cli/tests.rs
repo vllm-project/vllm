@@ -1507,6 +1507,33 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
     "#]].assert_eq(&actual);
 }
 
+/// Python args that have no meaningful Rust equivalent are accepted on both the
+/// `vllm-rs serve` and the `--args-json` paths.
+#[test]
+fn noop_args_are_accepted() {
+    Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--disable-fastapi-docs",
+    ])
+    .expect("--disable-fastapi-docs is accepted");
+
+    Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true}"#,
+    ])
+    .expect("disable_fastapi_docs is accepted");
+}
+
 /// Frontend-read Python args that Rust recognizes but does not support yet must
 /// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
 #[test]
