@@ -210,7 +210,10 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model'
+    # Per-test timeout: a hung test fails with a stack dump instead of holding
+    # the job until Buildkite cancels it, which also blocks the full run's
+    # coverage collection. A whole shard takes 12-21 minutes.
+    - pytest -v -s models/language/pooling -m 'not core_model' --timeout=900 --timeout-method=thread
   mirror:
     amd:
       parallelism: 4
