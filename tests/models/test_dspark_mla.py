@@ -403,6 +403,7 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
         model_config=None, cache_config=SimpleNamespace(block_size=64)
     )
     target_attn = SimpleNamespace(
+        topk_buffer_width=None,
         kv_cache_dtype="fp8",
         head_size=576,
         sliding_window=None,
