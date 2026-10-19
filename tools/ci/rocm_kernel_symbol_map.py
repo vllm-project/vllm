@@ -517,7 +517,7 @@ def build_map(
         "version": 2,
         "backend": "rocm",
         "commit": commit,
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "incomplete": False,
         "objects": [],
         "errors": [],
