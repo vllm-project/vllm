@@ -34,7 +34,7 @@ def _config_names(config_list_path: Path) -> list[str]:
     that this machine runs (see ``_list_keys``)."""
     if config_list_path.suffix in (".yaml", ".yml"):
         lists = yaml.safe_load(config_list_path.read_text()) or {}
-        return [name for key in _list_keys() for name in lists.get(key, [])]
+        return [name for key in _list_keys() for name in lists.get(key) or []]
     lines = (line.strip() for line in config_list_path.read_text().splitlines())
     return [line for line in lines if line and not line.startswith("#")]
 
