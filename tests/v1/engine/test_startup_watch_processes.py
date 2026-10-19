@@ -24,6 +24,7 @@ from vllm.v1.engine.utils import (
     wait_for_engine_startup,
 )
 from vllm.v1.executor import UniProcExecutor, multiproc_executor
+from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -100,11 +101,13 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
     def get_context():
         assert thread_state() == (initial_threads, user_threads, None)
         return SimpleNamespace(
+            Pipe=connection.Pipe,
+            get_start_method=lambda: "spawn",
             Process=lambda **kwargs: SimpleNamespace(
                 name=kwargs["name"],
                 exitcode=1 if fail_start else None,
                 start=start_process,
-            )
+            ),
         )
 
     monkeypatch.setattr(engine_utils, "get_mp_context", get_context)
@@ -167,6 +170,7 @@ def test_engine_core_process_shutdown_timeout(
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
     manager.processes = [object()]
+    manager._death_writers = []
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 
@@ -195,6 +199,7 @@ def test_engine_core_process_shutdown_timeout(
         "shutdown_state",
         "has_work",
         "shutdown_timeout",
+        "parent_exited",
         "exit_code",
         "expected_calls",
     ),
@@ -204,14 +209,25 @@ def test_engine_core_process_shutdown_timeout(
             EngineShutdownState.SHUTTING_DOWN,
             False,
             0,
+            False,
             None,
             ["shutdown", "freeze"],
         ),
-        (False, EngineShutdownState.SHUTTING_DOWN, False, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.RUNNING, False, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, True, 0, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, False, 7, None, ["shutdown"]),
-        (True, EngineShutdownState.SHUTTING_DOWN, False, 0, 1, ["shutdown"]),
+        (False, EngineShutdownState.SHUTTING_DOWN, False, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.RUNNING, False, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.SHUTTING_DOWN, True, 0, False, None, ["shutdown"]),
+        (True, EngineShutdownState.SHUTTING_DOWN, False, 7, False, None, ["shutdown"]),
+        # The parent died, so the engine aborted despite the drain timeout.
+        (
+            True,
+            EngineShutdownState.SHUTTING_DOWN,
+            False,
+            7,
+            True,
+            None,
+            ["shutdown", "freeze"],
+        ),
+        (True, EngineShutdownState.SHUTTING_DOWN, False, 0, False, 1, ["shutdown"]),
     ],
 )
 def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
@@ -220,6 +236,7 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     shutdown_state: EngineShutdownState,
     has_work: bool,
     shutdown_timeout: int,
+    parent_exited: bool,
     exit_code: int | None,
     expected_calls: list[str],
 ):
@@ -229,6 +246,7 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
         shutdown_state=EngineShutdownState.RUNNING,
         has_work=lambda: has_work,
         vllm_config=vllm_config,
+        parent_exited=parent_exited,
     )
 
     def run_busy_loop():
@@ -267,6 +285,33 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
         EngineCoreProc.run_engine_core(vllm_config=vllm_config)
 
     assert calls == expected_calls
+
+
+@pytest.mark.parametrize("parent_exited", [True, False])
+def test_handle_shutdown_aborts_once_parent_exited(parent_exited: bool):
+    # A dead parent can no longer bound a drain, so in-flight requests abort.
+    finished: list[tuple] = []
+
+    def finish_requests(*args):
+        finished.append(args)
+        return []
+
+    engine = object.__new__(EngineCoreProc)
+    engine.shutdown_state = EngineShutdownState.REQUESTED
+    engine.parent_exited = parent_exited
+    engine.vllm_config = SimpleNamespace(shutdown_timeout=7)
+    engine.scheduler = SimpleNamespace(
+        get_num_unfinished_requests=lambda: 1,
+        finish_requests=finish_requests,
+    )
+    engine._send_abort_outputs = lambda requests: None
+    engine.has_work = lambda: False
+
+    engine._handle_shutdown()
+
+    assert engine.shutdown_state == EngineShutdownState.SHUTTING_DOWN
+    expected = [(None, RequestStatus.FINISHED_ABORTED)] if parent_exited else []
+    assert finished == expected
 
 
 class _FinishedProcess:
