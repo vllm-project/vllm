@@ -122,9 +122,10 @@ def _alloc_page_locked_slot(nbytes: int) -> torch.Tensor:
     return buffer
 
 
-def _host_unregister(cudart: CudaRTLibrary, base: int) -> None:
-    """Undo ``cudaHostRegister`` on ``base``. A failure is logged, not raised:
-    this runs on shutdown and inside the init rollback."""
+def _host_unregister(cudart: CudaRTLibrary, base: int) -> bool:
+    """Undo ``cudaHostRegister`` on ``base``; True when it succeeded. A failure
+    is logged, not raised: this runs on shutdown and inside the init rollback,
+    and the caller decides the range's fate."""
     code = cudart.cudaHostUnregister(base)
     if code != 0:
         cudart.cudaGetLastError()
@@ -134,6 +135,7 @@ def _host_unregister(cudart: CudaRTLibrary, base: int) -> None:
             code,
             cudart.cudaGetErrorString(code),
         )
+    return code == 0
 
 
 @dataclass(frozen=True)
@@ -450,8 +452,10 @@ class ShardedRDTWeightTransferEngine(
         # (slot, old tensor) pairs a re-init grow replaced, released once that
         # init commits: a rollback puts them back, so they must stay registered.
         self._retired_slots: list[tuple[int, torch.Tensor]] = []
-        # Host slots whose NIXL deregistration failed: possibly still registered,
-        # so they stay page-locked and referenced for the process lifetime.
+        # Host slots whose release failed or could not be proven safe (a NIXL
+        # deregistration or cudaHostUnregister error, or a post-processing thread
+        # that never stopped): possibly still registered or still being read, so
+        # they stay page-locked and referenced for the process lifetime.
         self._parked_host_slots: list[torch.Tensor] = []
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
         # Generation counters guarding the events (see _ensure_proc_worker).
@@ -945,33 +949,51 @@ class ShardedRDTWeightTransferEngine(
         ``cudaHostUnregister`` on the storage base, then forget the cached dtype
         views so dropping the tensor frees the pageable storage.
 
-        A slot whose NIXL deregistration fails may still be registered, so it
-        is never handed back to the allocator: it is reported at error level,
-        kept page-locked (no ``cudaHostUnregister``) and parked on
-        ``_parked_host_slots`` for the process lifetime. One slot's bytes
-        leaked loudly beats a freed range a registration still covers.
+        A slot whose release fails at either step is never handed back to the
+        allocator: after a failed NIXL deregistration it may still be
+        registered, and after a failed ``cudaHostUnregister`` its page-lock
+        state is unknown, so it is parked (``_park_host_slot``) instead. One
+        slot's bytes leaked loudly beats a freed range a registration still
+        covers.
 
         Never raises: it runs on shutdown and inside the init rollback, where a
         failure must not mask the caller's state.
         """
-        storage = buffer.untyped_storage()
-        base = storage.data_ptr()
+        base = buffer.untyped_storage().data_ptr()
         try:
             deregister_nixl_memory(buffer)
         except Exception:
-            logger.exception(
-                "NIXL deregistration of a host receive slot failed (base %#x, "
-                "%d bytes); the slot stays page-locked and parked, never freed",
-                base,
-                storage.nbytes(),
+            self._park_host_slot(
+                buffer, "its NIXL deregistration failed", exc_info=True
             )
-            self._parked_host_slots.append(buffer)
-            self._forget_cached_targets(buffer)
             return
         try:
-            _host_unregister(CudaRTLibrary(), base)
+            unregistered = _host_unregister(CudaRTLibrary(), base)
         except Exception:
             logger.exception("cudaHostUnregister of a host receive slot failed")
+            unregistered = False
+        if not unregistered:
+            self._park_host_slot(buffer, "its cudaHostUnregister failed")
+            return
+        self._forget_cached_targets(buffer)
+
+    def _park_host_slot(
+        self, buffer: torch.Tensor, why: str, *, exc_info: bool = False
+    ) -> None:
+        """Keep ``buffer`` referenced (page-locked, possibly NIXL-registered) for
+        the process lifetime instead of freeing it, and say so at error level:
+        one leaked slot is the safe failure, a freed range that NIXL or a
+        scatter still uses is not."""
+        storage = buffer.untyped_storage()
+        logger.error(
+            "Host receive slot %#x (%d bytes) %s; it stays page-locked and "
+            "parked, never freed",
+            storage.data_ptr(),
+            storage.nbytes(),
+            why,
+            exc_info=exc_info,
+        )
+        self._parked_host_slots.append(buffer)
         self._forget_cached_targets(buffer)
 
     def _forget_cached_targets(self, buffer: torch.Tensor) -> None:
@@ -1884,6 +1906,7 @@ class ShardedRDTWeightTransferEngine(
     def shutdown(self) -> None:
         # Stop the background post-processing thread (drain, then sentinel + join)
         # before dropping the state it touches.
+        worker_alive = False
         if self._proc_thread is not None:
             try:
                 self.drain_pending()
@@ -1892,6 +1915,14 @@ class ShardedRDTWeightTransferEngine(
             assert self._proc_queue is not None
             self._proc_queue.put(None)  # sentinel
             self._proc_thread.join(timeout=30)
+            # A worker that did not stop may still scatter out of the receive
+            # slots, so they are parked below rather than freed under it.
+            worker_alive = self._proc_thread.is_alive()
+            if worker_alive:
+                logger.error(
+                    "RDT post-processing thread did not stop within 30 s; host "
+                    "receive slots are parked, not freed"
+                )
             self._proc_thread = None
             self._proc_queue = None
             self._proc_stream = None
@@ -1907,6 +1938,14 @@ class ShardedRDTWeightTransferEngine(
         # NIXL registration as before.
         if self._staging_device == "host":
             for slot, buffers in enumerate(self._dest_buffers):
+                if worker_alive:
+                    for buffer in buffers.values():
+                        self._park_host_slot(
+                            buffer,
+                            "may still be read by the post-processing thread "
+                            "that did not stop",
+                        )
+                    continue
                 self._wait_slot_consumed(slot)
                 for buffer in buffers.values():
                     self._release_host_slot(buffer)

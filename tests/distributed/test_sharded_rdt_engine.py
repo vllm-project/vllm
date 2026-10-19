@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Focused receive-pool and scheduler tests for sharded RDT."""
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -121,6 +122,7 @@ def cuda_runtime(monkeypatch):
         unregistered=[],
         events=[],
         register_code=0,
+        unregister_code=0,
         load_error=None,
     )
 
@@ -136,7 +138,7 @@ def cuda_runtime(monkeypatch):
         def cudaHostUnregister(self, ptr):
             state.unregistered.append(ptr)
             state.events.append(("unregister", ptr))
-            return 0
+            return state.unregister_code
 
         def cudaGetErrorString(self, code):
             return f"fake cuda error {code}"
@@ -182,6 +184,28 @@ def nixl(monkeypatch, cuda_runtime):
         lambda nbytes, presize=0: max(nbytes, presize),
     )
     return state
+
+
+@pytest.fixture
+def engine_log(caplog):
+    """``caplog`` wired to the engine's logger, which does not propagate to the
+    root logger vLLM configures."""
+    caplog.set_level(logging.ERROR, logger=engine_module.logger.name)
+    engine_module.logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        engine_module.logger.removeHandler(caplog.handler)
+
+
+def _errors(caplog) -> list[str]:
+    """The error-level messages, each record once even when the engine's
+    logger also propagates to the root handler."""
+    seen: dict[int, str] = {}
+    for record in caplog.records:
+        if record.levelno >= logging.ERROR:
+            seen.setdefault(id(record), record.getMessage())
+    return list(seen.values())
 
 
 def _base(buffer: torch.Tensor) -> int:
@@ -385,7 +409,7 @@ def test_the_regrow_in_issue_pull_releases_the_replaced_host_slot(
 
 
 def test_a_failed_nixl_deregistration_parks_the_old_host_slot_page_locked(
-    nixl, cuda_runtime, monkeypatch
+    nixl, cuda_runtime, monkeypatch, engine_log
 ):
     import ray.experimental
 
@@ -408,6 +432,79 @@ def test_a_failed_nixl_deregistration_parks_the_old_host_slot_page_locked(
     assert nixl.deregistered == []
     assert ("unregister", _base(old)) not in cuda_runtime.events
     assert _ids(engine._parked_host_slots) == _ids([old])
+    (error,) = _errors(engine_log)
+    assert f"{_base(old):#x}" in error and "32 bytes" in error
+    assert "NIXL deregistration failed" in error and "never freed" in error
+
+
+def test_a_failed_cuda_host_unregister_parks_the_old_host_slot(
+    nixl, cuda_runtime, monkeypatch, engine_log
+):
+    import ray.experimental
+
+    monkeypatch.setattr(
+        ray.experimental, "set_target_for_ref", lambda _ref, _targets: None
+    )
+    engine = _engine(staging_device="host", ring_depth=1, chunk_bytes=(32,))
+    engine._preregister_at_init()
+    old = engine._dest_buffers[0][torch.uint8]
+    cuda_runtime.unregister_code = 1  # cudaErrorInvalidValue
+
+    engine._issue_pull(_chunk(64), 0)
+
+    # NIXL let go of the slot and cudaHostUnregister was asked, but it did not
+    # confirm, so the slot's page-lock state is unknown: parked, not freed.
+    assert _ids(nixl.deregistered) == _ids([old])
+    assert cuda_runtime.events == _released([old])
+    assert _ids(engine._parked_host_slots) == _ids([old])
+    (error,) = _errors(engine_log)
+    assert f"{_base(old):#x}" in error and "cudaHostUnregister failed" in error
+
+
+def test_shutdown_parks_every_host_slot_when_the_worker_thread_did_not_stop(
+    nixl, cuda_runtime, monkeypatch, engine_log
+):
+    engine = _host_pool_engine()
+    engine._preregister_at_init()
+    buffers = [slot[torch.uint8] for slot in engine._dest_buffers]
+    # A post-processing thread that survives join(timeout=30) may still be
+    # scattering out of the slots.
+    engine._proc_thread = SimpleNamespace(
+        join=lambda timeout=None: None, is_alive=lambda: True
+    )
+    engine._proc_queue = SimpleNamespace(put=lambda _item: None)
+    engine._proc_stream = None
+    monkeypatch.setattr(engine, "drain_pending", lambda: None)
+
+    engine.shutdown()
+
+    assert engine._dest_buffers == [{}, {}, {}, {}]
+    assert engine._proc_thread is None and engine._proc_queue is None
+    assert nixl.deregistered == [] and cuda_runtime.events == []
+    assert _ids(engine._parked_host_slots) == _ids(buffers)
+    errors = _errors(engine_log)
+    assert errors[0].startswith("RDT post-processing thread did not stop")
+    assert len(errors) == 1 + len(buffers)
+    assert all("did not stop" in error for error in errors[1:])
+
+
+def test_a_fresh_engine_has_nothing_parked_or_retired_and_shuts_down_clean(
+    nixl, cuda_runtime
+):
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(distributed_executor_backend="ray"),
+        model_config=None,
+    )
+    engine = ShardedRDTWeightTransferEngine(
+        None, vllm_config, torch.device("cpu"), torch.nn.Module()
+    )
+
+    assert engine._parked_host_slots == [] and engine._retired_slots == []
+
+    engine.shutdown()
+
+    assert engine._dest_buffers == [{}] and engine._parked_host_slots == []
+    assert nixl.deregistered == [] and cuda_runtime.events == []
 
 
 def test_shutdown_parks_a_host_slot_whose_nixl_deregistration_fails(nixl, cuda_runtime):
@@ -444,7 +541,8 @@ def test_a_host_regrow_failure_names_the_slot_bytes_and_keeps_the_old_slot(
     assert "staging_device='host'" in message and "cudaHostRegister" in message
     assert "64 bytes" in message and "712" in message
     # Only this slot is regrown; the other keeps its 32 bytes, so the error
-    # cannot claim an exact pool total.
+    # speaks of one slot and cannot claim an exact pool total.
+    assert "regrow one receive slot" in message and "to 64 bytes, exactly" in message
     assert f"= {engine._num_slots * 64} bytes per worker" not in message
     assert engine._dest_buffers[0][torch.uint8] is old
     assert cuda_runtime.events == [] and nixl.deregistered == []
