@@ -22,15 +22,14 @@ from typing import TYPE_CHECKING
 
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
-from vllm.parser.utils import extract_json_member_object, scan_json_object_end
+from vllm.parser.utils import extract_json_member_object
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -47,9 +46,7 @@ def _granite_arg_converter(raw_args: str, partial: bool) -> str:
     return span
 
 
-def _granite_arg_value_extender(
-    raw_args: str,
-) -> Callable[[str], str | None] | None:
+def _granite_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
     """Return an ``O(|delta|)`` extender when ``raw_args`` ends inside a
     top-level string value of the ``arguments`` object.
 
@@ -66,7 +63,7 @@ def _granite_arg_value_extender(
         span = extract_json_member_object(raw_args, "arguments")
     except ValueError:
         return None
-    if span is None or scan_json_object_end(span, 0) is not None:
+    if span is None:
         return None
 
     depth = 0
