@@ -121,9 +121,13 @@ At that stop point progress was 56/64 and no experiment or regression queue rema
 ## 11. Control overhead and deployment-scale experiments
 
 Resumed on October 18 at the user's request. The October 12 stop boundary no longer applies.
+On October 19 the user requested incremental tested commits and prioritized speed over detailed output checks.
+Completed `quota-wait120-aging30` and stopped all experiment launchers at the user's requested boundary.
+Ordinary native/quota 30/1/quota 120/30 runs take 1,994.30/1,898.86/1,369.48 seconds at utilization 0.5 and equal work; the latter exceeds the 25% target in this single run.
+Repeated cache-fit/pressure, remaining ablations and external models stay incomplete; detailed output validation was deferred by the user.
 
 - [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
 - [ ] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
 - [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
 - [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
-- [ ] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.
+- [x] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.

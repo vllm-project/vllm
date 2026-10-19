@@ -14,18 +14,22 @@
 | 数据 | 范围 |
 | --- | --- |
 | `baseline/trace.json.gz`、`baseline/native-0.json.gz` | 256 条真实 verl 轨迹及一轮固定工作量原生回放；并发 64、32 个前缀家族 |
+| `priority-quota/`、`quota-wait120-aging30/` | 相同利用率 0.5、固定工作量的普通 quota 30/1 与 120/30，各一轮；矩阵、资源归属与清理检查通过 |
+| `stop-boundary-summary.json` | 三个普通轮的指纹、SHA256、吞吐、排队/阶段、抢占、RPC、进程 CPU 和家族延迟对比；单轮结果不代表稳定中位数 |
 | `profile-device-cold-policy/` | 完整策略诊断、四进程 Yappi、两卡 CUDA trace 和逐请求/逐操作记录；诊断时间独立于普通性能对照 |
 | `profile-device-cold-policy/post-validation.json` | 原矩阵的函数限定名检查失败后，独立核验客户端、指纹、清理、GPU 归属和 CPU 时间；原失败矩阵保持原样 |
 | `control-coverage-before-after.json` | 共享冷内容修正前后的完整 Mamba 组准备、实际命中和传输计数 |
 | `cpu-regression-merged.log`、`cpu-layout-region.log` | 合并后 1,973 项 CPU 回归通过；另有 60 项布局/区域检查通过，范围不重叠 |
 | `gpu-buffers-merged.log` | 合并后实际 GPU/CPU/Mooncake 搬运 56 项通过，1 项 ROCm 专用检查跳过 |
 | `precommit-driver-staged.log`、`mypy-3.12-driver-staged.log` | 包括新 profiling bootstrap 的 staged 默认检查与 Python 3.12 全量类型检查通过 |
-| `commit-core.log`、`commit-driver.log` | 核心修复 `af2c0d7ab2` 与异步驱动/性能工具 `10121d7920`；提交 hook 和 sign-off 检查通过 |
+| `quota-parameter-behavior.log`、`precommit-policy-parameters-final.log`、`mypy-3.12-policy-parameters.log` | 参数化后的 9 项 quota 行为检查、staged 默认检查与 Python 3.12 类型检查通过 |
+| `commit-core.log`、`commit-driver.log`、`commit-policy-parameters.log` | 核心修复 `af2c0d7ab2`、异步驱动/性能工具 `10121d7920`、有界准入参数 `6d63f4eaa9`；提交 hook 和 sign-off 检查通过 |
+| `user-stop-boundary.json`、`round-status.json` | 用户要求完成末轮后停止；实际完成/未执行范围、清理与检查状态 |
 | `profile-*/` 的其他失败记录 | 采样停滞、无效 CPU 时间、共享 GPU 干扰和同步压缩造成的超时；保留原始失败，不作为性能通过记录 |
 
 `functional/` 已完成当时版本的恢复、权重与 128 题 Mooncake 质量检查；合并后脚本的重验边界与失败另列在本轮报告。
-按用户最新要求，优先运行 `priority-quota/` 的普通压力计时并逐次提交，细化输出校验暂缓。
-重复压力/容量充足对照和预测实验仍待完成，结果逐项记录，不从旧的小配额数据推断。
+按用户要求，完成 `quota-wait120-aging30/` 后停止；本轮相对原生单轮吞吐高 45.6%，尚未验证重复稳定性。
+重复压力/容量充足对照、消融、预测和外部模型保持未完成，细化输出校验暂缓；不从旧的小配额数据推断这些项目通过。
 
 ## October 11 historical round
 

@@ -25,7 +25,7 @@ The discussion files below are historical sources retained in commit `ac5094f177
 Historical Pin mentions do not override the user's confirmed September 24 semantics: no public Pin.
 Broad context-editing/attention changes are not implied by the notes' references to management edits.
 
-## Audited coverage (updated 2026-10-11)
+## Audited coverage (updated 2026-10-19)
 
 Each row distinguishes implementation, executed evidence and remaining acceptance.
 A source file or mock is not evidence of real movement or serving performance.
@@ -35,29 +35,30 @@ Historical Qwen/Store results are located by the evidence index in `validation.m
 | --- | --- | --- |
 | Common hints | `api.py`, `controller.py`; `test_kv_hint_control.py`, HTTP `test_api.py`, recorded `http-control.json.gz` | Full workload validation |
 | Interpretation ownership | `EngineCore.add_request`, `consume_attached`; engine `test_kv_control.py`, `test_kvcr_tier.py` opaque forwarding | KVCR independent control and G1 directives are unsupported |
-| Application-directed behavior | `rollout.py` executes attached movement, preparation/retention, outcomes and cleanup; 19 real fixed-work replays and three live verl runs archived in the October 12 report | Adverse forecast and complete fault/recovery workloads |
+| Application-directed behavior | `rollout.py` overlaps inference/control while draining and cleaning results; real 256-rollout/920-call deployment trace and complete policy diagnostic in the October 18 round | Repeated deployment comparisons, adverse forecasts and merged recovery completion |
 | Session/continuation state | `state.py`, `request_observer.py`; engine tests and real `lifecycle.py` root/branches/external sharing | Other models/layouts |
-| Shared-content membership | `test_cache_hit_request_adds_logical_membership_without_allocating_another_copy`; state reverse-membership tests | Broader serving workload |
+| Shared-content membership | Cache-hit membership and reverse-index tests; bounded shared cold-checkpoint recovery after original owner cleanup; full policy diagnostic has zero backend misses | Other models/layouts and ordinary repeated movement comparisons |
 | Request-free retention | Real GPU queries observe shared priority 90→20→0 across task-tree cleanup and independent expiry in `lifecycle.json.gz` | Cold-tier retention remains unsupported |
 | Explicit reclamation | `BlockPool.evict_unreferenced`; prefix-cache active-reference tests; recorded 4-copy HTTP eviction | Pressure comparisons |
 | Demotion lifecycle | `transfers.py` and CPU/Store adapters; queued source-reference tests; recorded real CPU/Store copies | Full failure workload |
 | Proactive preparation | Transfer leases, all-rank publication; Store/CPU suites; real `lifecycle.py` duplicate COPY/resume race hits 784 tokens and cancelled preparation falls back correctly | Full outage/restart loop (7.9) |
-| Cross-engine reuse | `http_control.py --destination-url`; recorded `mooncake-cross-engine.json.gz` | Other models/layouts |
+| Cross-engine reuse | Unified `http_control.py --destination-url`; actual destination hits in `functional/` and both merged CLI rounds | Other models/layouts |
 | Complete native G2 path | Legacy actions and version-1.0 primitives have real Store/Qwen evidence; request-attached and opt-in native-policy G2 traces pass on rfc-hint | Broader workload and external model validation |
-| Programmable local policy | Three pressure and three cache-fit comparisons: full policy +81.4% and −3.6% throughput respectively; quota-only +104.5% on pressure | External workloads and complete forecast sensitivity |
+| Programmable local policy | At utilization 0.5 and 256 rollouts, quota 30/1 and 120/30 finish in 1,898.86 s and 1,369.48 s versus native 1,994.30 s (+5.0%/+45.6%, one run each); the latter has 2 versus 9 preemptions and lower tails for all 32 families | Repeated deployment cache-fit/pressure, complete forecast sensitivity and external workloads |
 | Multi-policy composition | Composer and shared leases; unit coverage plus direct retention/movement/composed and quota-only ablations | Oracle/adverse workloads (7.4) remain unexecuted |
-| Request/KV cooperation | Real quota/scheduler tests check priority and maximum waiting; the October 6 Qwen quota-enabled correctness run is recorded separately | Fairness, admission-delay and overhead matrix (7.5) |
+| Request/KV cooperation | Quota scheduler checks preserve priority and bounded waiting; deployment runs record phases, per-family latency and zero per-request control RPCs | Repeated fairness/admission and idle/noop overhead matrix (7.5) |
 | Logical lifecycle completion | Real root+B/C cleanup preserves the independently owned external task and its GPU priority | Broader pressure/failure matrix |
 | Closed-loop control | Current bounded GPU residency/priority queries, association/session revisions, explicit result ACK and incarnation-checked cancellation | Full recovery loop (7.9); cold residency is not advertised |
-| Recovery | Epoch checks, bounded replay, HTTP history-loss test; October 6 actual restart rejects the old epoch and drops local records | Full failure injection, prefetch/resume races and fallback loop (7.9) |
-| Weight compatibility | Drained lifecycle, new namespace/epoch and ordinary cache hash isolation; final optimized Qwen IPC tensor update and rollback pass in `rollout-2026-10-11/weight-update.json.gz` | External models; full optimizer/trainer integration |
+| Recovery | `functional/` actual Store outage has no false residency, recomputation matches, restart rejects old epoch and reconstructs logical state | Unified-CLI full recovery completion after fixing early Store-segment-host shutdown; user deferred the remaining quality run |
+| Weight compatibility | `functional/weight-update.json.gz` actual norm parameter update/rollback passes with async control drained; new namespace cannot reuse old KV, rollback restores reuse | External models; full optimizer/trainer integration |
 
 Runtime restrictions: general CPU control requires one block per chunk; native CPU Share is unsupported.
 Mooncake supports full primary boundaries and PCP=DCP=1.
 Cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are unsupported.
 Local Qwen results do not validate GPT-OSS-120B or DeepSeek-V4-Flash.
 `verl_rollout.py` now executes the actual verl ToolAgentLoop with real model/tool calls, response masks, logprobs and rewards.
-The 32-rollout native trace reached cache pressure and preemptions; repeated optimized comparisons remain tracked separately and are not inferred from script presence.
+The current 256-rollout native trace and ordinary quota comparison use utilization 0.5, peak at full KV occupancy and incur real preemptions.
+Repeated deployment-scale acceptance remains tracked separately and is not inferred from the earlier 32-rollout artificial-budget results.
 
 ## Engine responsibilities behind application control
 
