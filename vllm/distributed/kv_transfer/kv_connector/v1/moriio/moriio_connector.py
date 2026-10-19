@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import logging
 import math
 import queue
@@ -64,17 +65,28 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import
     MoRIIOHeartbeat,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    HeadLayout,
     LayerTransferGeometry,
     MambaOffsetTemplate,
+    MambaStateLayout,
     apply_mamba_offset_template,
     build_layer_to_spec,
     build_mamba_offset_template,
     compute_block_transfer_offsets,
+    compute_head_slice_offsets,
     compute_mamba_conv_split_count,
+    compute_mamba_slice_offsets,
+    get_layer_head_layout,
     get_layer_transfer_geometry,
+    get_mamba_state_layout,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    MoRIIOWriteTPMapping,
+    WriteTarget,
+    compute_write_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -140,6 +152,16 @@ def is_moriio_available() -> bool:
     return MoRIIO_enabled
 
 
+def _describe_memory(memory_desc: Any) -> str:
+    """Identify a MoRI memory descriptor for error messages."""
+    fields = ("engine_key", "device_id", "device_bus_id", "size")
+    return (
+        "{"
+        + ", ".join(f"{name}={getattr(memory_desc, name, '?')}" for name in fields)
+        + "}"
+    )
+
+
 def get_moriio_remote_tp_rank(
     local_tp_rank: int, local_tp_size: int, remote_tp_size: int
 ) -> int:
@@ -183,6 +205,12 @@ def validate_moriio_heterogeneous_tp_kv_heads(
         f"prefill and decode. Got total_num_kv_heads={total_num_kv_heads}, "
         f"local_tp_size={local_tp_size}, remote_tp_size={remote_tp_size}."
     )
+
+
+def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
+    """TP size of the peer named in ``kv_transfer_params``; unknown means equal."""
+    params = params or {}
+    return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
 
 
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
@@ -892,16 +920,17 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
-        # Advertise the consumer (decode) TP size so prefill counts the right
-        # number of ACKs (get_moriio_expected_ack_count; see the upstream
-        # READ-mode release in _pop_done_transfers). Resolves to 1 for our
-        # homogeneous TP=1 configs; only matters under heterogeneous-TP fan-in.
+        # Unlike the READ-mode release in _pop_done_transfers, which every
+        # decode rank sends, this one comes from the decode scheduler once per
+        # prefill rank on behalf of all decode ranks. It is the only ACK the
+        # prefill rank gets, so advertise a single consumer
+        # (get_moriio_expected_ack_count).
         self.paths[path].send(
             msgpack.dumps(
                 {
                     "type": "release",
                     "transfer_id": transfer_id,
-                    "consumer_tp_size": self.tp_size,
+                    "consumer_tp_size": 1,
                 }
             )
         )
@@ -934,7 +963,7 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
-        for tp_index in range(self.tp_size):
+        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
             target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
@@ -1218,7 +1247,9 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    for tp_index in range(self.tp_size):
+                    # Every prefill TP rank needs the allocation; ports past
+                    # the prefill TP size are not bound.
+                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
@@ -1950,6 +1981,7 @@ class MoRIIOConnectorWorker:
         remote_dp_size_local: int,
         remote_dp_size: int,
         remote_tp_size: int | None = None,
+        tp_mapping: MoRIIOWriteTPMapping | None = None,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1967,6 +1999,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size_local: Per-pod DP size for multi-pod
             remote_dp_size: Global DP size of the decode instance
             remote_tp_size: Tensor parallel size advertised by the peer
+            tp_mapping: Decode ranks this rank writes and what each receives
 
         """
         # synchronization to prevent dirty reads between
@@ -1992,6 +2025,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size_local=remote_dp_size_local,
             remote_dp_size=remote_dp_size,
             remote_tp_size=remote_tp_size,
+            tp_mapping=tp_mapping,
         )
         self._writer.schedule_write(task)
 
@@ -2000,7 +2034,7 @@ class MoRIIOConnectorWorker:
             remote_layer_map = self.layer_name_to_remote_kv_cache_metadata[
                 remote_engine_id
             ]
-            cur_remote_engine_sessions = []
+            cur_remote_engine_sessions: list[Any] = []
             for ln, local_metas in self.layer_name_to_local_kv_cache_metadata.items():
                 remote_metas = remote_layer_map[ln]
                 if len(remote_metas) != len(local_metas):
@@ -2025,11 +2059,19 @@ class MoRIIOConnectorWorker:
                     unpacked_remote_memory_meta = (
                         self.moriio_wrapper.get_unpack_memory_metadata(remote_meta)
                     )
-                    cur_remote_engine_sessions.append(
-                        self.moriio_wrapper.build_session(
-                            unpacked_local_memory_meta, unpacked_remote_memory_meta
-                        )
+                    session = self.moriio_wrapper.build_session(
+                        unpacked_local_memory_meta, unpacked_remote_memory_meta
                     )
+                    if session is None:
+                        raise MoRIIOError(
+                            f"MoRI could not open a session from layer {ln} to "
+                            f"peer {remote_engine_id} (region "
+                            f"{len(cur_remote_engine_sessions)}, local "
+                            f"{_describe_memory(unpacked_local_memory_meta)}, "
+                            "remote "
+                            f"{_describe_memory(unpacked_remote_memory_meta)})"
+                        )
+                    cur_remote_engine_sessions.append(session)
             self.built_write_session[remote_engine_id] = cur_remote_engine_sessions
         return self.built_write_session[remote_engine_id], self.remote_moriio_metadata[
             remote_engine_id
@@ -2252,10 +2294,15 @@ class MoRIIOConnectorWorker:
 
         fut_list = []
 
+        write_target_tp_ranks: tuple[int, ...] = ()
+        if self.mode == MoRIIOMode.WRITE and self.is_producer:
+            targets = self._write_tp_mapping(tp_size).target_tp_ranks
+            if len(targets) > 1:
+                write_target_tp_ranks = targets
+
         # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
 
         for cur_dp_rank in range(remote_dp_size):
-            dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
             _pod_idx = pod_index(cur_dp_rank, remote_dp_size_local)
             if _pod_idx >= len(pod_hosts):
                 _pod_idx = 0
@@ -2264,26 +2311,39 @@ class MoRIIOConnectorWorker:
             # each pod binds sockets only for its local ranks; dp_engine_id
             # keeps the global rank for uniqueness. Single-pod is bit-identical.
             _per_rank_local_dp = fold_local_rank(cur_dp_rank, remote_dp_size_local)
-            future = self._handshake_initiation_executor.submit(
-                self._moriio_handshake,
-                _per_rank_host,
-                port,
-                tp_size,
-                dp_engine_id,
-                _per_rank_local_dp,
+            target_tp_ranks: tuple[int | None, ...] = (
+                tuple(write_target_tp_ranks) if write_target_tp_ranks else (None,)
             )
-            fut_list.append(future)
+            for target_tp_rank in target_tp_ranks:
+                if target_tp_rank is None:
+                    target_engine_id = self.get_engine_name_with_dp(
+                        remote_engine_id, cur_dp_rank
+                    )
+                else:
+                    target_engine_id = self.get_engine_name_with_dp_tp(
+                        remote_engine_id, cur_dp_rank, target_tp_rank
+                    )
+                future = self._handshake_initiation_executor.submit(
+                    self._moriio_handshake,
+                    _per_rank_host,
+                    port,
+                    tp_size,
+                    target_engine_id,
+                    _per_rank_local_dp,
+                    target_tp_rank,
+                )
+                fut_list.append(future)
 
-            def done_callback(f: Future[set[str]], eid=dp_engine_id):
-                with self._handshake_lock:
-                    self._handshake_futures.pop(eid, None)
-                    try:
-                        self._remote_agents[eid] = f.result()
-                    except Exception:
-                        logger.exception("Handshake with %s failed", eid)
+                def done_callback(f: Future[set[str]], eid=target_engine_id):
+                    with self._handshake_lock:
+                        self._handshake_futures.pop(eid, None)
+                        try:
+                            self._remote_agents[eid] = f.result()
+                        except Exception:
+                            logger.exception("Handshake with %s failed", eid)
 
-            future.add_done_callback(done_callback)
-            self._handshake_futures[dp_engine_id] = future
+                future.add_done_callback(done_callback)
+                self._handshake_futures[target_engine_id] = future
 
         # fut = fut_list
         def wait_all_dp():
@@ -2638,6 +2698,7 @@ class MoRIIOConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
+        self._record_slice_layouts(kv_caches)
         self.num_layers = len(self.kv_caches.keys())
 
         # Report the prevalidated KDA decomposition after registration.
@@ -2678,6 +2739,14 @@ class MoRIIOConnectorWorker:
             num_blocks=self.num_blocks,
             block_len=self.block_len,
             attn_backend_name=self.backend_name,
+            kv_head_layouts={
+                name: layout.to_wire() for name, layout in self.kv_head_layouts.items()
+            },
+            mamba_state_layouts={
+                name: layout.to_wire()
+                for name, layout in self.mamba_state_layouts.items()
+            },
+            attention_block_sizes=self.attention_block_sizes,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
@@ -2696,6 +2765,35 @@ class MoRIIOConnectorWorker:
         self._moriio_handshake_listener_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid()
+
+    def _record_slice_layouts(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Record how to address head and state slices of each layer.
+
+        A peer with a different TP size writes slices of these caches, so the
+        layouts are advertised in the handshake. Layers whose layout cannot be
+        sliced by head are left out; a heterogeneous-TP write to them fails.
+        """
+        self.kv_head_layouts: dict[str, HeadLayout] = {}
+        self.mamba_state_layouts: dict[str, MambaStateLayout] = {}
+        self.attention_block_sizes: dict[str, int] = {}
+        for layer_name, kv_cache in kv_caches.items():
+            if not self._is_mamba_layer(layer_name):
+                self.attention_block_sizes[layer_name] = (
+                    self._get_layer_transfer_geometry(layer_name).block_size
+                )
+            if self._is_mamba_layer(layer_name):
+                assert self._conv_decomp is not None
+                conv, ssm = kda_conv_ssm(
+                    kv_cache, cast(MambaSpec, self.layer_to_spec[layer_name])
+                )
+                self.mamba_state_layouts[layer_name] = get_mamba_state_layout(
+                    conv, ssm, self._conv_decomp
+                )
+            elif not self._is_mla_cache_layer(layer_name):
+                with contextlib.suppress(ValueError):
+                    self.kv_head_layouts[layer_name] = get_layer_head_layout(
+                        layer_name, kv_cache, self.layer_to_spec
+                    )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get requests that are done sending or recving on this specific worker.
@@ -2960,8 +3058,26 @@ class MoRIIOConnectorWorker:
 
             meta.remote_engine_id = remote_engine_id
 
+            write_targets = self._write_tp_mapping(int(meta.tp_size)).target_tp_ranks
+            is_fanout = len(write_targets) > 1
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            if dp0_remote_engine_id not in self._remote_agents:
+            if not write_targets:
+                # Another producer rank writes everything this one holds: no
+                # session is needed, and waiting for a handshake that never
+                # starts would stall this rank, and its TP peers, every layer.
+                self.write_ready_flags[remote_engine_id] = True
+            # A failed target handshake must be retried, so check every target
+            # session rather than write_ready_flags, which is set either way.
+            handshake_ready = (
+                all(
+                    self.get_engine_name_with_dp_tp(remote_engine_id, 0, tp_rank)
+                    in self._remote_agents
+                    for tp_rank in write_targets
+                )
+                if is_fanout
+                else not write_targets or dp0_remote_engine_id in self._remote_agents
+            )
+            if not handshake_ready:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -3300,10 +3416,20 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
+    def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
+        """Decode ranks this prefill rank writes, and what each receives."""
+        return compute_write_tp_mapping(
+            self.tp_rank,
+            self.world_size,
+            remote_tp_size or self.world_size,
+            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
+            self.use_mla,
+            self._has_mamba,
+        )
+
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
-        if self._has_mamba:
-            # Reject before even an attention-layer write can be queued.
-            self._mamba_tp_ratio(int(meta.tp_size))
+        # Raises before any write is queued for a TP pair the mapping rejects.
+        tp_mapping = self._write_tp_mapping(int(meta.tp_size))
         # Compute per-request values to pass through the task (no shared state).
         # This avoids race conditions when concurrent requests target different
         # decode pods - each WriteTask carries its own routing info.
@@ -3329,6 +3455,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size_local=dp_local,
             remote_dp_size=int(meta.remote_dp_size),
             remote_tp_size=int(meta.tp_size),
+            tp_mapping=tp_mapping,
         )
 
     def merge_contiguous_blocks(
@@ -3448,6 +3575,18 @@ class MoRIIOConnectorWorker:
                 local, remote, sizes, assume_sorted=False
             ),
         )
+        return self._apply_layer_mr_offsets(
+            layer_name, (local, remote, sizes), remote_moriio_meta, remote_engine_id
+        )
+
+    def _apply_layer_mr_offsets(
+        self,
+        layer_name: str,
+        offsets: tuple[list[int], list[int], list[int]],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: EngineId | None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        local, remote, sizes = offsets
         if self.kv_layer_mr_offset:
             local_off = self.kv_layer_mr_offset[layer_name]
             remote_off = self._remote_layer_mr_offset(
@@ -3456,6 +3595,97 @@ class MoRIIOConnectorWorker:
             local = [x + local_off for x in local]
             remote = [x + remote_off for x in remote]
         return local, remote, sizes
+
+    def _check_peer_block_size(
+        self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata
+    ) -> None:
+        """Blocks are copied as units, so both sides must hold as many tokens."""
+        remote = remote_moriio_meta.attention_block_sizes.get(layer_name)
+        local = self.attention_block_sizes.get(layer_name)
+        if remote is not None and local is not None and remote != local:
+            raise MoRIIOError(
+                f"Layer {layer_name} holds {local} tokens per block here and "
+                f"{remote} on the peer. Hybrid models size attention blocks to "
+                "the per-rank recurrent state, so MLA models with different "
+                "prefill and decode TP sizes get different block sizes; pass the "
+                "same --block-size to both instances"
+            )
+
+    def _block_copy_matches_peer(
+        self, layer_name: str, remote_moriio_meta: MoRIIOAgentMetadata
+    ) -> bool:
+        """A raw block copy puts every head and token where the peer reads it.
+
+        Prefill and decode can order heads and tokens differently (different
+        attention backends), and some layouts do not keep a block contiguous;
+        those need the head-slice path even when all heads are moved.
+        """
+        local = self.kv_head_layouts.get(layer_name)
+        remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
+        if local is None or remote_wire is None:
+            # MLA latents, or a peer that does not advertise layouts.
+            return True
+        return local.is_dense and HeadLayout.from_wire(remote_wire) == local
+
+    def _compute_head_slice_transfer_offsets(
+        self,
+        layer_name: str,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        target: WriteTarget,
+        remote_engine_id: EngineId | None = None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Offsets writing ``target``'s KV heads of a block into the peer."""
+        remote_wire = remote_moriio_meta.kv_head_layouts.get(layer_name)
+        local_layout = self.kv_head_layouts.get(layer_name)
+        if remote_wire is None or local_layout is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP WRITE of layer {layer_name} needs a KV head "
+                "layout on both sides; the cache layout of this layer cannot "
+                "be sliced by head, or the peer runs an older vLLM"
+            )
+        offsets = compute_head_slice_offsets(
+            local_layout,
+            HeadLayout.from_wire(remote_wire),
+            local_block_ids,
+            remote_block_ids,
+            target.local_head,
+            target.remote_head,
+            target.num_heads,
+            merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
+                local, remote, sizes, assume_sorted=False
+            ),
+        )
+        return self._apply_layer_mr_offsets(
+            layer_name, offsets, remote_moriio_meta, remote_engine_id
+        )
+
+    def _compute_mamba_slice_offsets(
+        self,
+        layer_name: str,
+        local_slots: list[int],
+        remote_slots: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        target: WriteTarget,
+    ) -> tuple[list[int], list[int], list[int], int]:
+        """(local, remote, sizes, n_conv) writing ``target``'s state slice."""
+        remote_wire = remote_moriio_meta.mamba_state_layouts.get(layer_name)
+        if remote_wire is None:
+            raise MoRIIOError(
+                f"Heterogeneous-TP WRITE of mamba layer {layer_name} needs the "
+                "peer's state layout; the peer runs an older vLLM"
+            )
+        return compute_mamba_slice_offsets(
+            self.mamba_state_layouts[layer_name],
+            MambaStateLayout.from_wire(remote_wire),
+            local_slots,
+            remote_slots,
+            target.local_slice,
+            target.local_slices,
+            target.remote_slice,
+            target.remote_slices,
+        )
 
     def _region_session_indices(self, layer_name: str) -> list[int]:
         """Flat session indices for a layer's registered regions.
