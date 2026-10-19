@@ -1419,6 +1419,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         }
         if accepts_kwarg("use_audio_in_video"):
             kwargs["use_audio_in_video"] = use_audio_in_video
+        if accepts_kwarg("attention_mask"):
+            kwargs["attention_mask"] = torch.ones(1, len(input_tokens), dtype=torch.int)
         if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
