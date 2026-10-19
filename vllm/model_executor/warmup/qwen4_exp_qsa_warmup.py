@@ -10,6 +10,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -76,13 +77,54 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
 
     kv_cache = owner.kv_cache
     assert kv_cache.numel()
+    dcp_world_size = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_world_size
     attention_profiles = warmup_qsa_sparse_paged_attention(
         kv_cache,
         block_table_for(owner.layer_name),
         num_query_heads=owner.num_heads,
         selection_width=indexer.output_width,
+        dcp_world_size=dcp_world_size,
     )
     logger.info(
         "Warmed up Qwen4Exp QSA sparse attention kernels: %s.",
         attention_profiles,
     )
+
+    if dcp_world_size > 1:
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import (
+            warmup_qsa_localize_dcp_indices,
+        )
+
+        warmup_qsa_localize_dcp_indices(
+            selection_width=indexer.output_width,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_rank,
+            cp_kv_cache_interleave_size=cast(
+                "Qwen4ExpQSAFlashAttentionImpl", owner.impl
+            ).cp_kv_cache_interleave_size,
+        )
+        logger.info("Warmed up Qwen4Exp QSA DCP localization kernel.")
+
+    from vllm.models.qwen4_exp.common.qsa_cache import qsa_dcp_selector_is_sharded
+
+    if dcp_world_size > 1 and qsa_dcp_selector_is_sharded(worker.vllm_config):
+        from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+        from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp_selector import (
+            warmup_qsa_dcp_selector,
+        )
+
+        impl = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl)
+        token_shard = impl.dcp_token_shard
+        selector_block_table = block_table_for(indexer.compressed_key_cache.prefix)
+        warmup_qsa_dcp_selector(
+            logits_width=selector_block_table.shape[1] * k_cache.shape[1],
+            token_topk=indexer.token_topk,
+            compress_ratio=indexer.compress_ratio,
+            selector_shard=QSADCPShard(
+                token_shard.rank,
+                token_shard.world_size,
+                token_shard.interleave // indexer.compress_ratio,
+            ),
+            token_shard=token_shard,
+        )
+        logger.info("Warmed up Qwen4Exp QSA sharded selector kernels.")
