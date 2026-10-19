@@ -78,7 +78,7 @@ class PoolingBaseServing(BaseServing, ObservabilityMixin, ABC):
         ctx = await self._init_ctx(io_processor, request, raw_request)
         ctx.arrival_time_ns = arrival_time_ns
 
-        async with self.maybe_tracing(ctx, io_processor, raw_request):
+        async with self.maybe_tracing(ctx, io_processor):
             await self.preprocessing(io_processor, ctx)
             await self.engine_call(ctx)
             return await self.postprocessing(io_processor, ctx)

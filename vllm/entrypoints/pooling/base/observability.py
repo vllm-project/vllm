@@ -135,10 +135,9 @@ else:
             self,
             ctx: PoolingServeContext,
             io_processor: PoolingIOProcessor,
-            raw_request: Request | None = None,
         ):
             raw_trace_headers = await self._get_trace_headers(
-                {} if raw_request is None else raw_request.headers
+                {} if ctx.raw_request is None else ctx.raw_request.headers
             )
 
             if not self.is_tracing_request:

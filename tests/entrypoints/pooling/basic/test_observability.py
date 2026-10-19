@@ -250,7 +250,9 @@ class TestRequestSpan:
             "tracestate": "congo=t61rcWkgMzE",
         }
 
-        async with mixin.maybe_tracing(ctx, io_processor, raw_request):
+        ctx.raw_request = raw_request
+
+        async with mixin.maybe_tracing(ctx, io_processor):
             pass
 
         req = exporter.get_finished_spans()[0]
@@ -569,6 +571,7 @@ class TestServingIntegration:
         raw_request.headers = {
             "traceparent": f"00-{remote_trace_id}-b7ad6b7169203331-01",
         }
+        ctx.raw_request = raw_request
 
         captured: dict = {}
 
@@ -581,7 +584,7 @@ class TestServingIntegration:
 
             return _empty()
 
-        async with mixin.maybe_tracing(ctx, io_processor, raw_request):  # noqa: SIM117
+        async with mixin.maybe_tracing(ctx, io_processor):  # noqa: SIM117
             async with mixin.maybe_start_span_async(
                 ctx.entrypoint_tracer,
                 mixin.span_entrypoint_engine_call,

@@ -30,7 +30,6 @@ from .protocol import (
     ScoreResponseData,
 )
 from .typing import ScoreInput
-from ..typing import PoolingServeContext
 
 logger = init_logger(__name__)
 
@@ -200,7 +199,7 @@ class ServingScores(PoolingServing):
         await self._preprocessing_async(self.io_processor, ctx)
         ctx.arrival_time_ns = arrival_time_ns
 
-        async with self.maybe_tracing(ctx, self.io_processor, *args, **kwargs):
+        async with self.maybe_tracing(ctx, self.io_processor):
             try:
                 # stage 1: encode queries and cache token embeddings on workers.
                 await self._flash_late_interaction_encode_queries(ctx)
