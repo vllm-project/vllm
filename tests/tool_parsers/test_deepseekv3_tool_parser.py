@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 
 import pytest
 
@@ -8,6 +9,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -90,3 +92,57 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_multiline_json_arguments(self, tool_parser, streaming: bool):
+        # The model may pretty-print the JSON arguments over several lines.
+        weather = {"city": "Tokyo", "unit": "celsius"}
+        hotels = {"location": "Tokyo", "check_in": "2025-01-15"}
+        model_output = (
+            "<｜tool▁calls▁begin｜>"
+            "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n"
+            f"```json\n{json.dumps(weather, indent=2)}\n```<｜tool▁call▁end｜>"
+            "<｜tool▁call▁begin｜>function<｜tool▁sep｜>search_hotels\n"
+            f"```json\n{json.dumps(hotels, indent=2)}\n```<｜tool▁call▁end｜>"
+            "<｜tool▁calls▁end｜>"
+        )
+
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+
+        assert [call.function.name for call in tool_calls] == [
+            "get_weather",
+            "search_hotels",
+        ]
+        assert [json.loads(call.function.arguments) for call in tool_calls] == [
+            weather,
+            hotels,
+        ]
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    def test_preserves_text_after_tool_call(
+        self,
+        tool_parser,
+        streaming: bool,
+    ) -> None:
+        model_output = (
+            "let me check the weather."
+            "<｜tool▁calls▁begin｜>"
+            "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n"
+            "```json\n"
+            '{"city": "Paris"}\n'
+            "```<｜tool▁call▁end｜>"
+            "<｜tool▁calls▁end｜>"
+            "It is 30 degrees."
+        )
+
+        content, tool_calls = run_tool_extraction(
+            tool_parser,
+            model_output,
+            streaming=streaming,
+        )
+
+        assert content == "let me check the weather.It is 30 degrees."
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_weather"
+        assert tool_calls[0].function.arguments == '{"city": "Paris"}'
