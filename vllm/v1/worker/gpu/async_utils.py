@@ -31,6 +31,7 @@ class StepTimingSample:
     num_target_tokens: int
     num_reqs: int
     full_cudagraph: bool
+    draft_depth: int
 
 
 def _timing_event() -> torch.cuda.Event:
@@ -43,6 +44,7 @@ class StepTimingEvents:
     forward_end: torch.cuda.Event = field(default_factory=_timing_event)
     drafter_start: torch.cuda.Event = field(default_factory=_timing_event)
     drafter_end: torch.cuda.Event = field(default_factory=_timing_event)
+    draft_depth: int = 0
 
 
 class StepTimingCollector:
@@ -83,6 +85,7 @@ class StepTimingCollector:
                 num_target_tokens,
                 num_reqs,
                 full_cudagraph,
+                events.draft_depth,
             )
             for events, (full_cudagraph, num_target_tokens, num_reqs) in timed
         )
@@ -100,8 +103,9 @@ class StepTimingCollector:
         if self._step is not None:
             self._step.forward_end.record()
 
-    def drafter_start(self) -> None:
+    def drafter_start(self, draft_depth: int) -> None:
         if self._step is not None:
+            self._step.draft_depth = draft_depth
             self._step.drafter_start.record()
 
     def drafter_end(self) -> None:

@@ -60,16 +60,23 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
             assert speculative_config is not None
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
-            )
+            num_spec_tokens = self.vllm_config.num_speculative_tokens
+            if speculative_config.uses_dynamic_speculative_decoding():
+                spec_token_counts = set(
+                    build_dynamic_sd_schedule_lookup(
+                        speculative_config.num_speculative_tokens_per_batch_size,
+                        vllm_max_batch_size=self.max_num_reqs,
+                        vllm_num_speculative_tokens=num_spec_tokens,
+                    )
+                )
+            else:
+                # Adaptive draft depth may stop at any step.
+                spec_token_counts = set(range(num_spec_tokens + 1))
             self._capture_descs = {
                 mode: [
                     SpeculatorBatchDescriptor(**vars(desc), num_speculative_tokens=k)
                     for desc in descs
-                    for k in sorted(set(dense_schedule) - {0, 1}, reverse=True)
+                    for k in sorted(spec_token_counts - {0, 1}, reverse=True)
                 ]
                 for mode, descs in self._capture_descs.items()
             }

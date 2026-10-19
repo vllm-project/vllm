@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -15,6 +16,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
+)
+from vllm.v1.worker.gpu.spec_decode.undrafted_confidence import (
+    UndraftedConfidenceEstimator,
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
@@ -32,9 +36,18 @@ def make_manager(
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),
         prefill_len=SimpleNamespace(np=np.ones(num_reqs, dtype=np.int32)),
     )
-    manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
+    manager.cost_tables = (np.zeros((num_steps + 1, num_reqs + 1)), verify_cost_ms)
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
+    manager.use_adaptive_draft_depth = False
+    manager._last_draft_depth = num_steps
+    manager._last_num_non_draft_tokens = 0
+    manager._copy_events = [SimpleNamespace(synchronize=lambda: None)] * 2
+    manager._pending_resets = []
+    manager.undrafted_confidence = UndraftedConfidenceEstimator(num_reqs, num_steps)
+    # Every slot's last proposal drafted the full depth unless a test says otherwise.
+    manager._stale_draft_depths = [np.full(num_reqs, num_steps, dtype=np.int32)] * 2
+    manager._last_idx_mapping = np.zeros(0, dtype=np.int64)
     return manager
 
 
@@ -189,6 +202,7 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
+    manager.use_adaptive_draft_depth = False
     curves: dict[str, list[tuple[int, float]]] = {}
     monkeypatch.setattr(
         manager,
@@ -204,6 +218,7 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
             num_reqs=batch["num_tokens"] // 8,
             # Only the captured sizes replay a graph; the tail sizes run eager.
             full_cudagraph=batch["num_tokens"] <= 1024,
+            draft_depth=manager.num_speculative_steps,
         )
         for batch in manager.batches_to_profile([8, 1024])
     ]
@@ -221,6 +236,148 @@ def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     # count they would land inside the captured range and, once made monotonic,
     # smear that eager cost across every larger request count.
     assert curves["draft"] == [(1, 1.0), (128, 1.0)]
+
+
+def make_depth_manager(
+    verify_cost_ms: np.ndarray, draft_ms_per_step: float
+) -> AdaptiveVerificationManager:
+    confidences = np.full((2, 3), 0.9, dtype=np.float32)
+    manager = make_manager(confidences, verify_cost_ms)
+    manager._stale_confidences = [SimpleNamespace(np=confidences)] * 2  # type: ignore[list-item]
+    manager.use_adaptive_draft_depth = True
+    depths = np.arange(4, dtype=np.float64)[:, None]
+    manager.cost_tables = (
+        np.broadcast_to(depths * draft_ms_per_step, (4, 3)).copy(),
+        verify_cost_ms,
+    )
+    return manager
+
+
+def test_draft_depth_stops_where_no_draft_would_be_verified():
+    # Any draft past the two bonus tokens costs 100x to verify, so the next
+    # budget admits none and every draft step past the prefill is wasted.
+    manager = make_depth_manager(np.array([1.0, 1.0, 1.0] + [100.0] * 6), 1.0)
+
+    assert manager.get_draft_depth(np.array([0, 1]), 3) == 1
+    assert manager._last_draft_depth == 1
+
+
+def test_draft_depth_keeps_full_depth_when_drafts_are_cheap():
+    manager = make_depth_manager(np.ones(9), 0.01)
+
+    assert manager.get_draft_depth(np.array([0, 1]), 3) == 3
+
+
+def test_undrafted_steps_are_planned_on_position_estimates():
+    # The last proposal stopped after one step, so the deep columns hold leftovers
+    # (0.01) rather than confidences. Planning must ignore them and use the
+    # per-position estimate, here confidently high, and so draft deep again.
+    manager = make_depth_manager(np.ones(9), 0.01)
+    leftovers = np.array([[0.9, 0.01, 0.01], [0.9, 0.01, 0.01]], dtype=np.float32)
+    manager._stale_confidences = [SimpleNamespace(np=leftovers)] * 2  # type: ignore[list-item]
+    manager._stale_draft_depths = [np.ones(2, dtype=np.int32)] * 2
+    manager.undrafted_confidence.sums[:] = 450.0
+    manager.undrafted_confidence.counts[:] = 500.0
+
+    assert manager.get_draft_depth(np.array([0, 1]), 3) == 3
+
+
+def test_position_estimates_count_only_drafted_steps():
+    estimates = UndraftedConfidenceEstimator(3, 3)
+    confidences = np.array([[0.8, 0.6, 0.0], [0.5, 0.5, 0.5], [0.4, 0.0, 0.0]])
+
+    estimates.update(confidences, np.array([2, 3, 1]), np.array([2, 0]))
+
+    # Slot 0 drafted two steps, slot 2 one; slot 1 was not in the proposal.
+    np.testing.assert_allclose(
+        estimates.sums, [[0.8, 0.6, 0.0], [0.0, 0.0, 0.0], [0.4, 0.0, 0.0]]
+    )
+    np.testing.assert_allclose(estimates.counts, [[1, 1, 0], [0, 0, 0], [1, 0, 0]])
+    np.testing.assert_allclose(estimates.population_sums, [1.2, 0.6, 0.0])
+    np.testing.assert_allclose(estimates.population_counts, [2, 1, 0])
+
+
+def test_position_estimates_lean_on_the_population_until_drafted():
+    # A request that has not drafted a step yet is planned on what other requests
+    # saw there; its own confidences take over as it drafts the step.
+    estimates = UndraftedConfidenceEstimator(2, 1)
+    for _ in range(1000):
+        estimates.update(np.array([[0.2], [0.0]]), np.array([1, 0]), np.arange(2))
+    population = estimates.mean(np.array([1]))[0, 0]
+    assert population == pytest.approx(0.2, abs=1e-3)
+
+    for _ in range(1000):
+        estimates.update(np.array([[0.0], [0.9]]), np.array([0, 1]), np.arange(2))
+    assert estimates.mean(np.array([1]))[0, 0] > 0.85
+
+
+def test_reused_slot_does_not_inherit_position_estimates():
+    manager = make_manager(np.full((2, 2), 0.5, dtype=np.float32), np.ones(7))
+    manager.use_adaptive_draft_depth = True
+    manager._confidence_probs = torch.ones(2, 2)
+    manager._draft_depths = np.zeros(2, dtype=np.int32)
+    estimates = manager.undrafted_confidence
+    estimates.update(np.full((2, 2), 0.9), np.full(2, 2), np.arange(2))
+
+    manager.add_request(0)
+
+    np.testing.assert_array_equal(estimates.counts[0], [0.0, 0.0])
+    np.testing.assert_array_equal(estimates.counts[1], [1.0, 1.0])
+    # The new request starts at the population mean, not the old request's.
+    population = (estimates.population_sums + 0.5) / (estimates.population_counts + 1)
+    np.testing.assert_allclose(estimates.mean(np.array([0]))[0], population)
+
+
+def test_budget_never_admits_slots_past_the_drafted_depth():
+    manager = make_manager(
+        np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32), np.ones(7)
+    )
+    manager.use_adaptive_draft_depth = True
+    manager._last_draft_depth = 1
+
+    manager.get_num_tokens({"low": 3, "high": 3}, {"low": [1, 2], "high": [3, 4]})
+    assert manager._batch_budget is not None
+    valid_drafts, num_non_draft_tokens, draft_budget = manager._batch_budget
+
+    assert valid_drafts == {"low": 1, "high": 1}
+    assert num_non_draft_tokens == {"low": 1, "high": 1}
+    assert draft_budget == 2
+
+
+def test_shallow_profile_seeds_per_depth_draft_costs(monkeypatch):
+    monkeypatch.setattr(
+        adaptive_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(broadcast_object=lambda obj, src: obj),
+    )
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager.req_states = SimpleNamespace(max_num_batched_tokens=64, max_num_reqs=8)
+    manager.num_speculative_steps = 5
+    manager.num_bonus_tokens = 1
+    manager.use_adaptive_draft_depth = True
+
+    batches = list(manager.batches_to_profile([8]))
+    shallow = [b for b in batches if b.get("num_speculative_tokens") == 1]
+    assert shallow and len(shallow) < len(batches)
+
+    timings = [
+        StepTimingSample(
+            forward_ms=1.0,
+            drafter_ms=1.0 if batch.get("num_speculative_tokens") == 1 else 5.0,
+            num_target_tokens=batch["num_tokens"],
+            num_reqs=8,
+            full_cudagraph=True,
+            draft_depth=batch.get(
+                "num_speculative_tokens", manager.num_speculative_steps
+            ),
+        )
+        for batch in batches
+    ]
+    manager.set_initial_cost_curves(timings)
+
+    assert manager.cost_tables is not None
+    # Each decode step past the prefill-only depth adds an equal share.
+    np.testing.assert_allclose(manager.cost_tables[0][1:, 8], [1, 2, 3, 4, 5])
 
 
 def test_compact_batch_preserves_totals_and_bounds():

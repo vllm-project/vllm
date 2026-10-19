@@ -22,6 +22,9 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
     get_varlen_cudagraph_unsupported_backend,
 )
+from vllm.v1.worker.gpu.spec_decode.undrafted_confidence import (
+    UndraftedConfidenceEstimator,
+)
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
@@ -135,6 +138,7 @@ class AdaptiveVerificationManager:
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
         max_total_logits: int,
+        use_adaptive_draft_depth: bool = False,
     ):
         self.req_states = req_states
         self.num_speculative_steps = req_states.num_speculative_steps
@@ -147,6 +151,8 @@ class AdaptiveVerificationManager:
         # address the compacted layout, so the budget must fit one chunk.
         self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
+        # ([num_speculative_steps + 1, max_num_reqs + 1] drafter cost by depth,
+        #  [max_num_batched_tokens + 1] verify cost by token count).
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
         self._cudagraph_limit = 0
@@ -179,11 +185,33 @@ class AdaptiveVerificationManager:
         self._stale_idx = 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
+        # Draft steps each slot's latest proposal ran, snapshotted with every
+        # confidence copy: columns at or past it hold no fresh confidence.
+        self._draft_depths = np.zeros(max_num_reqs, dtype=np.int32)
+        self._stale_draft_depths = [
+            np.zeros(max_num_reqs, dtype=np.int32) for _ in range(2)
+        ]
+
+        # Draft steps the latest proposal ran. The next budget only ranks those.
+        self._last_draft_depth = self.num_speculative_steps
+        self.use_adaptive_draft_depth = use_adaptive_draft_depth
+        if self.use_adaptive_draft_depth:
+            self._last_num_non_draft_tokens = 0
+            # Index mapping of the latest recorded proposal.
+            self._last_idx_mapping = np.zeros(0, dtype=np.int64)
+            # Approximates confidence scores beyond the early draft stop.
+            self.undrafted_confidence = UndraftedConfidenceEstimator(
+                max_num_reqs, self.num_speculative_steps
+            )
 
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
+        self._stale_draft_depths[self._stale_idx][req_idx] = 0
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
+        self._draft_depths[req_idx] = 0
+        if self.use_adaptive_draft_depth:
+            self.undrafted_confidence.reset(req_idx)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
@@ -202,12 +230,18 @@ class AdaptiveVerificationManager:
                 size = min(size * 2, max_num_tokens)
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
+        context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
         for num_tokens in capture_sizes + sorted(tail_sizes):
             for _ in range(_PROFILE_REPLAYS):
-                yield {
-                    "num_tokens": num_tokens,
-                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
-                }
+                yield {"num_tokens": num_tokens, "context_len": context_len}
+            if self.use_adaptive_draft_depth:
+                # Prefill-only drafts anchor the shallow end of the depth costs.
+                for _ in range(_PROFILE_REPLAYS):
+                    yield {
+                        "num_tokens": num_tokens,
+                        "context_len": context_len,
+                        "num_speculative_tokens": 1,
+                    }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
@@ -222,21 +256,33 @@ class AdaptiveVerificationManager:
         # still launching kernels, opening gaps between the drafter's events),
         # and request counts — unlike token counts — collide across execution
         # modes, so only graph-replay samples may price the draft curve.
+        full_depth = [s for s in samples if s.draft_depth == self.num_speculative_steps]
         draft_curve = median_curve(
-            (s.num_reqs, s.drafter_ms) for s in samples if s.full_cudagraph
+            (s.num_reqs, s.drafter_ms) for s in full_depth if s.full_cudagraph
         )
         verify_curve = median_curve(
-            (s.num_target_tokens, s.forward_ms) for s in samples
+            (s.num_target_tokens, s.forward_ms) for s in full_depth
         )
-        self.set_cost_curves(draft_curve, verify_curve)
+        if self.use_adaptive_draft_depth:
+            shallow_draft_curve = median_curve(
+                (s.num_reqs, s.drafter_ms)
+                for s in samples
+                if s.draft_depth == 1 and s.full_cudagraph
+            )
+            self.set_cost_curves(draft_curve, verify_curve, shallow_draft_curve)
+        else:
+            self.set_cost_curves(draft_curve, verify_curve)
 
     def set_cost_curves(
         self,
         draft_curve: list[tuple[int, float]],
         verify_curve: list[tuple[int, float]],
+        shallow_draft_curve: list[tuple[int, float]] | None = None,
     ) -> None:
-        draft_curve, verify_curve = get_tp_group().broadcast_object(
-            (draft_curve, verify_curve), src=0
+        draft_curve, verify_curve, shallow_draft_curve = (
+            get_tp_group().broadcast_object(
+                (draft_curve, verify_curve, shallow_draft_curve), src=0
+            )
         )
         if not draft_curve or not verify_curve:
             raise RuntimeError(
@@ -244,14 +290,37 @@ class AdaptiveVerificationManager:
                 "`enable_adaptive_verification=false` in the speculative config to "
                 "verify a fixed number of drafts instead."
             )
-        self.cost_tables = build_cost_tables_from_curves(
+        full_cost, verify_cost = build_cost_tables_from_curves(
             draft_curve,
             verify_curve,
             self.req_states.max_num_reqs,
             self.req_states.max_num_batched_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
+        logger.debug("DSpark cost tables: %s", (full_cost, verify_cost))
+        num_depths = self.num_speculative_steps + 1
+        # Without a shallow profile every depth is priced at the full depth,
+        # which is what runs.
+        draft_cost_by_depth = np.broadcast_to(
+            full_cost[None, :], (num_depths, len(full_cost))
+        )
+        if shallow_draft_curve and self.num_speculative_steps > 1:
+            shallow_cost, _ = build_cost_tables_from_curves(
+                shallow_draft_curve,
+                verify_curve,
+                self.req_states.max_num_reqs,
+                self.req_states.max_num_batched_tokens,
+                self._cudagraph_limit,
+            )
+            full_cost = np.maximum(full_cost, shallow_cost)
+            # Every decode step after the prefill step costs about the same, so
+            # interpolate between depth 1 (prefill only) and the full depth.
+            steps = np.arange(num_depths)
+            frac = np.clip((steps - 1) / (self.num_speculative_steps - 1), 0, 1)
+            draft_cost_by_depth = shallow_cost[None, :] + frac[:, None] * (
+                full_cost - shallow_cost
+            )
+        self.cost_tables = (draft_cost_by_depth, verify_cost)
 
     def record_confidences(
         self, confidence_probs: torch.Tensor, input_batch: "InputBatch"
@@ -259,17 +328,16 @@ class AdaptiveVerificationManager:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
         num_reqs = input_batch.num_reqs
-        ready_idx = self._stale_idx ^ 1
-        with gpu_sync_allowed():
-            self._copy_events[ready_idx].synchronize()
-        if self._pending_resets:
-            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
-            self._pending_resets.clear()
+        ready_idx = self._sync_ready_slot()
         # Last step's copy has landed: budgets read it, this step overwrites the
         # slot they were reading before.
         self._stale_idx, write_idx = ready_idx, self._stale_idx
 
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
+        if self.use_adaptive_draft_depth:
+            self._draft_depths[input_batch.idx_mapping_np] = self._last_draft_depth
+            self._stale_draft_depths[write_idx][:] = self._draft_depths
+            self._last_idx_mapping = input_batch.idx_mapping_np.copy()
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
@@ -278,6 +346,34 @@ class AdaptiveVerificationManager:
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
             self._copy_events[write_idx].record()
+
+    def _sync_ready_slot(self) -> int:
+        """Wait for the previous proposal's confidences to reach the CPU."""
+        ready_idx = self._stale_idx ^ 1
+        with gpu_sync_allowed():
+            self._copy_events[ready_idx].synchronize()
+        if self._pending_resets:
+            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
+            self._stale_draft_depths[ready_idx][self._pending_resets] = 0
+            self._pending_resets.clear()
+        return ready_idx
+
+    def _get_confidences(self, stale_idx: int, idx_mapping: np.ndarray) -> np.ndarray:
+        """Stale confidences, with steps the stale proposal did not draft estimated."""
+        confidences = self._stale_confidences[stale_idx].np[idx_mapping]
+        if not self.use_adaptive_draft_depth:
+            return confidences
+        steps = np.arange(self.num_speculative_steps)
+        depths = self._stale_draft_depths[stale_idx][idx_mapping]
+        undrafted = steps[None, :] >= depths[:, None]
+        if not undrafted.any():
+            return confidences
+        fill = self.undrafted_confidence.mean(idx_mapping)
+        return np.where(undrafted, fill, confidences)
+
+    def _max_logit_drafts(self, num_reqs: int) -> int:
+        """Drafts that still fit the rejection sampler's single logits chunk."""
+        return max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens)
 
     def get_num_tokens(
         self,
@@ -301,23 +397,26 @@ class AdaptiveVerificationManager:
             count=num_reqs,
         )
         num_non_draft_tokens = scheduled_tokens - scheduled_drafts
+        # Slots past the drafted depth hold no draft and can never be admitted.
+        scheduled_drafts = np.minimum(scheduled_drafts, self._last_draft_depth)
         slots = np.fromiter(
             map(self.req_states.req_id_to_index.__getitem__, req_ids),
             dtype=np.int32,
             count=num_reqs,
         )
-        stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        stale_confidences = self._get_confidences(self._stale_idx, slots)
         survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
         steps = np.arange(self.num_speculative_steps)
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+        self._last_num_non_draft_tokens = num_non_draft_tokens_total
         max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
+            int(scheduled_drafts.sum()), self._max_logit_drafts(num_reqs)
         )
         scores = scores[:max_draft_budget]
-        draft_cost_ms, verify_cost_ms = self.cost_tables
+        draft_cost_by_depth, verify_cost_ms = self.cost_tables
+        draft_cost_ms = draft_cost_by_depth[self._last_draft_depth]
         num_sampling_requests = np.count_nonzero(
             self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
             >= self.req_states.prefill_len.np[slots]
@@ -348,6 +447,70 @@ class AdaptiveVerificationManager:
             draft_budget,
         )
         return sum(num_non_draft_tokens_per_req.values()) + draft_budget
+
+    def get_draft_depth(
+        self,
+        idx_mapping_np: np.ndarray,
+        max_draft_depth: int,
+    ) -> int:
+        """Draft steps worth running for the proposal about to be drafted.
+
+        The next step's budget ranks the previous proposal's confidences, which
+        already sit in the ready slot, so the depth that budget pays for is known
+        before drafting. Steps past it would never be verified. Steps that
+        proposal did not draft are filled with the per-step running means.
+        """
+        # Startup warmup drafts before the cost tables are profiled: draft fully.
+        if (
+            not self.use_adaptive_draft_depth
+            or max_draft_depth <= 1
+            or self.cost_tables is None
+        ):
+            self._last_draft_depth = max_draft_depth
+            return max_draft_depth
+
+        num_reqs = len(idx_mapping_np)
+        ready_idx = self._sync_ready_slot()
+
+        # Update the estimates for draft steps beyond the early stop.
+        self.undrafted_confidence.update(
+            self._stale_confidences[ready_idx].np,
+            self._stale_draft_depths[ready_idx],
+            self._last_idx_mapping,
+        )
+        # Get the confidence scores up to the max number of draft steps.
+        stale_confidences = self._get_confidences(ready_idx, idx_mapping_np)[
+            :, :max_draft_depth
+        ]
+
+        # Find the optimal depth for expected number of tokens relative to the
+        # cost of drafting + verifying them.
+        draft_cost_by_depth, verify_cost_ms = self.cost_tables
+        survival = np.cumprod(stale_confidences.astype(np.float64), axis=1)
+        num_non_draft_tokens = self._last_num_non_draft_tokens or num_reqs
+        max_budget = max(
+            0,
+            min(
+                len(verify_cost_ms) - 1 - num_non_draft_tokens,
+                self._max_logit_drafts(num_reqs),
+            ),
+        )
+        best_rate, best_depth = -1.0, max_draft_depth
+        for depth in range(1, max_draft_depth + 1):
+            scores = np.sort(survival[:, :depth], axis=None)[::-1][:max_budget]
+            expected_num_tokens = num_reqs + np.concatenate(([0.0], np.cumsum(scores)))
+            costs = (
+                draft_cost_by_depth[depth, num_reqs]
+                + verify_cost_ms[
+                    num_non_draft_tokens : num_non_draft_tokens + len(scores) + 1
+                ]
+            )
+            rate = float(np.max(expected_num_tokens / costs))
+            if rate > best_rate:
+                best_rate, best_depth = rate, depth
+
+        self._last_draft_depth = best_depth
+        return best_depth
 
     def compact_batch(
         self,
@@ -458,6 +621,7 @@ def maybe_create_adaptive_verification_manager(
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
+    use_adaptive_draft_depth: bool = False,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
@@ -506,4 +670,5 @@ def maybe_create_adaptive_verification_manager(
         query_start_loc,
         num_bonus_tokens,
         max_total_logits=max_total_logits,
+        use_adaptive_draft_depth=use_adaptive_draft_depth,
     )

@@ -556,6 +556,10 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    adaptive_draft_depth: bool = False
+    """With enable_adaptive_verification, also stop autoregressive drafting at the
+    deepest step the next verification budget is forecast to admit."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -1562,6 +1566,11 @@ class SpeculativeConfig:
                 "Adaptive verification estimates per-position acceptance from "
                 "the draft logits, which use_local_argmax_reduction never "
                 "materializes. Disable one of them."
+            )
+
+        if self.adaptive_draft_depth and not self.enable_adaptive_verification:
+            raise ValueError(
+                "adaptive_draft_depth requires enable_adaptive_verification."
             )
 
         return self

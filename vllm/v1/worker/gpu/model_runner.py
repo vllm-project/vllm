@@ -168,6 +168,9 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
@@ -553,6 +556,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             compile_model_with_stock_torch(self.model, self.vllm_config)
 
+    def _use_adaptive_draft_depth(self) -> bool:
+        spec_config = self.speculative_config
+        if spec_config is None or not spec_config.adaptive_draft_depth:
+            return False
+        if not isinstance(self.speculator, TargetDependentARSpeculator):
+            logger.warning_once(
+                "adaptive_draft_depth only applies to autoregressive MTP/EAGLE "
+                "drafters; ignoring it."
+            )
+            return False
+        if self.dp_size > 1:
+            # Draft steps run MoE collectives, so every DP rank would have to
+            # agree on the depth.
+            logger.warning_once("adaptive_draft_depth is not supported with DP > 1.")
+            return False
+        return True
+
     @property
     def dp_size(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
@@ -704,6 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vllm_config=self.vllm_config,
             target_layer_names=target_attn_layer_names,
             additional_attn_cg_support=additional_attn_cg_support,
+            use_adaptive_draft_depth=self._use_adaptive_draft_depth(),
         )
 
         self.block_tables = BlockTables(
@@ -837,6 +858,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        num_speculative_tokens: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -937,7 +959,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
-            self.step_timing.drafter_start()
+            self.step_timing.drafter_start(
+                self.num_speculative_steps
+                if num_speculative_tokens is None
+                else num_speculative_tokens
+            )
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
                 all_false = torch.zeros(
@@ -972,6 +998,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
                     is_profile=is_profile,
+                    num_speculative_tokens=num_speculative_tokens,
                 )
             self.step_timing.drafter_end()
 
@@ -2251,6 +2278,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
+            num_draft_steps = num_spec_tokens
+            if (
+                self.adaptive_verification is not None
+                and self.adaptive_verification.use_adaptive_draft_depth
+            ):
+                num_draft_steps = self.adaptive_verification.get_draft_depth(
+                    input_batch.idx_mapping_np, num_spec_tokens
+                )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2264,12 +2299,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.req_states.next_prefill_tokens,
                     self.sampler.sampling_states.temperature.gpu,
                     self.sampler.sampling_states.seeds.gpu,
-                    num_speculative_tokens=num_spec_tokens,
+                    num_speculative_tokens=num_draft_steps,
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
-            if num_spec_tokens < self.num_speculative_steps:
-                draft_tokens[:, num_spec_tokens:] = -1
+            if num_draft_steps < self.num_speculative_steps:
+                draft_tokens[:, num_draft_steps:] = -1
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
