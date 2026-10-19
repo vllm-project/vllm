@@ -34,6 +34,62 @@ class PagedPrefillMetadata(NamedTuple):
     page_stride: int
 
 
+class PrimsTSSelectionOutput(NamedTuple):
+    """Final history-only int32 rows, optionally with decode route metadata."""
+
+    ids: torch.Tensor
+    owners: torch.Tensor | None = None
+    positions: torch.Tensor | None = None
+    source_positions: torch.Tensor | None = None
+    active: torch.Tensor | None = None
+    groups: int = 1
+    query_len: int = 1
+
+
+def _prims_selection_kwargs(output: PrimsTSSelectionOutput | None) -> dict:
+    if output is None:
+        return {}
+    return dict(
+        PRIMS_TS=True,
+        OUTPUT_ROW=output.ids.stride(0),
+        OUTPUT_WIDTH=output.ids.shape[1],
+        EMIT_ROUTES=output.owners is not None,
+        RouteOwners=output.owners,
+        RoutePositions=output.positions,
+        SourcePositions=output.source_positions,
+        Active=output.active,
+        POSITION_STRIDE=output.source_positions.stride(0)
+        if output.source_positions is not None
+        else 0,
+        ACTIVE_STRIDE=output.active.stride(0) if output.active is not None else 0,
+        GROUPS=output.groups,
+        QUERY_LEN=output.query_len,
+    )
+
+
+@triton.jit
+def _emit_prims_routes(
+    row,
+    RouteOwners,
+    RoutePositions,
+    SourcePositions,
+    Active,
+    POSITION_STRIDE: tl.constexpr,
+    ACTIVE_STRIDE: tl.constexpr,
+    GROUPS: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+):
+    # Groups share one request/query position; publish it once per token.
+    if row % GROUPS == 0:
+        token = row // GROUPS
+        live = tl.load(Active + row * ACTIVE_STRIDE)
+        position = tl.load(SourcePositions + row * POSITION_STRIDE)
+        tl.store(
+            RouteOwners + token, tl.where(live, token // QUERY_LEN, -1).to(tl.int32)
+        )
+        tl.store(RoutePositions + token, tl.where(live, position, -1))
+
+
 @triton.jit
 def _emit_prefill_pages(
     selected,
@@ -414,27 +470,87 @@ def pack_decode_summary_pages(
 
 
 @triton.jit
-def _emit_all_regions(current, Output, K, BLOCK: tl.constexpr):
+def _emit_all_regions(
+    current,
+    Output,
+    K,
+    BLOCK: tl.constexpr,
+    PRIMS_TS: tl.constexpr = False,
+    OUTPUT_WIDTH: tl.constexpr = 0,
+):
     col = tl.arange(0, BLOCK)
-    # Left-pad with -1, then include every historical region and the current one.
-    region = col - (K - current)
-    tl.store(Output + col, tl.where(region >= 0, region, -1), col <= K)
+    if PRIMS_TS:
+        # Current is appended by attention, outside the historical top-k budget.
+        tl.store(
+            Output + col,
+            tl.where(col < tl.minimum(current, K), col, -1),
+            col < OUTPUT_WIDTH,
+        )
+    else:
+        # Native format: left padding, history, then current in the last slot.
+        region = col - (K - current)
+        tl.store(Output + col, tl.where(region >= 0, region, -1), col <= K)
 
 
 @triton.jit
-def _all_regions(Current, Output, K: tl.constexpr, BLOCK: tl.constexpr):
+def _all_regions(
+    Current,
+    Output,
+    K: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PRIMS_TS: tl.constexpr = False,
+    OUTPUT_ROW: tl.constexpr = 0,
+    OUTPUT_WIDTH: tl.constexpr = 0,
+    EMIT_ROUTES: tl.constexpr = False,
+    RouteOwners=None,
+    RoutePositions=None,
+    SourcePositions=None,
+    Active=None,
+    POSITION_STRIDE: tl.constexpr = 0,
+    ACTIVE_STRIDE: tl.constexpr = 0,
+    GROUPS: tl.constexpr = 1,
+    QUERY_LEN: tl.constexpr = 1,
+):
     row = tl.program_id(0)
     current = tl.load(Current + row)
-    _emit_all_regions(current, Output + row * (K + 1), K, BLOCK)
+    stride = OUTPUT_ROW if PRIMS_TS else K + 1
+    _emit_all_regions(
+        current, Output + row.to(tl.int64) * stride, K, BLOCK, PRIMS_TS, OUTPUT_WIDTH
+    )
+    if EMIT_ROUTES:
+        _emit_prims_routes(
+            row,
+            RouteOwners,
+            RoutePositions,
+            SourcePositions,
+            Active,
+            POSITION_STRIDE,
+            ACTIVE_STRIDE,
+            GROUPS,
+            QUERY_LEN,
+        )
 
 
-def select_all_regions(current: torch.Tensor, capacity: int) -> torch.Tensor:
-    """Select all history and current without computing unused indexer scores."""
+def select_all_regions(
+    current: torch.Tensor,
+    capacity: int,
+    *,
+    prims_output: PrimsTSSelectionOutput | None = None,
+) -> torch.Tensor:
+    """Select all history; native output also includes the current region."""
     rows = current.shape[0]
-    output = torch.empty((rows, capacity + 1), device=current.device, dtype=torch.long)
+    output = (
+        prims_output.ids
+        if prims_output is not None
+        else torch.empty((rows, capacity + 1), device=current.device, dtype=torch.long)
+    )
     if rows:
         _all_regions[(rows,)](
-            current, output, capacity, triton.next_power_of_2(capacity + 1)
+            current,
+            output,
+            capacity,
+            triton.next_power_of_2(max(capacity + 1, output.shape[1])),
+            **_prims_selection_kwargs(prims_output),
         )
     return output
 
@@ -464,9 +580,24 @@ def _stable_topk_regions(
     OWNER_STRIDE: tl.constexpr = 0,
     INDPTR_STRIDE: tl.constexpr = 1,
     SORT: tl.constexpr = True,
+    PRIMS_TS: tl.constexpr = False,
+    OUTPUT_ROW: tl.constexpr = 0,
+    OUTPUT_WIDTH: tl.constexpr = 0,
+    EMIT_ROUTES: tl.constexpr = False,
+    RouteOwners=None,
+    RoutePositions=None,
+    SourcePositions=None,
+    Active=None,
+    POSITION_STRIDE: tl.constexpr = 0,
+    ACTIVE_STRIDE: tl.constexpr = 0,
+    GROUPS: tl.constexpr = 1,
+    QUERY_LEN: tl.constexpr = 1,
 ):
     row = tl.program_id(0)
     length = tl.load(Current + row).to(tl.int32)
+    if PRIMS_TS:
+        length = tl.maximum(length, 0)
+    output_row = row.to(tl.int64) * (OUTPUT_ROW if PRIMS_TS else K + 1)
     col = tl.arange(0, BLOCK_K)
     chosen = tl.load(Indices + row * INDEX_STRIDE + col, col < K, other=-1)
     valid = (col < K) & (chosen >= 0) & (chosen < length)
@@ -481,8 +612,11 @@ def _stable_topk_regions(
         short_finite = tl.sum(nonfinite.to(tl.int32), 0) == 0
     if short_finite:
         output_col = tl.arange(0, BLOCK_SORT)
-        region = output_col - (K - length)
-        selected = tl.where(region >= 0, region, -1)
+        if PRIMS_TS:
+            selected = tl.where(output_col < length, output_col, -1)
+        else:
+            region = output_col - (K - length)
+            selected = tl.where(region >= 0, region, -1)
     else:
         threshold = tl.min(values, 0)
         above = valid & (values > threshold)
@@ -494,11 +628,12 @@ def _stable_topk_regions(
             output = Scratch + row * (K + 1)
             pad = 0
         else:
-            output = Output + row * (K + 1)
-            pad = K - tl.minimum(length, K)
+            output = Output + output_row
+            pad = 0 if PRIMS_TS else K - tl.minimum(length, K)
         # Also initialize capture/dummy rows whose scores can be NaN.
         tl.store(output + col, -1, col < K)
-        tl.store(output + K, length)
+        if not PRIMS_TS:
+            tl.store(output + K, length)
         tl.debug_barrier()
         tl.store(output + pad + above_rank - 1, chosen, above)
         # Public top-k backends need not prefer smaller IDs at the cutoff.
@@ -527,8 +662,13 @@ def _stable_topk_regions(
         if SORT:
             tl.debug_barrier()
             sorted_col = tl.arange(0, BLOCK_SORT)
-            selected = tl.load(output + sorted_col, sorted_col <= K, other=2147483647)
+            valid_sort = (
+                sorted_col < tl.minimum(length, K) if PRIMS_TS else sorted_col <= K
+            )
+            selected = tl.load(output + sorted_col, valid_sort, other=2147483647)
             selected = tl.sort(selected, descending=False)
+            if PRIMS_TS:
+                selected = tl.where(sorted_col < tl.minimum(length, K), selected, -1)
         elif PREPARE_PREFILL:
             # Page metadata reads the row back; the unsorted layout (-1 left
             # padding, current last) already matches its compact-page contract.
@@ -541,7 +681,11 @@ def _stable_topk_regions(
 
     col = tl.arange(0, BLOCK_SORT)
     if SORT or short_finite:
-        tl.store(Output + row * (K + 1) + col, selected, col <= K)
+        tl.store(
+            Output + output_row + col,
+            selected,
+            col < OUTPUT_WIDTH if PRIMS_TS else col <= K,
+        )
     if PREPARE_PREFILL:
         _emit_prefill_pages(
             selected,
@@ -560,6 +704,19 @@ def _stable_topk_regions(
             PAGE_STRIDE,
         )
 
+    if EMIT_ROUTES:
+        _emit_prims_routes(
+            row,
+            RouteOwners,
+            RoutePositions,
+            SourcePositions,
+            Active,
+            POSITION_STRIDE,
+            ACTIVE_STRIDE,
+            GROUPS,
+            QUERY_LEN,
+        )
+
 
 def select_regions(
     scores: torch.Tensor,
@@ -570,6 +727,7 @@ def select_regions(
     topk_lengths: torch.Tensor | None = None,
     paged_prefill: PagedPrefillMetadata | None = None,
     sort: bool = True,
+    prims_output: PrimsTSSelectionOutput | None = None,
 ) -> torch.Tensor:
     """Select stable top-k historical regions and append current.
 
@@ -583,8 +741,12 @@ def select_regions(
         if paged_prefill.block_size not in (16, 32, 64, 128):
             raise ValueError("Unsupported prefill cache block size")
     if regions <= topk:
-        return select_all_regions(current, k)
-    output = torch.empty((rows, k + 1), device=scores.device, dtype=torch.long)
+        return select_all_regions(current, k, prims_output=prims_output)
+    output = (
+        prims_output.ids
+        if prims_output is not None
+        else torch.empty((rows, k + 1), device=scores.device, dtype=torch.long)
+    )
     if not rows:
         return output
     # Step5 requires exact FP32 ordering. The cooperative/persistent backends
@@ -642,8 +804,9 @@ def select_regions(
         k,
         triton.next_power_of_2(k),
         1024,
-        triton.next_power_of_2(k + 1),
+        triton.next_power_of_2(max(k + 1, output.shape[1])),
         **paged_kwargs,
+        **_prims_selection_kwargs(prims_output),
         SORT=sort,
     )
     return output
