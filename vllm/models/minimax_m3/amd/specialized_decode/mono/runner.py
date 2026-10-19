@@ -36,7 +36,9 @@ def _writable_flydsl_cache() -> None:
 class FfnRunner:
     """``sym``: this rank's peer buffer; ``peers``: every rank's, int64 on
     device. The kernels move the epoch on themselves, so every rank that runs
-    the same launches agrees on it."""
+    the same launches agrees on it. Runners on one peer buffer must share
+    ``epoch``: a tag repeated over the buffer's lifetime could match a stale
+    pair."""
 
     def __init__(
         self,
@@ -48,6 +50,7 @@ class FfnRunner:
         widths: tuple[int, ...] = tuple(range(1, MAX_TOKENS + 1)),
         experts: Experts = Experts.ALL,
         timeline: bool = False,
+        epoch: torch.Tensor | None = None,
     ) -> None:
         _writable_flydsl_cache()
         self.tp, self.rank, self.sym, self.peers = tp, rank, sym, peers
@@ -56,7 +59,9 @@ class FfnRunner:
             s: FfnBuild(tokens=s, tp=tp, experts=experts, timeline=timeline)
             for s in widths
         }
-        self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=device)
+        if epoch is None:
+            epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=device)
+        self.epoch = epoch
         self.scratch = {
             s: torch.zeros(scratch_bytes(s), dtype=torch.uint8, device=device)
             for s in widths

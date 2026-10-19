@@ -562,39 +562,36 @@ def up_weights(c, rgs, st0):
 
 @traced
 def stage_down(c, tasks):
-    """Rows 16 task .. of every task in ``tasks``: (task, slot) items a wave
-    each, round robin; a slot's columns' results -> LDS CONTRIB[task][pick],
-    then each token's routed picks (top-k order) x their weights + the shared
-    expert -> bf16 pairs pushed to every rank's FFN region."""
+    """Rows 16 task .. of every task in ``tasks``: a slot a wave, round robin,
+    its MID columns loaded once for every task; a column's result ->
+    LDS CONTRIB[task][pick], then each token's routed picks (top-k order) x
+    their weights + the shared expert -> bf16 pairs pushed to every rank's FFN
+    region."""
     s, tid, lane, wave, a = c["S"], c["tid"], c["lane"], c["wave"], c["args"]
     nt = len(tasks)
     nu = n_slots(c)
-    for item in range(wave, nt * nu, WAVES):
-        ti = item % nt
-        u = item // nt
-        task = tasks[0]
-        for q in range_constexpr(1, nt):
-            task = (ti == q).select(tasks[q], task)
+    for u in range(wave, nu, WAVES):
         e = tab_ld(c, T_SLOT_E + u)
-        rg = e * DOWN_TASKS + task
-        wv = weight_loads(a["w2"], rg, INTER, 0, K2_STEPS)
-        sv = scale_loads(a["s2"], rg, INTER, 0, K2_STEPS)
+        rgs = [e * DOWN_TASKS + task for task in tasks]
+        wvs = [weight_loads(a["w2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
+        svs = [scale_loads(a["s2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
         cnt = slot_count(c, u)
         c["mb"].poll(
             [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
         )
         col = fx.min(lane % 16, cnt - 1)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
-        acc = fx.Vector.filled(4, 0.0, fx.Float32)
-        for i in range_constexpr(K2_STEPS):
-            acc = step_mfma(acc, wv[i], scale_f32(sv, rg, i), xs[i])
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)
-        if lane % 16 < cnt:
-            for q in range_constexpr(4):
-                fx.ptr_store(
-                    acc[q],
-                    c["contrib"] + ((ti * 80 + pick) * 16 + 4 * (lane // 16) + q),
-                )
+        for ti in range_constexpr(nt):
+            acc = fx.Vector.filled(4, 0.0, fx.Float32)
+            for i in range_constexpr(K2_STEPS):
+                acc = step_mfma(acc, wvs[ti][i], scale_f32(svs[ti], rgs[ti], i), xs[i])
+            if lane % 16 < cnt:
+                for q in range_constexpr(4):
+                    fx.ptr_store(
+                        acc[q],
+                        c["contrib"] + ((ti * 80 + pick) * 16 + 4 * (lane // 16) + q),
+                    )
     gpu.barrier()
     if tid < nt * s * 8:
         ti = tid // (s * 8)
