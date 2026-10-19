@@ -116,6 +116,13 @@ class KVControlService:
                 transfers = getattr(self.controller.executor, "transfers", None)
                 if transfers is not None:
                     result["transfers"] = dict(transfers.statistics)
+                result["pending_transfers"] = bool(
+                    getattr(self.controller.executor, "has_pending", False)
+                )
+                result["pending_policy_actions"] = bool(
+                    self.controller.policies is not None
+                    and self.controller.policies.has_pending
+                )
                 if self.controller.policies is not None:
                     result["policy_errors"] = dict(self.controller.policies.errors)
             elif route.consumer != "native":

@@ -592,6 +592,8 @@ async def run(args):
             await replay(args, client, report)
         else:
             await live(args, client, report)
+        if client.invocation:
+            report["control_capacity"] = await client.wait_control_idle()
         report["seconds"] = time.perf_counter() - report.get(
             "workload_started", started
         )
@@ -602,7 +604,6 @@ async def run(args):
         response.raise_for_status()
         report["metrics_after"] = response.text
         if client.invocation:
-            report["control_capacity"] = await client.call("capacity", {})
             assert not report["control_capacity"].get("policy_errors"), report[
                 "control_capacity"
             ]

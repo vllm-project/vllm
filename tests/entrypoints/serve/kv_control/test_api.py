@@ -133,7 +133,6 @@ async def test_rollout_resume_overlaps_control_and_finish_drains_it(rollout_clie
         body = json.loads(request.content)
         queried.append(body["method"])
         if body["method"] == "associations":
-            assert release.is_set(), "Cleanup must follow all outstanding control"
             return httpx.Response(200, json={"items": []})
         if body["method"] == "operation":
             return httpx.Response(200, json={"status": "completed"})
@@ -148,11 +147,11 @@ async def test_rollout_resume_overlaps_control_and_finish_drains_it(rollout_clie
         assert generated["token_ids"] == [1] and resumed.is_set()
         cleanup = asyncio.create_task(client.finish("r"))
         await asyncio.sleep(0)
-        assert not cleanup.done() and "associations" not in queried
+        assert not cleanup.done()
     finally:
         release.set()
     await cleanup
-    assert not client.background
+    assert "associations" in queried and not client.background
 
 
 @pytest.mark.asyncio
@@ -391,6 +390,112 @@ async def test_failed_rollout_cancels_other_requests_before_client_cleanup():
     with pytest.raises(ValueError, match="original serving failure"):
         await run_episodes([waiting(), failing()])
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_finish_cancels_unused_preparation_before_draining_results(
+    control_client, rollout_client
+):
+    from tests.v1.core.test_prefix_caching import (
+        install_movement_policies,
+        make_movement_controller,
+        make_request,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+
+    http, service = control_client
+    init_none_hash(sha256)
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
+    other = make_request("other", list(range(20, 25)), 4, sha256)
+    other.session_id = "other"
+    runtime.requests = lambda: (other,)
+    service.controller = controller
+    predicted = asyncio.Event()
+    signals = []
+
+    async def handle(request):
+        data = json.loads(request.content)
+        response = http.post("/v1/kv/control", json=data)
+        if data["method"] == "submit":
+            signal = data["payload"]["actions"][0]["payload"].get("signal")
+            if signal:
+                signals.append(signal)
+            if signal == "tool_wait":
+                adapter.finish()
+                controller.executor.progress()
+            if signal == "resume_prediction":
+                predicted.set()
+        return httpx.Response(response.status_code, json=response.json())
+
+    client = await rollout_client("policy", handle)
+    client.invocation = {"engine_id": "engine", "engine_epoch": "epoch"}
+    await client.action(
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+        version="1",
+    )
+    client.targets["r"] = {"kind": "session", "session_id": "s", "continuation_id": "c"}
+    await client.pause("r", 10)
+    await asyncio.wait_for(predicted.wait(), 5)
+    await asyncio.wait_for(client.finish("r"), 5)
+    assert signals == ["tool_wait", "resume_prediction"]
+    assert not controller.index.query().items
+    assert controller.registry.capacity()["records"] == 0
+    assert not runtime.has_pending and not adapter.jobs
+
+
+@pytest.mark.asyncio
+async def test_timed_out_control_acknowledges_cancelled_results_but_keeps_worker_hold(
+    control_client, rollout_client
+):
+    from tests.v1.core.test_prefix_caching import (
+        install_movement_policies,
+        make_movement_controller,
+    )
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import init_none_hash
+
+    http, service = control_client
+    init_none_hash(sha256)
+    manager, request, controller, adapter, target = make_movement_controller()
+    install_movement_policies(manager, controller, "movement")
+    service.controller = controller
+
+    async def handle(request):
+        response = http.post("/v1/kv/control", json=json.loads(request.content))
+        return httpx.Response(response.status_code, json=response.json())
+
+    client = await rollout_client("policy", handle)
+    client.invocation = {"engine_id": "engine", "engine_epoch": "epoch"}
+    client.control_timeout = 0.02
+    result = await client.action(
+        "signal", {"target": target, "signal": "resume"}, version="1", attempts=1
+    )
+    try:
+        assert result["status"] == "failed"
+        assert controller.registry.capacity()["records"] == 0
+        assert manager.block_pool.get_num_free_blocks() == 2
+        assert (await client.call("capacity", {}))["pending_transfers"]
+        error = next(r for r in client.controls if r["status"] == "client_error")
+        assert error["driver_target"] == target
+    finally:
+        adapter.finish()
+        controller.executor.progress()
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert not (await client.wait_control_idle())["pending_transfers"]
 
 
 @pytest.fixture

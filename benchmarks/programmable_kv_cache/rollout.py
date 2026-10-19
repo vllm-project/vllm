@@ -70,6 +70,8 @@ class RolloutClient:
         self.preparations: dict[str, asyncio.Task] = {}
         self.resume_events: dict[str, asyncio.Event] = {}
         self.pending_moves: dict[str, str] = {}
+        self.submissions: dict[str, list[asyncio.Event]] = {}
+        self.finishing: set[str] = set()
         self.invocation: dict[str, str] = {}
         self.boundary = 1
         self.rpc_stats: dict[str, dict[str, float]] = {}
@@ -155,6 +157,8 @@ class RolloutClient:
             self.control_timeout if timeout is None else timeout
         )
         registration_delay = 0.01
+        poll_delay = 0.01
+        previous_progress = None
         while time.monotonic() < deadline:
             try:
                 result = (
@@ -199,7 +203,12 @@ class RolloutClient:
                         if error.response.json().get("error", {}).get("code") != "busy":
                             raise
                 return result
-            await asyncio.sleep(0.01)
+            progress = result["status"], result.get("sequence")
+            poll_delay = (
+                0.01 if progress != previous_progress else min(0.25, poll_delay * 2)
+            )
+            previous_progress = progress
+            await asyncio.sleep(min(poll_delay, max(0, deadline - time.monotonic())))
         raise TimeoutError(f"Control operation timed out: {message_id}")
 
     async def action(
@@ -210,11 +219,33 @@ class RolloutClient:
         version="1.0",
         attempts: int = 2,
         submitted: asyncio.Event | None = None,
+        request_id: str | None = None,
     ) -> dict:
+        if request_id is not None:
+            submitted = submitted or asyncio.Event()
+            self.submissions.setdefault(request_id, []).append(submitted)
         for attempt in range(attempts):
+            if request_id in self.finishing:
+                assert submitted is not None
+                submitted.set()
+                return {
+                    "status": "cancelled",
+                    "reason": "Task finished before submission",
+                }
             message = f"{self.run_id}-{uuid.uuid4().hex}"
             receipt = None
             started = time.perf_counter()
+            metadata = {
+                "driver_started": started,
+                "driver_action_type": kind,
+                "driver_target": payload.get("target"),
+                "driver_message_id": message,
+            }
+            if kind == "signal":
+                metadata["driver_signal"] = payload["signal"]
+                metadata["driver_resume_after_seconds"] = payload.get(
+                    "resume_after_seconds"
+                )
             try:
                 receipt = await self.call(
                     "submit", envelope(message, kind, payload, version)
@@ -224,7 +255,12 @@ class RolloutClient:
                 result = await self.wait(message, initial=receipt["results"][0])
             except (httpx.HTTPError, TimeoutError) as error:
                 self.controls.append(
-                    {"status": "client_error", "error": str(error), "action_type": kind}
+                    {
+                        "status": "client_error",
+                        "error": str(error),
+                        "action_type": kind,
+                        **metadata,
+                    }
                 )
                 if receipt is not None:
                     for parent in receipt["results"]:
@@ -242,18 +278,19 @@ class RolloutClient:
                                     },
                                 )
                                 self.controls.append(cancelled)
+                    messages = {
+                        ref["message_id"]
+                        for parent in receipt["results"]
+                        for ref in [*parent.get("derived_operations", []), parent]
+                    }
+                    for message_id in messages:
+                        with suppress(httpx.HTTPError):
+                            await self.call("acknowledge", {"message_id": message_id})
                 if attempt + 1 == attempts:
                     return {"status": "failed", "reason": str(error)}
             else:
                 result["driver_seconds"] = time.perf_counter() - started
-                result["driver_started"] = started
-                result["driver_action_type"] = kind
-                result["driver_target"] = payload.get("target")
-                if kind == "signal":
-                    result["driver_signal"] = payload["signal"]
-                    result["driver_resume_after_seconds"] = payload.get(
-                        "resume_after_seconds"
-                    )
+                result.update(metadata)
                 if result["status"] != "deferred" or attempt + 1 == attempts:
                     return result
             finally:
@@ -411,23 +448,26 @@ class RolloutClient:
 
     async def pause(self, request_id: str, predicted_seconds: float = 0.25) -> None:
         target = self.targets.get(request_id)
-        if target is None:
+        if target is None or request_id in self.finishing:
             return
         resumed = self.resume_events.setdefault(request_id, asyncio.Event())
         predicted_at = time.monotonic() + predicted_seconds
         message = self.pending_moves.pop(request_id, None)
         previous = self.preparations.get(request_id)
 
+        async def prepare_action(kind, payload, **options):
+            return await self.action(kind, payload, request_id=request_id, **options)
+
         async def prepare():
             if previous is not None:
                 await previous
             if self.mode == "retention":
-                await self.action(
+                await prepare_action(
                     "signal", {"target": target, "signal": "importance"}, version="1"
                 )
                 return
             if self.mode == "priority":
-                await self.action(
+                await prepare_action(
                     "retain",
                     {
                         "target": target,
@@ -465,7 +505,7 @@ class RolloutClient:
                     "blocks": blocks,
                 }
             if self.mode == "policy":
-                result = await self.action(
+                result = await prepare_action(
                     "signal",
                     {
                         "target": target,
@@ -478,18 +518,18 @@ class RolloutClient:
                 )
                 if not result.get("derived_operations"):
                     await resumed.wait()
-                    await self.action(
+                    await prepare_action(
                         "signal", {"target": target, "signal": "resume"}, version="1"
                     )
                     return
                 if resumed.is_set():
-                    await self.action(
+                    await prepare_action(
                         "signal", {"target": target, "signal": "resume"}, version="1"
                     )
                     return
                 submitted = asyncio.Event()
                 prediction = asyncio.create_task(
-                    self.action(
+                    prepare_action(
                         "signal",
                         {
                             "target": target,
@@ -506,7 +546,7 @@ class RolloutClient:
                 try:
                     await submitted.wait()
                     await resumed.wait()
-                    await self.action(
+                    await prepare_action(
                         "signal", {"target": target, "signal": "resume"}, version="1"
                     )
                 finally:
@@ -516,7 +556,7 @@ class RolloutClient:
                 await asyncio.wait_for(
                     resumed.wait(), max(0, predicted_at - time.monotonic() - 0.1)
                 )
-            await self.action(
+            await prepare_action(
                 "vllm.copy_to",
                 {
                     "target": movement_target,
@@ -525,7 +565,7 @@ class RolloutClient:
                 },
             )
             if self.mode == "composed":
-                await self.action(
+                await prepare_action(
                     "retain",
                     {
                         "target": target,
@@ -554,10 +594,23 @@ class RolloutClient:
                     raise outcome
 
     async def finish(self, request_id: str) -> None:
-        await self.drain(request_id)
-        move = self.pending_moves.pop(request_id, None)
-        if move is not None:
-            await self.wait(move, "move")
+        self.finishing.add(request_id)
+        try:
+            await asyncio.gather(
+                *(event.wait() for event in self.submissions.get(request_id, ()))
+            )
+            await self._finish_task(request_id)
+        finally:
+            try:
+                await self.drain(request_id)
+                move = self.pending_moves.pop(request_id, None)
+                if move is not None:
+                    await self.wait(move, "move")
+            finally:
+                self.submissions.pop(request_id, None)
+                self.finishing.discard(request_id)
+
+    async def _finish_task(self, request_id: str) -> None:
         target = self.targets.get(request_id)
         if target is None:
             return
@@ -590,21 +643,26 @@ class RolloutClient:
 
     async def close(self) -> None:
         try:
-            for event in self.resume_events.values():
-                event.set()
+            identifiers = (
+                set(self.targets) | set(self.background) | set(self.pending_moves)
+            )
             outcomes = await asyncio.gather(
-                *(task for tasks in self.background.values() for task in tasks),
+                *(self.finish(identifier) for identifier in identifiers),
                 return_exceptions=True,
             )
-            self.background.clear()
-            self.preparations.clear()
             failure = next((r for r in outcomes if isinstance(r, BaseException)), None)
-            for identifier in tuple(self.targets):
-                try:
-                    await self.finish(identifier)
-                except Exception as error:
-                    failure = failure or error
             if failure is not None:
                 raise failure
         finally:
             await self.http.aclose()
+
+    async def wait_control_idle(self) -> dict:
+        deadline = time.monotonic() + self.control_timeout
+        while time.monotonic() < deadline:
+            state = await self.call("capacity", {})
+            if not state.get("pending_transfers") and not state.get(
+                "pending_policy_actions"
+            ):
+                return state
+            await asyncio.sleep(0.05)
+        raise TimeoutError("Native control work did not drain")
