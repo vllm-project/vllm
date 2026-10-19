@@ -65,12 +65,15 @@ class SynthIDWatermarker(Watermarker):
 
         return probs
 
+    def _use_triton(self, logits: torch.Tensor) -> bool:
+        return type(self.prf) is PhiloxPRF and logits.device.type == "cuda"
+
     def watermark_logits(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> torch.Tensor:
-        if type(self.prf) is PhiloxPRF and logits.device.type == "cuda":
+        if self._use_triton(logits):
             from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
 
             # Masked tokens stay -inf, as below.
@@ -110,11 +113,25 @@ class SynthIDWatermarker(Watermarker):
         if random_sampler is None:
             raise ValueError("SynthID-Text requires a random sampler")
 
-        watermarked_logits = self.watermark_logits(logits, contexts)
-        if skip_mask is not None:
-            watermarked_logits = torch.where(
-                skip_mask.unsqueeze(-1), logits, watermarked_logits
+        if self._use_triton(logits) and logits.dtype != torch.float64:
+            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
+
+            # The kernel applies skip_mask in its final pass, with the same
+            # result as the torch.where below.
+            watermarked_logits = synthid_watermark_logits(
+                logits,
+                contexts,
+                self.prf.key,
+                self.depth,
+                stream=_STREAM_DOMAIN,
+                skip_mask=skip_mask,
             )
+        else:
+            watermarked_logits = self.watermark_logits(logits, contexts)
+            if skip_mask is not None:
+                watermarked_logits = torch.where(
+                    skip_mask.unsqueeze(-1), logits, watermarked_logits
+                )
         return WatermarkSample(
             token_ids=random_sampler(watermarked_logits),
             logits=logits,
