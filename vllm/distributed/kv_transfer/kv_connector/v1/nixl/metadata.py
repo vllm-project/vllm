@@ -17,6 +17,8 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+# Router-assigned id shared by the prefill and decode request of one dispatch.
+TransferId = str
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -50,8 +52,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Require transfer_id in kv_transfer_params and PUSH_REG for push mode
 #
-NIXL_CONNECTOR_VERSION: int = 14
+NIXL_CONNECTOR_VERSION: int = 15
 
 
 @dataclass
@@ -281,9 +284,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (D side): registration data the D worker should send to
         # P workers via NIXL notification on this step.
         self.push_registrations: dict[ReqId, dict[str, Any]] = {}
-        # Push mode (P side): newly finished request blocks to be matched
-        # against pending D registrations on the P worker.
-        self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Push mode (P side): newly finished request blocks (and their
+        # transfer_id) to be matched against pending D registrations on the
+        # P worker.
+        self.push_finished_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
 
     def _add_new_req(
         self,

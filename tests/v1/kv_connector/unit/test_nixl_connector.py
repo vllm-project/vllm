@@ -4383,6 +4383,7 @@ def test_scheduler_advertises_transfer_topology(
     cls = NixlPullConnectorScheduler if mode == "pull" else NixlPushConnectorScheduler
     scheduler = cls(config, "prefiller", make_kv_cache_config(block_size=16))
     request = create_request(request_id=1, num_tokens=32, do_remote_decode=True)
+    request.kv_transfer_params["transfer_id"] = "xfer-1"
     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
     try:
         delay, params = scheduler.request_finished(request, ([0, 1],))

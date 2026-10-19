@@ -11,7 +11,8 @@ the same; the difference is in how P and D coordinate the KV transfer:
   (``remote_engine_id``, ``remote_host``, ``remote_port``, ``tp_size``,
   ``pp_size``) and the shared ``remote_request_id``. D registers its locally
   allocated blocks with P over a NIXL notification; P then pushes the KV to D via
-  NIXL WRITE.
+  NIXL WRITE. Both requests carry the same ``transfer_id``, which P uses to
+  pair them.
 
 Launch multiple vLLM instances configured with ``NixlPushConnector`` and
 matching ``engine_id`` / ``side_channel_port``, then start this proxy:
@@ -206,7 +207,7 @@ class PushProxy:
 
     # ── push-mode request handling ──────────────────────────────────── #
 
-    def _build_decode_kv_params(self, request_id: str) -> dict:
+    def _build_decode_kv_params(self, request_id: str, transfer_id: str) -> dict:
         """Push-mode kv_transfer_params for D.
 
         ``remote_block_ids`` is intentionally omitted: D allocates its
@@ -215,6 +216,7 @@ class PushProxy:
         """
         params = self.push_metadata.copy()
         params["remote_request_id"] = request_id
+        params["transfer_id"] = transfer_id
         return params
 
     def _common_headers(self, request_id: str) -> dict:
@@ -236,6 +238,8 @@ class PushProxy:
         """
         request = await raw_request.json()
         request_id = str(uuid.uuid4())
+        # New for every dispatch, also on retries.
+        transfer_id = f"xfer-{uuid.uuid4()}"
 
         # Prefill leg (max_tokens=1, signals P to keep KV around for D).
         prefill_request = request.copy()
@@ -249,11 +253,14 @@ class PushProxy:
             "remote_block_ids": None,
             "remote_host": None,
             "remote_port": None,
+            "transfer_id": transfer_id,
         }
 
         # Decode leg (push mode: no remote_block_ids).
         decode_request = request.copy()
-        decode_request["kv_transfer_params"] = self._build_decode_kv_params(request_id)
+        decode_request["kv_transfer_params"] = self._build_decode_kv_params(
+            request_id, transfer_id
+        )
 
         prefill_instance = self.schedule(self.prefill_cycler)
         decode_instance = self.schedule(self.decode_cycler)

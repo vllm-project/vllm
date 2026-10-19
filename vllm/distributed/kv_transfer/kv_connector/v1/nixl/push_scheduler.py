@@ -37,7 +37,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     ReqId,
+    TransferId,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_transfer_id
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -86,8 +88,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # P-side: block IDs for finished requests, kept for the lease and
         # used to drive ``has_pending_push_work``.
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
-        # P-side: newly finished blocks to ship to P workers on next step.
-        self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: newly finished blocks (and their transfer_id) to ship to P
+        # workers on next step.
+        self._newly_finished_push_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -116,13 +119,19 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._get_remote_prefill_token_count(len(token_ids))
-            count = actual - num_computed_tokens
-            if count > 0:
-                return count, True
+        if params is None or not params.get("do_remote_prefill"):
+            return 0, False
+        if get_transfer_id(params, request.request_id) is None:
+            # P can't pair with this request, so prefill it locally.
+            params["do_remote_prefill"] = False
+            self._stop_heartbeat(request.request_id)
+            return 0, False
 
+        token_ids = request.prompt_token_ids or []
+        actual = self._get_remote_prefill_token_count(len(token_ids))
+        count = actual - num_computed_tokens
+        if count > 0:
+            return count, True
         return 0, False
 
     def update_state_after_alloc(
@@ -176,6 +185,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # reverse handshake before WRITE-ing.
         self._push_pending_registrations[request.request_id] = {
             "request_id": request.request_id,
+            "transfer_id": params["transfer_id"],
             "decode_engine_id": self.engine_id,
             "decode_host": self.side_channel_host,
             "decode_port": self.side_channel_port,
@@ -249,10 +259,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if not is_p_node:
             return False, None
 
-        if request.status not in (
+        transfer_id = None
+        if request.status in (
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
+            # Without a transfer_id no D can pair with this request.
+            transfer_id = get_transfer_id(params, request.request_id)
+        if transfer_id is None:
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
             return False, None
@@ -276,7 +290,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # Store finished blocks for worker-level matching with D
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
-            self._newly_finished_push_blocks[request.request_id] = block_ids
+            self._newly_finished_push_blocks[request.request_id] = (
+                block_ids,
+                transfer_id,
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,

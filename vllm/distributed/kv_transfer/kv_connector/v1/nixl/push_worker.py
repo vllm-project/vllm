@@ -27,8 +27,8 @@ the handshake-completion callback sets the same event after a deferred
 PUSH_REG send or a deferred push WRITE has been queued. When a request's
 lease expires (the base worker reports it via ``done_sending``) or the WRITE completes,
 ``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
-the writer drops any leftover ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stops self-polling.
+the writer drops any leftover ``_push_finished_blocks`` and stops
+self-polling.
 """
 
 import queue
@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -54,12 +54,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqId,
     ReqMeta,
     TransferHandle,
+    TransferId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     _is_attention_spec,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -107,16 +107,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._sending_transfers_lock = threading.Lock()
 
         # Writer-thread owned matching state.
-        # P-side: finished request blocks received from scheduler metadata
-        # that have not yet been matched with an incoming D registration.
-        self._push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: finished request blocks (and their transfer_id) received from
+        # scheduler metadata that have not yet been matched with an incoming D
+        # registration.
+        self._push_finished_blocks: dict[ReqId, tuple[BlockIds, TransferId]] = {}
         # P-side: D registrations received via NIXL notification that have
-        # not yet been matched with a finished P request.
-        self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        # not yet been matched with a finished P request. Keyed by D engine
+        # too since D request ids can repeat across D instances.
+        self._pending_d_registrations: dict[tuple[EngineId, ReqId], dict[str, Any]] = {}
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
+        self._finished_blocks_inbox = queue.Queue[tuple[str, BlockIds, TransferId]]()
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
@@ -204,8 +206,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
-            for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
+            for req_id, (blocks, transfer_id) in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((req_id, blocks, transfer_id))
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).
@@ -254,26 +256,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 # 3. P-side finished blocks; match against pending regs.
                 while True:
                     try:
-                        rid, blocks = self._finished_blocks_inbox.get_nowait()
+                        rid, blocks, transfer_id = (
+                            self._finished_blocks_inbox.get_nowait()
+                        )
                     except queue.Empty:
                         break
-                    matched = self._pop_matching_registration(rid)
-                    if matched is not None:
-                        self._do_start_push_kv(rid, blocks, matched)
-                    else:
-                        self._push_finished_blocks[rid] = blocks
+                    self._handle_finished_blocks(rid, blocks, transfer_id)
 
                 # 3b. Evict finished blocks for requests that have either
                 # completed (WRITE acknowledged) or whose lease expired
-                # without a D registration.  Drop pending registrations
-                # for the same reason so we don't leak state.
+                # without a D registration.
                 while True:
                     try:
                         rid = self._evict_finished_inbox.get_nowait()
                     except queue.Empty:
                         break
                     self._push_finished_blocks.pop(rid, None)
-                    self._pending_d_registrations.pop(rid, None)
 
                 # 4. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
@@ -304,13 +302,27 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if not isinstance(rid, str):
             logger.warning("PUSH_REG notif missing request_id; dropping")
             return
+        transfer_id = reg_data.get("transfer_id")
+        if not isinstance(transfer_id, str):
+            logger.warning("PUSH_REG notif for %s missing transfer_id; dropping", rid)
+            return
 
-        match = self._pop_matching_finished_blocks(rid)
+        match = self._pop_matching_finished_blocks(transfer_id)
         if match is not None:
             fin_id, blocks = match
             self._do_start_push_kv(fin_id, blocks, reg_data)
         else:
-            self._pending_d_registrations[rid] = reg_data
+            reg_key = (reg_data.get("decode_engine_id"), rid)
+            self._pending_d_registrations[reg_key] = reg_data
+
+    def _handle_finished_blocks(
+        self, request_id: str, blocks: BlockIds, transfer_id: TransferId
+    ) -> None:
+        matched = self._pop_matching_registration(transfer_id)
+        if matched is not None:
+            self._do_start_push_kv(request_id, blocks, matched)
+            return
+        self._push_finished_blocks[request_id] = (blocks, transfer_id)
 
     # --- D-side registration send (writer thread) ---------------------- #
 
@@ -395,36 +407,26 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- Matching helpers --------------------------------------------- #
 
-    def _pop_matching_registration(self, request_id: str) -> dict[str, Any] | None:
-        """Pop the D-side registration matching *request_id*.
+    def _pop_matching_registration(
+        self, transfer_id: TransferId
+    ) -> dict[str, Any] | None:
+        """Pop the D-side registration with the same *transfer_id*.
 
-        Exact key first, then a match after stripping the random suffix from
-        both sides. No match leaves the request unmatched (push not started).
+        No match leaves the request unmatched (push not started).
         """
-        data = self._pending_d_registrations.pop(request_id, None)
-        if data is not None:
-            return data
-        base_id = get_base_request_id(request_id)
-        for reg_id in list(self._pending_d_registrations):
-            if get_base_request_id(reg_id) == base_id:
+        for reg_id, reg in self._pending_d_registrations.items():
+            if reg["transfer_id"] == transfer_id:
                 return self._pending_d_registrations.pop(reg_id)
         return None
 
     def _pop_matching_finished_blocks(
-        self, request_id: str
+        self, transfer_id: TransferId
     ) -> tuple[str, BlockIds] | None:
-        """Pop the P-side finished blocks matching *request_id*.
-
-        Same lookup as ``_pop_matching_registration``: exact key, then a
-        match after stripping the random suffix from both sides.
-        """
-        blocks = self._push_finished_blocks.pop(request_id, None)
-        if blocks is not None:
-            return request_id, blocks
-        base_id = get_base_request_id(request_id)
-        for fin_id in list(self._push_finished_blocks):
-            if get_base_request_id(fin_id) == base_id:
-                return fin_id, self._push_finished_blocks.pop(fin_id)
+        """Pop the P-side finished blocks with the same *transfer_id*."""
+        for fin_id, (blocks, fin_transfer_id) in self._push_finished_blocks.items():
+            if fin_transfer_id == transfer_id:
+                del self._push_finished_blocks[fin_id]
+                return fin_id, blocks
         return None
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
