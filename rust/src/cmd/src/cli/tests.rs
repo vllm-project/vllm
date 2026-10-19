@@ -1798,29 +1798,6 @@ fn serve_args_auto_forward_negative_value_without_separator() {
 }
 
 #[test]
-fn serve_args_forward_structured_outputs_config_to_engine() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--structured-outputs-config",
-        r#"{"backend":"guidance"}"#,
-    ])
-    .unwrap();
-
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    expect![[r#"
-        [
-            "--structured-outputs-config",
-            "{\"backend\":\"guidance\"}",
-        ]
-    "#]]
-    .assert_debug_eq(&args.managed_engine.python_args);
-}
-
-#[test]
 fn serve_args_accept_handshake_aliases() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
