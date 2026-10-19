@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.api_utils import _request_tracer
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -47,7 +48,10 @@ def render_spans(request, monkeypatch):
     )
     if request.param == "disabled":
         monkeypatch.setattr("vllm.tracing.otel._IS_OTEL_AVAILABLE", False)
+    # Each test installs its own provider, so its tracer must not be reused.
+    _request_tracer.cache_clear()
     yield exporter, request.param == "recording"
+    _request_tracer.cache_clear()
     provider.shutdown()
 
 
