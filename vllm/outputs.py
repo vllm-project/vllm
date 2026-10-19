@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
@@ -25,6 +26,11 @@ class RequestError:
     code: str
     message: str
     retryable: bool = False
+
+    def to_exception(self) -> GenerationError:
+        if self.retryable:
+            return RetryableRequestError(self.message)
+        return GenerationError(self.message)
 
 
 @dataclass
