@@ -46,6 +46,7 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
