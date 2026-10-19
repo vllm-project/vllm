@@ -138,6 +138,52 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
+class _Mm3AttnPtpcFp8Config(QuantizationConfig):
+    """Online PTPC FP8 for the attention projections (VLLM_MINIMAX_M3_FP8_ATTN_PROJ).
+
+    The checkpoint keeps q/k/v/o in bf16 (Quark excludes them); this quantizes
+    them at load time to per-output-channel FP8 weights with dynamic per-token
+    FP8 activations. The routed experts keep the checkpoint's MXFP4 config.
+    """
+
+    def get_name(self) -> str:
+        return "mm3_attn_ptpc_fp8"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 0
+
+    @staticmethod
+    def get_config_filenames() -> list[str]:
+        return []
+
+    @classmethod
+    def from_config(cls, config: dict) -> "_Mm3AttnPtpcFp8Config":
+        return cls()
+
+    def get_quant_method(self, layer: torch.nn.Module, prefix: str):
+        from vllm.model_executor.layers.linear import LinearBase
+        from vllm.model_executor.layers.quantization.online.fp8 import (
+            Fp8PtpcOnlineLinearMethod,
+        )
+
+        if isinstance(layer, LinearBase):
+            return Fp8PtpcOnlineLinearMethod()
+        return None
+
+
+def _attn_proj_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> QuantizationConfig | None:
+    if envs.VLLM_MINIMAX_M3_FP8_ATTN_PROJ:
+        logger.info_once("MiniMax-M3: online PTPC FP8 attention q/k/v/o projections")
+        return _Mm3AttnPtpcFp8Config()
+    return quant_config
+
+
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
     cfg = getattr(config, "sparse_attention_config", None)
@@ -523,7 +569,7 @@ class MiniMaxM3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.qkv_proj",
         )
         # reduce_results=False: the attention all-reduce is fused with the
@@ -534,7 +580,7 @@ class MiniMaxM3Attention(nn.Module):
             self.hidden_size,
             bias=False,
             reduce_results=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.o_proj",
         )
 
@@ -678,7 +724,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.total_idx_heads,
             self.idx_head_dim,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.qkv_proj",
         )
         # reduce_results=False: the attention all-reduce is fused with the
@@ -689,7 +735,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.hidden_size,
             bias=False,
             reduce_results=False,
-            quant_config=quant_config,
+            quant_config=_attn_proj_quant_config(quant_config),
             prefix=f"{prefix}.o_proj",
         )
 
