@@ -33,10 +33,6 @@ from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.local_argmax import (
-    MAX_EXACT_FP32_TOKEN_ID,
-    reduce_local_argmax,
-)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -44,6 +40,7 @@ logger = init_logger(__name__)
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
+    MAX_EXACT_FP32_TOKEN_ID = 1 << 24
 
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
@@ -67,37 +64,19 @@ class DSparkSpeculator(DFlashSpeculator):
             )
         if getattr(self.model, "draft_id_to_target_id", None) is not None:
             raise ValueError(
-                "DSpark local argmax does not support draft-to-target "
-                "vocabulary remapping."
+                "DSpark local argmax reduction currently requires "
+                "an identity draft-to-target vocabulary mapping."
             )
-
-        lm_head = getattr(self.model, "lm_head", None)
-        tp_group = get_tp_group()
-        if lm_head is None or getattr(lm_head, "tp_size", None) != tp_group.world_size:
-            raise ValueError(
-                "DSpark local argmax requires the LM head TP size to match "
-                "the model TP group."
-            )
-        lm_head_group = getattr(lm_head, "parallel_group", None)
-        if (
-            lm_head_group is not None
-            and lm_head_group.unique_name != tp_group.unique_name
-        ):
-            raise ValueError(
-                "DSpark local argmax requires the LM head communication "
-                "group to match the model TP group."
-            )
-
         vocab_size = self.model.config.vocab_size
-        if vocab_size - 1 > MAX_EXACT_FP32_TOKEN_ID:
+        if vocab_size - 1 > self.MAX_EXACT_FP32_TOKEN_ID:
             raise ValueError(
                 "DSpark vocabulary exceeds the exact FP32 token-ID range: "
                 f"vocab_size={vocab_size}, "
-                f"maximum_token_id={MAX_EXACT_FP32_TOKEN_ID}."
+                f"maximum_token_id={self.MAX_EXACT_FP32_TOKEN_ID}."
             )
         logger.info(
             "Using local argmax reduction for DSpark token generation "
-            "(communication: O(2*tp_size) vs O(vocab_size))."
+            "(gathered payload per row: O(tp_size) vs O(vocab_size))."
         )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -213,6 +192,61 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
         )
 
+    @classmethod
+    def _reduce_local_argmax(
+        cls,
+        local_scores: torch.Tensor,
+        *,
+        vocab_start: int,
+        vocab_end: int,
+        vocab_size: int,
+        tp_group: Any,
+    ) -> torch.Tensor:
+        """Reduce local vocabulary argmax candidates to global token IDs.
+
+        Args:
+            local_scores: Scores for this rank's padded vocabulary shard.
+            vocab_start: First unpadded global vocabulary index on this rank.
+            vocab_end: End of this rank's unpadded global vocabulary range.
+            vocab_size: Size of the full vocabulary.
+            tp_group: Tensor-parallel group for the LM head.
+
+        Returns:
+            The global argmax token ID for each row in ``local_scores``.
+
+        """
+        if vocab_size - 1 > cls.MAX_EXACT_FP32_TOKEN_ID:
+            raise ValueError(
+                "DSpark local argmax packs token IDs into FP32, but vocabulary "
+                f"size {vocab_size} exceeds the exact FP32 integer range."
+            )
+
+        valid_local_vocab = vocab_end - vocab_start
+        local_scores = local_scores[..., :valid_local_vocab]
+        local_values, local_indices = local_scores.max(dim=-1)
+        global_indices = local_indices + vocab_start
+
+        tp_size = tp_group.world_size
+        if tp_size == 1:
+            return global_indices.to(torch.int64)
+
+        local_pair = torch.stack(
+            (local_values.float(), global_indices.float()),
+            dim=-1,
+        )
+        gathered = tp_group.all_gather(local_pair, dim=-1)
+        gathered = gathered.view(*local_scores.shape[:-1], tp_size, 2)
+
+        # TP ranks own contiguous vocabulary shards in increasing token order,
+        # so the first matching rank preserves full-vocabulary argmax tie-breaking.
+        winner_rank = gathered[..., 0].argmax(dim=-1, keepdim=True)
+        return (
+            gathered[..., 1]
+            .gather(dim=-1, index=winner_rank)
+            .squeeze(-1)
+            .to(torch.int64)
+        )
+
     def _sample_sequential_local_argmax(
         self, num_reqs: int, head_hidden: torch.Tensor
     ) -> None:
@@ -222,10 +256,8 @@ class DSparkSpeculator(DFlashSpeculator):
         local_logits = self.model.compute_local_draft_logits(sample_hidden)
         local_logits = local_logits.view(num_reqs, n_spec, -1)
 
-        lm_head = self.model.lm_head
-        shard = lm_head.shard_indices
-        vocab_start = shard.org_vocab_start_index
-        vocab_end = shard.org_vocab_end_index
+        vocab_start = self.model.lm_head.shard_indices.org_vocab_start_index
+        vocab_end = self.model.lm_head.shard_indices.org_vocab_end_index
         tp_group = get_tp_group()
         confidence_markov_embeds: list[torch.Tensor] = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
@@ -239,7 +271,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 local_logits[:, step, : vocab_end - vocab_start]
                 + full_bias[:, vocab_start:vocab_end]
             )
-            draft_ids = reduce_local_argmax(
+            draft_ids = self._reduce_local_argmax(
                 local_scores,
                 vocab_start=vocab_start,
                 vocab_end=vocab_end,
