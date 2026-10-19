@@ -60,7 +60,6 @@ def _check_replayssm_parity(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
     )
@@ -122,32 +121,48 @@ def test_replayssm_flashinfer_decode_matches_baseline(
 
 
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
-def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_name):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_replayssm_flashinfer_spec_decode_matches_baseline(
+    vllm_runner, model_name, monkeypatch, use_v2_model_runner
+):
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         speculative_config={
             "method": "ngram",
             "num_speculative_tokens": 3,
             "prompt_lookup_max": 3,
         },
     )
-    with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
-        baseline = llm.generate_greedy_logprobs(
-            FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
-        )
-    with vllm_runner(
-        model_name,
-        use_replayssm=True,
-        replayssm_buffer_len=16,
-        mamba_backend="flashinfer",
-        **common,
-    ) as llm:
-        replay = llm.generate_greedy_logprobs(
-            FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
-        )
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+            envs.disable_envs_cache()
+            with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
+                assert (
+                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                    is use_v2_model_runner
+                )
+                baseline = llm.generate_greedy_logprobs(
+                    FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
+                )
+            with vllm_runner(
+                model_name,
+                use_replayssm=True,
+                replayssm_buffer_len=16,
+                mamba_backend="flashinfer",
+                **common,
+            ) as llm:
+                assert (
+                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                    is use_v2_model_runner
+                )
+                replay = llm.generate_greedy_logprobs(
+                    FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
+                )
+    finally:
+        envs.disable_envs_cache()
 
     check_logprobs_close(
         outputs_0_lst=baseline,
@@ -165,7 +180,6 @@ def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner)
         max_model_len=1024,
         trust_remote_code=True,
         enable_prefix_caching=False,
-        mamba_cache_mode="none",
         mamba_backend="flashinfer",
         tensor_parallel_size=2,
         disable_log_stats=False,
@@ -233,7 +247,6 @@ def _check_replayssm_prefix_caching_parity(
         trust_remote_code=True,
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
-        mamba_cache_mode="align",
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
     )

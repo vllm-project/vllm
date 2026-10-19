@@ -637,3 +637,27 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+def test_replayssm_ring_shape_extends_groups_for_head_shards():
+    """A single group under TP is replicated to every head shard, as in
+    ``mamba2_state_shape``, so each rank's B_cache holds one group."""
+    base_shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=2,
+        intermediate_size=256,
+        n_groups=1,
+        num_heads=4,
+        head_dim=64,
+        state_size=128,
+        conv_kernel=4,
+    )
+
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes,
+        n_groups=1,
+        tp_world_size=2,
+        logical_window=16,
+        backend=MambaBackendEnum.TRITON,
+    )
+
+    assert shapes[4] == (1, 16, 128)

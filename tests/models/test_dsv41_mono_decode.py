@@ -22,26 +22,31 @@ M = 6
 class _Runner:
     def __init__(self):
         self.calls = []
+        self.draft = None
 
     def forward(self, *args, **kwargs):
-        self.calls.append((args, kwargs))
+        self.calls.append((args, {**kwargs, "draft_runner": self.draft}))
         return ("mono outputs",)
+
+    def first_pre_mix(self, rows):
+        return torch.zeros(rows, 4)
 
     def ffn(self, *args):
         self.calls.append((args, {}))
         return ("ffn outputs",)
 
 
-def _layer(comp="comp"):
+def _layer(comp="comp", indexer=None):
     cache = lambda: torch.zeros(4, 128 * md.RECORD, dtype=torch.uint8)  # noqa: E731
     attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(prefix="swa", kv_cache=cache()),
         compressed_cache_prefix=comp,
         topk_indices_buffer=torch.zeros(64, 512, dtype=torch.int32),
         compress_ratio=1,
+        indexer=indexer,
         _compressed_kv_cache=cache,
     )
-    return SimpleNamespace(attn=attn)
+    return SimpleNamespace(attn=attn, engram=None, hc_mult=4)
 
 
 def _swa(**overrides):
@@ -77,7 +82,13 @@ def run(monkeypatch):
     ``mode`` and ``metadata``; returns (result, runner calls)."""
 
     def _run(
-        mode=CUDAGraphMode.FULL, metadata=None, ffn_only=False, entry=None, **inputs
+        mode=CUDAGraphMode.FULL,
+        metadata=None,
+        ffn_only=False,
+        entry=None,
+        layer=None,
+        mono=None,
+        **inputs,
     ):
         if metadata is None:
             metadata = {
@@ -88,16 +99,21 @@ def run(monkeypatch):
         runner = _Runner()
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
+
+        def pick(device, draft=None):
+            runner.draft = draft
+            return runner
+
+        monkeypatch.setattr(md, "_mono_runner", pick)
         monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
         args = {**_inputs(), **inputs}
-        mono = md.MonoDecodeLayer(ffn_only)
+        mono = mono or md.MonoDecodeLayer(ffn_only)
         if (entry or ("ffn" if ffn_only else "layer")) == "ffn":
             # x stands for wo_b's unreduced output; the first layer's attention
             # has no compressed cache
             part, _ = args.pop("x"), args.pop("positions")
             return mono.ffn(_layer(comp=None), part, **args), runner.calls
-        return mono(_layer(), **args), runner.calls
+        return mono(layer or _layer(), **args), runner.calls
 
     return _run
 
@@ -114,6 +130,66 @@ def test_decode_step_runs_mono(run, mode):
         1,
     )
     assert kwargs["comp_cache"].shape == (4, 128, md.RECORD)
+    assert kwargs["fold"] and "select" not in kwargs
+
+
+def test_first_layer_runs_mono_from_the_embedding(run):
+    """The first layer's residual is the embedding broadcast to the four
+    streams, which K1 takes as it is (no owed post to fold)."""
+    out, calls = run(residual=None, post_mix=None, res_mix=None, pre_mix=None)
+    assert out == ("mono outputs",) and len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[2].shape == (M, 4, 5120) and not kwargs["fold"]
+
+
+DRAFT_WIDTH = 192  # the DSpark draft's non-causal SWA rows: window 128 + 5 drafts
+
+
+def _draft(**overrides):
+    """A DSpark draft layer's mono path, and the metadata its step carries."""
+    layer = _layer(comp=None)
+    layer.attn.compress_ratio = 0
+    swa = _swa(
+        decode_swa_width=DRAFT_WIDTH,
+        decode_swa_indices=torch.zeros(64, 1, DRAFT_WIDTH, dtype=torch.int32),
+    )
+    mono = md.MonoDecodeLayer(draft=True, experts=128, topk=3, swa_width=DRAFT_WIDTH)
+    return dict(layer=layer, mono=mono, metadata={"swa": swa}, **overrides)
+
+
+def test_draft_layer_runs_mono_on_its_own_runner(run):
+    out, calls = run(**_draft())
+    assert out == ("mono outputs",) and len(calls) == 1
+    assert calls[0][0][9].stride(0) == DRAFT_WIDTH  # the non-causal SWA rows
+    assert calls[0][1]["draft_runner"] is not None  # not the target's runner
+
+
+def test_draft_first_layer_takes_the_broadcast_embedding(run):
+    """The draft hands its first layer the embedding already repeated to the
+    hc copies: K1 takes it as the settled residual."""
+    x = torch.zeros(M, 4, 5120, dtype=torch.bfloat16)
+    out, calls = run(
+        **_draft(residual=None, post_mix=None, res_mix=None, pre_mix=None, x=x)
+    )
+    assert out == ("mono outputs",)
+    args, kwargs = calls[0]
+    assert args[1].shape == (M, 5120) and args[2] is x and not kwargs["fold"]
+
+
+def test_draft_and_target_layers_take_only_their_own_swa_rows(run):
+    causal = {"swa": _swa(), "comp": SimpleNamespace(block_size=128)}
+    out, calls = run(**{**_draft(), "metadata": causal})
+    assert out is None and not calls
+    target = {"swa": _draft()["metadata"]["swa"], "comp": causal["comp"]}
+    out, calls = run(metadata=target)
+    assert out is None and not calls
+
+
+def test_index_source_selects_between_the_kernels(run):
+    """An index source hands the runner its compressor and indexer to run
+    between K1 and K2."""
+    out, calls = run(layer=_layer(indexer=object()))
+    assert out == ("mono outputs",) and callable(calls[0][1]["select"])
 
 
 def test_padded_decode_step_runs_mono(run):
@@ -149,7 +225,9 @@ def test_padded_decode_step_runs_mono(run):
         ),
         dict(metadata={}),  # a profile / dummy run: no attention metadata
         dict(**_inputs(md.MAX_ROWS + 6)),
-        dict(residual=None),  # the first layer's seam broadcasts the embedding
+        # a later pipeline stage's first layer: its stream arrives without
+        # the mixes
+        dict(residual=None, x=torch.zeros(M, 4, 5120, dtype=torch.bfloat16)),
     ],
     ids=[
         "piecewise",
@@ -158,7 +236,7 @@ def test_padded_decode_step_runs_mono(run):
         "tokens-past-rows",
         "no-metadata",
         "rows",
-        "first-layer",
+        "stage-input",
     ],
 )
 def test_other_steps_take_the_original_path(run, case):
@@ -202,22 +280,41 @@ def _decoder_layer(engram=None, **attn):
     )
 
 
+def _indexer():
+    from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
+
+    return object.__new__(DeepseekV41RocmMxfp4Indexer)
+
+
 @pytest.mark.parametrize(
     "layer, path",
     [
         (_decoder_layer(), "whole"),
-        (_decoder_layer(compress_ratio=0), "ffn"),
-        (_decoder_layer(engram=object()), "ffn"),
-        (_decoder_layer(compressor=object(), indexer=object()), "ffn"),
+        (_decoder_layer(compress_ratio=0), "whole"),
+        (_decoder_layer(engram=object()), "whole"),
+        (_decoder_layer(compressor=object(), indexer=_indexer()), "whole"),
+        (_decoder_layer(indexer=_indexer()), "whole"),
+        (_decoder_layer(compressor=object()), "ffn"),
         (_decoder_layer(indexer=object()), "ffn"),
         (_decoder_layer(kv_cache_dtype="auto"), "ffn"),
         (_decoder_layer(layer_id=40), None),
     ],
-    ids=["standard", "first", "engram", "kv-source", "index-source", "kv", "draft"],
+    ids=[
+        "standard",
+        "window",
+        "engram",
+        "kv-source",
+        "index-source",
+        "compressor-only",
+        "other-indexer",
+        "kv",
+        "draft",
+    ],
 )
 def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
-    """The whole-layer kernels serve the standard layers; every other backbone
-    layer keeps vLLM's attention and runs its FFN half as one launch."""
+    """The whole-layer kernels serve every backbone layer of the checkpoint (an
+    index source's compressor and indexer run between them); a layer outside
+    them keeps vLLM's attention and runs its FFN half as one launch."""
     _deployment(monkeypatch)
     mono = md.MonoDecodeLayer.create(layer, _config())
     got = None if mono is None else "ffn" if mono.ffn_only else "whole"
@@ -254,7 +351,7 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
     assert out is None and not calls
 
 
-def _config(**parallel):
+def _config(monokernel=True, **parallel):
     parallel = (
         dict(enable_expert_parallel=False, enable_eplb=False, data_parallel_size=1)
         | parallel
@@ -262,6 +359,7 @@ def _config(**parallel):
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40)),
         parallel_config=SimpleNamespace(**parallel),
+        kernel_config=SimpleNamespace(monokernel=monokernel),
     )
 
 
@@ -269,7 +367,6 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
     import vllm.platforms.rocm as rocm
 
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -278,6 +375,14 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)
+
+
+def test_off_without_the_flag(monkeypatch):
+    """No --monokernel: no mono layer, whatever the deployment."""
+    _deployment(monkeypatch)
+    assert (
+        md.MonoDecodeLayer.create(_decoder_layer(), _config(monokernel=False)) is None
+    )
 
 
 @pytest.mark.parametrize("cdna", [3, 5])
