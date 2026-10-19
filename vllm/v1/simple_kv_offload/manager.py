@@ -242,6 +242,7 @@ class SimpleCPUOffloadScheduler:
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int, int]
         ] = {}
+        self._refreshed_prefix_reqs: set[str] = set()
 
         # Store metadata
         self._lazy_mode = lazy_offload
@@ -361,6 +362,13 @@ class SimpleCPUOffloadScheduler:
         if request.skip_reading_prefix_cache:
             return 0, False
 
+        if (
+            not self._lazy_mode
+            and request.request_id not in self._refreshed_prefix_reqs
+        ):
+            self._refreshed_prefix_reqs.add(request.request_id)
+            self._refresh_cpu_prefix(request, num_computed_tokens)
+
         if num_computed_tokens % self.block_size != 0:
             # Transfers are whole-block copies, so an external suffix cannot
             # start in the middle of a destination block. When the GPU-side
@@ -401,6 +409,30 @@ class SimpleCPUOffloadScheduler:
             )
             return hit_length, True
         return 0, False
+
+    def _refresh_cpu_prefix(self, request: "Request", num_local_tokens: int) -> None:
+        """Move CPU copies of a GPU-hit prefix to the MRU end of the CPU LRU.
+
+        Eager stores skip blocks already cached on CPU, so a prefix that keeps
+        hitting on GPU would otherwise age out of CPU by its first store time.
+        Mamba states are skipped: this request stores a newer one.
+        """
+        blocks: list[KVCacheBlock] = []
+        for g, group in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
+            if g not in self.prefix_cacheable_group_ids or not isinstance(
+                group.kv_cache_spec, FullAttentionSpec
+            ):
+                continue
+            group_size = self.group_block_sizes[g]
+            hashes = resolve_block_hashes(
+                request.block_hashes, self.hash_block_size, group_size
+            )
+            for i in range(min(num_local_tokens // group_size, len(hashes))):
+                if cached := self.cpu_block_pool.get_cached_block(hashes[i], [g]):
+                    blocks.append(cached[0])
+        if blocks:
+            self.cpu_block_pool.touch(blocks)
+            self.cpu_block_pool.free_blocks(reversed(blocks))
 
     # TODO(yifan): this API now only matches the suffix part of the prefix cache. A more
     # general API should scan blocks in both GPU and CPU block pool in a single pass.
@@ -1198,6 +1230,7 @@ class SimpleCPUOffloadScheduler:
         """Always returns (False, None). GPU blocks are protected by ref_cnt,
         so the scheduler can free blocks immediately."""
         req_id = request.request_id
+        self._refreshed_prefix_reqs.discard(req_id)
 
         # Release any temp CPU hit pin from get_num_new_matched_tokens()
         # if request is canceled or preempted before update_state_after_alloc()

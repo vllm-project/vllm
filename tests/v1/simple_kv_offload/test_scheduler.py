@@ -1293,6 +1293,65 @@ def test_touched_blocks_survive_eviction() -> None:
         assert cached is not None, f"req_a block {i} should survive (was touched/MRU)"
 
 
+def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
+    """Eager mode: a prefix that hits on GPU keeps its CPU copy at the MRU end."""
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # Fill all 4 usable CPU blocks: req_a is LRU, req_b is MRU.
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+            new_reqs={
+                req_a.request_id: kv_a.get_block_ids(),
+                req_b.request_id: kv_b.get_block_ids(),
+            },
+        )
+    )
+    simulate_store_completion(sched, meta.store_event)
+
+    # req_a's prefix is reused and hits entirely on GPU: nothing to load.
+    req_a2 = Request(
+        request_id="req-a2",
+        prompt_token_ids=req_a.prompt_token_ids,
+        sampling_params=req_a.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req_a._block_hasher,
+    )
+    assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
+
+    # Storing 2 new blocks evicts the 2 LRU blocks, which are now req_b's.
+    req_c = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    meta2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_c.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req_c.request_id: kv_c.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, meta2.store_event)
+
+    cache_map = sched.cpu_block_pool.cached_block_hash_to_block
+
+    def cpu_cached(req: Request) -> list[bool]:
+        return [
+            cache_map.get_one_block(make_block_hash_with_group_id(h, 0)) is not None
+            for h in req.block_hashes[:2]
+        ]
+
+    assert cpu_cached(req_a) == [True, True]
+    assert cpu_cached(req_b) == [False, False]
+    assert cpu_cached(req_c) == [True, True]
+
+
 # ---------------------------------------------------------------------------
 # Test 5: Preemption no CPU block leak
 # ---------------------------------------------------------------------------
