@@ -44,13 +44,9 @@ def sync_num_offload_blocks_across_workers(num_offload_blocks: int) -> int:
 
 def gpu_total_bytes(gpu_config: KVCacheConfig) -> int:
     assert len(gpu_config.kv_cache_tensors) > 0
-    tensors = gpu_config.kv_cache_tensors
-    sizes = {t.size for t in tensors}
-    if len(sizes) == 1:
-        # All KVCacheTensor entries describe regions in one backing allocation.
-        return tensors[0].size
-    # Fallback when tensors describe disjoint allocations.
-    return sum(t.size for t in tensors)
+    # Every KVCacheTensor describes placement within the same backing allocation,
+    # so its size is the total GPU KV cache size.
+    return gpu_config.kv_cache_tensors[0].size
 
 
 def compute_num_offload_blocks_from_config(
