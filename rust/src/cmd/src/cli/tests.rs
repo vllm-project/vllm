@@ -187,9 +187,9 @@ fn serve_args_forward_python_flags_with_separator() {
                     uds: None,
                     grpc_port: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
-                        revision: None,
-                        model_source: ModelSourceArgs {
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
@@ -1095,9 +1095,9 @@ fn frontend_args_accept_json() {
                     engine_count: 1,
                     data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
-                        revision: None,
-                        model_source: ModelSourceArgs {
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
@@ -1180,7 +1180,7 @@ fn frontend_args_json_applies_defaults() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
     assert_eq!(args.runtime.generation_config, GenerationConfigMode::Auto);
     assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
@@ -1210,7 +1210,7 @@ fn frontend_args_json_ignores_engine_owned_max_model_len() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
 }
 
 #[test]
@@ -1255,12 +1255,12 @@ fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
     .assert_debug_eq(&(config.tokenizer, config.hf_config));
     expect![[r#"
         [
+            "--revision",
+            "release",
             "--tokenizer",
             "org/tokenizer",
             "--hf-config-path",
             "org/config",
-            "--revision",
-            "release",
         ]
     "#]]
     .assert_debug_eq(&args.to_managed_engine_config(1234).python_args);
@@ -1397,7 +1397,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
-    assert_eq!(args.runtime.revision.as_deref(), Some("release"));
+    assert_eq!(args.runtime.model.revision.as_deref(), Some("release"));
     assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
@@ -1478,7 +1478,7 @@ fn frontend_args_json_ignores_unknown_fields() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
 }
 
 #[test]
@@ -1500,7 +1500,7 @@ fn frontend_args_json_sets_prompt_tokens_details_flag() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
     assert!(args.runtime.enable_prompt_tokens_details);
 }
 
@@ -1869,9 +1869,9 @@ fn serve_args_accept_handshake_aliases() {
                     uds: None,
                     grpc_port: None,
                     runtime: SharedRuntimeArgs {
-                        model: "Qwen/Qwen3-0.6B",
-                        revision: None,
-                        model_source: ModelSourceArgs {
+                        model: ModelArgs {
+                            id: "Qwen/Qwen3-0.6B",
+                            revision: None,
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
