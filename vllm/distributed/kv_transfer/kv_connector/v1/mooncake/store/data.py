@@ -680,11 +680,14 @@ class MooncakeLookupResult:
         tail_key_boundaries: Hash boundary used to store each cache group's
             tail block when ``hit_length`` does not identify its store key.
             There is one entry per group for every nonzero hit.
+        shared_prefix_boundaries: Store-side junctions (see
+            ``junction_boundaries``).
 
     """
 
     hit_length: int
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+    shared_prefix_boundaries: tuple[int, ...] = ()
 
 
 @dataclass
@@ -713,6 +716,9 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
+    # The request's junctions; kept on the tracker because a loading sibling
+    # skips the save on its first step.
+    shared_prefix_boundaries: tuple[int, ...] = ()
 
     def reset(self) -> None:
         self.token_len = 0
@@ -722,6 +728,7 @@ class RequestTracker:
         self.has_pending_offload = False
         self.prefill_end_tokens = 0
         self.partial_tail_sent = False
+        self.shared_prefix_boundaries = ()
 
     def update(
         self,
@@ -784,6 +791,7 @@ class ReqMeta:
     # Set on the save that first covers the whole prompt, so the scheduler
     # publishes the prompt's partial tail once rather than on every save.
     publish_partial_tail: bool = False
+    shared_prefix_boundaries: tuple[int, ...] = ()
 
     @staticmethod
     def from_request_tracker(
@@ -862,6 +870,7 @@ class ReqMeta:
             prefill_end_tokens=tracker.prefill_end_tokens,
             completed_token_len=input_token_len,
             publish_partial_tail=publish_tail and not skip_save,
+            shared_prefix_boundaries=tracker.shared_prefix_boundaries,
         )
 
 

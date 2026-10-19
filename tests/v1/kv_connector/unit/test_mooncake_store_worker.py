@@ -1145,6 +1145,115 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
     assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
 
 
+def _make_swa_junction_send_thread(store: MagicMock):
+    """A full + SWA (window 32) hybrid under retention 0, for junction saves."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    swa = SlidingWindowSpec(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["swa"], swa),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+        retention_interval=0,
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_swa = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db_swa.set_kv_caches_base_addr([0x2000])
+    db_swa.set_block_len([256])
+    return _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_swa]
+    )
+
+
+def test_store_sending_thread_stores_swa_junction_tail():
+    """Junction boundaries on the ReqMeta make the SWA group store its tail
+    at each junction, not only the prompt-end replay tail (retention 0)."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    thread = _make_swa_junction_send_thread(store)
+
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=160,
+            block_ids=(list(range(1, 11)), list(range(11, 21))),
+            block_hashes=[f"a{i}".encode() for i in range(10)],
+            can_save=True,
+            num_prompt_tokens=160,
+            prefill_end_tokens=160,
+            shared_prefix_boundaries=(48,),
+        ),
+    )
+
+    keys = store.batch_is_exist.call_args.args[0]
+    swa_hashes = [key.rsplit("@", 1)[-1] for key in keys if "@group:1" in key]
+    # Junction tail at 48 (chunks 1-2) + the prompt-end replay tail (7-8).
+    assert swa_hashes == [b"a1".hex(), b"a2".hex(), b"a7".hex(), b"a8".hex()]
+
+
+def test_store_sending_thread_skips_nulled_junction_tail_block():
+    """A lagging save (``_saved_offset`` behind) reruns over a junction chunk
+    whose SWA tail slot the window slide has since nulled. The worker must
+    skip the chunk, never put null-block bytes under its (valid) key."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    thread = _make_swa_junction_send_thread(store)
+
+    thread._saved_offset["req-a"] = 16
+    _run_store_req(
+        thread,
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=64,
+            # The SWA slot of junction chunk 1 is nulled in the refreshed
+            # block table.
+            block_ids=([1, 2, 3, 4], [11, NULL_BLOCK_ID, 13, 14]),
+            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            can_save=True,
+            num_prompt_tokens=64,
+            prefill_end_tokens=64,
+            shared_prefix_boundaries=(48,),
+        ),
+    )
+
+    keys = store.batch_is_exist.call_args.args[0]
+    swa_hashes = [key.rsplit("@", 1)[-1] for key in keys if "@group:1" in key]
+    # The junction tail at 48 (chunks 1-2) is masked in; the nulled chunk 1
+    # is skipped, so its hash never reaches the store.
+    assert swa_hashes == [b"a2".hex()]
+    put_swa = [
+        key
+        for key in store.batch_put_from_multi_buffers.call_args.args[0]
+        if "@group:1" in key
+    ]
+    assert [key.rsplit("@", 1)[-1] for key in put_swa] == [b"a2".hex()]
+
+
 def test_partial_tail_offload_skips_cap_omitted_mamba_group():
     """A Mamba group omitted by the handoff cap must not fall back to the
     connector's positional block table."""
@@ -1589,7 +1698,10 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     )
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+        store_mask=lambda token_len,
+        start_token,
+        num_prompt_tokens=None,
+        shared_prefix_boundaries=(): (
             None,
             [True, False],
         ),
@@ -1635,7 +1747,9 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     assert full_hashes == [b"a2".hex(), b"a3".hex()]
     assert masked_hashes == [b"a2".hex()]
-    coord.store_mask.assert_called_once_with(64, 32, num_prompt_tokens=64)
+    coord.store_mask.assert_called_once_with(
+        64, 32, num_prompt_tokens=64, shared_prefix_boundaries=()
+    )
 
 
 def test_store_sending_thread_prepares_missing_chunks_once_per_group():
@@ -1644,7 +1758,10 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
     store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+        store_mask=lambda token_len,
+        start_token,
+        num_prompt_tokens=None,
+        shared_prefix_boundaries=(): (
             None,
             None,
         ),
@@ -3854,7 +3971,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         hash_block_size=hash_block_size,
         exists={(group, bytes(h)) for group in range(2) for h in hashes},
     )
-    _, hit = coordinator.find_longest_cache_hit(hashes, 511, pool)
+    _, hit, *_ = coordinator.find_longest_cache_hit(hashes, 511, pool)
     assert hit == 512 - hash_block_size
 
 

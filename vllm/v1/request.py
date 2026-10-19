@@ -202,7 +202,7 @@ class Request:
 
         # Token positions of a proven shared prefix worth pinning in the
         # (sparse) prefix cache; empty means none. Set at admission when the
-        # local prefix-cache lookup detects one (Marconi-style).
+        # local or an external prefix-cache lookup detects one (Marconi-style).
         self.shared_prefix_boundaries: tuple[int, ...] = ()
         # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
         # sliding-window KV below this position; 0 when nothing replays.
