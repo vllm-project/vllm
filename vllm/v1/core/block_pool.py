@@ -541,6 +541,10 @@ class BlockPool:
                     if first_hash_idx > 0
                     else None
                 )
+            # Intermediate hashes provide ancestry for KV-event consumers.
+            # They are not registered as lookup aliases for this block, even when
+            # the corresponding KV is present. Only the final hash is registered
+            # for prefix lookup.
             if len(block_hashes) > 1:
                 self.reported_block_hashes_by_block.setdefault(
                     block.block_id, set()
