@@ -182,6 +182,28 @@ def test_ffn_stages_match_native(weights, s):
     assert cos > 0.9999 and rel < 1e-2
 
 
+def test_missing_peer_times_out_and_marks_every_rank(weights):
+    """A TP=2 launch whose peer never runs: its first wait gives up, the
+    error word is set on both ranks, and the launch still completes."""
+    dev = torch.device("cuda")
+    s = 1
+    peer_bufs = [
+        torch.zeros(ffn.peer_bytes(2), dtype=torch.uint8, device=dev) for _ in range(2)
+    ]
+    peers = torch.tensor([b.data_ptr() for b in peer_bufs], device=dev)
+    runner = FfnRunner(2, 0, peer_bufs[0].data_ptr(), peers, dev, (s,))
+    runner.warm(weights)
+    part = torch.randn(s, H, device=dev).bfloat16()
+    runner(part, torch.randn_like(part), weights)
+    torch.accelerator.synchronize()
+    for buf in peer_bufs:
+        failed, rank, epoch, site = (
+            buf[: 4 * ffn.ERROR_WORDS].view(torch.int32).tolist()
+        )
+        assert (failed, rank, epoch) == (1, 0, 0)
+        assert site == ffn.SITE_REDUCE
+
+
 @pytest.mark.parametrize("experts", [ffn.Experts.SHARED, ffn.Experts.ROUTED])
 @pytest.mark.parametrize("s", [1, 16])
 def test_ffn_expert_sides_match_native(weights, s, experts):
