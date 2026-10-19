@@ -109,6 +109,10 @@ class KVPolicy:
     # None preserves delivery of every signal to third-party policies.
     consumed_signals: frozenset[str] | None = None
 
+    def needs_request_observation(self, payload: SignalPayload) -> bool:
+        """Opt out only when a signal needs no request or session demand values."""
+        return True
+
     def on_signal(
         self,
         signal: PolicySignal,
@@ -142,6 +146,9 @@ def _positive(value: float, name: str) -> None:
 
 class RetentionPolicy(KVPolicy):
     consumed_signals = frozenset({"importance", "resume"})
+
+    def needs_request_observation(self, payload: SignalPayload) -> bool:
+        return False
 
     def __init__(self, priority: int = 50, ttl_seconds: float = 30.0):
         if type(priority) is not int or not 0 <= priority <= 100:
@@ -179,6 +186,7 @@ class RetentionPolicy(KVPolicy):
 
 class ToolWaitPolicy(KVPolicy):
     consumed_signals = frozenset({"tool_wait", "resume", "resume_prediction"})
+    signal_updates_guidance = False
 
     def __init__(
         self,
@@ -217,6 +225,19 @@ class ToolWaitPolicy(KVPolicy):
         self._store_seconds = 0.0
         self._load_seconds = 0.0
         self._kept: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+
+    def _worth_moving(self, pause: float | None) -> bool:
+        return (
+            not self.consider_pause_duration
+            or pause is None
+            or pause
+            > max(self.min_pause_seconds, self._store_seconds + self._load_seconds)
+        )
+
+    def needs_request_observation(self, payload: SignalPayload) -> bool:
+        return payload.signal == "tool_wait" and self._worth_moving(
+            payload.resume_after_seconds
+        )
 
     def on_result(
         self,
@@ -309,13 +330,7 @@ class ToolWaitPolicy(KVPolicy):
             projected = view.referenced_blocks + sum(
                 max(0, r.estimated_blocks - r.held_blocks) for r in view.requests
             )
-            pause = payload.resume_after_seconds
-            worthwhile = (
-                not self.consider_pause_duration
-                or pause is None
-                or pause
-                > max(self.min_pause_seconds, self._store_seconds + self._load_seconds)
-            )
+            worthwhile = self._worth_moving(payload.resume_after_seconds)
             if not worthwhile or projected < self.min_pressure * view.total_blocks:
                 self._kept[signal.owner_id] = signal.owners
                 self._kept.move_to_end(signal.owner_id)
@@ -377,6 +392,9 @@ class ToolWaitPolicy(KVPolicy):
 class QuotaPolicy(KVPolicy):
     uses_scheduler_guidance = True
     consumed_signals = frozenset({"importance"})
+
+    def needs_request_observation(self, payload: SignalPayload) -> bool:
+        return False
 
     def __init__(
         self,

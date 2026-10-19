@@ -141,5 +141,6 @@ performance. The previous requested stop boundary is superseded for this work.
 - [x] 12.2 Use application pause estimates to suppress unamortized round trips and verify resume/cleanup behavior.
 - [x] 12.3 Revalidate quota capacity across admissions within one observation interval; preserve bounded waiting and shared-prefix behavior.
 - [x] 12.6 Couple optional preparation with selected-session admission, verifying publication, failure fallback and cancellation.
+- [x] 12.7 Avoid request scans and guidance invalidation for signals that need neither; preserve custom-policy observations and scheduler age history.
 - [ ] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
 - [ ] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.

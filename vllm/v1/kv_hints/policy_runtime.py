@@ -170,20 +170,25 @@ class KVPolicyRuntime:
         resources = self.manager.transfer_manager
         return resources.generation if resources is not None else 0
 
-    def observation(self) -> CacheObservation:
+    def observation(self, *, include_requests: bool = True) -> CacheObservation:
         now, wall = self.clock(), self.wall_clock()
-        requests = list(islice(self.requests(), self.settings.max_policy_requests + 1))
+        requests = (
+            list(islice(self.requests(), self.settings.max_policy_requests + 1))
+            if include_requests
+            else []
+        )
         truncated = len(requests) > self.settings.max_policy_requests
         requests = requests[: self.settings.max_policy_requests]
         active_ids = {r.request_id for r in requests}
-        self._arrivals = {
-            key: value for key, value in self._arrivals.items() if key in active_ids
-        }
-        self._waiting_since = {
-            key: value
-            for key, value in self._waiting_since.items()
-            if key in active_ids
-        }
+        if include_requests:
+            self._arrivals = {
+                key: value for key, value in self._arrivals.items() if key in active_ids
+            }
+            self._waiting_since = {
+                key: value
+                for key, value in self._waiting_since.items()
+                if key in active_ids
+            }
         session_blocks: dict[str | None, set[int]] = {}
         demands = []
         for request in requests:
@@ -440,8 +445,18 @@ class KVPolicyRuntime:
             )
             return
         self._reap()
-        self._view = None
-        view = self.observation()
+        if any(
+            policy.uses_scheduler_guidance
+            and type(policy).__dict__.get("signal_updates_guidance", True)
+            for _, policy in consumers
+        ):
+            self._view = None
+        include_requests = any(
+            "needs_request_observation" not in type(policy).__dict__
+            or policy.needs_request_observation(payload)
+            for _, policy in consumers
+        )
+        view = self.observation(include_requests=include_requests)
         binding = (
             request_id
             if isinstance(payload.target, RequestTarget)

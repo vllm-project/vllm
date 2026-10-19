@@ -352,6 +352,11 @@ These observations motivate two independent changes and separate ablations:
 - Estimate live tool batches from prior completed batches of the same tool
   names. Replay without tool names uses a labeled aggregate estimator; fixed and
   oracle variants remain selectable, and every prediction/actual pair is saved.
+- Built-in signals which use no request demand opt out of request scans. Such
+  observations still include physical counters and current time, and do not
+  prune arrival/wait history. Only signals that can change scheduler scores
+  invalidate cached guidance. Custom policy subclasses receive full observations
+  unless they explicitly override the opt-out method.
 
 Tests extend the existing prefix, scheduler and HTTP suites. Their contracts are
 respectively signal-to-transfer behavior, admission-to-KV capacity behavior, and

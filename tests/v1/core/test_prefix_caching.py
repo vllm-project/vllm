@@ -6870,15 +6870,46 @@ def test_custom_policy_without_signal_filter_receives_all_signals():
 
     class Observer(ToolWaitPolicy):
         def on_signal(self, signal, view):
+            assert len(view.requests) == 1
             return PolicyDecision()
 
-    manager, _, controller, _, target = make_movement_controller()
+    manager, request, controller, _, target = make_movement_controller()
     runtime, _ = install_movement_policies(manager, controller)
+    runtime.requests = lambda: (request,)
     runtime.policies["observer"] = Observer()
     parent = submit_movement(
         controller, "observed", "signal", {"target": target, "signal": "importance"}
     )
     assert parent.status == OperationStatus.COMPLETED
+
+
+def test_short_pause_control_preserves_scheduler_observation_without_request_scan(
+    monkeypatch,
+):
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+
+    manager, request, controller, _, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
+    runtime.requests = lambda: (request,)
+    runtime.observe_requests()
+    view = runtime._view
+    arrivals = dict(runtime._arrivals)
+
+    def unexpected_scan():
+        pytest.fail("A short-pause decision does not need request demand")
+
+    monkeypatch.setattr(runtime, "requests", unexpected_scan)
+    for signal in ("tool_wait", "resume"):
+        result = submit_movement(
+            controller,
+            signal,
+            "signal",
+            {"target": target, "signal": signal, "resume_after_seconds": 0.01},
+        )
+        assert result.status == OperationStatus.COMPLETED
+    assert runtime._view is view
+    assert runtime._arrivals == arrivals
 
 
 def test_policy_signal_receipt_and_duplicate_do_not_claim_gpu_readiness():
