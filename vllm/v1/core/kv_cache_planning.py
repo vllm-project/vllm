@@ -1634,6 +1634,13 @@ def get_kv_cache_configs(
         )
 
     for kv_cache_config in kv_cache_configs:
+        declared_bytes_per_block = builder._get_pool_bytes_per_block(
+            vllm_config, kv_cache_config.kv_cache_groups
+        )
+        if declared_bytes_per_block is not None:
+            kv_cache_config.declared_device_bytes = (
+                declared_bytes_per_block * kv_cache_config.num_blocks
+            )
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_cache_config.kv_cache_groups,
             vllm_config.parallel_config.tensor_parallel_size,

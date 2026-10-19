@@ -252,6 +252,52 @@ def new_chunked_local_attention_spec(
     )
 
 
+@pytest.mark.parametrize("second_head_size", [64, 128])
+def test_separate_device_allocation_capacity_after_replan(
+    monkeypatch, second_head_size
+):
+    from vllm.v1.core import kv_cache_config_builder
+
+    class PerGroupAllocationBuilder(kv_cache_planning.DefaultKVCacheConfigBuilder):
+        def get_kv_cache_groups(self, vllm_config, specs):
+            return [KVCacheGroupSpec([name], spec) for name, spec in specs.items()]
+
+        def get_kv_cache_config_from_groups(self, vllm_config, groups, num_blocks):
+            tensors = [
+                KVCacheTensor(
+                    size=group.kv_cache_spec.page_size_bytes * num_blocks,
+                    layers=group.layer_names,
+                    layer_stride=group.kv_cache_spec.page_size_bytes * num_blocks,
+                    block_stride=group.kv_cache_spec.page_size_bytes,
+                )
+                for group in groups
+            ]
+            return KVCacheConfig(num_blocks, tensors, groups)
+
+        def _get_pool_bytes_per_block(self, vllm_config, groups):
+            return sum(group.kv_cache_spec.page_size_bytes for group in groups)
+
+    monkeypatch.setattr(
+        kv_cache_config_builder,
+        "get_kv_cache_config_builder",
+        lambda _: PerGroupAllocationBuilder(),
+    )
+    specs = {
+        name: FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.float16
+        )
+        for name, head_size in zip(("a", "b"), (128, second_head_size))
+    }
+    bytes_per_block = sum(spec.page_size_bytes for spec in specs.values())
+    configs = get_kv_cache_configs(
+        VllmConfig(model_config=ModelConfig(max_model_len=16)),
+        [specs, specs],
+        [bytes_per_block * 10, bytes_per_block * 20],
+    )
+    assert [config.num_blocks for config in configs] == [10, 10]
+    assert [config.allocated_bytes for config in configs] == [bytes_per_block * 10] * 2
+
+
 def test_get_kv_cache_configs_multiple_workers():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)

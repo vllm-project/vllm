@@ -1502,9 +1502,14 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    declared_device_bytes: int | None = None
+    """Device backing bytes declared by builders with multiple allocations."""
+
     @property
     def allocated_bytes(self) -> int:
         """Device KV backing bytes, excluding host pools and allocator padding."""
+        if self.declared_device_bytes is not None:
+            return self.declared_device_bytes
         sizes = {
             tensor.size for tensor in self.kv_cache_tensors if not tensor.host_resident
         }
