@@ -1275,7 +1275,6 @@ def test_promotion_hit_precedes_stored_event_translation(
         expected_stored=tuple(range(blocks_per_chunk)),
     )
     runner.scheduler.reset_prefix_cache()
-    runner.connector_scheduler._events_tracker.reset()
 
     raw_events: list[OffloadingEvent] = []
 

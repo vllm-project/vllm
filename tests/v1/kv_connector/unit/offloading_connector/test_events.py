@@ -808,19 +808,6 @@ def test_take_events_supports_restore_after_eviction():
     assert second_store[0].token_ids == [5, 6, 7, 8]
 
 
-def test_reset_cache_clears_side_table():
-    tracker = _tracker()
-    group_config = _group_config()
-    req = _request(block_hashes=[_hash(i) for i in range(3)], token_count=12)
-    _record_lookup_chunks(tracker, req, group_config, num_chunks=3)
-
-    assert tracker._pending_event_metadata
-
-    tracker.reset()
-
-    assert not tracker._pending_event_metadata
-
-
 def test_reset_primary_emits_scoped_clear_and_drops_cpu_metadata():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)

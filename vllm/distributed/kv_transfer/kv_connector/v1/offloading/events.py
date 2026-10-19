@@ -106,7 +106,7 @@ class OffloadingEventsTracker:
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
     :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
     available. Unallocated and missing lookups add no state. Entries remain until
-    the final observed residency removal or :meth:`reset`.
+    the final observed residency removal or a residency reset.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -115,7 +115,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until final removal or reset.
+        # OffloadKey -> payload snapshot, kept until final removal or residency reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
         self._pending_control_events: list[KVCacheEvent] = []
 
@@ -280,12 +280,6 @@ class OffloadingEventsTracker:
             meta = self._pending_event_metadata.get(key)
             if meta is not None and not meta.active_residencies:
                 self._pending_event_metadata.pop(key)
-
-    def reset(self) -> None:
-        """Drop all tracked state; pending payloads are stale after a
-        manager cache reset."""
-        self._pending_event_metadata.clear()
-        self._pending_control_events.clear()
 
     def reset_primary(self) -> None:
         """Invalidate CPU primary residency while preserving secondary tiers."""
