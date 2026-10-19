@@ -175,8 +175,8 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
 | `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [Liquid d1](#liquid-d1), images only) |
 
-A question with any field other than `type`, `instructions` and `criteria` is
-rejected with a 400.
+A request field not listed above, or a question with any field other than
+`type`, `instructions` and `criteria`, is rejected with a 400.
 
 When [tracing](../../examples/observability/opentelemetry/README.md) is enabled
 with `--otlp-traces-endpoint`, the HTTP `traceparent` and `tracestate` headers are
