@@ -39,7 +39,7 @@ use self::types::{
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
+use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -193,8 +193,8 @@ async fn generate_chunk_stream(
                 usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
-                if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
-                    bail_server_error!("Internal server error");
+                if let Some(FinishReason::Error(error)) = finish_reason.as_ref() {
+                    return Err(engine_error(error.as_deref()));
                 }
 
                 if let Some(finish_reason) = finish_reason.as_ref()
@@ -293,6 +293,11 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
+    if let FinishReason::Error(Some(error)) = &collected.finish_reason
+        && error.retryable
+    {
+        return Err(engine_error(Some(error)));
+    }
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
             ApiError::server_error(
