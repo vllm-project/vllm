@@ -31,9 +31,10 @@ else()
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
-  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE.
+  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
+  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "a7a927731b109fdfec770df7c2a5be5d7e2216b5")
+  set(_DEEPGEMM_UPSTREAM_TAG "727f847082d2e7946f70dc02b94949db206310d3")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
