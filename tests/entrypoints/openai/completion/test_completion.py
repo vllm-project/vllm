@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import numpy as np
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import regex as re
@@ -828,3 +830,54 @@ def test_completion_request_forwards_routed_experts_prompt_start():
     )
 
     assert sampling_params.routed_experts_prompt_start == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_packed_logprobs_match_standard_completion(client, stream):
+    """Packing preserves generated tokens and scores through the HTTP API."""
+    kwargs = dict(
+        model=MODEL_NAME,
+        prompt="Hello, my name is",
+        max_tokens=16,
+        temperature=0.0,
+        logprobs=2,
+    )
+    extra = {"return_tokens_as_token_ids": True, "return_token_ids": True}
+    baseline = await client.completions.create(**kwargs, extra_body=extra)
+    result = await client.completions.create(
+        **kwargs,
+        stream=stream,
+        extra_body={**extra, "return_top_k_logprobs": True, "stream_interval": 4},
+    )
+    choices = []
+    if stream:
+        async for chunk in result:
+            choices.extend(chunk.choices)
+    else:
+        choices = result.choices
+    assert "".join(choice.text for choice in choices) == baseline.choices[0].text
+    assert choices[-1].finish_reason == baseline.choices[0].finish_reason
+    assert [
+        token for choice in choices for token in choice.token_ids
+    ] == baseline.choices[0].token_ids
+    sampled = []
+    rows: list[tuple[np.ndarray, np.ndarray]] = []
+    for choice in choices:
+        lp = choice.logprobs
+        sampled.extend(lp.token_logprobs)
+        packed = lp.model_extra["top_k"]
+        ids = np.frombuffer(base64.b64decode(packed["token_ids"]), "<i4").reshape(
+            (packed["num_positions"], packed["k"])
+        )
+        values = np.frombuffer(base64.b64decode(packed["logprobs"]), "<f4").reshape(
+            (packed["num_positions"], packed["k"])
+        )
+        rows.extend(zip(ids, values))
+    expected = baseline.choices[0].logprobs
+    np.testing.assert_allclose(sampled, expected.token_logprobs, rtol=1e-5, atol=1e-5)
+    assert len(rows) == len(expected.top_logprobs)
+    for (ids, values), reference in zip(rows, expected.top_logprobs):
+        assert len(set(ids.tolist())) == 2
+        for token_id, value in zip(ids, values):
+            assert value == pytest.approx(reference[f"token_id:{token_id}"], abs=1e-5)
