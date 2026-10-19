@@ -20,7 +20,22 @@ def setup_listen_address(
     # Bind before the engine starts to avoid race conditions with ray.
     # See https://github.com/vllm-project/vllm/issues/8204
     if args.uds:
-        sock = create_server_unix_socket(args.uds)
+        try:
+            sock = create_server_unix_socket(args.uds)
+        except OSError as e:
+            # `create_server_unix_socket` does not unlink a pre-existing
+            # socket file, so a crashed prior run leaves a stale path that
+            # surfaces here as EADDRINUSE. Port-oriented hints ("free the
+            # port") would be confusing for UDS, so give path-specific ones.
+            if e.errno == errno.EADDRINUSE:
+                raise OSError(
+                    f"Unix socket {args.uds!r} already exists. Another "
+                    f"process may be listening on it, or a previous run left "
+                    f"a stale socket file. Remove the file (rm {args.uds}) "
+                    f"if no process is using it, or pass a different --uds "
+                    f"path."
+                ) from e
+            raise
         return f"unix:{args.uds}", sock
 
     host = args.host or ""
@@ -28,20 +43,35 @@ def setup_listen_address(
     try:
         sock = create_server_socket((host, args.port), reuse_port=reuse_port)
     except OSError as e:
-        # Surface an actionable message for the two common failure modes.
         if e.errno == errno.EADDRINUSE:
             holder = _describe_port_holder(args.port)
+            if reuse_port:
+                hint = (
+                    "The holder does not share the port via SO_REUSEPORT "
+                    "(possibly a non-vLLM process or a different user). "
+                    "Free the port or pass a different --port."
+                )
+            else:
+                hint = (
+                    "Free the port, pass a different --port, or share it "
+                    "via SO_REUSEPORT by running multiple API servers "
+                    "(--api-server-count > 1)."
+                )
             raise OSError(
                 f"Port {args.port} is already in use (holder: {holder}). "
-                f"Free the port or pass a different --port. "
-                f"If you intend to share the port, enable SO_REUSEPORT "
-                f"in the launcher."
+                f"{hint}"
             ) from e
         if e.errno == errno.EACCES:
             raise OSError(
                 f"Permission denied binding to "
                 f"{host or '0.0.0.0'}:{args.port}. "
                 f"Ports below 1024 typically require elevated privileges."
+            ) from e
+        if e.errno == errno.ENOPROTOOPT and reuse_port:
+            raise OSError(
+                f"SO_REUSEPORT is not supported on this platform. "
+                f"Cannot use --api-server-count > 1 here; use a single "
+                f"API server."
             ) from e
         raise
 
