@@ -897,14 +897,24 @@ guide: |
 
   On B200, TP2 at concurrency 1 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'`,
   `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. DEP2 (TP1 x DP2 with expert
-  parallelism) serves concurrency 8 to 32; at c8 and c16 graph capture stops at 576 tokens and
-  `--prefill-schedule-interval` stays at the vLLM default of 1, while c32 extends piecewise
-  graphs to 4096 tokens and sets `--prefill-schedule-interval 64`. DEP4 sets
-  `--prefill-schedule-interval 48` at c128 and keeps the default of 1 at c64.
+  parallelism) serves concurrency 8 to 32 with `--max-num-batched-tokens 4096`. At c8 and c16
+  graph capture stops at 576 tokens and `--prefill-schedule-interval` stays at the vLLM default
+  of 1, while c24 and c32 extend piecewise graphs to 4096 tokens and set
+  `--prefill-schedule-interval 64`. `--max-num-seqs` is 16 at c8 and c16 and 32 at c24 and c32.
 
-  For DEP2 at c128, add vLLM's native CPU KV offloading with
+  DEP4 (TP1 x DP4) serves concurrency 64 to 128. It sets `--prefill-schedule-interval 48` at c96
+  and c128, with `--max-num-seqs` matching the concurrency, and keeps the default of 1 at c64.
+  Graph capture extends to 8190 tokens, and decode-replay graphs are captured separately:
+
+  ```
+  --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048,2304,2560,2816,3072,3328,3584,3840,4096]}'
+  ```
+
+  For DEP2 at c64 and c128, add vLLM's native CPU KV offloading with
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
-  server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`.
+  server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`. The remaining clients
+  queue behind the 48 running sequences. Graph capture stops at 576 tokens, as for DEP2 at
+  c8 and c16.
 
   ## DGX Station (GB300) Tensor Parallel
 
