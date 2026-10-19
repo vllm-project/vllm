@@ -526,8 +526,6 @@ guide: |
 
   For client concurrency 1 or 2, use TP16/DCP16 with five DSpark draft tokens. For concurrency 2 or 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
 
-  The script uses greedy draft sampling. The InferenceX GB300 AgentX lane runs the same presets with `"draft_sample_method":"probabilistic"` ([SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047)); either value works with block verification.
-
   The explicit opt-in is `--additional-config '{"decode_backend":"latency_specialized"}'`; `auto` keeps the stock decode path in this image. The specialized path requires the V2 model runner, FULL decode CUDA graphs, and BF16 convolution state with FP32 recurrent state (`--mamba-ssm-cache-dtype float32`). Keep `FULL_AND_PIECEWISE` and the capture sizes together: the lists cover DSpark draft and verification shapes. Prefill and eager/piecewise steps still use the stock implementation. This recipe uses PP1, no expert parallelism, and at most seven draft tokens; do not combine it with `--enforce-eager`, ReplaySSM/RecoverSSM, or adaptive verification. See the pinned [backend requirements](https://github.com/vllm-project/vllm/blob/49cb2bbf71cfd36ee5aa33d1e184b1cddff55294/vllm/models/kimi_k3/nvidia/specialized_decode/runtime/__init__.py).
 
   ### Launch on each node
@@ -653,9 +651,9 @@ guide: |
   - **Frontend:** the Dynamo frontend runs with `--router-mode least-loaded --router-session-affinity-ttl-secs 900`, so each conversation sticks to one worker and reuses its prefix cache. The Rust frontend is selected with `VLLM_USE_RUST_FRONTEND=1`, with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600` and `DYN_TOKENIZER_CACHE_BYTES=8589934592`. AgentX sends the conversation ID as the Dynamo session ID.
   - **Mooncake master:** `--default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, 128GB global segment, 4GB local buffer, RDMA over `mlx5_0..mlx5_3`.
 
-  ## GB300: InferenceX AgentX disaggregated (xPyD, TP8 + DCP8 per worker)
+  ## GB300: InferenceX AgentX disaggregated (xPyD, TP8 + DCP8 prefill and decode)
 
-  The GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047)) runs Dynamo + vLLM with several prefill and decode workers. Every worker is TP8 + DCP8 across two 4-GPU GB300 trays. KV moves over NIXL, and all workers share an RDMA Mooncake store. Prefill workers add expert parallelism with MegaMoE; decode workers do not. Image `vllm/vllm-openai:nightly-1b2a666391f2a24228a1436b64d547c34cc6b6ce`, Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`.
+  The GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047)) runs Dynamo + vLLM with several prefill and decode workers. Prefill and decode workers are both TP8 + DCP8 across two 4-GPU GB300 trays; prefill workers also use EP8 with MegaMoE, and decode workers use no expert parallelism. KV moves over NIXL, and all workers share an RDMA Mooncake store. Image `vllm/vllm-openai:nightly-1b2a666391f2a24228a1436b64d547c34cc6b6ce`, Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`.
 
   | Clients | Prefill workers | Decode workers | GPUs | Decode `--max-num-seqs` |
   |---:|---:|---:|---:|---:|
