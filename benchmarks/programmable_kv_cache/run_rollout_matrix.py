@@ -9,6 +9,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
 import pstats
 import random
@@ -238,6 +239,10 @@ def main():
     parser.add_argument("--prediction-seconds", type=float, default=0.25)
     parser.add_argument("--oracle", action="store_true")
     parser.add_argument("--policy-components", default="retention,movement,quota")
+    parser.add_argument("--policy-max-wait-seconds", type=float, default=30)
+    parser.add_argument("--quota-aging-seconds", type=float, default=1)
+    parser.add_argument("--quota-reuse-score-weight", type=float, default=0.5)
+    parser.add_argument("--policy-decode-lookahead-tokens", type=int, default=512)
     parser.add_argument("--replay-pause-floor", type=float, default=0)
     parser.add_argument("--live-after-replay", action="store_true")
     parser.add_argument("--verl-root", type=Path, default=Path("../verl"))
@@ -263,6 +268,16 @@ def main():
         parser.error("cache-gib must be positive")
     if not components <= {"retention", "movement", "quota"}:
         parser.error("Unknown policy component")
+    for name in ("policy_max_wait_seconds", "quota_aging_seconds"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            parser.error(f"{name.replace('_', '-')} must be positive and finite")
+    if (
+        not math.isfinite(args.quota_reuse_score_weight)
+        or args.quota_reuse_score_weight < 0
+        or args.policy_decode_lookahead_tokens < 0
+    ):
+        parser.error("Quota reuse weight and decode lookahead must be nonnegative")
     policy_mode = (
         "policy"
         if "movement" in components
@@ -467,8 +482,9 @@ def main():
                             "options": {
                                 "reserve_running_growth": True,
                                 "borrow_idle_capacity": True,
-                                "reuse_score_weight": 0.5,
-                                "max_wait_seconds": 30,
+                                "reuse_score_weight": args.quota_reuse_score_weight,
+                                "aging_seconds": args.quota_aging_seconds,
+                                "max_wait_seconds": args.policy_max_wait_seconds,
                             },
                         },
                     ]
@@ -476,8 +492,10 @@ def main():
                 settings = {
                     "engine_id": "rollout",
                     "policies": policies,
-                    "policy_decode_lookahead_tokens": 512,
-                    "max_policy_wait_seconds": 30,
+                    "policy_decode_lookahead_tokens": (
+                        args.policy_decode_lookahead_tokens
+                    ),
+                    "max_policy_wait_seconds": args.policy_max_wait_seconds,
                     "max_inflight_load_blocks": 32,
                 }
                 connector = {

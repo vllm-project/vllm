@@ -67,6 +67,9 @@ PYTHONPATH=../verl \
 | `policy` | 信号驱动的本地策略与调度 |
 | `--policy-components quota` | 仅启用配额调度；不加载搬运连接器，不发送无用关联与工具信号 |
 | `--policy-components retention` | 通过 importance 信号触发保留策略，并检查真实优先级操作；不加载搬运连接器。可同时启用 quota |
+| `--policy-max-wait-seconds` | 策略准入/次序延期上限，默认 30 秒；同时设置 quota 自身等待阈值，实验时需报告尾延迟 |
+| `--quota-aging-seconds` / `--quota-reuse-score-weight` | quota 等待老化时间尺度和缓存复用评分权重，默认 1 秒和 0.5 |
+| `--policy-decode-lookahead-tokens` | quota 估计运行请求后续 KV 需求的 token 上限，默认 512 |
 | `--gpu-memory-utilization 0.5` | 默认主要性能预算，各对照记录实际分配出的 KV 容量 |
 | `--cache-gib 2` | 历史人工配额压力诊断；不要当作正常资源主基线 |
 | `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
