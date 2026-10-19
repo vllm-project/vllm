@@ -42,6 +42,17 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_ray_dp_placement_node_ips_is_not_compile_factor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.1,10.0.0.2")
+    factors = envs.compile_factors()
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.3")
+
+    assert "VLLM_RAY_DP_PLACEMENT_NODE_IPS" not in factors
+    assert envs.compile_factors() == factors
+
+
 def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_API_KEY", "sk-super-secret")
 
