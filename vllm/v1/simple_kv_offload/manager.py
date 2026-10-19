@@ -300,6 +300,7 @@ class SimpleCPUOffloadScheduler:
             self.hash_block_size,
             self.enable_kv_cache_events,
             max_hashes_per_slot=max(self.group_block_sizes) // self.hash_block_size + 1,
+            medium=self.kv_event_medium,
         )
         self.cpu_block_pool = pool
         self.cpu_coordinator.block_pool = pool

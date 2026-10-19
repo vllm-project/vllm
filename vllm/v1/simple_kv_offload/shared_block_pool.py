@@ -19,7 +19,7 @@ import numpy as np
 
 from vllm.distributed.kv_events import MEDIUM_CPU, AllBlocksCleared
 from vllm.utils.math_utils import round_up
-from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -64,6 +64,7 @@ class SharedCPUBlockPool(BlockPool):
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         max_hashes_per_slot: int = 2,
+        medium: str = MEDIUM_CPU,
     ):
         if metadata.blocks_per_rank < 2:
             raise ValueError("Shared CPU offload needs at least two slots per DP rank.")
@@ -76,7 +77,7 @@ class SharedCPUBlockPool(BlockPool):
         self._peer_pinned: set[int] = set()
         count = metadata.blocks_per_rank * metadata.local_size
         super().__init__(
-            count, True, hash_block_size, enable_kv_cache_events, medium=MEDIUM_CPU
+            count, True, hash_block_size, enable_kv_cache_events, medium=medium
         )
         for block in self.blocks:
             block.prev_free_block = block.next_free_block = None
@@ -297,18 +298,15 @@ class SharedCPUBlockPool(BlockPool):
             self._sync_peer_pins()
 
     def reset_prefix_cache(self) -> bool:
+        """Invalidate this rank's partition once all readers and writers release it."""
         with self.locked():
-            if np.any(self._refs != 0):
+            owned = slice(self._start, self._end)
+            if np.any(self._refs[owned] != 0):
                 return False
-            self._hash_counts[:] = 0
+            self._hash_counts[owned] = 0
             self._header[0] += 1
-            self._versions[:] = self._header[0]
-            self._seen[:] = self._versions
-            self._seen_revision = int(self._header[0])
-            self.cached_block_hash_to_block = BlockHashToBlockMap()
-            self.cached_block_hashes_by_block.clear()
-            for block in self.blocks:
-                block.reset_hash()
+            self._versions[owned] = self._header[0]
+            self._refresh_hashes()
             if self.enable_kv_cache_events:
                 self.kv_event_queue.append(AllBlocksCleared())
             return True

@@ -309,6 +309,7 @@ def make_scheduler(
     num_groups: int = 1,
     lazy: bool = False,
     kv_cache_config: KVCacheConfig | None = None,
+    enable_events: bool = False,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with small block pools."""
     if kv_cache_config is None:
@@ -316,6 +317,8 @@ def make_scheduler(
     else:
         num_groups = len(kv_cache_config.kv_cache_groups)
     vllm_config = _make_vllm_config()
+    if enable_events:
+        vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     cpu_capacity_bytes = _BYTES_PER_BLOCK * num_cpu_blocks * num_groups
 
     sched = SimpleCPUOffloadScheduler(
@@ -517,8 +520,11 @@ def _alloc_and_register(
     return kv_blocks
 
 
-def _make_shared_schedulers(tmp_path, count=2):
-    fixtures = [make_scheduler(num_cpu_blocks=3) for _ in range(count)]
+def _make_shared_schedulers(tmp_path, count=2, enable_events=False):
+    fixtures = [
+        make_scheduler(num_cpu_blocks=3, enable_events=enable_events)
+        for _ in range(count)
+    ]
     for rank, fix in enumerate(fixtures):
         fix.scheduler.set_shared_pool(
             SimpleCPUOffloadHandshake(
@@ -701,6 +707,21 @@ def test_shared_dp_pending_hit_retry_and_cancel_release_pins(shared_schedulers):
     reader.scheduler.request_finished(request, [])
     assert get_cpu_free_blocks(writer.scheduler) == 2
     assert writer.scheduler.reset()
+
+
+def test_shared_dp_reset_ignores_inflight_peer_partition_store(shared_schedulers):
+    """A peer's pending write only prevents resetting the peer's own partition."""
+    writer, peer = shared_schedulers
+    request = make_request()
+    meta = _store_shared_request(writer, request)
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    peer_meta = _store_shared_request(peer, make_request())
+
+    assert writer.scheduler.reset()
+    assert peer.scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert not peer.scheduler.reset()
+    simulate_store_completion(peer.scheduler, peer_meta.store_event)
+    assert peer.scheduler.reset()
 
 
 def test_eight_dp_readers_release_the_writer_only_after_the_last_reader(tmp_path):
