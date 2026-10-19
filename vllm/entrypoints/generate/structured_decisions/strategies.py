@@ -663,7 +663,9 @@ class JointSchemaStrategy(ReadStrategy):
             prompt["cache_salt"] = cache_salt
         renderer = self.context.online_renderer.renderer
         try:
-            engine_input = await renderer.process_for_engine_async(prompt, time.time())
+            engine_input = await renderer.process_for_engine_async(
+                prompt, time.time(), skip_mm_cache=True
+            )
         except ValueError as e:
             raise StructuredDecisionError(f"media: {e}") from e
         assert engine_input["type"] == "multimodal"

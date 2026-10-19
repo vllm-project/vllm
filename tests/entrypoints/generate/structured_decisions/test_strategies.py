@@ -13,8 +13,16 @@ import torch
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from PIL import Image
+from transformers import (
+    AutoTokenizer,
+    Qwen2VLImageProcessor,
+    Qwen2VLVideoProcessor,
+    Qwen3OmniMoeConfig,
+    Qwen3OmniMoeProcessor,
+    WhisperFeatureExtractor,
+)
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
@@ -51,6 +59,12 @@ from vllm.entrypoints.serve.exception_handling.register import (
 )
 from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
+    MultiModalProcessorOnlyCache,
+)
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
     CompletionOutput,
@@ -475,8 +489,9 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
     image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
     rendered: dict[str, Any] = {}
 
-    async def process_for_engine_async(prompt, arrival_time):
+    async def process_for_engine_async(prompt, arrival_time, *, skip_mm_cache=False):
         rendered.update(prompt)
+        rendered["skip_mm_cache"] = skip_mm_cache
         # The image's placeholder expands to three tokens.
         ids = [
             token
@@ -500,6 +515,7 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
     )
     assert rendered["prompt_token_ids"] == strategy.prefix + placeholder
     assert rendered["multi_modal_data"]["image"][0].size == (8, 8)
+    assert rendered["skip_mm_cache"] is True
     assert rendered["mm_processor_kwargs"] == {
         "images_kwargs": {"size": strategy.IMAGE_SIZE}
     }
@@ -538,9 +554,10 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
 
     strategy.__dict__["_connector"] = FakeConnector()
 
-    async def process_for_engine_async(prompt, arrival_time):
+    async def process_for_engine_async(prompt, arrival_time, *, skip_mm_cache=False):
         rendered.clear()
         rendered.update(prompt)
+        rendered["skip_mm_cache"] = skip_mm_cache
         return mm_input(prompt["prompt_token_ids"], {}, {}, {})
 
     renderer = strategy.context.online_renderer.renderer
@@ -553,6 +570,7 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, StructuredDecisionResponse)
     assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
+    assert rendered["skip_mm_cache"] is True
     assert rendered["mm_processor_kwargs"] == {
         "images_kwargs": {"size": strategy.IMAGE_SIZE},
         "use_audio_in_video": True,
@@ -578,6 +596,162 @@ async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
     )
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400
+
+
+def test_joint_schema_cold_image_cache_survives_schema_refusal(joint_schema, tmp_path):
+    """Refusing an unseen image's schema must not poison the next media read."""
+    _, engine, tokenizer = joint_schema
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer.name_or_path,
+        image_token="<|image_pad|>",
+        video_token="<|video_pad|>",
+        vision_bos_token="<|vision_start|>",
+        vision_eos_token="<|vision_end|>",
+        audio_token="<|audio_pad|>",
+        audio_bos_token="<|audio_start|>",
+        audio_eos_token="<|audio_end|>",
+    )
+    hf_processor = Qwen3OmniMoeProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(
+            patch_size=16,
+            image_mean=[0.5] * 3,
+            image_std=[0.5] * 3,
+        ),
+        video_processor=Qwen2VLVideoProcessor(patch_size=16),
+        feature_extractor=WhisperFeatureExtractor(feature_size=128),
+    )
+    hf_processor.save_pretrained(tmp_path)
+    hf_config = Qwen3OmniMoeConfig(architectures=["ClefOmniForJointSchema"])
+    hf_config.thinker_config.image_token_id = tokenizer.image_token_id
+    hf_config.thinker_config.video_token_id = tokenizer.video_token_id
+    hf_config.thinker_config.audio_token_id = tokenizer.audio_token_id
+    hf_config.joint_head_config = {
+        "hidden_size": 2048,
+        "width": 1024,
+        "routing_layers": 2,
+        "layers": 4,
+        "heads": 16,
+        "feedforward": 4096,
+    }
+    hf_config.save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=1024,
+            mm_processor_cache_gb=0.01,
+            mm_processor_cache_type="lru",
+            limit_mm_per_prompt={"image": 1, "audio": 0, "video": 0},
+        ),
+    )
+    renderer = HfRenderer(config, tokenizer)
+    try:
+        assert isinstance(renderer.mm_processor_cache, LruKeyReplicatedSenderCache)
+        processor_cache = renderer._mm_processor_only_cache
+        assert isinstance(processor_cache, MultiModalProcessorOnlyCache)
+        assert processor_cache.make_stats().total == 0
+        assert renderer.mm_processor_cache.make_stats().total == 0
+        receiver = LruKeyReplicatedReceiverCache(config.model_config)
+        engine.model_config = config.model_config
+        engine.renderer = renderer
+        online = OnlineRenderer(
+            config.model_config,
+            renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        strategy = JointSchemaStrategy(ReadContext(engine, online, None, "auto", {}))
+        handler = serving(engine, strategy)
+        encode = engine.encode.side_effect
+        received = []
+
+        async def receive_and_encode(prompt, params, request_id, **kwargs):
+            mm_hash = prompt["mm_hashes"]["image"][0]
+            payload = prompt["mm_kwargs"]["image"][0]
+            position = prompt["mm_placeholders"]["image"][0]
+            features = receiver.get_and_update_features(
+                [
+                    MultiModalFeatureSpec(
+                        data=payload,
+                        modality="image",
+                        identifier=mm_hash,
+                        mm_hash=mm_hash,
+                        mm_position=position,
+                    )
+                ]
+            )
+            assert payload is not None
+            item = features[0].data
+            assert item is not None
+            pixels = item["pixel_values"].data
+            assert isinstance(pixels, torch.Tensor) and pixels.device.type == "cpu"
+            assert torch.unique(pixels).tolist() == [-1.0, 1.0]
+            assert torch.count_nonzero(pixels == 1) == pixels.numel() // 3
+            ids = prompt["prompt_token_ids"]
+            assert ids.count(tokenizer.image_token_id) == position.length
+            received.append((mm_hash, pixels.clone(), list(ids)))
+            async for result in encode(prompt, params, request_id, **kwargs):
+                yield result
+
+        engine.encode.side_effect = receive_and_encode
+        app = FastAPI()
+        app.state.args = SimpleNamespace(log_error_stack=False)
+        app.state.serving_structured_decisions = handler
+        init_exception_handler(app)
+        register_structured_decisions_api_router(app)
+        images = []
+        for color in ("red", "blue"):
+            buffer = BytesIO()
+            Image.new("RGB", (64, 64), color).save(buffer, format="PNG")
+            images.append(
+                "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+            )
+        oversized = "question " * 2048
+        assert len(tokenizer.encode(oversized)) > strategy.max_length
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/systemone",
+                json={
+                    **JOINT_SCHEMA_REQUEST,
+                    "images": [images[0]],
+                    "questions": {
+                        **JOINT_SCHEMA_REQUEST["questions"],
+                        "team": {
+                            **JOINT_SCHEMA_REQUEST["questions"]["team"],
+                            "instructions": oversized,
+                        },
+                    },
+                },
+            )
+            assert response.status_code == 400
+            assert "questions take" in response.json()["error"]["message"]
+            engine.encode.assert_not_called()
+            assert received == []
+            for image in (images[0], images[0], images[1]):
+                response = client.post(
+                    "/v1/systemone",
+                    json={
+                        **JOINT_SCHEMA_REQUEST,
+                        "state": "short",
+                        "images": [image],
+                    },
+                )
+                assert response.status_code == 200
+                assert response.json()["answers"]["team"]["choice"] == "billing"
+                assert response.json()["usage"]["input_tokens"] == len(received[-1][2])
+                assert response.json()["usage"]["output_tokens"] == 0
+        assert engine.encode.call_count == 3
+        assert received[0][0] == received[1][0] != received[2][0]
+        torch.testing.assert_close(received[0][1], received[1][1])
+        assert not torch.equal(received[0][1], received[2][1])
+        assert received[0][2] == received[1][2]
+        assert processor_cache.make_stats().total == 4
+        assert processor_cache.make_stats().hits == 2
+        assert renderer.mm_processor_cache.make_stats().total == 0
+    finally:
+        renderer.shutdown()
 
 
 @pytest.mark.parametrize(
