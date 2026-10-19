@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -56,6 +57,114 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fused MTP Triton Kernels
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _sparse_gather_gemv_kernel(
+    hidden_states_ptr,
+    lm_head_weight_ptr,
+    selected_indices_ptr,
+    out_ptr,
+    stride_h_t,
+    stride_h_h,
+    stride_w_v,
+    stride_w_h,
+    stride_idx_t,
+    stride_idx_s,
+    stride_out_t,
+    stride_out_s,
+    S: tl.constexpr,
+    H: tl.constexpr,
+    BLOCK_S: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_t = tl.program_id(0).to(tl.int64)
+    pid_s = tl.program_id(1).to(tl.int64)
+
+    offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+    mask_s = offs_s < S
+
+    idx_ptrs = selected_indices_ptr + pid_t * stride_idx_t + offs_s * stride_idx_s
+    vocab_idxs = tl.load(idx_ptrs, mask=mask_s, other=0).to(tl.int64)
+
+    acc = tl.zeros((BLOCK_S,), dtype=tl.float32)
+
+    for h_start in range(0, H, BLOCK_H):
+        offs_h = h_start + tl.arange(0, BLOCK_H)
+        mask_h = offs_h < H
+        h_vals = tl.load(
+            hidden_states_ptr + pid_t * stride_h_t + offs_h * stride_h_h,
+            mask=mask_h,
+            other=0.0,
+        ).to(tl.float32)
+        w_ptrs = (
+            lm_head_weight_ptr
+            + vocab_idxs[:, None] * stride_w_v
+            + offs_h[None, :] * stride_w_h
+        )
+        mask_2d = mask_s[:, None] & mask_h[None, :]
+        w_block = tl.load(w_ptrs, mask=mask_2d, other=0.0).to(tl.float32)
+        acc += tl.sum(w_block * h_vals[None, :], axis=1)
+
+    out_ptrs = out_ptr + pid_t * stride_out_t + offs_s * stride_out_s
+    tl.store(out_ptrs, acc.to(out_ptr.dtype.element_ty), mask=mask_s)
+
+
+def fused_mtp_sparse_gather_gemv(
+    hidden_states: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    selected_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Compute sparse dot products einsum('td,tsd->ts') in-register."""
+    T, H = hidden_states.shape
+    S = selected_indices.shape[1]
+    if T == 0 or S == 0:
+        return torch.empty(
+            (T, S), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+    if not HAS_TRITON or not hidden_states.is_cuda:
+        embeddings = lm_head_weight[selected_indices.reshape(-1)].view(T, S, H)
+        return torch.einsum("td,tsd->ts", hidden_states, embeddings)
+
+    if hidden_states.stride(-1) != 1:
+        hidden_states = hidden_states.contiguous()
+    if lm_head_weight.stride(-1) != 1:
+        lm_head_weight = lm_head_weight.contiguous()
+    if selected_indices.stride(-1) != 1:
+        selected_indices = selected_indices.contiguous()
+
+    out = torch.empty((T, S), dtype=hidden_states.dtype, device=hidden_states.device)
+    BLOCK_H = min(256, max(16, triton.next_power_of_2(H)))
+    BLOCK_S = 16 if T <= 2 else 32
+    num_warps = 4
+
+    grid = (T, triton.cdiv(S, BLOCK_S))
+    _sparse_gather_gemv_kernel[grid](
+        hidden_states,
+        lm_head_weight,
+        selected_indices,
+        out,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        lm_head_weight.stride(0),
+        lm_head_weight.stride(1),
+        selected_indices.stride(0),
+        selected_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        S=S,
+        H=H,
+        BLOCK_S=BLOCK_S,
+        BLOCK_H=BLOCK_H,
+        num_warps=num_warps,
+    )
+    return out
 
 
 class Gemma4MTPMaskedEmbedder(nn.Module):
@@ -113,13 +222,11 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
             self.vocab_size_per_centroid,
         )
         selected = clusters[top_k_indices]
-        embeddings = lm_head_weight[selected.reshape(-1)].view(
-            num_tokens,
-            self.num_selected,
-            self.hidden_size,
+        selected_flat = selected.view(num_tokens, self.num_selected)
+        logits = fused_mtp_sparse_gather_gemv(
+            hidden_states, lm_head_weight, selected_flat
         )
-        logits = torch.einsum("td,tsd->ts", hidden_states, embeddings)
-        return logits, selected.view(num_tokens, -1)
+        return logits, selected_flat
 
     def forward(
         self,
@@ -572,20 +679,32 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_idx is not None:
-            logits.index_fill_(1, self._suppress_idx, -float("inf"))
+        suppress_idx = getattr(self, "_suppress_idx", None)
+        if logits is not None and suppress_idx is not None:
+            logits.index_fill_(1, suppress_idx, -float("inf"))
         return logits
 
     def get_top_tokens(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """Sparse argmax via centroids masking. Returns token IDs directly."""
-        assert self.masked_embedding is not None
-        return self.masked_embedding.get_top_tokens(
-            hidden_states,
-            self._get_full_lm_head_weight(),
-        )
+        """Return greedy top token IDs directly without materializing full-vocab
+        softcapped logits.
+        """
+        if self.masked_embedding is not None:
+            return self.masked_embedding.get_top_tokens(
+                hidden_states,
+                self._get_full_lm_head_weight(),
+            )
+        if self.lm_head.tp_size == 1 and self.logits_processor.scale > 0.0:
+            logits = self.logits_processor._apply_head(
+                self.lm_head, hidden_states, None
+            )
+            suppress_idx = getattr(self, "_suppress_idx", None)
+            if suppress_idx is not None:
+                logits.index_fill_(1, suppress_idx, -float("inf"))
+            return logits[:, : self.logits_processor.org_vocab_size].argmax(dim=-1)
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self._stable_full_lm_head_weight = None
