@@ -58,11 +58,22 @@ def test_mha_attn_platform(default_vllm_config, device: str):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
-        with (
-            patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
-        ):
-            attn = MMEncoderAttention(16, 64, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        for aiter_mha_enabled, expected_backend in [
+            (False, AttentionBackendEnum.FLASH_ATTN),
+            (True, AttentionBackendEnum.ROCM_AITER_FA),
+        ]:
+            with (
+                patch(
+                    "vllm.model_executor.models.vision.current_platform",
+                    RocmPlatform(),
+                ),
+                patch(
+                    "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled",
+                    return_value=aiter_mha_enabled,
+                ),
+            ):
+                attn = MMEncoderAttention(16, 64, scale=1)
+                assert attn.attn_backend == expected_backend
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
