@@ -311,8 +311,6 @@ class MambaMixer(MambaBase, PluggableLayer):
         gate_p = prefill_decode_split.gate_p
         gate_d = prefill_decode_split.gate_d
 
-        ssm_outputs = []
-
         if has_prefill:
             # 2. Convolution sequence transformation
             conv_out_p = causal_conv1d_fn(
@@ -326,12 +324,57 @@ class MambaMixer(MambaBase, PluggableLayer):
                 query_start_loc=query_start_loc_p,
                 metadata=attn_metadata,
             )
-            # 3. State Space Model sequence transformations.
-            discrete_time_step_p, B_p, C_p = self._ssm_transform(
-                conv_out_p.transpose(-2, -1)
-            )
-            time_proj_bias = self._time_proj_bias()
 
+        if has_decode:
+            # state_indices_tensor_d is assigned when attn_metadata is not None,
+            # and has_decode is only True when attn_metadata is not None
+            assert state_indices_tensor_d is not None
+            # 2. Convolution sequence transformation
+            conv_out_d = causal_conv1d_update(
+                hidden_states_BC_d.transpose(0, 1),
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=state_indices_tensor_d,
+            ).transpose(0, 1)
+
+        # 3. State Space Model sequence transformations.
+        # Run projection on the full batch for LoRA metadata alignment.
+        if has_prefill and has_decode:
+            conv_out = torch.cat([conv_out_d, conv_out_p], dim=-1)
+        else:
+            conv_out = conv_out_p if has_prefill else conv_out_d
+
+        discrete_time_step, B, C = self._ssm_transform(
+            conv_out.transpose(-2, -1)
+        )
+        time_proj_bias = self._time_proj_bias()
+
+        if has_prefill and has_decode:
+            discrete_time_step_d, discrete_time_step_p = torch.split(
+                discrete_time_step,
+                [num_decode_tokens, num_prefill_tokens],
+                dim=-1,
+            )
+            B_d, B_p = torch.split(
+                B,
+                [num_decode_tokens, num_prefill_tokens],
+                dim=-2,
+            )
+            C_d, C_p = torch.split(
+                C,
+                [num_decode_tokens, num_prefill_tokens],
+                dim=-2,
+            )
+        else:
+            discrete_time_step_d = discrete_time_step_p = discrete_time_step
+            B_d = B_p = B
+            C_d = C_p = C
+
+        ssm_outputs = []
+
+        if has_prefill:
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_out_p = selective_scan_fn(
                 conv_out_p,
@@ -353,25 +396,6 @@ class MambaMixer(MambaBase, PluggableLayer):
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
-            # state_indices_tensor_d is assigned when attn_metadata is not None,
-            # and has_decode is only True when attn_metadata is not None
-            assert state_indices_tensor_d is not None
-            # 2. Convolution sequence transformation
-            conv_out_d = causal_conv1d_update(
-                hidden_states_BC_d.transpose(0, 1),
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor_d,
-            ).transpose(0, 1)
-
-            # 3. State Space Model sequence transformation.
-            discrete_time_step_d, B_d, C_d = self._ssm_transform(
-                conv_out_d.transpose(-2, -1)
-            )
-            time_proj_bias = self._time_proj_bias()
-
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_outputs_d = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
             selective_state_update(
