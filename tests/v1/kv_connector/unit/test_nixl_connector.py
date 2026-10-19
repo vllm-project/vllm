@@ -3015,6 +3015,78 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
+def test_cleanup_remote_engine_drops_its_pending_recv_notifs(
+    default_vllm_config, dist_init
+):
+    """Deferred notifications addressed to a removed engine's agents are dropped.
+
+    The pending map is keyed by request id, so the per-engine cleanup has to
+    find its entries by agent name. Entries for other engines must survive.
+    """
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    worker._pending_recv_notifs = {
+        "req-evicted": [("agent_0", b"req-evicted:1")],
+        "req-mixed": [("other_agent", b"req-mixed:1"), ("agent_1", b"req-mixed:1")],
+        "req-other": [("other_agent", b"req-other:1")],
+    }
+
+    worker._cleanup_remote_engine(engine_id)
+
+    assert "req-evicted" not in worker._pending_recv_notifs
+    assert worker._pending_recv_notifs["req-mixed"] == [("other_agent", b"req-mixed:1")]
+    assert worker._pending_recv_notifs["req-other"] == [("other_agent", b"req-other:1")]
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_ttl_eviction_never_notifies_evicted_agent(default_vllm_config, dist_init):
+    """After TTL eviction, no deferred notification reaches the evicted agent."""
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+    worker._pending_recv_notifs = {"req": [("agent_0", b"req:1")]}
+    worker._engine_last_active[engine_id] = time.perf_counter() - 20.0
+
+    with patch.object(nixl_wrapper, "send_notif") as mock_send:
+        worker._evict_stale_engines()
+        assert engine_id not in worker._remote_agents
+
+        worker._send_pending_recv_notifs("req")
+
+        mock_send.assert_not_called()
+    assert not worker._pending_recv_notifs
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_send_pending_recv_notifs_skips_unregistered_agent(
+    default_vllm_config, dist_init
+):
+    """A stale agent name is skipped silently; registered ones are still notified."""
+    worker, _ = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+    worker._pending_recv_notifs = {
+        "req": [("stale_agent", b"req:1"), ("agent_0", b"req:1")]
+    }
+
+    with (
+        patch.object(nixl_wrapper, "send_notif") as mock_send,
+        patch.object(worker.xfer_stats, "record_failed_notification") as mock_fail,
+    ):
+        worker._send_pending_recv_notifs("req")
+
+    mock_send.assert_called_once_with("agent_0", notif_msg=b"req:1")
+    mock_fail.assert_not_called()
+    assert "req" not in worker._pending_recv_notifs
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_init):
     """A transfer that outlives the TTL must keep its engine registered.
 
