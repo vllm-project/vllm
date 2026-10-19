@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 
 class _ParseAuxMTPInner(nn.Module):
@@ -30,6 +30,14 @@ class ParseAuxMTPModel(nn.Module):
 
     has_own_embed_tokens = False
     has_own_lm_head = False
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "decoder.embed_tokens.": "model.embed_tokens.",
+            "decoder.extra_heads.0.": "model.extra_head.",
+            "decoder.extra_proj.0.": "model.extra_proj.",
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -62,38 +70,12 @@ class ParseAuxMTPModel(nn.Module):
         return self.model.embed_tokens(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        auxiliary_params = {
-            "decoder.extra_heads.0.weight": self.model.extra_head.weight,
-            "decoder.extra_heads.0.bias": self.model.extra_head.bias,
-            "decoder.extra_proj.0.weight": self.model.extra_proj.weight,
-            "decoder.extra_proj.0.bias": self.model.extra_proj.bias,
-        }
-        loaded: set[str] = set()
-        loaded_auxiliary: set[str] = set()
-        for name, weight in weights:
-            if name == "decoder.embed_tokens.weight":
-                default_weight_loader(self.model.embed_tokens.weight, weight)
-                loaded.add("model.embed_tokens.weight")
-            elif name in auxiliary_params:
-                if name in loaded_auxiliary:
-                    raise RuntimeError(f"Duplicate Parse 3.5 MTP tensor: {name}")
-                parameter = auxiliary_params[name]
-                if weight.shape != parameter.shape:
-                    raise ValueError(
-                        f"Parse 3.5 MTP tensor {name} has shape {tuple(weight.shape)}; "
-                        f"expected {tuple(parameter.shape)}"
-                    )
-                default_weight_loader(parameter, weight)
-                loaded_auxiliary.add(name)
-                suffix = name.rsplit(".", 1)[-1]
-                module_name = "extra_head" if ".extra_heads." in name else "extra_proj"
-                loaded.add(f"model.{module_name}.{suffix}")
-            elif name.startswith(("decoder.extra_heads.", "decoder.extra_proj.")):
-                raise RuntimeError(f"Unsupported Parse 3.5 MTP tensor: {name}")
+        def mtp_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if name == "decoder.embed_tokens.weight" or name.startswith(
+                    ("decoder.extra_heads.0.", "decoder.extra_proj.0.")
+                ):
+                    yield name, weight
 
-        missing = auxiliary_params.keys() - loaded_auxiliary
-        if missing:
-            raise RuntimeError(f"Missing Parse 3.5 MTP tensors: {sorted(missing)}")
-        if "model.embed_tokens.weight" not in loaded:
-            raise RuntimeError("Missing Parse 3.5 MTP embedding")
-        return loaded
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(mtp_weights(), mapper=self.hf_to_vllm_mapper)

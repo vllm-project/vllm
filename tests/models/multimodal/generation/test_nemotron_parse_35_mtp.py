@@ -12,7 +12,9 @@ from safetensors.torch import save_file
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm.config.load import LoadConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.nemotron_parse3_5 import MBartDecoderNoPos
 from vllm.model_executor.models.nemotron_parse3_5_mtp import (
     ParseAuxMTPModel,
@@ -44,6 +46,8 @@ def test_parse_mtp_loads_auxiliary_weights_from_model_file(tmp_path: Path) -> No
         "decoder.extra_proj.0.weight": torch.arange(9).reshape(3, 3).float(),
         "decoder.extra_proj.0.bias": torch.arange(3).float(),
         "decoder.embed_tokens.weight": torch.arange(12).reshape(4, 3).float(),
+        "decoder.layers.0.fc1.weight": torch.ones(3, 3),
+        "encoder.conv1.weight": torch.ones(3, 3, 1),
     }
     model_file = tmp_path / "model.safetensors"
     save_file(weights, model_file)
@@ -61,78 +65,43 @@ def test_parse_mtp_loads_auxiliary_weights_from_model_file(tmp_path: Path) -> No
         "model.extra_proj.weight",
         "model.extra_proj.bias",
     }
-    assert torch.equal(
-        draft.model.embed_tokens.weight, weights["decoder.embed_tokens.weight"]
-    )
-    assert torch.equal(
-        draft.model.extra_head.weight, weights["decoder.extra_heads.0.weight"]
-    )
-    assert torch.equal(
-        draft.model.extra_proj.bias, weights["decoder.extra_proj.0.bias"]
-    )
-
-
-def test_parse_mtp_requires_all_integrated_auxiliary_weights(tmp_path: Path) -> None:
-    draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
-    nn.Module.__init__(draft)
-    draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
-    save_file(
-        {"decoder.extra_heads.0.bias": torch.zeros(3)},
-        tmp_path / "auxiliary_prediction_heads.safetensors.extra",
-    )
-
-    with pytest.raises(RuntimeError, match="Missing Parse 3.5 MTP tensors"):
-        draft.load_weights(
-            [
-                ("decoder.embed_tokens.weight", torch.zeros(4, 3)),
-                ("decoder.extra_heads.0.bias", torch.zeros(3)),
-            ]
-        )
-
-
-def test_parse_mtp_rejects_wrong_integrated_tensor_shape() -> None:
-    draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
-    nn.Module.__init__(draft)
-    draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
-
-    with pytest.raises(ValueError, match="decoder.extra_heads.0.weight has shape"):
-        draft.load_weights([("decoder.extra_heads.0.weight", torch.zeros(2, 3))])
+    for destination, source in (
+        ("embed_tokens.weight", "decoder.embed_tokens.weight"),
+        ("extra_head.weight", "decoder.extra_heads.0.weight"),
+        ("extra_head.bias", "decoder.extra_heads.0.bias"),
+        ("extra_proj.weight", "decoder.extra_proj.0.weight"),
+        ("extra_proj.bias", "decoder.extra_proj.0.bias"),
+    ):
+        assert torch.equal(draft.model.get_parameter(destination), weights[source])
 
 
 @pytest.mark.parametrize(
-    ("name", "error"),
+    ("missing_source", "missing_destination"),
     [
-        ("decoder.extra_heads.0.bias", "Duplicate Parse 3.5 MTP tensor"),
-        ("decoder.extra_heads.1.bias", "Unsupported Parse 3.5 MTP tensor"),
-        ("decoder.extra_proj.1.weight", "Unsupported Parse 3.5 MTP tensor"),
+        ("decoder.extra_heads.0.weight", "model.extra_head.weight"),
+        ("decoder.embed_tokens.weight", "model.embed_tokens.weight"),
     ],
 )
-def test_parse_mtp_rejects_ambiguous_auxiliary_weights(name: str, error: str) -> None:
+def test_parse_mtp_default_loader_detects_missing_weights(
+    missing_source: str, missing_destination: str
+) -> None:
     draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
     nn.Module.__init__(draft)
     draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
+    weights = {
+        "decoder.embed_tokens.weight": torch.zeros(4, 3),
+        "decoder.extra_heads.0.weight": torch.zeros(3, 3),
+        "decoder.extra_heads.0.bias": torch.zeros(3),
+        "decoder.extra_proj.0.weight": torch.zeros(3, 3),
+        "decoder.extra_proj.0.bias": torch.zeros(3),
+    }
+    del weights[missing_source]
+    loaded = draft.load_weights(weights.items())
 
-    with pytest.raises(RuntimeError, match=error):
-        draft.load_weights(
-            [("decoder.extra_heads.0.bias", torch.zeros(3)), (name, torch.zeros(3))]
-        )
-
-
-def test_parse_mtp_requires_embedding_even_with_complete_auxiliary_weights() -> None:
-    draft = ParseAuxMTPModel.__new__(ParseAuxMTPModel)
-    nn.Module.__init__(draft)
-    draft.model = _ParseAuxMTPInner(vocab_size=4, hidden_size=3)
-    weights = [
-        (f"decoder.{name}.0.{suffix}", torch.zeros_like(parameter))
-        for name, module in (
-            ("extra_heads", draft.model.extra_head),
-            ("extra_proj", draft.model.extra_proj),
-        )
-        for suffix, parameter in module.named_parameters()
-    ]
-
-    with pytest.raises(RuntimeError, match="Missing Parse 3.5 MTP embedding"):
-        draft.load_weights(weights)
+    loader = DefaultModelLoader(LoadConfig())
+    with pytest.raises(ValueError, match="not initialized from checkpoint") as exc:
+        loader.track_weights_loading(draft, loaded)
+    assert missing_destination in str(exc.value)
 
 
 def test_parse_decoder_exposes_head_without_registering_duplicate_module() -> None:
