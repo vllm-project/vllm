@@ -837,9 +837,17 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         set_draft_tokens=lambda _batch, _tokens: events.append("publish"),
         get_draft_tokens=lambda: "drafts",
     )
-    runner.kv_connector = SimpleNamespace(
-        post_forward=lambda _finished: events.append("kv")
-    )
+    from vllm.v1.worker.gpu.kv_connector import KVConnector
+
+    class RecordingKVConnector(KVConnector):
+        def post_forward(self, finished_req_ids, defer_finalize=False):
+            assert defer_finalize
+            events.append("kv")
+
+        def finalize_step(self):
+            events.append("kv-finalize")
+
+    runner.kv_connector = RecordingKVConnector()
     runner.adaptive_verification = None
 
     proposer = object.__new__(UnoSpeculator)
@@ -896,7 +904,14 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
     output = runner.sample_tokens(None)
 
     assert isinstance(output, output_type)
-    assert events == ["output", "postprocess", "propose-step-7", "publish", "kv"]
+    assert events == [
+        "output",
+        "kv",
+        "postprocess",
+        "propose-step-7",
+        "publish",
+        "kv-finalize",
+    ]
     assert proposer._step == 8
     assert runner.req_states.draft_tokens.tolist() == [[8, 9]]
 

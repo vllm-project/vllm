@@ -328,17 +328,17 @@ def test_speculator_factory_builds_uno(uno_config_factory, monkeypatch):
     constructors = [
         (import_module(f"vllm.v1.worker.gpu.spec_decode.{module}"), name)
         for module, name in (
-        ("extract_hidden_states", "ExtractHiddenStatesSpeculator"),
-        ("lilicorr.speculator", "LiLiCorrSpeculator"),
-        ("dflash2.speculator", "DFlash2Speculator"),
-        ("dflash.speculator", "DFlashSpeculator"),
-        ("dspark.speculator", "DSparkSpeculator"),
-        ("gemma4.speculator", "Gemma4Speculator"),
-        ("multi_module_mtp.speculator", "MultiModuleMTPSpeculator"),
-        ("mtp.speculator", "MTPSpeculator"),
-        ("eagle.speculator", "EagleSpeculator"),
-        ("standalone_ar.speculator", "StandaloneARSpeculator"),
-        ("ngram.speculator", "NgramGPUSpeculator"),
+            ("extract_hidden_states", "ExtractHiddenStatesSpeculator"),
+            ("lilicorr.speculator", "LiLiCorrSpeculator"),
+            ("dflash2.speculator", "DFlash2Speculator"),
+            ("dflash.speculator", "DFlashSpeculator"),
+            ("dspark.speculator", "DSparkSpeculator"),
+            ("gemma4.speculator", "Gemma4Speculator"),
+            ("multi_module_mtp.speculator", "MultiModuleMTPSpeculator"),
+            ("mtp.speculator", "MTPSpeculator"),
+            ("eagle.speculator", "EagleSpeculator"),
+            ("standalone_ar.speculator", "StandaloneARSpeculator"),
+            ("ngram.speculator", "NgramGPUSpeculator"),
         )
     ]
     for constructor, name in constructors:
