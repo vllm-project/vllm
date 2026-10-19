@@ -55,7 +55,10 @@ def test_recorder_mount_and_identity_reach_the_inner_container(tmp_path):
 
 
 def test_unavailable_checkout_does_not_block_the_workload(tmp_path):
-    assert _recorder_args(tmp_path / "missing", "recorders/kernrec/ci_setup.sh") == []
+    assert _recorder_args(tmp_path / "missing", "recorders/kernrec/ci_setup.sh") == [
+        "-e",
+        "KERNREC_DISABLE=1",
+    ]
     assert not (tmp_path / "missing").exists()
 
 

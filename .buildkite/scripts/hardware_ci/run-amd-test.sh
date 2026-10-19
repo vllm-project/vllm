@@ -135,6 +135,7 @@ configure_kernrec_docker_args() {
   if [[ -z "$checkout" || ! -d "$checkout" ]] ||
       ! mkdir -p "$checkout/.kernrec" || ! chmod 0777 "$checkout/.kernrec"; then
     echo "kernrec: checkout unavailable; container recordings cannot be uploaded" >&2
+    kernrec_docker_args=(-e KERNREC_DISABLE=1)
     return 0
   fi
   kernrec_docker_args=(
