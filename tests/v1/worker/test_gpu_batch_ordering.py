@@ -459,6 +459,32 @@ def test_sort_key_reads_state_slots_not_batch_positions():
             )
 
 
+def test_gather_hands_the_request_state_to_the_sort():
+    """The sort can only see context if the call site passes the state in.
+
+    Every other sort test calls sort_batch_req_ids directly, so dropping the
+    two state arguments in gather_batch_req_state leaves all of them green.
+    The clamp would keep the result correct, and the lost ordering would show
+    up only as extra zero-context rows in the extend region. Go through the
+    runner so the call site itself is covered.
+    """
+    # {req_id: (num_computed_tokens, prefill_len)}; "fresh" is the only row
+    # without context, so it is the only one the context term moves.
+    runner = _make_runner(
+        {"fresh": (0, 4096), "resumed": (2048, 4096), "running": (512, 512)},
+        decode_query_len=4,
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"fresh": 64, "resumed": 64, "running": 64},
+        total_num_scheduled_tokens=192,
+        scheduled_spec_decode_tokens={},
+    )
+    state, _ = runner.gather_batch_req_state(scheduler_output, False)
+    # Without the state arguments every row ties and the input order survives,
+    # leaving "fresh" in front of the two that carry context.
+    assert state.req_ids == ["resumed", "running", "fresh"]
+
+
 def test_uniform_decode_uses_state_index_not_batch_position():
     """The gather must read each request's own state, not its batch slot.
 
