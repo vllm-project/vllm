@@ -106,6 +106,7 @@ class FrontBuild:
     tp: int
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
+    swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
 
 
 def plus(t0, v):
@@ -202,8 +203,8 @@ def stage_kt(c, t):
     kv_len = ntopk + nswa
     for i in range_constexpr((KEYS + THREADS - 1) // THREADS):
         k = fresh(tid) + THREADS * i
-        sidx = fx.min(fx.max(k - ntopk, 0), WINDOW - 1)
-        s_slot = ld_i32(a["swa_idx"], t * WINDOW + sidx)
+        sidx = fx.min(fx.max(k - ntopk, 0), c["swa_width"] - 1)
+        s_slot = ld_i32(a["swa_idx"], t * c["swa_width"] + sidx)
         val = (k < kv_len).select(s_slot, fx.Int32(-1))
         if const_expr(ratio > 0):
             local = ld_i32(a["topk"], t * TOPK + fx.min(k, TOPK - 1))
@@ -531,6 +532,7 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "mb": Mailbox(tag),
         "d": d,
         "ratio": key.ratio,
+        "swa_width": key.swa_width,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),

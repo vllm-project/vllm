@@ -51,6 +51,7 @@ from .interfaces import (
     requires_raw_input_tokens,
     supports_hc_sp,
     supports_kv_cache_grouping,
+    supports_lora,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -79,6 +80,7 @@ _TEXT_GENERATION_MODELS = {
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
     "BailingMoeV3ForCausalLM": ("bailing_moe_v3", "BailingMoeV3ForCausalLM"),
+    "BeamForCausalLM": ("vllm.models.beam", "BeamForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
@@ -273,6 +275,7 @@ _LATE_INTERACTION_MODELS = {
     "JinaForRanking": ("jina", "JinaForRanking"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
+    "ColUltraVBertForRetrieval": ("colultravbert", "ColUltraVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
@@ -637,6 +640,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "LiLiCorrDraftModel": ("lilicorr", "LiLiCorrForCausalLM"),
     "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
+    "DFlash2BeamDraftModel": ("vllm.models.beam", "DFlash2BeamForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
     # DFlash{arch} unless it already starts or ends with "DFlash" (see
@@ -875,6 +879,7 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supports_lora: bool
     supports_hc_sp: bool
     has_inner_state: bool
     is_attention_free: bool
@@ -906,6 +911,7 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supports_lora=supports_lora(model),
             supports_hc_sp=supports_hc_sp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
