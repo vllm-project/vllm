@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=13.2.1
+ARG CUDA_VERSION=13.2.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
@@ -41,9 +41,10 @@ ARG NCCL_VERSION=2.30.7
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/pytorch/manylinux2_28-builder:cuda13.2
 
 # Build wheels against the same glibc floor as PyTorch's published wheels.
-ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e
+ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.2-12d4d5cac0ce55ba89088573e71cd5e811b1888e
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
+# nvidia/cuda publishes no 13.2.2 image, so this is not derived from CUDA_VERSION.
+ARG FINAL_BASE_IMAGE=nvidia/cuda:13.2.1-base-ubuntu${UBUNTU_VERSION}
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent

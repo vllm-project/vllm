@@ -403,7 +403,7 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-12d4d5cac0ce55ba89088573e71cd5e811b1888e \
     --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
     ```
 
@@ -413,8 +413,8 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
     ```bash
     DOCKER_BUILDKIT=1 docker build \
-    --build-arg CUDA_VERSION=13.2.1 \
-    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e \
+    --build-arg CUDA_VERSION=13.2.2 \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-12d4d5cac0ce55ba89088573e71cd5e811b1888e \
     --build-arg max_jobs=256 \
     --build-arg nvcc_threads=2 \
     --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \

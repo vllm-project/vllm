@@ -36,7 +36,7 @@ else
     --platform linux/arm64 \
     --build-arg max_jobs=16 \
     --build-arg nvcc_threads=4 \
-    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-12d4d5cac0ce55ba89088573e71cd5e811b1888e \
     --build-arg torch_cuda_arch_list="9.0 10.0 11.0 12.0" \
     --build-arg USE_SCCACHE=1 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
