@@ -6,12 +6,15 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    CPUControlJob,
     OffloadingConnectorMetadata,
     TransferJob,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
+from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -31,6 +34,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -38,6 +42,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 
 NUM_BLOCKS = 10
 BLOCK_SIZE = 16
@@ -680,3 +685,42 @@ def test_register_kv_caches_uniform_type(backend):
     # opaque mapping rather than a certified, parallelism-agnostic one
     assert group_refs[0].mapping.parallelism_agnostic
     assert not group_refs[1].mapping.parallelism_agnostic
+
+
+@pytest.mark.parametrize("direction", ["load", "store"])
+@pytest.mark.parametrize("success", [False, True])
+def test_native_cpu_completion_never_emits_an_inference_receipt(direction, success):
+    worker, spec = _make_worker(KVCacheConfig(NUM_BLOCKS, [], []))
+    spec.config.parallel.world_size = 2
+    lease = KVCacheTransferLease(
+        7,
+        1,
+        direction,
+        "cpu/namespace",
+        make_block_hash_with_group_id(BlockHash(b"h" * 32), 0),
+        16,
+        3,
+    )
+    gpu = GPULoadStoreSpec([3], (1,), (0,))
+    cpu = CPULoadStoreSpec([2])
+    job = (
+        CPUControlJob(lease, cpu, gpu)
+        if direction == "load"
+        else CPUControlJob(lease, gpu, cpu)
+    )
+    metadata = OffloadingConnectorMetadata({}, {}, control_jobs=[job])
+    if direction == "store":
+        worker.prepare_store_kv(metadata)
+        worker.worker.submit_store.assert_not_called()
+        worker.start_kv_transfers(_empty_metadata())
+        worker.worker.submit_store.assert_called_once_with(-7, gpu, cpu)
+    else:
+        worker.start_kv_transfers(metadata)
+        worker.worker.submit_load.assert_called_once_with(-7, cpu, gpu)
+    worker.worker.get_finished.return_value = [TransferResult(-7, success)]
+    assert worker.get_finished(set()) == (set(), set())
+    output = worker.build_connector_worker_meta()
+    assert output.completed_jobs == {}
+    (completed,) = output.control_results
+    assert completed.transfer_id == 7 and completed.generation == 1
+    assert completed.success == success and completed.rank == 0

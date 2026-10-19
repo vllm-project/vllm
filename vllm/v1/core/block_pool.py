@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -29,6 +30,17 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_retention import RetentionFreeBlockQueue
+
+
+@dataclass(frozen=True)
+class ScopedCacheEviction:
+    evicted: frozenset[BlockHashWithGroupId]
+    blocked: frozenset[BlockHashWithGroupId]
+    missing: frozenset[BlockHashWithGroupId]
+    num_evicted_blocks: int
 
 
 class BlockHashToBlockMap:
@@ -80,6 +92,26 @@ class BlockHashToBlockMap:
             return block_id in blocks
         self._unexpected_blocks_type(blocks)
         return False
+
+    def get_blocks(self, key: BlockHashWithGroupId) -> tuple[KVCacheBlock, ...]:
+        """Return every physical copy of the addressed cached content."""
+        blocks = self._cache.get(key)
+        if blocks is None:
+            return ()
+        if isinstance(blocks, KVCacheBlock):
+            return (blocks,)
+        return tuple(blocks.values())
+
+    def get_cached_block_counts(self) -> tuple[int, int]:
+        """Count physical cached copies and unreferenced copies, excluding aliases."""
+        cached = reclaimable = 0
+        for key, copies in self._cache.items():
+            blocks = (copies,) if isinstance(copies, KVCacheBlock) else copies.values()
+            for block in blocks:
+                if block.block_hash == key:
+                    cached += 1
+                    reclaimable += block.ref_cnt == 0
+        return cached, reclaimable
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
         """Inserts the KVCacheBlock to the cache"""
@@ -165,6 +197,7 @@ class BlockPool:
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.medium = medium
+        self._cache_counts: list[int] | None = None
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
@@ -193,6 +226,55 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self._retention_queue: RetentionFreeBlockQueue | None = None
+        self._forget_priority: Callable[[KVCacheBlock], None] | None = None
+
+    def configure_retention(
+        self,
+        priority: Callable[[BlockHashWithGroupId], int | None],
+        synchronize: Callable[[], Iterable[BlockHashWithGroupId]],
+        *,
+        copy_priority: Callable[[KVCacheBlock], int | None] | None = None,
+        forget_priority: Callable[[KVCacheBlock], None] | None = None,
+    ) -> None:
+        """Install engine-owned priority ordering once, before serving requests."""
+        from vllm.v1.core.kv_cache_retention import RetentionFreeBlockQueue
+
+        if not self.enable_caching or self._retention_queue is not None:
+            raise ValueError(
+                "Retention requires caching and can only be configured once"
+            )
+
+        def block_priority(block: KVCacheBlock) -> int:
+            values = []
+            if block.block_hash is not None:
+                value = priority(block.block_hash)
+                if value is not None:
+                    values.append(value)
+            for alias in self.cached_block_hashes_by_block.get(block.block_id, ()):
+                value = priority(alias)
+                if value is not None:
+                    values.append(value)
+            if copy_priority is not None:
+                value = copy_priority(block)
+                if value is not None:
+                    values.append(value)
+            return max(values, default=0)
+
+        def refresh() -> None:
+            assert self._retention_queue is not None
+            for key in synchronize():
+                for block in self.cached_block_hash_to_block.get_blocks(key):
+                    self._retention_queue.cache_changed(block)
+
+        self._retention_queue = RetentionFreeBlockQueue(
+            self.free_block_queue.get_all_free_blocks(),
+            self.blocks,
+            block_priority,
+            refresh,
+        )
+        self.free_block_queue = self._retention_queue
+        self._forget_priority = forget_priority
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -593,8 +675,13 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
+        if self._forget_priority is not None:
+            self._forget_priority(block)
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
+            if self._cache_counts is not None:
+                self._cache_counts[0] -= 1
+                self._cache_counts[1] -= block.ref_cnt == 0
             block_hashes.append(block.block_hash)
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
         if not block_hashes:
@@ -608,6 +695,8 @@ class BlockPool:
             ):
                 removed_hashes.append(block_hash)
         block.reset_hash()
+        if self._retention_queue is not None:
+            self._retention_queue.cache_changed(block)
         return removed_hashes
 
     def _emit_block_removed_events(
@@ -641,11 +730,29 @@ class BlockPool:
 
         if block.block_hash is None:
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
+            if self._cache_counts is not None:
+                self._cache_counts[0] += 1
+                self._cache_counts[1] += block.ref_cnt == 0
         else:
             self.cached_block_hashes_by_block.setdefault(block.block_id, set()).add(
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+        if self._retention_queue is not None:
+            self._retention_queue.cache_changed(block)
+
+    def cache_transferred_block(
+        self,
+        block: KVCacheBlock,
+        key: BlockHashWithGroupId,
+        num_tokens: int,
+    ) -> None:
+        """Publish an exclusively reserved destination after worker completion."""
+        assert self.enable_caching and self.blocks[block.block_id] is block
+        assert block.ref_cnt == 1 and not block.is_null
+        assert block.block_hash is None
+        assert block.block_id not in self.cached_block_hashes_by_block
+        self._insert_block_hash(key, block, num_tokens=num_tokens)
 
     def move_block_hashes(
         self,
@@ -725,6 +832,8 @@ class BlockPool:
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                if self._cache_counts is not None:
+                    self._cache_counts[1] += block.block_hash is not None
                 released.append(block)
         self.free_block_queue.append_n(released)
 
@@ -765,6 +874,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
+                if self._cache_counts is not None:
+                    self._cache_counts[1] -= block.block_hash is not None
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -797,6 +908,8 @@ class BlockPool:
                     blocks_to_evict_first.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
+                    if self._cache_counts is not None:
+                        self._cache_counts[1] += 1
                     blocks_to_evict_last.append(block)
 
         # Blocks to reuse first are prepended to the front of the free queue.
@@ -826,6 +939,57 @@ class BlockPool:
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
 
+    def evict_unreferenced(
+        self, keys: Iterable[BlockHashWithGroupId]
+    ) -> ScopedCacheEviction:
+        """Evict addressed copies without invalidating active or shared storage.
+
+        A page with unaddressed aliases cannot be reclaimed by this operation.
+        Evicted and blocked may both contain a key when it has multiple copies.
+        """
+        selected = set(keys)
+        missing = set()
+        candidates: dict[int, KVCacheBlock] = {}
+        for key in selected:
+            copies = self.cached_block_hash_to_block.get_blocks(key)
+            if not copies:
+                missing.add(key)
+            for block in copies:
+                candidates[block.block_id] = block
+        evicted: set[BlockHashWithGroupId] = set()
+        blocked: set[BlockHashWithGroupId] = set()
+        num_evicted_blocks = 0
+        for block in candidates.values():
+            hashes = set(self.cached_block_hashes_by_block.get(block.block_id, ()))
+            if block.block_hash is not None:
+                hashes.add(block.block_hash)
+            if (
+                block.ref_cnt != 0
+                or block.is_null
+                or block.block_id in self._reuse_watchers
+                or not hashes <= selected
+            ):
+                blocked.update(hashes & selected)
+                continue
+            if self.metrics_collector:
+                self.metrics_collector.on_block_evicted(block)
+            evicted.update(self._remove_cached_block_hashes(block))
+            num_evicted_blocks += 1
+        # One reclaimed duplicate is not removal of the logical cache entry.
+        self._emit_block_removed_events(
+            [
+                key
+                for key in evicted
+                if not self.cached_block_hash_to_block.get_blocks(key)
+            ]
+        )
+        return ScopedCacheEviction(
+            frozenset(evicted),
+            frozenset(blocked),
+            frozenset(missing),
+            num_evicted_blocks,
+        )
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
@@ -848,6 +1012,8 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        if self._cache_counts is not None:
+            self._cache_counts[:] = [0, 0]
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
@@ -855,7 +1021,12 @@ class BlockPool:
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
+            if self._forget_priority is not None:
+                self._forget_priority(block)
             block.reset_hash()
+
+        if self._retention_queue is not None:
+            self._retention_queue.rebuild()
 
         if self.metrics_collector:
             self.metrics_collector.reset()
@@ -875,6 +1046,27 @@ class BlockPool:
 
         """
         return self.free_block_queue.num_free_blocks
+
+    def get_cached_block_counts(self) -> tuple[int, int]:
+        """Count resident and reclaimable copies without double-counting aliases."""
+        if self._cache_counts is not None:
+            return self._cache_counts[0], self._cache_counts[1]
+        # Sparse caches benefit from traversing only hash entries. At higher
+        # occupancy a pool scan avoids per-key dispatch and alias traversal.
+        if len(self.cached_block_hash_to_block) * 4 < self.num_gpu_blocks:
+            return self.cached_block_hash_to_block.get_cached_block_counts()
+        return (
+            sum(b.block_hash is not None for b in self.blocks),
+            sum(b.block_hash is not None and b.ref_cnt == 0 for b in self.blocks),
+        )
+
+    def track_cached_block_counts(self) -> None:
+        """Enable incremental observations for the opt-in control runtime."""
+        if self._cache_counts is None:
+            self._cache_counts = list(self.get_cached_block_counts())
+
+    def eviction_priority(self, block: KVCacheBlock) -> int:
+        return self._retention_queue.priority(block) if self._retention_queue else 0
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

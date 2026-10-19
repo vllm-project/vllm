@@ -28,7 +28,7 @@ from kvcr.types import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
-from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -314,6 +314,35 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     # Here we verify that request cleanup discards the request-scoped hint in
     # KVCR.
     tier.on_request_finished(ctx)
+    assert kvcr.discard_hint_calls == ["req"]
+
+
+def test_kvcr_forwards_opaque_action_values_without_native_readiness(monkeypatch):
+    """Forward backend-owned actions verbatim and keep completion request-scoped."""
+    kvcr = RecordingKVCR()
+    tier = _make_tier(monkeypatch, kvcr)
+    hint = KvHintsEnvelope(
+        protocol_version="backend-future",
+        message_id="opaque",
+        actions=[
+            KvHintAction(
+                action_id="a",
+                action_type="backend.prefetch",
+                action_version="v9",
+                payload={"values": [None, True, 3.5, {"text": "值"}]},
+            )
+        ],
+    )
+    # Use the public wire conversion so this also covers tuple/list boundaries.
+    hint = msgspec.convert(msgspec.to_builtins(hint), type=KvHintsEnvelope)
+    before = msgspec.to_builtins(hint)
+    tier.on_new_request(ReqContext(req_id="req", kv_hints=hint))
+
+    assert kvcr.submit_hint_calls == [((), {"request_id": "req", "hints": before})]
+    assert not kvcr.deliver_calls
+    assert not kvcr.deposit_calls
+    assert list(tier.get_finished_jobs()) == []
+    tier.on_request_finished(ReqContext(req_id="req", kv_hints=hint))
     assert kvcr.discard_hint_calls == ["req"]
 
 

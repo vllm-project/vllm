@@ -1,0 +1,478 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Read-only policy observations and proposal-only startup extension points."""
+
+import math
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Literal, TypeAlias
+
+from vllm.v1.kv_hints.actions import (
+    CacheLocation,
+    CopyTo,
+    MoveTo,
+    Primitive,
+    SetPriority,
+)
+from vllm.v1.kv_hints.control import OperationResult
+from vllm.v1.kv_hints.native import (
+    ContentSpan,
+    DemotePayload,
+    EvictPayload,
+    HashTarget,
+    PrefetchPayload,
+    ReleasePayload,
+    RequestTarget,
+    RetainPayload,
+    SessionTarget,
+    SharePayload,
+    SignalPayload,
+    Target,
+)
+
+PolicyAction: TypeAlias = (
+    RetainPayload
+    | ReleasePayload
+    | EvictPayload
+    | DemotePayload
+    | PrefetchPayload
+    | SharePayload
+    | Primitive
+)
+
+
+@dataclass(frozen=True)
+class RequestDemand:
+    request_id: str
+    session_id: str | None
+    waiting_seconds: float
+    arrival_order: int
+    waiting: bool
+    held_blocks: int
+    estimated_blocks: int
+    remaining_output_tokens: int = 0
+    cached_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class CacheObservation:
+    now: float
+    total_blocks: int
+    free_blocks: int
+    referenced_blocks: int
+    load_reservations: int
+    transfer_source_blocks: int
+    retention_declarations: int
+    requests: tuple[RequestDemand, ...]
+    session_blocks: tuple[tuple[str | None, int], ...]
+    truncated_requests: bool = False
+    cached_blocks: int = 0
+    reclaimable_cached_blocks: int = 0
+    pending_policy_actions: int = 0
+
+
+@dataclass(frozen=True)
+class PolicySignal:
+    payload: SignalPayload
+    target: Target
+    owner_id: str
+    request_id: str | None
+
+
+@dataclass(frozen=True)
+class PolicyProposal:
+    action: PolicyAction
+    not_before: float = 0.0
+    content_keys: frozenset[tuple[int, str]] = frozenset()
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    proposals: tuple[PolicyProposal, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestGuidance:
+    request_id: str
+    admit: bool = True
+    score: float = 0.0
+    reason: str = ""
+
+
+class KVPolicy:
+    """Policies receive values, never a scheduler, allocator or connector."""
+
+    uses_scheduler_guidance = False
+
+    def on_signal(
+        self,
+        signal: PolicySignal,
+        view: CacheObservation,
+    ) -> PolicyDecision | None:
+        return None
+
+    def guidance(self, view: CacheObservation) -> tuple[RequestGuidance, ...]:
+        return ()
+
+    def cleanup(self, owners: tuple[str, ...]) -> None:
+        pass
+
+    def on_result(
+        self,
+        action: PolicyAction,
+        result: OperationResult,
+        *,
+        owner_id: str,
+        owners: tuple[str, ...],
+        elapsed_seconds: float,
+    ) -> None:
+        """Observe completed proposals without obtaining allocator access."""
+        pass
+
+
+def _positive(value: float, name: str) -> None:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be positive and finite")
+
+
+class RetentionPolicy(KVPolicy):
+    def __init__(self, priority: int = 50, ttl_seconds: float = 30.0):
+        if type(priority) is not int or not 0 <= priority <= 100:
+            raise ValueError("Retention priority must be between 0 and 100")
+        _positive(ttl_seconds, "ttl_seconds")
+        self.priority = priority
+        self.ttl_seconds = ttl_seconds
+        self._revision = 0
+
+    def on_signal(
+        self, signal: PolicySignal, view: CacheObservation
+    ) -> PolicyDecision | None:
+        payload = signal.payload
+        if payload.signal not in ("importance", "resume"):
+            return None
+        priority = (
+            payload.importance if payload.importance is not None else self.priority
+        )
+        self._revision += 1
+        return PolicyDecision(
+            (
+                PolicyProposal(
+                    SetPriority(
+                        signal.target,
+                        "local_g1",
+                        signal.owner_id,
+                        self._revision,
+                        priority,
+                        self.ttl_seconds,
+                    )
+                ),
+            )
+        )
+
+
+class ToolWaitPolicy(KVPolicy):
+    def __init__(
+        self,
+        tier: Literal["cpu", "mooncake"] = "mooncake",
+        lead_seconds: float = 0.1,
+        min_pressure: float = 0.0,
+        max_stored_blocks: int = 16384,
+    ):
+        if tier not in ("cpu", "mooncake"):
+            raise ValueError("Movement policy requires CPU or Mooncake")
+        if not math.isfinite(lead_seconds) or lead_seconds < 0:
+            raise ValueError("lead_seconds must be nonnegative and finite")
+        if not math.isfinite(min_pressure) or not 0 <= min_pressure <= 1:
+            raise ValueError("min_pressure must be between zero and one")
+        self.tier = tier
+        self.lead_seconds = lead_seconds
+        self.min_pressure = min_pressure
+        if type(max_stored_blocks) is not int or max_stored_blocks < 1:
+            raise ValueError("max_stored_blocks must be positive")
+        self.max_stored_blocks = max_stored_blocks
+        self._stored: OrderedDict[str, tuple[HashTarget, tuple[str, ...], int]] = (
+            OrderedDict()
+        )
+        self._stored_blocks = 0
+        self._copy_seconds_per_byte: float | None = None
+
+    def on_result(
+        self,
+        action: PolicyAction,
+        result: OperationResult,
+        *,
+        owner_id: str,
+        owners: tuple[str, ...],
+        elapsed_seconds: float,
+    ) -> None:
+        if (
+            isinstance(action, CopyTo)
+            and action.dst.tier == "gpu"
+            and result.transferred_bytes
+            and "gpu_content_registered" in result.completed_steps
+            and elapsed_seconds > 0
+        ):
+            observed = elapsed_seconds / result.transferred_bytes
+            previous = self._copy_seconds_per_byte
+            self._copy_seconds_per_byte = (
+                observed if previous is None else 0.75 * previous + 0.25 * observed
+            )
+        if not isinstance(action, MoveTo) or result.namespace is None:
+            return
+        blocks = tuple(
+            ContentSpan(o.block_hash, o.group_id, o.start_token, o.end_token)
+            for o in result.target_outcomes
+            if (
+                o.block_hash is not None
+                and o.group_id is not None
+                and "cold_copy_stored" in o.completed_steps
+            )
+        )
+        if not blocks or len(blocks) > self.max_stored_blocks:
+            return
+        key = owner_id
+        previous_stored = self._stored.pop(key, None)
+        if previous_stored is not None:
+            self._stored_blocks -= len(previous_stored[0].blocks)
+        while self._stored_blocks + len(blocks) > self.max_stored_blocks:
+            _, entry = self._stored.popitem(last=False)
+            self._stored_blocks -= len(entry[0].blocks)
+        self._stored[key] = (
+            HashTarget(result.namespace, blocks),
+            owners,
+            result.transferred_bytes,
+        )
+        self._stored_blocks += len(blocks)
+
+    def cleanup(self, owners: tuple[str, ...]) -> None:
+        for key, entry in tuple(self._stored.items()):
+            if set(owners).intersection(entry[1]):
+                del self._stored[key]
+                self._stored_blocks -= len(entry[0].blocks)
+
+    def on_signal(
+        self, signal: PolicySignal, view: CacheObservation
+    ) -> PolicyDecision | None:
+        payload = signal.payload
+        if payload.signal == "tool_wait":
+            projected = view.referenced_blocks + sum(
+                max(0, r.estimated_blocks - r.held_blocks) for r in view.requests
+            )
+            if projected < self.min_pressure * view.total_blocks:
+                return PolicyDecision()
+            return PolicyDecision(
+                (
+                    PolicyProposal(
+                        MoveTo(
+                            signal.target,
+                            CacheLocation("gpu"),
+                            CacheLocation(self.tier),
+                        )
+                    ),
+                )
+            )
+        stored = self._stored.get(signal.owner_id)
+        load_target = signal.target if stored is None else stored[0]
+        lead = self.lead_seconds
+        if stored is not None and self._copy_seconds_per_byte is not None:
+            lead = max(lead, stored[2] * self._copy_seconds_per_byte)
+        if payload.signal == "resume":
+            return PolicyDecision(
+                (
+                    PolicyProposal(
+                        CopyTo(
+                            load_target,
+                            CacheLocation(self.tier),
+                            CacheLocation("gpu"),
+                        )
+                    ),
+                )
+            )
+        if (
+            payload.signal == "resume_prediction"
+            and payload.resume_after_seconds is not None
+        ):
+            return PolicyDecision(
+                (
+                    PolicyProposal(
+                        CopyTo(
+                            load_target,
+                            CacheLocation(self.tier),
+                            CacheLocation("gpu"),
+                        ),
+                        view.now + max(0.0, payload.resume_after_seconds - lead),
+                    ),
+                )
+            )
+        return None
+
+
+class QuotaPolicy(KVPolicy):
+    uses_scheduler_guidance = True
+
+    def __init__(
+        self,
+        shares: dict[str, float] | None = None,
+        max_wait_seconds: float = 1.0,
+        aging_seconds: float = 1.0,
+        importance_ttl: float = 60.0,
+        max_states: int = 4096,
+        reserve_running_growth: bool = False,
+        borrow_idle_capacity: bool = False,
+        reuse_score_weight: float = 0.0,
+    ):
+        self.shares = dict(shares or {})
+        for share in self.shares.values():
+            _positive(share, "share")
+        for value, name in (
+            (max_wait_seconds, "max_wait_seconds"),
+            (aging_seconds, "aging_seconds"),
+            (importance_ttl, "importance_ttl"),
+        ):
+            _positive(value, name)
+        if type(max_states) is not int or max_states < 1:
+            raise ValueError("max_states must be positive")
+        self.max_wait_seconds = max_wait_seconds
+        self.aging_seconds = aging_seconds
+        self.importance_ttl = importance_ttl
+        self.max_states = max_states
+        self.reserve_running_growth = reserve_running_growth
+        self.borrow_idle_capacity = borrow_idle_capacity
+        if not math.isfinite(reuse_score_weight) or reuse_score_weight < 0:
+            raise ValueError("reuse_score_weight must be nonnegative and finite")
+        self.reuse_score_weight = reuse_score_weight
+        self._importance: dict[tuple[str, str], tuple[int, float]] = {}
+
+    def _expire(self, now: float) -> None:
+        self._importance = {
+            key: item for key, item in self._importance.items() if item[1] > now
+        }
+
+    def on_signal(
+        self, signal: PolicySignal, view: CacheObservation
+    ) -> PolicyDecision | None:
+        if signal.payload.signal != "importance" or signal.payload.importance is None:
+            return None
+        target = signal.payload.target
+        if isinstance(target, SessionTarget):
+            key = "session", target.session_id
+        elif isinstance(target, RequestTarget) and signal.request_id is not None:
+            key = "request", signal.request_id
+        else:
+            return None
+        self._expire(view.now)
+        if key not in self._importance and len(self._importance) >= self.max_states:
+            raise ValueError("Quota importance state capacity exhausted")
+        self._importance[key] = (
+            signal.payload.importance,
+            view.now + self.importance_ttl,
+        )
+        return PolicyDecision()
+
+    def guidance(self, view: CacheObservation) -> tuple[RequestGuidance, ...]:
+        self._expire(view.now)
+        weights = dict(self.shares)
+        for request in view.requests:
+            weights.setdefault(request.session_id or "", 1.0)
+        total_weight = sum(weights.values()) or 1.0
+        occupied = dict(view.session_blocks)
+        growth = sum(
+            max(0, r.estimated_blocks - r.held_blocks)
+            for r in view.requests
+            if not r.waiting
+        )
+        result = []
+        for request in view.requests:
+            if not request.waiting:
+                continue
+            share = weights[request.session_id or ""] / total_weight
+            demand = occupied.get(request.session_id, 0) + max(
+                0, request.estimated_blocks - request.held_blocks
+            )
+            admit = request.waiting_seconds >= self.max_wait_seconds or demand <= max(
+                1, int(view.total_blocks * share)
+            )
+            available = max(0, view.free_blocks - growth)
+            additional = max(0, request.estimated_blocks - request.held_blocks)
+            if (
+                self.borrow_idle_capacity
+                and not occupied.get(request.session_id, 0)
+                and additional <= available
+            ):
+                admit = True
+            if self.reserve_running_growth:
+                admit = admit and additional <= available
+            importance = max(
+                self._importance.get(("request", request.request_id), (0, 0))[0],
+                self._importance.get(("session", request.session_id or ""), (0, 0))[0],
+            )
+            score = importance / 100 + request.waiting_seconds / self.aging_seconds
+            score += self.reuse_score_weight * request.cached_tokens / 1024
+            result.append(
+                RequestGuidance(
+                    request.request_id,
+                    admit,
+                    score,
+                    "" if admit else "Session quota",
+                )
+            )
+        return tuple(result)
+
+    def cleanup(self, owners: tuple[str, ...]) -> None:
+        for owner in owners:
+            self._importance.pop(("session", owner), None)
+
+
+def placement(action: object) -> str:
+    if isinstance(action, (RetainPayload, PrefetchPayload)):
+        return "gpu"
+    if isinstance(action, SetPriority):
+        return "gpu" if action.value is not None else ""
+    if isinstance(action, CopyTo):
+        return "gpu" if action.dst.tier == "gpu" else ""
+    if isinstance(action, (DemotePayload, MoveTo)):
+        return "cold"
+    return "evict" if isinstance(action, EvictPayload) else ""
+
+
+class KVPlanComposer:
+    """Compose advisory scores; physical conflicts remain engine-checked."""
+
+    def compose(
+        self, proposals: tuple[PolicyProposal, ...], view: CacheObservation
+    ) -> tuple[bool, ...]:
+        """Select compatible proposals in configured policy order."""
+        accepted: list[tuple[frozenset[tuple[int, str]], str]] = []
+        choices = []
+        for proposal in proposals:
+            action = proposal.action
+            keys = proposal.content_keys
+            destination = placement(action)
+            conflict = bool(destination) and any(
+                keys.intersection(previous) and destination != previous_destination
+                for previous, previous_destination in accepted
+            )
+            choices.append(not conflict)
+            if destination and not conflict:
+                accepted.append((keys, destination))
+        return tuple(choices)
+
+    def combine(
+        self, guidance: tuple[RequestGuidance, ...]
+    ) -> tuple[RequestGuidance, ...]:
+        merged: dict[str, RequestGuidance] = {}
+        for proposal in guidance:
+            if not math.isfinite(proposal.score):
+                raise ValueError("Policy scores must be finite")
+            previous = merged.get(proposal.request_id)
+            merged[proposal.request_id] = (
+                proposal
+                if previous is None
+                else RequestGuidance(
+                    proposal.request_id,
+                    previous.admit and proposal.admit,
+                    previous.score + proposal.score,
+                    previous.reason or proposal.reason,
+                )
+            )
+        return tuple(merged.values())

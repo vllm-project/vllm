@@ -216,6 +216,22 @@ class EngineCoreClient(ABC):
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
+    def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        raise NotImplementedError
+
+    async def get_kv_control_capabilities_async(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def kv_control_async(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
@@ -379,6 +395,27 @@ class InprocClient(EngineCoreClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
+
+    def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        caps = self.engine_core.get_kv_control_capabilities()
+        return [] if caps is None else [caps]
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        from vllm.v1.kv_hints.api import unwrap_control_reply
+
+        result = unwrap_control_reply(
+            self.engine_core.kv_control(method, invocation, payload)
+        )
+        scheduler = self.engine_core.scheduler
+        if not scheduler.has_unfinished_requests() and (
+            scheduler.has_requests() or self.engine_core.has_pending_kv_control()
+        ):
+            # This client has no busy loop. Control polling cooperatively drains
+            # connector work without creating an inference request.
+            self.get_output()
+        return result
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
@@ -1010,6 +1047,19 @@ class SyncMPClient(MPClient):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
 
+    def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        caps = self.call_utility("get_kv_control_capabilities")
+        return [] if caps is None else [caps]
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        from vllm.v1.kv_hints.api import unwrap_control_reply
+
+        return unwrap_control_reply(
+            self.call_utility("kv_control", method, invocation, payload)
+        )
+
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
@@ -1255,6 +1305,50 @@ class AsyncMPClient(MPClient):
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
+
+    async def get_kv_control_capabilities_async(self) -> list[dict[str, Any]]:
+        from vllm.v1.kv_hints.control import ControlError
+
+        engines = tuple(self.core_engines)
+        replies = await asyncio.gather(
+            *[
+                self._call_utility_async("get_kv_control_capabilities", engine=engine)
+                for engine in engines
+            ]
+        )
+        routes: dict[str, EngineIdentity] = {}
+        capabilities = []
+        for engine, caps in zip(engines, replies, strict=True):
+            if caps is None:
+                continue
+            if caps["engine_id"] in routes:
+                raise ControlError(
+                    "conflict", "Discovered duplicate control engine IDs"
+                )
+            routes[caps["engine_id"]] = engine
+            capabilities.append(caps)
+        self._kv_control_routes = routes
+        return capabilities
+
+    async def kv_control_async(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        from vllm.v1.kv_hints.api import unwrap_control_reply
+        from vllm.v1.kv_hints.control import ControlError
+
+        engine_id = invocation.get("engine_id")
+        if not isinstance(engine_id, str):
+            raise ControlError("invalid_payload", "Control requires a string engine_id")
+        routes = getattr(self, "_kv_control_routes", {})
+        if engine_id not in routes or routes[engine_id] not in self.core_engines:
+            await self.get_kv_control_capabilities_async()
+            routes = self._kv_control_routes
+        if engine_id not in routes:
+            raise ControlError("wrong_engine", "Control engine is not connected")
+        reply = await self._call_utility_async(
+            "kv_control", method, invocation, payload, engine=routes[engine_id]
+        )
+        return unwrap_control_reply(reply)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index

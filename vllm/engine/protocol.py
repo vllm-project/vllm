@@ -181,6 +181,16 @@ class EngineClient(ABC):
         """Reset the encoder cache."""
         ...
 
+    async def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        """Discover connected engines and their supported programmable KV scope."""
+        raise NotImplementedError
+
+    async def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        """Submit/query KV control using an explicitly discovered engine and epoch."""
+        raise NotImplementedError
+
     @abstractmethod
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

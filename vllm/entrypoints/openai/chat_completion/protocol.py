@@ -30,6 +30,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
+    KvHintsField,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
@@ -218,6 +219,16 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
+    kv_hints: KvHintsField | None = None
+
+    @model_validator(mode="after")
+    def check_kv_hints_scope(self):
+        if self.kv_hints is not None and (self.n != 1 or self.use_beam_search):
+            raise ValueError(
+                "Request-attached KV hints require n=1 without beam search"
+            )
+        return self
+
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]

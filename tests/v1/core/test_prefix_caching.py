@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import random
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -14,6 +15,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config.kv_control import KVControlConfig, KVPolicyConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -40,6 +42,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferError
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -66,6 +69,15 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_hints.control import ControlContext, OperationRegistry, OperationStatus
+from vllm.v1.kv_hints.controller import NativeKVController
+from vllm.v1.kv_hints.native import ContentSpan, HashTarget, RetainPayload
+from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
+from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_hints.resources import KVResourceController, KVRetentionPriority
+from vllm.v1.kv_hints.retention import RetentionDeclarations
+from vllm.v1.kv_hints.state import SessionPrefixIndex
+from vllm.v1.kv_hints.transfers import KVTransferCompletion
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -3774,6 +3786,27 @@ def test_emit_cached_block_events():
     assert event.session_id == "agent-session-reuse"
 
 
+def test_advisory_lookup_preserves_hits_without_reporting_application_reuse():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, num_blocks=10),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
+    source = make_request("source", list(range(32)), 16, sha256)
+    assert manager.allocate_slots(source, 32) is not None
+    manager.free(source)
+    list(manager.take_events())
+
+    resumed = make_request("resumed", list(range(33)), 16, sha256)
+    resumed.kv_cache_report_mode = "full"
+    assert manager.get_computed_blocks(resumed, emit_events=False)[1] == 32
+    assert not list(manager.take_events())
+    assert manager.get_computed_blocks(resumed)[1] == 32
+    assert any(isinstance(event, BlockStored) for event in manager.take_events())
+
+
 def test_emit_cached_block_events_disabled():
     """No events are emitted when enable_kv_cache_events is False."""
     block_size = 4
@@ -5968,3 +6001,1442 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def make_retention_pool(num_blocks=3, *, extra_free=0, block_size=4):
+    now = [100.0]
+    pool = BlockPool(
+        num_blocks + extra_free + 1, enable_caching=True, hash_block_size=4
+    )
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index, clock=lambda: now[0])
+    KVRetentionPriority(pool, declarations)
+    request = make_request(
+        "retained", list(range(num_blocks * block_size)), block_size=4, hash_fn=sha256
+    )
+    blocks = pool.get_new_blocks(num_blocks)
+    pool.cache_full_blocks(request, blocks, 0, num_blocks, block_size, 0)
+    pool.free_blocks(blocks)
+    return pool, declarations, now, request, blocks
+
+
+def retain_cached(declarations, request, position, priority, ttl=None, owner="owner"):
+    return declarations.retain(
+        RetainPayload(
+            HashTarget(
+                "namespace",
+                (
+                    ContentSpan(
+                        request.block_hashes[position].hex(),
+                        0,
+                        position * 4,
+                        (position + 1) * 4,
+                    ),
+                ),
+            ),
+            owner,
+            str(position),
+            priority,
+            ttl,
+        )
+    )
+
+
+def test_retention_bias_changes_eviction_order_without_pinning():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    retain_cached(declarations, request, 1, 10)
+    assert all(block.ref_cnt == 0 for block in blocks)
+    assert pool.get_num_free_blocks() == 3
+    assert pool.get_new_blocks(2) == [blocks[2], blocks[1]]
+    assert blocks[0].block_hash is not None
+    assert pool.get_new_blocks(1) == [blocks[0]]
+    assert all(block.ref_cnt == 1 for block in blocks)
+
+
+def test_independent_retention_expiry_is_applied_before_pool_allocation():
+    pool, declarations, now, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90, ttl=5, owner="high")
+    retain_cached(declarations, request, 0, 20, ttl=20, owner="low")
+    retain_cached(declarations, request, 1, 30)
+    retain_cached(declarations, request, 2, 10)
+    now[0] += 5
+    assert pool.get_new_blocks(1) == [blocks[2]]
+    assert pool.get_new_blocks(1) == [blocks[0]]
+    assert declarations.get("low", "0") is not None
+
+
+def test_retention_never_selects_active_references_and_keeps_lifo_for_unhashed_blocks():
+    pool, _, _, _, blocks = make_retention_pool()
+    pool.touch([blocks[0]])
+    assert pool.get_new_blocks(2) == blocks[1:]
+    pool.free_blocks([blocks[1], blocks[0], blocks[2]])
+    assert pool.get_new_blocks(3) == [blocks[1], blocks[2], blocks[0]]
+
+
+def test_retention_applies_to_a_new_partial_alias_on_an_idle_cached_copy():
+    pool, declarations, _, request, blocks = make_retention_pool(
+        extra_free=1, block_size=8
+    )
+    retain_cached(declarations, request, 0, 90)
+    # Refresh the declaration view while this partial hash has no GPU entry.
+    unused = pool.get_new_blocks(1)[0]
+    assert unused not in blocks
+    pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    assert pool.get_new_blocks(2) == blocks[1:]
+    assert blocks[0].block_hash is not None
+
+
+@pytest.mark.parametrize("extra_free", [1, 100])
+@pytest.mark.parametrize("incremental", [False, True])
+def test_policy_occupancy_counts_shared_copies_once_per_block_and_excludes_aliases(
+    extra_free,
+    incremental,
+):
+    pool, _, _, request, blocks = make_retention_pool(
+        num_blocks=1, extra_free=extra_free, block_size=8
+    )
+    if incremental:
+        pool.track_cached_block_counts()
+    copy = pool.get_new_blocks(1)[0]
+    pool.cache_full_blocks(request, [copy], 0, 1, 8, 0)
+    pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    assert pool.get_cached_block_counts() == (2, 1)
+    pool.free_blocks([copy])
+    assert pool.get_cached_block_counts() == (2, 2)
+    pool.evict_blocks({copy.block_id})
+    assert pool.get_cached_block_counts() == (1, 1)
+    pool.touch([blocks[0]])
+    assert pool.get_cached_block_counts() == (1, 0)
+    pool.unpin_blocks([blocks[0]], lambda block: None)
+    assert pool.get_cached_block_counts() == (1, 1)
+    assert pool.reset_prefix_cache()
+    assert pool.get_cached_block_counts() == (0, 0)
+
+
+def test_cache_reset_cannot_leave_priority_on_a_reused_physical_block():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    chosen = pool.get_new_blocks(1)
+    assert chosen == [blocks[1]]
+    pool.free_blocks(chosen)
+    order = pool.free_block_queue.get_all_free_blocks()
+    assert pool.reset_prefix_cache()
+    assert pool.get_new_blocks(3) == order
+    assert all(block.block_hash is None for block in blocks)
+
+
+def test_evicted_idle_copy_loses_its_heap_priority_before_reallocation():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    # Populate the priority view without consuming this retained copy.
+    assert pool.get_new_blocks(1) == [blocks[1]]
+    pool.evict_blocks({blocks[0].block_id})
+    assert pool.get_new_blocks(1) == [blocks[0]]
+
+
+def test_retention_reuse_still_notifies_unpinned_transfer_readers():
+    pool, declarations, _, request, blocks = make_retention_pool()
+    retain_cached(declarations, request, 0, 90)
+    pool.touch([blocks[1]])
+    reused = []
+    pool.unpin_blocks([blocks[1]], lambda block: reused.append(block.block_id))
+    chosen = pool.get_new_blocks(3)
+    assert set(b.block_id for b in chosen) == set(b.block_id for b in blocks)
+    assert reused == [blocks[1].block_id]
+
+
+def test_scoped_eviction_preserves_active_copies_and_reports_partial_effects():
+    pool, _, _, request, blocks = make_retention_pool()
+    keys = [make_block_hash_with_group_id(h, 0) for h in request.block_hashes]
+    pool.touch([blocks[0]])
+    missing = make_block_hash_with_group_id(BlockHash(b"missing"), 0)
+    result = pool.evict_unreferenced([*keys, missing])
+    assert result.blocked == {keys[0]}
+    assert result.evicted == set(keys[1:])
+    assert result.missing == {missing}
+    assert result.num_evicted_blocks == 2
+    assert blocks[0].ref_cnt == 1 and blocks[0].block_hash == keys[0]
+    assert pool.get_num_free_blocks() == 2
+
+
+def test_scoped_eviction_keeps_an_unaddressed_partial_alias():
+    pool, _, _, request, blocks = make_retention_pool(block_size=8)
+    alias = pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    primary = blocks[0].block_hash
+    assert primary is not None and alias is not None
+    partial = pool.evict_unreferenced([primary])
+    assert partial.blocked == {primary}
+    assert partial.num_evicted_blocks == 0
+    assert pool.get_cached_block(request.block_hashes[0], [0]) == [blocks[0]]
+    whole = pool.evict_unreferenced([primary, alias])
+    assert whole.evicted == {primary, alias}
+    assert whole.num_evicted_blocks == 1
+
+
+def test_scoped_eviction_does_not_announce_removal_while_a_duplicate_is_active():
+    pool = BlockPool(
+        4, enable_caching=True, hash_block_size=4, enable_kv_cache_events=True
+    )
+    request = make_request("duplicated", [1, 2, 3, 4], block_size=4, hash_fn=sha256)
+    copies = pool.get_new_blocks(2)
+    for block in copies:
+        pool.cache_full_blocks(request, [block], 0, 1, 4, 0)
+    pool.free_blocks([copies[0]])
+    pool.take_events()
+    key = make_block_hash_with_group_id(request.block_hashes[0], 0)
+    partial = pool.evict_unreferenced([key])
+    assert partial.evicted == partial.blocked == {key}
+    assert partial.num_evicted_blocks == 1
+    assert pool.get_cached_block(request.block_hashes[0], [0]) == [copies[1]]
+    assert pool.take_events() == []
+    pool.free_blocks([copies[1]])
+    assert pool.evict_unreferenced([key]).num_evicted_blocks == 1
+    assert len(pool.take_events()) == 1
+
+
+def test_scoped_eviction_does_not_abandon_an_unpinned_source_reader():
+    pool, _, _, request, blocks = make_retention_pool()
+    pool.touch([blocks[0]])
+    reused = []
+    pool.unpin_blocks([blocks[0]], lambda block: reused.append(block.block_id))
+    key = make_block_hash_with_group_id(request.block_hashes[0], 0)
+    result = pool.evict_unreferenced([key])
+    assert result.blocked == {key}
+    assert result.num_evicted_blocks == 0
+    assert reused == []
+    assert blocks[0].block_hash == key
+
+
+def test_native_evict_reports_actual_effects_from_the_existing_manager():
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    resources = KVResourceController(manager, registry, declarations)
+    controller = NativeKVController(registry, index, declarations, executor=resources)
+    request = make_request("request", list(range(12)), block_size=4, hash_fn=sha256)
+    pool = manager.block_pool
+    blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(request, blocks, 0, 3, 4, 0)
+    pool.free_blocks(blocks)
+    pool.touch([blocks[0]])
+    target = {
+        "kind": "hashes",
+        "namespace": "namespace",
+        "blocks": [
+            {
+                "block_hash": h.hex(),
+                "group_id": 0,
+                "start_token": i * 4,
+                "end_token": (i + 1) * 4,
+            }
+            for i, h in enumerate(request.block_hashes)
+        ],
+    }
+    hint = KvHintsEnvelope(
+        "0.1", "evict", [KvHintAction("action", "evict", "1", {"target": target})]
+    )
+    result = controller.submit(
+        hint, ControlContext("engine", "epoch", "native")
+    ).results[0]
+    assert result.status == OperationStatus.PARTIAL
+    assert result.affected_blocks == 2 and result.blocked_targets == 1
+    assert result.missing_targets == 0
+    assert blocks[0].ref_cnt == 1 and blocks[0].block_hash is not None
+    assert all(block.block_hash is None for block in blocks[1:])
+
+
+def test_native_retention_rejects_an_unconfigured_group_before_changing_state():
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    controller = NativeKVController(
+        registry,
+        index,
+        declarations,
+        executor=KVResourceController(manager, registry, declarations),
+    )
+    hint = KvHintsEnvelope(
+        "0.1",
+        "retain",
+        [
+            KvHintAction(
+                "action",
+                "retain",
+                "1",
+                {
+                    "owner_id": "s",
+                    "declaration_id": "d",
+                    "priority": 90,
+                    "target": {
+                        "kind": "hashes",
+                        "namespace": "namespace",
+                        "blocks": [
+                            {
+                                "block_hash": "0011",
+                                "group_id": 1,
+                                "start_token": 0,
+                                "end_token": 4,
+                            }
+                        ],
+                    },
+                },
+            )
+        ],
+    )
+    result = controller.submit(
+        hint, ControlContext("engine", "epoch", "native")
+    ).results[0]
+    assert result.status == OperationStatus.UNSUPPORTED
+    assert declarations.get("s", "d") is None
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("seed", [0, 73, 311])
+def test_retention_allocation_interleavings_match_priority_then_existing_queue_order(
+    seed,
+):
+    pool, declarations, now, request, _ = make_retention_pool(num_blocks=12)
+    rng = random.Random(seed)
+    allocated: list[KVCacheBlock] = []
+    for _ in range(250):
+        action = rng.randrange(4)
+        if action == 0:
+            retain_cached(
+                declarations,
+                request,
+                rng.randrange(12),
+                rng.randrange(101),
+                ttl=rng.randrange(1, 10),
+            )
+        elif action == 1 and allocated:
+            block = allocated.pop(rng.randrange(len(allocated)))
+            if rng.randrange(2):
+                position = rng.randrange(12)
+                pool.cache_full_blocks(
+                    request,
+                    [pool.null_block] * position + [block],
+                    position,
+                    position + 1,
+                    4,
+                    0,
+                )
+            pool.free_blocks([block])
+        elif action == 2 and pool.get_num_free_blocks():
+            free = pool.free_block_queue.get_all_free_blocks()
+
+            def expected_priority(block):
+                if block.block_hash is None:
+                    return 0
+                return declarations.priority(
+                    get_group_id(block.block_hash),
+                    get_block_hash(block.block_hash).hex(),
+                )
+
+            count = rng.randrange(1, min(3, len(free)) + 1)
+            expected = sorted(free, key=expected_priority)[:count]
+            actual = pool.get_new_blocks(count)
+            assert actual == expected
+            assert all(block.ref_cnt == 1 for block in actual)
+            allocated.extend(actual)
+            assert len({block.block_id for block in allocated}) == len(allocated)
+        else:
+            now[0] += 1
+        assert pool.get_num_free_blocks() + len(allocated) == 12
+
+
+def make_transfer_manager(num_blocks=4, watermark=0.0):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(4, num_blocks),
+        max_model_len=64,
+        hash_block_size=4,
+        watermark=watermark,
+    )
+    request = make_request("transfer", list(range(13)), 4, sha256)
+    keys = [make_block_hash_with_group_id(h, 0) for h in request.block_hashes]
+    return manager, manager.get_transfer_manager(), request, keys
+
+
+def test_request_free_load_is_shared_and_visible_only_after_completion():
+    manager, transfers, request, keys = make_transfer_manager()
+    lease, created = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and created
+    shared, created = transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert shared is lease and not created
+    transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert transfers.start(lease)
+    assert not transfers.start(lease)
+    transfers.cancel(lease, 10)
+    assert transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert transfers.acquire("load", keys[0], 4, 12, scope="cpu") == (None, False)
+    assert not transfers.complete(lease, success=True)
+    assert manager.block_pool.blocks[lease.block_id].ref_cnt == 0
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_cancelled_load_retains_worker_buffer_until_drained(started):
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=2)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None
+    if started:
+        assert transfers.start(lease)
+    transfers.cancel(lease, 10)
+    assert manager.block_pool.get_num_free_blocks() == (0 if started else 1)
+    if started:
+        with pytest.raises(KVCacheTransferError, match="draining"):
+            transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert not transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.block_pool.get_num_free_blocks() == 1
+    replacement, _ = transfers.acquire("load", keys[0], 4, 12, scope="cpu")
+    assert replacement is not None and replacement.transfer_id != lease.transfer_id
+    assert not transfers.complete(lease, success=True)
+    assert manager.block_pool.get_num_free_blocks() == 0
+    transfers.cancel(replacement, 12)
+
+
+def test_reset_invalidates_transfer_but_does_not_reuse_its_buffer():
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=2)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and transfers.start(lease)
+    assert not manager.reset_prefix_cache()
+    assert manager.block_pool.get_num_free_blocks() == 0
+    assert not transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.reset_prefix_cache()
+    assert not transfers.has_pending
+    assert manager.block_pool.get_num_free_blocks() == 1
+
+
+def test_load_budget_counts_shared_work_once_and_preserves_inference_capacity():
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=4)
+    transfers.max_load_blocks = 1
+    first, created = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert first is not None and created
+    shared, created = transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert shared == first and not created
+    with pytest.raises(KVCacheTransferError, match="load budget"):
+        transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert transfers.start(first)
+    assert transfers.complete(first, success=True)
+    second, created = transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    assert second is not None and created
+
+
+def test_transfer_sources_keep_request_references_and_independent_destinations():
+    manager, transfers, request, keys = make_transfer_manager()
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    block = blocks.blocks[0][0]
+    lease, _ = transfers.acquire("store", keys[0], 4, 10, scope="cpu")
+    other, created = transfers.acquire("store", keys[0], 4, 11, scope="mooncake")
+    assert lease is not None and other is not None and created
+    assert lease.block_id == other.block_id and lease.transfer_id != other.transfer_id
+    assert block.ref_cnt == 3
+    assert transfers.start(lease) and transfers.start(other)
+    transfers.cancel(lease, 10)
+    manager.free(request)
+    assert block.ref_cnt == 2
+    assert manager.block_pool.evict_unreferenced({keys[0]}).blocked == {keys[0]}
+    assert not transfers.complete(lease, success=True)
+    assert block.ref_cnt == 1
+    assert transfers.complete(other, success=True)
+    assert block.ref_cnt == 0
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_transfer_admission_respects_watermark_and_competing_source():
+    manager, transfers, _, keys = make_transfer_manager(num_blocks=4, watermark=0.5)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None
+    with pytest.raises(KVCacheTransferError, match="Another source"):
+        transfers.acquire("load", keys[0], 4, 11, scope="mooncake")
+    with pytest.raises(KVCacheTransferError, match="capacity"):
+        transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    with pytest.raises(KVCacheTransferError, match="Conflicting coordinates"):
+        transfers.acquire("load", keys[0], 8, 13, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    transfers.cancel(lease, 10)
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_transfer_publication_preserves_concurrently_computed_copy(success):
+    manager, transfers, request, keys = make_transfer_manager()
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and transfers.start(lease)
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    computed = blocks.blocks[0][0]
+    assert transfers.complete(lease, success=success) == success
+    assert computed.ref_cnt == 1 and computed.block_hash == keys[0]
+    assert len(manager.block_pool.cached_block_hash_to_block.get_blocks(keys[0])) == (
+        2 if success else 1
+    )
+    manager.free(request)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("group,num_tokens", [(1, 4), (0, 0), (0, 3), (0, 68)])
+def test_invalid_transfer_scope_does_not_allocate(group, num_tokens):
+    manager, transfers, request, _ = make_transfer_manager()
+    key = make_block_hash_with_group_id(request.block_hashes[0], group)
+    with pytest.raises(KVCacheTransferError):
+        transfers.acquire("load", key, num_tokens, 10, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert not transfers.has_pending
+
+
+@pytest.mark.parametrize("last_group_success", [False, True])
+def test_transferred_hybrid_prefix_requires_each_group(last_group_success):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(4, 8, 2, second_spec_type="mamba"),
+        max_model_len=64,
+        hash_block_size=4,
+    )
+    transfers = manager.get_transfer_manager()
+    request = make_request("hybrid-transfer", list(range(9)), 4, sha256)
+    for group, boundary in ((0, 4), (0, 8), (1, 8), (2, 8)):
+        key = make_block_hash_with_group_id(
+            request.block_hashes[boundary // 4 - 1], group
+        )
+        lease, _ = transfers.acquire("load", key, boundary, 10, scope="mooncake")
+        assert lease is not None and transfers.start(lease)
+        assert manager.get_computed_blocks(request)[1] == 0
+        transfers.complete(lease, success=group != 2 or last_group_success)
+    assert manager.get_computed_blocks(request)[1] == (8 if last_group_success else 0)
+    assert manager.block_pool.get_num_free_blocks() == 7
+
+
+def test_transfer_rejects_alias_without_claiming_exact_source_state():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(8, 4, 2, second_spec_type="mamba"),
+        max_model_len=64,
+        hash_block_size=4,
+    )
+    request = make_request("alias-transfer", list(range(9)), 4, sha256)
+    pool = manager.block_pool
+    block = pool.get_new_blocks(1)[0]
+    pool.cache_full_blocks(request, [block], 0, 1, 8, 0)
+    alias = pool.cache_partial_block(request, block, 4, 0, 8)
+    assert alias is not None
+    pool.free_blocks([block])
+    transfers = manager.get_transfer_manager()
+    with pytest.raises(KVCacheTransferError, match="exact primary"):
+        transfers.acquire("store", alias, 4, 10, scope="mooncake")
+    assert block.ref_cnt == 0 and pool.get_num_free_blocks() == 3
+
+
+class QueuedControlTransfers:
+    tier = "mooncake"
+    actions = ("prefetch", "demote", "share")
+    limitations = ()
+
+    def __init__(self):
+        self.jobs = []
+        self.completions = []
+
+    def validate(self, direction, key, num_tokens):
+        pass
+
+    def submit(self, lease):
+        self.jobs.append(lease)
+
+    def poll(self):
+        result, self.completions = tuple(self.completions), []
+        return result
+
+    def finish(self, success=True):
+        self.completions.extend(
+            KVTransferCompletion(job.transfer_id, job.generation, success)
+            for job in self.jobs
+        )
+        self.jobs.clear()
+
+
+def make_movement_controller(num_blocks=4):
+    manager, _, request, keys = make_transfer_manager(num_blocks)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    adapter = QueuedControlTransfers()
+    executor = KVResourceController(manager, registry, declarations, (adapter,))
+    controller = NativeKVController(registry, index, declarations, executor=executor)
+    target = {
+        "kind": "hashes",
+        "namespace": "namespace",
+        "blocks": [
+            {
+                "group_id": 0,
+                "block_hash": keys[0][:-4].hex(),
+                "start_token": 0,
+                "end_token": 4,
+            }
+        ],
+    }
+    return manager, request, controller, adapter, target
+
+
+def submit_movement(controller, message_id, action, payload):
+    return controller.submit(
+        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1", payload)]),
+        ControlContext("engine", "epoch", "native"),
+    ).results[0]
+
+
+@pytest.mark.parametrize("cancel_action", [False, True])
+def test_native_shared_prefetch_survives_independent_task_cleanup(cancel_action):
+    manager, request, controller, adapter, target = make_movement_controller()
+    for session in ("a", "b"):
+        submit_movement(
+            controller,
+            f"associate-{session}",
+            "associate",
+            {
+                "session_id": session,
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": target,
+            },
+        )
+        result = submit_movement(
+            controller,
+            session,
+            "prefetch",
+            {
+                "target": {"kind": "session", "session_id": session},
+                "source": "mooncake",
+            },
+        )
+        assert result.status == OperationStatus.RUNNING
+    assert len(adapter.jobs) == 1
+    block = manager.block_pool.blocks[adapter.jobs[0].block_id]
+    assert manager.get_computed_blocks(request)[1] == 0 and block.ref_cnt == 1
+    if cancel_action:
+        operation = controller.registry.get("a", "a")
+        controller.cancel("a", "a", operation.operation_id)
+    else:
+        submit_movement(
+            controller,
+            "finish-a",
+            "finish_task",
+            {
+                "session_id": "a",
+                "expected_revision": controller.index.session_revision("a"),
+            },
+        )
+    assert controller.registry.get("a", "a").status == OperationStatus.CANCELLED
+    assert controller.registry.get("b", "a").status == OperationStatus.RUNNING
+    assert block.ref_cnt == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert controller.registry.get("a", "a").status == OperationStatus.CANCELLED
+    assert controller.registry.get("b", "a").status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4 and block.ref_cnt == 0
+
+
+@pytest.mark.parametrize("active_request", [False, True])
+@pytest.mark.parametrize("success", [False, True])
+def test_native_demote_distinguishes_storage_from_gpu_reclamation(
+    active_request, success
+):
+    manager, request, controller, adapter, target = make_movement_controller()
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    if not active_request:
+        manager.free(request)
+    result = submit_movement(
+        controller,
+        "demote",
+        "demote",
+        {
+            "target": target,
+            "destination": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.RUNNING
+    assert manager.get_computed_blocks(request)[1] == 4
+    adapter.finish(success)
+    controller.executor.progress()
+    result = controller.registry.get("demote", "a")
+    if not success:
+        assert result.status == OperationStatus.FAILED
+        assert result.completed_steps == ()
+    elif active_request:
+        assert result.status == OperationStatus.PARTIAL and result.blocked_targets == 1
+        assert result.completed_steps == ("cold_copy_stored",)
+    else:
+        assert (
+            result.status == OperationStatus.COMPLETED and result.affected_blocks == 1
+        )
+        assert result.completed_steps == ("cold_copy_stored", "gpu_copies_reclaimed")
+    assert manager.get_computed_blocks(request)[1] == (
+        4 if active_request or not success else 0
+    )
+
+
+def test_native_prefetch_reports_partial_capacity_and_actual_registered_scope():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    target["blocks"].append(
+        {
+            "group_id": 0,
+            "block_hash": request.block_hashes[1].hex(),
+            "start_token": 4,
+            "end_token": 8,
+        }
+    )
+    result = submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.RUNNING and len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    result = controller.registry.get("prefetch", "a")
+    assert result.status == OperationStatus.PARTIAL
+    assert result.affected_blocks == 1 and result.blocked_targets == 1
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_native_prefetch_reset_cancels_result_before_draining_worker():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert not manager.reset_prefix_cache()
+    controller.executor.progress()
+    assert controller.registry.get("prefetch", "a").status == OperationStatus.CANCELLED
+    assert manager.block_pool.get_num_free_blocks() == 0
+    adapter.finish()
+    controller.executor.progress()
+    assert manager.block_pool.get_num_free_blocks() == 1
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.reset_prefix_cache()
+
+
+def test_native_adapter_submission_failure_does_not_leak_reservation(monkeypatch):
+    manager, _, controller, adapter, target = make_movement_controller(num_blocks=2)
+
+    def fail(lease):
+        raise OSError("backend submission failed")
+
+    monkeypatch.setattr(adapter, "submit", fail)
+    result = submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.FAILED
+    assert manager.block_pool.get_num_free_blocks() == 1
+    assert not manager.get_transfer_manager().has_pending
+
+
+def test_paused_engine_defers_movement_before_acquiring_gpu_capacity():
+    manager, _, controller, adapter, target = make_movement_controller()
+    controller.executor.transfer_allowed = lambda: False
+    payload = {"target": target, "source": "mooncake"}
+    result = submit_movement(controller, "paused", "prefetch", payload)
+    assert result.status == OperationStatus.DEFERRED
+    assert adapter.jobs == [] and manager.block_pool.get_num_free_blocks() == 3
+    retained = submit_movement(
+        controller,
+        "retain-paused",
+        "retain",
+        {
+            "target": target,
+            "owner_id": "owner",
+            "declaration_id": "declaration",
+        },
+    )
+    assert retained.status == OperationStatus.COMPLETED
+    controller.executor.transfer_allowed = lambda: True
+    assert submit_movement(controller, "paused", "prefetch", payload) == result
+    assert (
+        submit_movement(controller, "resumed", "prefetch", payload).status
+        == OperationStatus.RUNNING
+    )
+    adapter.finish()
+    controller.executor.progress()
+    assert controller.registry.get("resumed", "a").status == OperationStatus.COMPLETED
+
+
+def install_movement_policies(manager, controller, *names, **limits):
+    now = [0.0]
+    controller.declarations._clock = lambda: now[0]
+    runtime = KVPolicyRuntime(
+        KVControlConfig(
+            policies=[
+                KVPolicyConfig(name=name, implementation="tool_wait") for name in names
+            ],
+            **limits,
+        ),
+        controller,
+        manager,
+        lambda: (),
+        clock=lambda: now[0],
+        wall_clock=lambda: 0,
+    )
+    controller.policies = runtime
+    return runtime, now
+
+
+def derived_results(controller, parent):
+    children = tuple(
+        controller.registry.get(ref.message_id, ref.action_id)
+        for ref in parent.derived_operations
+    )
+    for child, reference in zip(children, parent.derived_operations):
+        assert child.operation_id == reference.operation_id
+        assert child.origin.message_id == parent.message_id
+        assert child.origin.action_id == parent.action_id
+        assert child.origin.operation_id == parent.operation_id
+    return children
+
+
+def test_policy_signal_receipt_and_duplicate_do_not_claim_gpu_readiness():
+    manager, request, controller, adapter, target = make_movement_controller()
+    install_movement_policies(manager, controller, "first", "second")
+    payload = {"target": target, "signal": "resume"}
+    parent = submit_movement(controller, "signal", "signal", payload)
+    assert parent.status == OperationStatus.COMPLETED
+    children = derived_results(controller, parent)
+    assert [c.status for c in children] == [OperationStatus.RUNNING] * 2
+    assert {(c.action_type, c.action_version) for c in children} == {
+        ("vllm.copy_to", "1.0")
+    }
+    assert {c.origin.policy_name for c in children} == {"first", "second"}
+    assert len(adapter.jobs) == 1
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert submit_movement(controller, "signal", "signal", payload) == parent
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert [c.status for c in derived_results(controller, parent)] == [
+        OperationStatus.COMPLETED
+    ] * 2
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_policy_predictions_capture_scope_and_do_not_retarget_new_growth():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": {"kind": "session", "session_id": "s", "continuation_id": "c"},
+            "signal": "resume_prediction",
+            "resume_after_seconds": 2,
+        },
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.RECEIVED
+    assert not adapter.jobs and runtime.has_pending
+    old = controller.index.get("s", "c")
+    controller.index.associate(
+        "s",
+        "c",
+        (*old.blocks, ContentSpan("abcd", 0, 4, 8)),
+        expected_revision=old.revision,
+    )
+    now[0] = 2
+    runtime.tick()
+    assert len(adapter.jobs) == 1
+    assert adapter.jobs[0].num_tokens == 4
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, parent)[0].affected_blocks == 1
+
+
+def test_resume_joins_a_running_prediction_without_cancelling_its_publication():
+    manager, request, controller, adapter, target = make_movement_controller()
+    install_movement_policies(manager, controller, "movement")
+    prediction = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": target,
+            "signal": "resume_prediction",
+            "resume_after_seconds": 0.05,
+        },
+    )
+    resumed = submit_movement(
+        controller,
+        "resume",
+        "signal",
+        {
+            "target": target,
+            "signal": "resume",
+        },
+    )
+    assert len(adapter.jobs) == 1
+    assert derived_results(controller, prediction)[0].status == OperationStatus.RUNNING
+    assert derived_results(controller, resumed)[0].status == OperationStatus.RUNNING
+    adapter.finish()
+    controller.executor.progress()
+    assert (
+        derived_results(controller, prediction)[0].status == OperationStatus.COMPLETED
+    )
+    assert derived_results(controller, resumed)[0].status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_policy_remembers_only_stored_targets_before_acknowledgement_releases_results():
+    from vllm.v1.kv_hints.api import KVControlService
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    target = dict(
+        target,
+        blocks=[
+            *target["blocks"],
+            {
+                "block_hash": "abcd",
+                "group_id": 0,
+                "start_token": 4,
+                "end_token": 8,
+            },
+        ],
+    )
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    install_movement_policies(manager, controller, "movement")
+    selector = {"kind": "session", "session_id": "s", "continuation_id": "c"}
+    saved = submit_movement(
+        controller,
+        "save",
+        "signal",
+        {
+            "target": selector,
+            "signal": "tool_wait",
+        },
+    )
+    adapter.finish()
+    controller.executor.progress()
+    child = derived_results(controller, saved)[0]
+    assert child.status == OperationStatus.PARTIAL
+    reply = KVControlService(controller).call(
+        "acknowledge",
+        {
+            "engine_id": "engine",
+            "engine_epoch": "epoch",
+        },
+        {"message_id": child.message_id},
+    )
+    assert reply["ok"]
+    resumed = submit_movement(
+        controller,
+        "resume",
+        "signal",
+        {
+            "target": selector,
+            "signal": "resume",
+        },
+    )
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, resumed)[0].status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+@pytest.mark.parametrize("invalidate", ["reset", "cleanup", "explicit"])
+def test_stale_policy_prediction_cannot_undo_newer_engine_state(invalidate):
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    selector = {"kind": "session", "session_id": "s", "continuation_id": "c"}
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {"target": selector, "signal": "resume_prediction", "resume_after_seconds": 2},
+    )
+    if invalidate == "reset":
+        assert manager.reset_prefix_cache()
+    elif invalidate == "cleanup":
+        submit_movement(
+            controller,
+            "finish",
+            "finish_task",
+            {
+                "session_id": "s",
+                "expected_revision": controller.index.session_revision("s"),
+            },
+        )
+    else:
+        submit_movement(controller, "evict", "evict", {"target": selector})
+    now[0] = 3
+    runtime.tick()
+    assert derived_results(controller, parent)[0].status == OperationStatus.CANCELLED
+    assert not adapter.jobs and not runtime.has_pending
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+def test_explicit_retention_defers_policy_demotion_without_rewriting_declaration():
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    manager.allocate_slots(request, 5)
+    manager.free(request)
+    submit_movement(
+        controller,
+        "retain",
+        "retain",
+        {
+            "target": target,
+            "owner_id": "application",
+            "declaration_id": "d",
+            "priority": 80,
+            "ttl_seconds": 5,
+        },
+    )
+    declaration = controller.declarations.get("application", "d")
+    parent = submit_movement(
+        controller, "wait", "signal", {"target": target, "signal": "tool_wait"}
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.DEFERRED
+    assert controller.declarations.get("application", "d") == declaration
+    assert not adapter.jobs
+    view = runtime.observation()
+    assert view.cached_blocks == view.reclaimable_cached_blocks == 1
+    assert view.retention_declarations == 1
+
+
+def test_policy_and_explicit_loads_compete_for_actual_capacity():
+    manager, _, controller, adapter, target = make_movement_controller(num_blocks=2)
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    first = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    view = runtime.observation()
+    assert view.free_blocks == 0
+    assert view.load_reservations == view.referenced_blocks == 1
+    other_target = {**target, "blocks": [{**target["blocks"][0], "block_hash": "abcd"}]}
+    second = submit_movement(
+        controller,
+        "competing",
+        "prefetch",
+        {"target": other_target, "source": "mooncake"},
+    )
+    assert second.status == OperationStatus.DEFERRED
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert derived_results(controller, first)[0].status == OperationStatus.COMPLETED
+
+
+def test_partial_policy_admission_keeps_every_registered_step_correlated():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "first", "second")
+    controller.registry.max_records = 2
+    parent = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    assert parent.status == OperationStatus.PARTIAL
+    assert parent.completed_steps == ("policy_context_updated",)
+    children = derived_results(controller, parent)
+    assert len(children) == 1 and children[0].status == OperationStatus.DEFERRED
+    assert not adapter.jobs and not runtime.has_pending
+
+
+def test_policy_snapshot_budget_counts_hash_target_entries_outside_selected_range():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(
+        manager, controller, "movement", max_policy_target_entries=1
+    )
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": {**target, "start_token": 4},
+            "signal": "resume_prediction",
+            "resume_after_seconds": 10,
+        },
+    )
+    child = derived_results(controller, parent)[0]
+    assert child.status == OperationStatus.DEFERRED
+    assert "snapshot capacity" in child.reason
+    assert not adapter.jobs and not runtime.has_pending
+
+
+@pytest.mark.parametrize("decisions", [None, (True, False), (1,)])
+def test_invalid_composer_output_terminates_children_and_releases_record_capacity(
+    decisions,
+    monkeypatch,
+):
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    controller.registry._clock = lambda: now[0]
+    controller.registry.max_records = 2
+    monkeypatch.setattr(runtime.composer, "compose", lambda *_: decisions)
+    result = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    assert result.status == OperationStatus.PARTIAL
+    assert derived_results(controller, result)[0].status == OperationStatus.FAILED
+    assert not runtime.has_pending and not adapter.jobs
+    now[0] += controller.registry.result_ttl
+    result = submit_movement(
+        controller, "next", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    assert result.status == OperationStatus.RUNNING
+
+
+def test_policy_cancel_preserves_an_explicit_shared_transfer_interest():
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller, "movement")
+    parent = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    explicit = submit_movement(
+        controller, "prefetch", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    submit_movement(
+        controller, "newer", "signal", {"target": target, "signal": "tool_wait"}
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.CANCELLED
+    assert (
+        controller.registry.get(explicit.message_id, explicit.action_id).status
+        == OperationStatus.RUNNING
+    )
+    assert len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert (
+        controller.registry.get(explicit.message_id, explicit.action_id).status
+        == OperationStatus.COMPLETED
+    )
+    assert manager.get_computed_blocks(request)[1] == 4
+    runtime.tick(force=True)
+    assert runtime.observation().pending_policy_actions == 0
+
+
+def submit_primitive(controller, message_id, action, payload):
+    registry = controller.registry
+    return controller.submit(
+        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1.0", payload)]),
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
+    ).results[0]
+
+
+def priority_primitive(
+    controller, target, message, claim="claim", revision=1, value=10, ttl=10
+):
+    return submit_primitive(
+        controller,
+        message,
+        "vllm.set_priority",
+        {
+            "target": target,
+            "location": "local_g1",
+            "claim_id": claim,
+            "revision": revision,
+            "value": value,
+            "ttl_seconds": ttl if value is not None else None,
+        },
+    )
+
+
+def test_copy_priority_overlaps_revisions_and_expiry_share_existing_eviction_queue():
+    manager, request, controller, _, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    (block,) = manager.get_blocks(request.request_id).blocks[0][:1]
+    manager.free(request)
+    now = [0.0]
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: now[0]
+    assert (
+        priority_primitive(
+            controller, target, "low", claim="low", value=-10, ttl=100
+        ).status
+        == "completed"
+    )
+    assert (
+        priority_primitive(controller, target, "high", value=20).status == "completed"
+    )
+    assert copies.priority(block) == 20
+    conflict = priority_primitive(controller, target, "conflict", value=30)
+    assert conflict.status == "failed"
+    now[0] = 9
+    assert priority_primitive(controller, target, "retry").status == "failed"
+    replay = priority_primitive(controller, target, "replay", value=20)
+    assert replay.affected_blocks == 0
+    now[0] = 10
+    # Expiry reveals the independent negative claim, before any unhashed free block.
+    assert manager.block_pool.get_new_blocks(1) == [block]
+    assert block.ref_cnt == 1
+    assert block.block_hash is None
+
+
+@pytest.mark.parametrize("cleanup", ["reuse", "reset"])
+def test_copy_priority_tombstones_end_with_the_physical_copy(cleanup):
+    manager, request, controller, _, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    block = manager.get_blocks(request.request_id).blocks[0][0]
+    key = block.block_hash
+    manager.free(request)
+    priority_primitive(controller, target, "original", revision=5, value=90)
+    priority_primitive(controller, target, "clear", revision=6, value=None)
+    old = priority_primitive(controller, target, "old", revision=5, value=90)
+    assert old.affected_blocks == 0
+    pool = manager.block_pool
+    if cleanup == "reset":
+        assert manager.reset_prefix_cache()
+    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert block in held
+    pool.cache_transferred_block(block, key, 4)
+    renewed = priority_primitive(controller, target, "new-copy", revision=1, value=-5)
+    assert renewed.status == "completed" and renewed.affected_blocks == 1
+    pool.free_blocks(held)
+    assert pool.get_new_blocks(1) == [block]
+
+
+def test_primitive_copy_preserves_source_and_move_reports_per_target_reclamation():
+    manager, request, controller, adapter, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    manager.free(request)
+    copy = submit_primitive(
+        controller,
+        "copy",
+        "vllm.copy_to",
+        {
+            "target": target,
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    assert copy.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    copy = controller.registry.get("copy", "a")
+    assert copy.status == "completed" and copy.completed_steps == ("cold_copy_stored",)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert copy.target_outcomes[0].block_hash == target["blocks"][0]["block_hash"]
+    move = submit_primitive(
+        controller,
+        "move",
+        "vllm.move_to",
+        {
+            "target": target,
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    assert move.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    move = controller.registry.get("move", "a")
+    assert move.status == "completed"
+    assert move.target_outcomes[0].completed_steps == (
+        "cold_copy_stored",
+        "gpu_copies_reclaimed",
+    )
+    assert manager.get_computed_blocks(request)[1] == 0
+
+
+def test_copy_target_results_identify_deferred_scope_before_retry():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    blocks = [
+        *target["blocks"],
+        {
+            "group_id": 0,
+            "block_hash": request.block_hashes[1].hex(),
+            "start_token": 4,
+            "end_token": 8,
+        },
+    ]
+    result = submit_primitive(
+        controller,
+        "partial",
+        "vllm.copy_to",
+        {
+            "target": {**target, "blocks": blocks},
+            "src": {"tier": "mooncake"},
+            "dst": {"tier": "gpu"},
+        },
+    )
+    assert result.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    result = controller.registry.get("partial", "a")
+    assert result.status == "partial"
+    assert [(r.end_token, r.status) for r in result.target_outcomes] == [
+        (4, "completed"),
+        (8, "deferred"),
+    ]
+    controller.registry.max_result_targets = 1
+    free = manager.block_pool.get_num_free_blocks()
+    result = submit_primitive(
+        controller,
+        "bounded",
+        "vllm.copy_to",
+        {
+            "target": {**target, "blocks": blocks},
+            "src": {"tier": "mooncake"},
+            "dst": {"tier": "gpu"},
+        },
+    )
+    assert result.status == "deferred" and not adapter.jobs
+    assert manager.block_pool.get_num_free_blocks() == free
+
+
+def test_copy_priority_compaction_cannot_drop_an_unprocessed_expiry():
+    manager, request, controller, _, target = make_movement_controller(num_blocks=4)
+    manager.allocate_slots(request, 12)
+    blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    manager.free(request)
+    pool = manager.block_pool
+    first = pool.free_block_queue.get_all_free_blocks()[0]
+    index = blocks.index(first)
+    selected = {
+        **target,
+        "blocks": [
+            {
+                "group_id": 0,
+                "block_hash": request.block_hashes[index].hex(),
+                "start_token": index * 4,
+                "end_token": (index + 1) * 4,
+            }
+        ],
+    }
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: 0.0
+    for revision in range(64):
+        assert (
+            priority_primitive(
+                controller, selected, str(revision), revision=revision, ttl=1
+            ).status
+            == "completed"
+        )
+    copies.clock = iter([0.0, 0.0, 2.0]).__next__
+    assert (
+        priority_primitive(controller, selected, "compact", revision=64, ttl=1).status
+        == "completed"
+    )
+    assert pool.get_new_blocks(1) == [first]
+
+
+def test_composed_retention_waits_for_copy_before_starting_its_ttl():
+    from vllm.v1.kv_hints.policy import RetentionPolicy
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(
+        manager, controller, "movement", max_policy_actions_per_step=1
+    )
+    runtime.policies = {"retention": RetentionPolicy(ttl_seconds=5), **runtime.policies}
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: now[0]
+    parent = submit_movement(
+        controller, "resume-retain", "signal", {"target": target, "signal": "resume"}
+    )
+    priority, copy = derived_results(controller, parent)
+    assert priority.action_type == "vllm.set_priority" and priority.status == "queued"
+    assert copy.action_type == "vllm.copy_to" and copy.status == "running"
+    now[0] = 10
+    adapter.finish()
+    controller.executor.progress()
+    runtime.tick(force=True)
+    priority, copy = derived_results(controller, parent)
+    assert priority.status == copy.status == "completed"
+    (block,) = manager.get_computed_blocks(request)[0].blocks[0]
+    assert copies.priority(block) == 50
+    now[0] = 15
+    copies.expire()
+    assert copies.priority(block) is None

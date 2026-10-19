@@ -4,6 +4,7 @@
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import cloudpickle
 import torch.nn as nn
@@ -799,6 +800,16 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        """Discover connected engines and their supported programmable KV scope."""
+        return self.llm_engine.engine_core.get_kv_control_capabilities()
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        """Submit/query KV control using an explicitly discovered engine and epoch."""
+        return self.llm_engine.engine_core.kv_control(method, invocation, payload)
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
@@ -910,6 +921,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         """Finish the weight update and set its version if provided."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        if weight_version is None and self.llm_engine.vllm_config.kv_control_config:
+            weight_version = uuid4().hex
         if weight_version is not None:
             self.llm_engine.set_weight_version(weight_version)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
@@ -9,13 +10,13 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -101,6 +102,9 @@ from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_hints.api import KVControlService
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -237,6 +241,29 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+        self.kv_control_service: KVControlService | None = None
+        if vllm_config.kv_control_config is not None:
+            from vllm.v1.kv_hints.engine import create_control_service
+
+            self.kv_control_service = create_control_service(
+                vllm_config,
+                cast(Any, self.scheduler).kv_cache_manager,
+                self._weight_version,
+                request_lookup=cast(Any, self.scheduler).requests.get,
+                connector=kv_connector,
+                transfer_allowed=lambda: not self.is_sleeping(),
+                requests=lambda: cast(Any, self.scheduler).requests.values(),
+            )
+            profile = self.kv_control_service.controller.cache_profile
+            assert profile is not None
+            self._kv_weight_hash_salt = profile["request_cache_salt_prefix"]
+            policies = self.kv_control_service.controller.policies
+            cast(
+                Any, self.scheduler
+            ).kv_hint_dispatcher = self.kv_control_service.controller.dispatcher
+            if policies is not None and policies.has_guidance:
+                cast(Any, self.scheduler).kv_policy_runtime = policies
 
         self.aborts_queue = queue.Queue[list[str]]()
 
@@ -483,6 +510,33 @@ class EngineCore:
             )
         return metadata
 
+    def get_kv_control_capabilities(self) -> dict[str, Any] | None:
+        """Discover this engine's control epoch and currently supported scope."""
+        if self.kv_control_service is None:
+            return None
+        return msgspec.json.decode(
+            msgspec.json.encode(self.kv_control_service.controller.capabilities())
+        )
+
+    def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Process request-free control on the engine's existing utility channel."""
+        if self.kv_control_service is None:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "unsupported",
+                    "message": "Programmable KV control is disabled",
+                },
+            }
+        if method == "submit" and getattr(self, "_kv_weight_update_active", False):
+            return {
+                "ok": False,
+                "error": {"code": "busy", "message": "Weight update has not committed"},
+            }
+        return self.kv_control_service.call(method, invocation, payload)
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -523,6 +577,45 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
+        service = getattr(self, "kv_control_service", None)
+        if getattr(self, "_kv_weight_update_active", False):
+            request.kv_hints = None
+            request.abort_immediately = True
+        salt_prefix = getattr(self, "_kv_weight_hash_salt", None)
+        if salt_prefix is not None:
+            request.cache_salt = json.dumps(
+                [salt_prefix, request.cache_salt],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            request.block_hashes.clear()
+            request.update_block_hashes()
+        if service is not None and request.kv_hints is not None:
+            from vllm.v1.kv_hints.control import ControlContext, ControlError
+
+            settings = self.vllm_config.kv_control_config
+            assert settings is not None
+            registry = service.controller.registry
+            context = ControlContext(
+                registry.engine_id, registry.engine_epoch, settings.attached_consumer
+            )
+            try:
+                observer = service.controller.request_observer
+                with (
+                    observer.attach(request) if observer is not None else nullcontext()
+                ):
+                    receipt = service.controller.consume_attached(
+                        request.kv_hints, context, request_id=request.request_id
+                    )
+                if receipt is not None:
+                    request.kv_hints = None
+            except ControlError as error:
+                logger.warning(
+                    "Request-attached KV control rejected: %s: %s", error.code, error
+                )
+                request.kv_hints = None
+                request.abort_immediately = True
+
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
@@ -535,6 +628,7 @@ class EngineCore:
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+        self._observe_kv_requests()
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -659,6 +753,12 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        service = getattr(self, "kv_control_service", None)
+        if service is not None and service.controller.executor is not None:
+            service.controller.executor.progress()
+        self._observe_kv_requests()
+        if service is not None and service.controller.policies is not None:
+            service.controller.policies.tick()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -666,6 +766,24 @@ class EngineCore:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
+
+    def has_pending_kv_control(self) -> bool:
+        service = getattr(self, "kv_control_service", None)
+        return bool(
+            service is not None
+            and (
+                getattr(service.controller.executor, "has_pending", False)
+                or (
+                    service.controller.policies is not None
+                    and service.controller.policies.has_pending
+                )
+            )
+        )
+
+    def _observe_kv_requests(self) -> None:
+        service = getattr(self, "kv_control_service", None)
+        if service is not None and service.controller.request_observer is not None:
+            service.controller.request_observer.observe()
 
     def step_with_batch_queue(
         self,
@@ -1034,9 +1152,70 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        if (
+            method == "start_weight_update"
+            and getattr(self, "kv_control_service", None) is not None
+        ):
+            self._prepare_kv_weight_update()
+        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
+        if method == "finish_weight_update" and getattr(
+            self, "_kv_weight_update_active", False
+        ):
+            self._kv_weight_update_finished = True
+        return result
+
+    def _prepare_kv_weight_update(self) -> None:
+        if getattr(self, "_kv_weight_update_active", False):
+            raise RuntimeError("A weight update is already active")
+        scheduler = cast(Any, self.scheduler)
+        if scheduler.requests or self.batch_queue:
+            raise RuntimeError("Drain inference requests before updating weights")
+        manager = scheduler.kv_cache_manager
+        if manager.get_transfer_manager().has_pending:
+            raise RuntimeError("Drain KV transfers before updating weights")
+        self._reset_caches(reset_running_requests=False, reset_connector=False)
+        service = self.kv_control_service
+        assert service is not None
+        if service.controller.policies is not None:
+            service.controller.policies.tick(force=True)
+        self._kv_weight_update_active = True
+        self._kv_weight_update_finished = False
 
     def set_weight_version(self, weight_version: str) -> None:
+        service = getattr(self, "kv_control_service", None)
+        if service is not None:
+            active = getattr(self, "_kv_weight_update_active", False)
+            if weight_version == self._weight_version:
+                if active:
+                    raise RuntimeError("Updated weights require a new weight version")
+                return
+            if active and not self._kv_weight_update_finished:
+                raise RuntimeError("Finish transferring weights before committing")
+            if not active:
+                self._prepare_kv_weight_update()
+            from vllm.v1.kv_hints.engine import create_control_service
+
+            scheduler = cast(Any, self.scheduler)
+            updated = create_control_service(
+                self.vllm_config,
+                scheduler.kv_cache_manager,
+                weight_version,
+                request_lookup=scheduler.requests.get,
+                connector=scheduler.connector,
+                transfer_allowed=lambda: not self.is_sleeping(),
+                requests=lambda: scheduler.requests.values(),
+                previous=service,
+            )
+            self.kv_control_service = updated
+            profile = updated.controller.cache_profile
+            assert profile is not None
+            self._kv_weight_hash_salt = profile["request_cache_salt_prefix"]
+            scheduler.kv_hint_dispatcher = updated.controller.dispatcher
+            policies = updated.controller.policies
+            scheduler.kv_policy_runtime = (
+                policies if policies is not None and policies.has_guidance else None
+            )
+            self._kv_weight_update_active = False
         self._weight_version = weight_version
 
     def get_weight_version(self) -> str:
@@ -1460,6 +1639,7 @@ class EngineCoreProc(EngineCore):
             self.engines_running
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
+            or self.has_pending_kv_control()
         )
 
     def is_running(self) -> bool:
@@ -1538,6 +1718,8 @@ class EngineCoreProc(EngineCore):
         # the GIL briefly to allow background transfer threads to make progress.
         if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
+        elif not model_executed and self.has_pending_kv_control():
+            time.sleep(0.01)
 
         return model_executed
 

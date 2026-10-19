@@ -28,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
     get_offloading_group_ids,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.control import (
+    CPUControlAdapter,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
@@ -44,6 +47,8 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_hints.transfers import KVTransferAdapter
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -97,6 +102,20 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
+
+    def create_kv_control_adapters(self) -> tuple[KVTransferAdapter, ...]:
+        scheduler = self.scheduler
+        parallel = self._vllm_config.parallel_config
+        if (
+            not isinstance(scheduler.manager, CPUOffloadingManager)
+            or scheduler.config.blocks_per_chunk != 1
+            or parallel.decode_context_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+        ):
+            return ()
+        if scheduler.control is None:
+            scheduler.control = CPUControlAdapter(scheduler.manager, scheduler.config)
+        return (scheduler.control,)
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
@@ -229,6 +248,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None
+        control = self.connector_scheduler.control
+        if control is not None and control.has_pending:
+            return False
         self.connector_scheduler.reset_cache()
         return True
 

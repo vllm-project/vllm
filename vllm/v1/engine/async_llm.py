@@ -8,6 +8,7 @@ import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
+from uuid import uuid4
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -1085,6 +1086,14 @@ class AsyncLLM(EngineClient):
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
+    async def get_kv_control_capabilities(self) -> list[dict[str, Any]]:
+        return await self.engine_core.get_kv_control_capabilities_async()
+
+    async def kv_control(
+        self, method: str, invocation: dict[str, Any], payload: dict[str, Any]
+    ) -> Any:
+        return await self.engine_core.kv_control_async(method, invocation, payload)
+
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
@@ -1286,6 +1295,8 @@ class AsyncLLM(EngineClient):
     async def finish_weight_update(self, weight_version: str | None = None) -> None:
         """Finish the weight update and set its version if provided."""
         await self.collective_rpc("finish_weight_update")
+        if weight_version is None and self.vllm_config.kv_control_config:
+            weight_version = uuid4().hex
         if weight_version is not None:
             await self.update_weight_version(weight_version)
 

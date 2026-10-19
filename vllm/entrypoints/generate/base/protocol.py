@@ -4,13 +4,17 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
+import sys
 from typing import Annotated, Any, Literal, TypeAlias
 
+import msgspec
 from pydantic import (
     BaseModel,
     Field,
+    GetPydanticSchema,
     model_serializer,
 )
+from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.utils import replace
@@ -19,8 +23,38 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
+from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.kv_hints.control import ControlContext, ControlError, envelope_fingerprint
 
 logger = init_logger(__name__)
+
+
+def _parse_kv_hints(value: Any) -> KvHintsEnvelope:
+    try:
+        envelope = msgspec.convert(value, type=KvHintsEnvelope)
+        envelope_fingerprint(
+            envelope,
+            ControlContext("ingress", "ingress", "backend"),
+            max_actions=len(envelope.actions),
+            max_bytes=sys.maxsize,
+        )
+        return envelope
+    except (msgspec.ValidationError, ControlError) as error:
+        raise ValueError(str(error)) from error
+
+
+KvHintsField: TypeAlias = Annotated[
+    KvHintsEnvelope,
+    GetPydanticSchema(
+        lambda _type, _handler: core_schema.no_info_plain_validator_function(
+            _parse_kv_hints,
+            json_schema_input_schema=core_schema.dict_schema(),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                msgspec.to_builtins
+            ),
+        )
+    ),
+]
 
 StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None

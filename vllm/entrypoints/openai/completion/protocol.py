@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
+    KvHintsField,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
@@ -44,6 +45,16 @@ _INT64_MAX = 2**63 - 1
 
 
 class CompletionRequest(OpenAIBaseModel):
+    kv_hints: KvHintsField | None = None
+
+    @model_validator(mode="after")
+    def check_kv_hints_scope(self):
+        if self.kv_hints is not None and (self.n != 1 or self.use_beam_search):
+            raise ValueError(
+                "Request-attached KV hints require n=1 without beam search"
+            )
+        return self
+
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None

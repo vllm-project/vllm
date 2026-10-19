@@ -137,6 +137,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return result
 
         engine_inputs = result
+        if request.kv_hints is not None and len(engine_inputs) != 1:
+            return self.create_error_response(
+                "Request-attached KV hints require one prompt"
+            )
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -209,6 +213,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    **(
+                        {"kv_hints": request.kv_hints}
+                        if request.kv_hints is not None
+                        else {}
+                    ),
                 )
 
             generators.append(generator)

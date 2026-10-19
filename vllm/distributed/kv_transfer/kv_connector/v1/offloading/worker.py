@@ -6,10 +6,12 @@ from dataclasses import replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.control import KVTransferRankResult
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    CPUControlJob,
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
@@ -18,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     get_offloading_group_ids,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferLease
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -40,6 +43,8 @@ logger = init_logger(__name__)
 
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods."""
+
+    _control_jobs: dict[int, KVCacheTransferLease] | None = None
 
     def __init__(
         self,
@@ -237,7 +242,7 @@ class OffloadingConnectorWorker:
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             assert isinstance(src_spec, GPULoadStoreSpec)
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
-            assert success
+            self._check_store_submission(job_id, success)
         self._unsubmitted_store_jobs.clear()
 
         if kv_connector_metadata.jobs_to_flush:
@@ -247,7 +252,7 @@ class OffloadingConnectorWorker:
         assert self.worker is not None
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
-            assert success
+            self._check_store_submission(job_id, success)
         self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
@@ -256,7 +261,14 @@ class OffloadingConnectorWorker:
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
+        for job in metadata.control_jobs:
+            if job.lease.direction == "load":
+                self._start_control_job(job)
+
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
+        for job in metadata.control_jobs:
+            if job.lease.direction == "store":
+                self._start_control_job(job)
         for job_id, entry in metadata.store_jobs.items():
             if not self._is_store_writer:
                 # Gate before queueing: no _unsubmitted_store_jobs entry.
@@ -283,8 +295,14 @@ class OffloadingConnectorWorker:
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
+            if self._control_jobs and job_id in self._control_jobs:
+                lease = self._control_jobs.pop(job_id)
+                self._record_control_result(
+                    lease, transfer_result.success, transfer_result.transfer_size or 0
+                )
+                continue
+            # Request-scoped jobs currently do not support failures.
             assert transfer_result.success
             is_load = job_id in self._load_jobs
             if (
@@ -309,11 +327,63 @@ class OffloadingConnectorWorker:
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
-        if not self._connector_worker_meta.completed_jobs:
+        if not (
+            self._connector_worker_meta.completed_jobs
+            or self._connector_worker_meta.control_results
+        ):
             return None
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
+
+    def _record_control_result(
+        self, lease: KVCacheTransferLease, success: bool, bytes_transferred: int = 0
+    ) -> None:
+        parallel = self.spec.config.parallel
+        self._connector_worker_meta.control_results.append(
+            KVTransferRankResult(
+                lease.transfer_id,
+                lease.generation,
+                parallel.rank % parallel.world_size,
+                success,
+                "" if success else "CPU transfer failed",
+                bytes_transferred=bytes_transferred,
+            )
+        )
+
+    def _check_store_submission(self, job_id: int, success: bool) -> None:
+        if success:
+            return
+        if self._control_jobs and job_id in self._control_jobs:
+            self._record_control_result(self._control_jobs.pop(job_id), False)
+        else:
+            raise RuntimeError("Request-scoped store submission failed")
+
+    def _start_control_job(self, job: CPUControlJob) -> None:
+        assert self.worker is not None
+        lease = job.lease
+        if job.src_spec is None:
+            assert job.dst_spec is None and lease.direction == "store"
+            self._record_control_result(lease, True)
+            return
+        if lease.direction == "store" and not self._is_store_writer:
+            self._record_control_result(lease, True)
+            return
+        if self._control_jobs is None:
+            self._control_jobs = {}
+        job_id = -lease.transfer_id
+        assert job_id not in self._control_jobs
+        self._control_jobs[job_id] = lease
+        if lease.direction == "load":
+            assert isinstance(job.dst_spec, GPULoadStoreSpec)
+            if not self.worker.submit_load(job_id, job.src_spec, job.dst_spec):
+                self._control_jobs.pop(job_id)
+                self._record_control_result(lease, False)
+        else:
+            assert (
+                isinstance(job.src_spec, GPULoadStoreSpec) and job.dst_spec is not None
+            )
+            self._unsubmitted_store_jobs.append((job_id, job.src_spec, job.dst_spec))
 
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
