@@ -132,6 +132,17 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+- `kv_lease_verification` (via `kv_connector_extra_config`): Whether the decoder uses pulled KV only after verifying the prefiller's lease. (Optional)
+    - Default: `true`
+    - After pulling, the decoder reads the prefiller's lease slot for the request and only uses the KV if the prefiller still held the blocks, so a lease that expired before or during the read fails the KV load (see [KV cache lease](../design/nixl_kv_cache_lease.md#lease-verification-on-the-reader)) instead of decoding another request's KV. A pull that cannot be verified fails the KV load too, e.g. when a router drops `remote_lease_slot`/`remote_lease_nonce` from `kv_transfer_params` or the prefiller ran out of lease slots. Failed loads follow `kv_load_failure_policy`. Turn-2 readbacks in bidirectional mode are not verified yet.
+    - The lease slots live in DRAM, so the NIXL backend must be able to transfer DRAM between the instances. With verification enabled, an instance that cannot register them fails to start.
+    - `false` pulls without verification.
+    - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"kv_lease_verification": false}}'`
+
+- `kv_lease_slots` (via `kv_connector_extra_config`): Number of lease slots on the prefiller. (Optional)
+    - Default: number of KV cache blocks plus `max_num_seqs`
+    - A request that finds no free slot gets no lease, so decoders that verify leases decline its KV.
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.
@@ -439,6 +450,8 @@ as interval counts in the same line and via Prometheus (see
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
 | `Num failed transfers` | count | Failed NIXL transfers, handshakes, and completion notifications (`send_notif`) in the interval, grouped because all are sporadic lower-transport-layer events. |
 | `Num KV expired reqs` | count | Requests whose KV blocks expired before being read. Reported separately from the failure counts above because it is an autoscaler/lease-tuning signal rather than a transport issue. |
+| `Num notifs after expiry` | count | Read notifications for requests the prefiller no longer tracks (see `vllm:nixl_num_notifications_after_expiry`). |
+| `Num lease check failures` | count | Pulls the decoder declined because the prefiller released the KV blocks before the read completed, or because the lease could not be checked. |
 
 ### Prometheus metrics
 
@@ -455,6 +468,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 | `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
+| `vllm:nixl_num_lease_check_failures` | Counter | Pulls declined on the decoder because the prefiller released the KV blocks before the read completed, or because the lease could not be checked, e.g. `kv_transfer_params` carry no lease (tracked on the D instance). Each failed load follows `kv_load_failure_policy`. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

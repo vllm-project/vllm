@@ -6,15 +6,25 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.lease_slots import (
+    LeaseSlotAllocator,
+    get_num_lease_slots,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlConnectorMetadata,
 )
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -30,6 +40,26 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        self._lease_slots = LeaseSlotAllocator(
+            get_num_lease_slots(vllm_config, kv_cache_config)
+        )
+
+    def build_connector_meta(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> KVConnectorMetadata:
+        meta = super().build_connector_meta(scheduler_output)
+        assert isinstance(meta, NixlConnectorMetadata)
+        meta.lease_slots_to_arm, meta.lease_slots_to_clear = (
+            self._lease_slots.take_updates()
+        )
+        return meta
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        super().update_connector_output(connector_output)
+        # Every worker zeroed the slot before reporting the request as sent.
+        for req_id in connector_output.finished_sending or ():
+            self._lease_slots.release(req_id, clear=False)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -123,6 +153,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params.get("do_remote_prefill") and self.is_bidirectional_kv_xfer_enabled
         ):
             self._reqs_in_batch.add(request.request_id)
+        if params.get("do_remote_decode"):
+            # Workers write the nonce in this step, before the request can
+            # finish and hand its lease to a reader.
+            self._lease_slots.acquire(request.request_id)
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
@@ -241,6 +275,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_not_processed.add(request.request_id)
             # Clear _reqs_need_save if a request is aborted as partial prefill.
             self._reqs_need_save.pop(request.request_id, None)
+            self._lease_slots.release(request.request_id, clear=True)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -248,7 +283,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
         blocks_expiry_time = None
-        if delay_free_blocks:
+        lease = self._lease_slots.get(request.request_id)
+        if not delay_free_blocks:
+            # Nothing is held for a reader, so no worker record zeroes the slot.
+            self._lease_slots.release(request.request_id, clear=True)
+            lease = None
+        else:
             # Prefill request on remote. It will be read from D upon completion
             request_kv_blocks_ttl = self._kv_lease_duration
             if is_d_node:
@@ -288,5 +328,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
+            remote_lease_slot=lease[0] if lease else None,
+            remote_lease_nonce=lease[1] if lease else None,
             transfer_mode=self._TRANSFER_MODE,
         )

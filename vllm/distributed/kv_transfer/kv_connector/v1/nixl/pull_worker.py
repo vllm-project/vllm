@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     ReqMeta,
+    make_read_notif,
+    parse_read_notif,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
@@ -86,6 +88,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._replicated_pcp_done_sending.update(metadata.reqs_to_send)
             return
 
+        if self._lease_slots is not None:
+            self._lease_slots.update(
+                metadata.lease_slots_to_clear | metadata.reqs_not_processed,
+                metadata.lease_slots_to_arm,
+            )
+
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
         # moment in which requests expiration is set (P side) and the moment in
@@ -133,6 +141,38 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         deadline = blocks_expiry_time - clock_offset
         return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
 
+    def _should_verify_lease(
+        self, req_id: str, meta: ReqMeta, remote_ranks: tuple[int, ...]
+    ) -> bool | None:
+        """Whether to check the remote lease once the pull completed.
+
+        Returns None when the pull must fail instead, as it cannot be verified.
+        """
+        assert meta.remote is not None
+        if (
+            not self._lease_verification
+            # TODO: export leases for turn-2 readback from the decoder too.
+            or meta.remote.is_turn2
+            or not any(len(group) > 0 for group in meta.local_block_ids)
+        ):
+            return False
+        if meta.remote.lease_slot is None or meta.remote.lease_nonce is None:
+            reason = "kv_transfer_params carry no remote_lease_slot/nonce"
+        elif self._lease_verifier is None or not self._lease_verifier.can_verify(
+            meta.remote.engine_id, remote_ranks
+        ):
+            reason = "the remote engine exports no lease slots"
+        else:
+            return True
+        logger.warning(
+            "Declining KV pull for request %s from engine %s: %s.",
+            req_id,
+            meta.remote.engine_id,
+            reason,
+        )
+        self.xfer_stats.record_lease_check_failure()
+        return None
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
@@ -158,6 +198,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self.xfer_stats.record_kv_expired_req()
             # KV expiry is reported separately from transport failures, so only
             # the state cleanup side of _handle_failed_transfer runs here.
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+
+        verify_lease = self._should_verify_lease(
+            req_id, meta, self.tp_mappings[engine_id].all_source_ranks
+        )
+        if verify_lease is None:
             self._handle_failed_transfer(
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
@@ -363,6 +412,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                lease_slot=meta.remote.lease_slot,
+                lease_nonce=meta.remote.lease_nonce,
+                verify_lease=verify_lease,
             ):
                 return
 
@@ -371,7 +423,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # have the blocks we need so they can update the request state.
             # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
             # reflects whether any remote replica is left unchosen.
-            notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
+            notif_id = make_read_notif(
+                meta.remote.request_id, plan.local_consumers, meta.remote.lease_nonce
+            )
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
@@ -401,9 +455,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        lease_slot: int | None = None,
+        lease_nonce: int | None = None,
+        verify_lease: bool = False,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
+
+        With ``verify_lease``, the remote is notified only after the READ
+        completed and its lease slot still held ``lease_nonce``.
 
         Returns True when the read was posted (or was unnecessary), False
         when the request was routed to failure reporting — the caller must
@@ -439,7 +499,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Number of local workers that will notify this producer worker.
         # Propagate on notification so dst worker can wait before freeing.
-        notif_id = f"{remote_request_id}:{expected_consumers}".encode()
+        notif_id = make_read_notif(remote_request_id, expected_consumers, lease_nonce)
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
@@ -529,6 +589,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Prepare transfer with Nixl.
         handle = None
+        notif_agent = self._remote_agents[dst_engine_id][(0, remote_rank)]
         try:
             if self._mixed_mem_types:
                 self._read_blocks_mixed(
@@ -539,24 +600,36 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
-                    notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
+                    notif_agent=notif_agent,
                     notif_id=notif_id,
                 )
-                return True
-            handle = self.nixl_wrapper.make_prepped_xfer(
-                "READ",
-                local_xfer_side_handle,
-                local_block_descs_ids,
-                remote_xfer_side_handle,
-                remote_block_descs_ids,
-                notif_msg=notif_id,
-            )
+            else:
+                handle = self.nixl_wrapper.make_prepped_xfer(
+                    "READ",
+                    local_xfer_side_handle,
+                    local_block_descs_ids,
+                    remote_xfer_side_handle,
+                    remote_block_descs_ids,
+                    # A verified pull notifies once the lease check passed:
+                    # the notification lets the remote zero the lease slot.
+                    notif_msg=b"" if verify_lease else notif_id,
+                )
 
-            # Begin async xfer.
-            self.nixl_wrapper.transfer(handle)
+                # Begin async xfer.
+                self.nixl_wrapper.transfer(handle)
 
-            # Use handle to check completion in future step().
-            self._recving_transfers[request_id].append(handle)
+                # Use handle to check completion in future step().
+                self._recving_transfers[request_id].append(handle)
+                if verify_lease:
+                    self._pending_recv_notifs.setdefault(request_id, []).append(
+                        (notif_agent, notif_id)
+                    )
+            if verify_lease:
+                assert self._lease_verifier is not None
+                assert lease_slot is not None and lease_nonce is not None
+                self._lease_verifier.add_check(
+                    request_id, dst_engine_id, remote_rank, lease_slot, lease_nonce
+                )
             return True
         except Exception as e:
             self._log_failure(
@@ -658,7 +731,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     self._handle_heartbeat(msg[3:])
                     continue
 
-                req_id, expected_consumers = msg.rsplit(":", 1)
+                req_id, expected_consumers, nonce = parse_read_notif(msg)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -667,7 +740,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "
-                        "a decode worker. They may have expired.",
+                        "a decode worker. They may have expired. Decode "
+                        "workers that verify KV leases reject reads of "
+                        "released blocks.",
+                        req_id,
+                    )
+                    continue
+                if (
+                    nonce is not None
+                    and self._lease_slots is not None
+                    and nonce != self._lease_slots.nonce(req_id)
+                ):
+                    # A reader of an earlier request with the same id; counting
+                    # it could release blocks a current reader still needs.
+                    logger.warning(
+                        "Ignoring a read notification for request %s from an "
+                        "earlier lease of the same request id.",
                         req_id,
                     )
                     continue
@@ -675,9 +763,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 # Every reader of this req_id reports the same count (it's
                 # derived from aggregate topology, not the specific rank),
                 # so repeated notifications never disagree on it.
-                self.expected_consumer_notifications_by_req[req_id] = int(
-                    expected_consumers
-                )
+                self.expected_consumer_notifications_by_req[req_id] = expected_consumers
 
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
@@ -690,4 +776,5 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     del self.expected_consumer_notifications_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
+                    self._clear_lease_slot(req_id)
         return notified_req_ids

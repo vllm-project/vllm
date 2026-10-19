@@ -159,7 +159,11 @@ def create_vllm_config(
         kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
-        kv_connector_extra_config=kv_connector_extra_config or {},
+        # Fake remotes export no KV lease slots; lease tests enable checks.
+        kv_connector_extra_config={
+            "kv_lease_verification": False,
+            **(kv_connector_extra_config or {}),
+        },
         kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
@@ -551,6 +555,9 @@ def make_nixl_scheduler(
     """
     from types import SimpleNamespace
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.lease_slots import (
+        LeaseSlotAllocator,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -585,6 +592,7 @@ def make_nixl_scheduler(
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
         sched.is_bidirectional_kv_xfer_enabled = False
+        sched._lease_slots = LeaseSlotAllocator(num_slots=64)
     return sched
 
 
