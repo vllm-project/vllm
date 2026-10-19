@@ -278,6 +278,50 @@ def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
     return tag
 
 
+_QWEN_XML_TOOL_CALL_BEGIN = "<tool_call>\n"
+_QWEN_XML_TOOL_CALL_END = "\n</tool_call>"
+_QWEN_XML_FUNCTION_BEGIN = "<function="
+
+
+def allow_unwrapped_qwen_xml_tool_calls(tag: StructuralTag) -> StructuralTag:
+    """Also constrain Qwen XML calls written without ``<tool_call>``, in place.
+
+    The Qwen3 parser extracts ``<function=NAME>...</function>`` as a tool call
+    with or without the ``<tool_call>`` wrapper, but the ``qwen_3_coder`` tag
+    only triggers on the wrapped form. An unwrapped call was free text to the
+    grammar, so its arguments were never checked against the tool schema.
+    """
+
+    def visit(node: Any) -> None:
+        if isinstance(node, TriggeredTagsFormat):
+            unwrapped = [
+                TagFormat(
+                    begin=tool_tag.begin.removeprefix(_QWEN_XML_TOOL_CALL_BEGIN),
+                    content=tool_tag.content,
+                    end=tool_tag.end.removesuffix(_QWEN_XML_TOOL_CALL_END),
+                )
+                for tool_tag in node.tags
+                if isinstance(tool_tag.begin, str)
+                and tool_tag.begin.startswith(
+                    _QWEN_XML_TOOL_CALL_BEGIN + _QWEN_XML_FUNCTION_BEGIN
+                )
+                and isinstance(tool_tag.end, str)
+                and tool_tag.end.endswith(_QWEN_XML_TOOL_CALL_END)
+            ]
+            if unwrapped and _QWEN_XML_FUNCTION_BEGIN not in node.triggers:
+                node.tags.extend(unwrapped)
+                node.triggers.append(_QWEN_XML_FUNCTION_BEGIN)
+        elif isinstance(node, BaseModel):
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+
+    visit(tag.format)
+    return tag
+
+
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:

@@ -865,6 +865,51 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     ]
 
 
+def _qwen_xml_call(name: str, parameters: str, wrapped: bool) -> str:
+    call = f"<function={name}>\n{parameters}</function>"
+    return f"<tool_call>\n{call}\n</tool_call>" if wrapped else call
+
+
+@pytest.mark.parametrize("wrapped", [True, False], ids=["wrapped", "unwrapped"])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_qwen3_xml_grammar_constrains_every_call_the_parser_extracts(
+    sample_tools_strict: list[ChatCompletionToolsParam], tool_choice, wrapped
+):
+    """The Qwen3 parser extracts ``<function=...>`` calls with or without
+    ``<tool_call>``, so strict arguments must be enforced in both forms."""
+
+    class Qwen3Parser(DelegatingParser):
+        tool_parser_cls = Qwen3EngineToolParser
+
+    parser = Qwen3Parser(MagicMock(), tools=sample_tools_strict)
+    request = parser.adjust_request(
+        ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=sample_tools_strict,
+            tool_choice=tool_choice,
+        )
+    )
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    call = _qwen_xml_call(
+        "get_weather", "<parameter=city>\nDallas\n</parameter>\n", wrapped
+    )
+
+    assert _is_grammar_accept_string(grammar, call)
+    # Missing the required argument, and a tool that is not in the request.
+    assert not _is_grammar_accept_string(
+        grammar, _qwen_xml_call("get_weather", "", wrapped)
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _qwen_xml_call("get_time", "", wrapped)
+    )
+
+    _, _, tool_calls = parser.parse(call, request, enable_auto_tools=True)
+    assert [(c.name, json.loads(c.arguments)) for c in tool_calls] == [
+        ("get_weather", {"city": "Dallas"})
+    ]
+
+
 @pytest.mark.parametrize(
     "tool_choice",
     ["required", {"type": "function", "function": {"name": "get_weather"}}],
@@ -2130,6 +2175,13 @@ _SINGLE_CALL_CASES = [
         "",
         "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
         "</parameter>\n</function>\n</tool_call>",
+        "",
+    ),
+    (
+        # The Qwen3 parser also extracts calls without the <tool_call> wrapper.
+        "qwen3_coder",
+        "",
+        "<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>",
         "",
     ),
     (
