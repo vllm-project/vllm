@@ -1620,10 +1620,11 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
     (M, K).
 
     AITER's fused gated-RMSNorm + MXFP4 quant writes unshuffled per-1x32
-    scales. The Triton GEMM takes those at every M, and in ASM mode the
-    preshuffled Triton GEMM takes them below M=32, so there the activation
-    quant runs in the norm kernel instead of as a separate launch. The other
-    ASM-mode GEMMs take shuffled scales and run the unfused sequence.
+    scales. The Triton GEMM takes those at every M (column-major, as
+    dynamic_mxfp4_quant writes them), and in ASM mode the preshuffled Triton
+    GEMM takes them below M=32, so there the activation quant runs in the norm
+    kernel instead of as a separate launch. The other ASM-mode GEMMs take
+    shuffled scales and run the unfused sequence.
     """
     m = x.shape[0]
     if not use_asm_gemm or (
@@ -1643,6 +1644,7 @@ def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
             norm_before_gate=True,
             activation=activation,
             group_size=norm_weight.numel(),
+            transpose_scale=not use_asm_gemm,
         )
         return torch.ops.vllm.gemm_with_dynamic_quant(
             x_q,

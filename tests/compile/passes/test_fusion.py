@@ -980,12 +980,11 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
         assert fusion_pass.matched_count == 1
         backend.check_after_ops([AiterRMSNormGatedMxfp4GemmPattern.FUSED_OP])
 
-        # Where the quant is fused it rounds to E2M1 in Triton, while the
-        # unfused path quantizes with per_1x32_f4_quant_hip (ASM mode) or
-        # dynamic_mxfp4_quant, so the activations can differ in rounding. The
-        # ASM-mode fallback at M >= 32 runs the same ops in both graphs.
-        fused = num_tokens < 32 or not use_asm_gemm
+        # In ASM mode below M=32 the unfused path quantizes with
+        # per_1x32_f4_quant_hip, which rounds differently from the fused
+        # Triton quant. Otherwise the fused quant matches dynamic_mxfp4_quant
+        # (or the ASM-mode fallback at M >= 32 runs the same ops in both graphs).
         err = (result_fused.float() - result_unfused.float()).norm() / (
             result_unfused.float().norm()
         )
-        assert err < (0.2 if fused else 1e-3), err
+        assert err < (0.2 if use_asm_gemm and num_tokens < 32 else 1e-3), err
