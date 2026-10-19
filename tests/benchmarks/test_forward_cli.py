@@ -3,6 +3,7 @@
 import json
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +11,7 @@ import pytest
 
 from vllm.benchmarks.forward.batch import build_batch
 from vllm.benchmarks.forward.main import run_case
+from vllm.benchmarks.forward.profile import summarize
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 
@@ -97,6 +99,35 @@ def test_bench_forward_rejects_oversized_verify(capacity):
         run_case(runner, case, SimpleNamespace())
 
 
+def test_profile_summary():
+    """Each replay's leading restore/rendezvous activities are left out, and
+    kernels are grouped by name without template or function arguments."""
+
+    def act(name, ts, dur, cat="kernel"):
+        return {"cat": cat, "name": name, "ts": ts, "dur": dur}
+
+    replay = [
+        ("Memcpy DtoD (Device -> Device)", "gpu_memcpy", 5),
+        ("void ns::gemm<128>(Params)", "kernel", 10),
+        ("void ns::gemm<64>(Params)", "kernel", 20),
+        ("std::enable_if<(1>0), void>::type ns::norm<float>(float*)", "kernel", 4),
+    ]
+    events = [{"cat": "cpu_op", "name": "x", "ts": 0, "dur": 1}]
+    for r in range(2):
+        for i, (name, cat, dur) in enumerate(replay):
+            events.append(act(name, 1000 * r + 100 * i, dur, cat))
+    summary = summarize(events, replays=2, skip=1)
+    assert summary["pre_forward_us"] == 5
+    assert summary["busy_us"] == 34
+    assert summary["span_us"] == 204
+    assert [(k["name"], k["us"], k["calls"]) for k in summary["kernels"]] == [
+        ("ns::gemm", 30, 2),
+        ("ns::norm", 4, 1),
+    ]
+    with pytest.raises(ValueError, match="replays"):
+        summarize(events[:-1], replays=2, skip=1)
+
+
 @pytest.mark.benchmark
 # TODO(woosuk): Support ROCm and re-enable this test there.
 @pytest.mark.skipif(
@@ -126,6 +157,8 @@ def test_bench_forward(tmp_path):
         "2",
         "--output-json",
         str(output),
+        "--profile-dir",
+        str(tmp_path / "profile"),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     print(result.stdout)
@@ -139,3 +172,7 @@ def test_bench_forward(tmp_path):
         assert len(rank0["batch_order"]) == len(row["requests"])
         assert rank0["finite"] and rank0["graph_deterministic"]
         assert row["median_us"] > 0
+        profile = rank0["profile"]
+        assert profile["top_kernels"] and profile["span_us"] > 0
+        summary = json.loads(Path(profile["summary"]).read_text())
+        assert Path(summary["trace"]).exists()
