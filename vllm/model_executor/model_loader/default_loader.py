@@ -44,6 +44,7 @@ from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
@@ -57,6 +58,17 @@ class DefaultModelLoader(BaseModelLoader):
 
     # default number of thread when enable multithread weight loading
     DEFAULT_NUM_THREADS = 8
+
+    # Set when this process loads more than one model (e.g. a target model plus a
+    # draft head), so the load timings can be attributed to a model.
+    _loads_multiple_models = False
+
+    def create_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
+        if vllm_config.speculative_config is not None:
+            DefaultModelLoader._loads_multiple_models = True
+        return super().create_model(vllm_config, model_config, prefix)
 
     @dataclasses.dataclass
     class Source:
@@ -499,8 +511,13 @@ class DefaultModelLoader(BaseModelLoader):
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
-            "Loading weights took %.2f seconds",
+            "Loading weights took %.2f seconds%s",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            (
+                f" (model={type(model).__name__})"
+                if DefaultModelLoader._loads_multiple_models
+                else ""
+            ),
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.

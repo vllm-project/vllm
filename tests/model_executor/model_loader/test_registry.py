@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -170,3 +173,45 @@ def test_moe_runner_reports_registered_expert_names():
     weights = [("experts.w13_weight", torch.zeros(2, 8, 4))]
     loaded = AutoWeightsLoader(model).load_weights(weights)
     assert loaded == {"experts.routed_experts.w13_weight"}
+
+
+class _StubModel(nn.Module):
+    def load_weights(self, weights) -> None:
+        for _ in weights:
+            pass
+        return None
+
+
+@pytest.mark.parametrize("multiple_models", [False, True])
+def test_loading_weights_took_names_the_model_only_for_multiple_models(
+    monkeypatch, caplog, multiple_models
+):
+    monkeypatch.setattr(DefaultModelLoader, "_loads_multiple_models", False)
+    monkeypatch.setattr(
+        BaseModelLoader,
+        "create_model",
+        lambda self, vllm_config, model_config, prefix="": _StubModel(),
+    )
+
+    loader = DefaultModelLoader(LoadConfig())
+    loader._init_ep_weight_filter = lambda model_config: None
+    loader._init_mm_encoder_only_weight_filter = lambda model, model_config: None
+    loader.get_all_weights = lambda model_config, model: iter(())
+
+    # create_model is what flags a process that also loads a draft head.
+    model = loader.create_model(
+        vllm_config=SimpleNamespace(
+            speculative_config=object() if multiple_models else None
+        ),
+        model_config=SimpleNamespace(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        loader.load_weights(model, SimpleNamespace(quantization=None))
+
+    message = next(
+        r.getMessage()
+        for r in caplog.records
+        if "Loading weights took" in r.getMessage()
+    )
+    assert ("(model=_StubModel)" in message) is multiple_models
