@@ -49,7 +49,7 @@ def test_split_k_segments_follow_sm_occupancy(
             get_head_size=lambda: 128,
             rswa_window=None,
         ),
-        parallel_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=16),
         speculative_config=None,
         compilation_config=SimpleNamespace(
@@ -81,7 +81,7 @@ def _draft_builder(builder_cls, rswa_window: int | None):
             get_head_size=lambda: 128,
             rswa_window=rswa_window,
         ),
-        parallel_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=16),
         speculative_config=None,
         compilation_config=SimpleNamespace(

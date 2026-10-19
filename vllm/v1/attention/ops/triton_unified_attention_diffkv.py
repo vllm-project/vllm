@@ -54,6 +54,29 @@ _SPEC_3D_NUM_WARPS = 8
 _SPEC_3D_TILE = 16
 
 
+def can_use_split_kv(
+    max_seqlen_q: int,
+    num_seqs: int,
+    seq_threshold_3D: int | None,
+    num_par_softmax_segments: int | None,
+    softmax_segm_output: torch.Tensor | None,
+    softmax_segm_max: torch.Tensor | None,
+    softmax_segm_expsum: torch.Tensor | None,
+    allow_multi_query: bool = False,
+) -> bool:
+    """One definition of 3D split-KV eligibility for launcher and builders."""
+    return not (
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
+        or (max_seqlen_q > 1 and not allow_multi_query)
+        or num_seqs > seq_threshold_3D
+        or is_batch_invariant
+    )
+
+
 @triton.jit
 def kernel_unified_attention_diffkv(
     # Output destinations.  In 2D mode we write the final result into
@@ -468,15 +491,15 @@ def unified_attention_diffkv(
         and softmax_segm_output is not None
         and q.shape[0] <= softmax_segm_output.shape[0]
     )
-    use_3d = not (
-        seq_threshold_3D is None
-        or num_par_softmax_segments is None
-        or softmax_segm_output is None
-        or softmax_segm_max is None
-        or softmax_segm_expsum is None
-        or (max_seqlen_q > 1 and not spec_3d)
-        or num_seqs > seq_threshold_3D
-        or is_batch_invariant
+    use_3d = can_use_split_kv(
+        max_seqlen_q,
+        num_seqs,
+        seq_threshold_3D,
+        num_par_softmax_segments,
+        softmax_segm_output,
+        softmax_segm_max,
+        softmax_segm_expsum,
+        allow_multi_query=spec_3d,
     )
 
     spec_tile: int | None = None

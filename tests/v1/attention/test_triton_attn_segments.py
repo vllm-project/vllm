@@ -39,7 +39,7 @@ def _build(
             get_head_size=lambda: 128,
             rswa_window=None,
         ),
-        parallel_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
         speculative_config=(
             None
