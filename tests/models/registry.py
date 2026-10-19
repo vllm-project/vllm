@@ -1392,13 +1392,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     ),
-    "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "RadioMBartPrefixForCausalLM": _HfExamplesInfo(
         "nvidia/Nemotron-3.5-Parse",
         trust_remote_code=True,
         # Enable online initialization once the checkpoint is public.
         is_available_online=False,
     ),
+    "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
         "Skywork/Skywork-R1V-38B",
         trust_remote_code=True,
