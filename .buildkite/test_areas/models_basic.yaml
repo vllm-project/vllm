@@ -287,3 +287,20 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) Qwen3.8-27B Dense Mono Decode Numerics'
+  key: qwen38-27b-dense-mono-numerics-amd
+  dind: false
+  device: mi355_1
+  num_devices: 1
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/qwen3_5/amd/
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/envs.py
+  - tests/models/qwen3_5/test_amd_dense_mono.py
+  commands:
+  - pytest -v -s tests/models/qwen3_5/test_amd_dense_mono.py
