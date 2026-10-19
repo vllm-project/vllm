@@ -11,8 +11,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
     AiterFlashAttnPrefillBackend,
-    _quant_fp8_kv_per_tensor,
-    _quant_fp8_per_tensor,
+    _quant_fp8_qkv_per_tensor,
 )
 
 NOPE, ROPE, VD = 128, 64, 128
@@ -52,8 +51,7 @@ def _cu(lens: list[int]) -> torch.Tensor:
 
 def _ref_attn(q, k, v, q_lens, kv_lens, causal):
     """fp32 attention on the dequantized FP8 inputs the kernel sees."""
-    q8, q_descale = _quant_fp8_per_tensor(q)
-    k8, v8, k_descale, v_descale = _quant_fp8_kv_per_tensor(k, v)
+    q8, k8, v8, q_descale, k_descale, v_descale = _quant_fp8_qkv_per_tensor(q, k, v)
     q, k, v = q8.float() * q_descale, k8.float() * k_descale, v8.float() * v_descale
     outs, lses = [], []
     for qi, ki, vi in zip(q.split(q_lens), k.split(kv_lens), v.split(kv_lens)):
@@ -83,13 +81,15 @@ def _make_backend(monkeypatch, num_heads: int) -> AiterFlashAttnPrefillBackend:
 
 def _check_attn(out, lse, ref_out, ref_lse):
     assert out.dtype == torch.bfloat16 and out.shape == ref_out.shape
-    torch.testing.assert_close(lse, ref_lse, atol=1e-3, rtol=0)
+    if lse is not None:
+        torch.testing.assert_close(lse, ref_lse, atol=1e-3, rtol=0)
     # The kernel rounds softmax probabilities to FP8 for the PV product.
     assert (out.float() - ref_out).norm() <= 0.04 * ref_out.norm()
 
 
+@pytest.mark.parametrize("return_lse", [True, False])
 @pytest.mark.parametrize("num_heads", [12, 16])
-def test_new_tokens_matches_reference(monkeypatch, num_heads):
+def test_new_tokens_matches_reference(monkeypatch, num_heads, return_lse):
     torch.manual_seed(0)
     lens = [1, 37, 515, 2048]
     q, k, v = _mla_qkv(sum(lens), sum(lens), num_heads)
@@ -97,14 +97,18 @@ def test_new_tokens_matches_reference(monkeypatch, num_heads):
     backend.prepare_metadata(
         SimpleNamespace(query_start_loc=_cu(lens), max_query_len=max(lens))
     )
-    out, lse = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=True)
+    result = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=return_lse)
+    # Without context the caller copies the bare output tensor.
+    out, lse = result if return_lse else (result, None)
     _check_attn(out, lse, *_ref_attn(q, k, v, lens, lens, causal=True))
 
 
 @pytest.mark.parametrize("num_heads", [12, 16])
 def test_context_chunk_matches_reference(monkeypatch, num_heads):
     torch.manual_seed(0)
-    q_lens, kv_lens = [1, 64, 300], [4096, 513, 1000]
+    # A request without context in this chunk must give LSE -inf, so the merge
+    # keeps its new-token output.
+    q_lens, kv_lens = [1, 64, 300], [4096, 0, 1000]
     q, k, v = _mla_qkv(sum(q_lens), sum(kv_lens), num_heads)
     backend = _make_backend(monkeypatch, num_heads)
     chunk = SimpleNamespace(
@@ -130,26 +134,21 @@ def _check_quant(x, x8, descale):
 
 # Token counts cover the single-pass and every two-pass size class.
 @pytest.mark.parametrize("tokens", [0, 1, 7, 4096, 20000, 30000])
-def test_kv_quant(tokens):
+def test_qkv_quant(tokens):
     torch.manual_seed(tokens)
     _, k, v = _mla_qkv(0, tokens, 12)
-    k8, v8, k_descale, v_descale = _quant_fp8_kv_per_tensor(k, v)
-    _check_quant(k, k8, k_descale)
-    _check_quant(v, v8, v_descale)
+    q = torch.randn(tokens // 3, 13, NOPE + ROPE, device="cuda", dtype=torch.bfloat16)
+    q = q[:, 1:]  # strided, and shorter than K/V as in a context chunk
+    q8, k8, v8, *descales = _quant_fp8_qkv_per_tensor(q, k, v)
+    for x, x8, descale in zip((q, k, v), (q8, k8, v8), descales):
+        _check_quant(x, x8, descale)
 
 
-def test_kv_quant_zero():
+def test_qkv_quant_zero():
+    q = torch.zeros(5000, 12, NOPE + ROPE, device="cuda", dtype=torch.bfloat16)
     k = torch.zeros(5000, 12, NOPE + ROPE, device="cuda", dtype=torch.bfloat16)
     v = torch.zeros(5000, 12, VD, device="cuda", dtype=torch.bfloat16)
-    k8, v8, k_descale, v_descale = _quant_fp8_kv_per_tensor(k, v)
-    assert k_descale.item() == pytest.approx(1e-6)
-    assert v_descale.item() == pytest.approx(1e-6)
-    assert not k8.float().any() and not v8.float().any()
-
-
-@pytest.mark.parametrize("tokens", [1, 3, 8191])
-def test_q_quant_strided(tokens):
-    q = torch.randn(tokens, 13, NOPE + ROPE, device="cuda", dtype=torch.bfloat16)
-    q = q[:, 1:]
-    q8, q_descale = _quant_fp8_per_tensor(q)
-    _check_quant(q, q8, q_descale)
+    *x8s, q_descale, k_descale, v_descale = _quant_fp8_qkv_per_tensor(q, k, v)
+    for descale in (q_descale, k_descale, v_descale):
+        assert descale.item() == pytest.approx(1e-6)
+    assert not any(x8.float().any() for x8 in x8s)

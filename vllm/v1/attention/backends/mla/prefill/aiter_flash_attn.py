@@ -11,13 +11,11 @@ With ``VLLM_ROCM_MLA_PREFILL_FLYDSL_FP8=1`` on gfx950, attention instead runs
 AITER's FlyDSL FP8 kernel on per-tensor dynamically quantized Q/K/V.
 """
 
-import math
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -33,26 +31,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _quant_fp8_per_tensor(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # scaled_fp8_quant's absmax does one atomicMax per row; a row per token-head
-    # serializes millions of them on the scale, so use at most 256 rows.
-    x = x.contiguous()
-    rows = math.gcd(x.numel(), 256) if x.numel() else 1
-    x8, scale = ops.scaled_fp8_quant(x.view(rows, -1))
-    return x8.view(x.shape), scale
-
-
-# Two-pass K/V per-tensor FP8 quant ported from ATOM
+# Two-pass Q/K/V per-tensor FP8 quant ported from ATOM
 # atom/model_ops/triton_fused_qkv_quant.py
 # (MIT, Copyright (C) 2026, Advanced Micro Devices, Inc.).
 # Sizes and worker counts stay runtime args so new prefill lengths do not
 # trigger a Triton recompile.
 @triton.jit
-def _kv_amax(K, V, Partial, NK, NV, PARTS: tl.constexpr, BLOCK: tl.constexpr):
+def _qkv_amax(Q, K, V, Partial, NQ, NK, NV, PARTS: tl.constexpr, BLOCK: tl.constexpr):
     part = tl.program_id(0)
     kind = tl.program_id(1)
-    X = K if kind == 0 else V
-    n = NK if kind == 0 else NV
+    X = Q if kind == 0 else K if kind == 1 else V
+    n = NQ if kind == 0 else NK if kind == 1 else NV
     offsets = part * BLOCK + tl.arange(0, BLOCK)
     acc = tl.full((BLOCK,), 0, tl.float32)
     for start in range(tl.cdiv(n, PARTS * BLOCK)):
@@ -63,13 +52,16 @@ def _kv_amax(K, V, Partial, NK, NV, PARTS: tl.constexpr, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _kv_quant(
+def _qkv_quant(
+    Q,
     K,
     V,
+    Q8,
     K8,
     V8,
     Partial,
     Scales,
+    NQ,
     NK,
     NV,
     WORKERS,
@@ -79,9 +71,9 @@ def _kv_quant(
 ):
     worker = tl.program_id(0)
     kind = tl.program_id(1)
-    X = K if kind == 0 else V
-    Y = K8 if kind == 0 else V8
-    n = NK if kind == 0 else NV
+    X = Q if kind == 0 else K if kind == 1 else V
+    Y = Q8 if kind == 0 else K8 if kind == 1 else V8
+    n = NQ if kind == 0 else NK if kind == 1 else NV
     offsets = worker * BLOCK + tl.arange(0, BLOCK)
     if SINGLE_PASS:
         x = tl.load(X + offsets, offsets < n, 0).to(tl.float32)
@@ -105,7 +97,7 @@ def _kv_quant(
             tl.store(Y + index, value, index < n)
 
 
-def _kv_config(n: int) -> tuple[int, int, int, int]:
+def _qkv_config(n: int) -> tuple[int, int, int, int]:
     if n <= 8192:
         return 1, max(256, triton.next_power_of_2(n)), 1, 4
     if n <= 2**24:
@@ -115,32 +107,36 @@ def _kv_config(n: int) -> tuple[int, int, int, int]:
     return 512, 8192, min(4096, triton.cdiv(n, 8192)), 8
 
 
-def _quant_fp8_kv_per_tensor(
-    k: torch.Tensor, v: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return ``(k8, v8, k_descale, v_descale)`` with independent per-tensor scales.
+def _quant_fp8_qkv_per_tensor(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+) -> tuple[torch.Tensor, ...]:
+    """Return ``(q8, k8, v8, q_descale, k_descale, v_descale)``, one scale each.
 
     Descales are fp32 of shape ``[1]``; an all-zero tensor gets descale 1e-6.
     """
-    k, v = k.contiguous(), v.contiguous()
-    nk, nv = k.numel(), v.numel()
-    n = max(nk, nv)
+    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+    nq, nk, nv = q.numel(), k.numel(), v.numel()
+    n = max(nq, nk, nv)
     assert n < 2**31, "int32 element offsets"
-    parts, block, workers, warps = _kv_config(n)
-    k8 = torch.empty(k.shape, dtype=torch.float8_e4m3fn, device=k.device)
-    v8 = torch.empty(v.shape, dtype=torch.float8_e4m3fn, device=v.device)
-    scales = torch.empty(2, dtype=torch.float32, device=k.device)
-    partial = torch.empty((2, parts), dtype=torch.float32, device=k.device)
+    parts, block, workers, warps = _qkv_config(n)
+    q8, k8, v8 = (torch.empty_like(x, dtype=torch.float8_e4m3fn) for x in (q, k, v))
+    scales = torch.empty(3, dtype=torch.float32, device=k.device)
+    partial = torch.empty((3, parts), dtype=torch.float32, device=k.device)
     single = n <= 8192
     if not single:
-        _kv_amax[(parts, 2)](k, v, partial, nk, nv, parts, block, num_warps=warps)
-    _kv_quant[(workers, 2)](
+        _qkv_amax[(parts, 3)](
+            q, k, v, partial, nq, nk, nv, parts, block, num_warps=warps
+        )
+    _qkv_quant[(workers, 3)](
+        q,
         k,
         v,
+        q8,
         k8,
         v8,
         partial,
         scales,
+        nq,
         nk,
         nv,
         workers,
@@ -149,7 +145,7 @@ def _quant_fp8_kv_per_tensor(
         single,
         num_warps=warps,
     )
-    return k8, v8, scales[:1], scales[1:]
+    return q8, k8, v8, scales[0:1], scales[1:2], scales[2:3]
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
@@ -238,8 +234,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
                 )
 
     def _fp8_attn(self, q, k, v, **kwargs):
-        q8, q_descale = _quant_fp8_per_tensor(q)
-        k8, v8, k_descale, v_descale = _quant_fp8_kv_per_tensor(k, v)
+        q8, k8, v8, q_descale, k_descale, v_descale = _quant_fp8_qkv_per_tensor(q, k, v)
         assert self.fp8_attn_func is not None
         return self.fp8_attn_func(
             q8,
