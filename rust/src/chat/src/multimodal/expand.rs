@@ -168,7 +168,8 @@ mod tests {
     use super::super::tests::{
         LLAMA4_IMAGE_END_ID, LLAMA4_IMAGE_ID, LLAMA4_IMAGE_START_ID, LLAMA4_PATCH_ID,
         LLAMA4_TILE_X_SEPARATOR_ID, LLAMA4_TILE_Y_SEPARATOR_ID, QWEN3_IMAGE_PAD_ID,
-        QWEN3_VIDEO_PAD_ID,
+        QWEN3_VIDEO_PAD_ID, STEP3_IM_END_ID, STEP3_IM_PATCH_ID, STEP3_IM_START_ID,
+        STEP3_PATCH_END_ID, STEP3_PATCH_NEWLINE_ID, STEP3_PATCH_START_ID, step3_vl_tokenizer,
     };
     use super::super::{PreparedMedia, ResolvedPlaceholder};
     use super::*;
@@ -297,6 +298,35 @@ mod tests {
             &ranges[0],
             &[false, true, false, true, false, false, true, false],
         );
+    }
+
+    #[test]
+    fn expand_prompt_tokens_prepends_alignment_pad_at_splice_offset() {
+        const PAD_ID: u32 = 7;
+
+        let mut prompt_token_ids = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+        let prepared = vec![qwen3_image_prepared(vec![
+            PromptReplacement::repeated(
+                Modality::Image,
+                "<|image_pad|>",
+                QWEN3_IMAGE_PAD_ID as TokenId,
+                2,
+            )
+            .with_alignment_pad(PAD_ID as TokenId, 4),
+        ])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        // The marker lands at offset 1, so the period-4 pad contributes
+        // `4 - 1 - 1 % 4 = 2` tokens ahead of the replacement.
+        assert_eq!(
+            prompt_token_ids,
+            vec![1, PAD_ID, PAD_ID, QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID, 2]
+        );
+        assert_eq!(ranges[0].offset, 1);
+        assert_eq!(ranges[0].length, 4);
+        assert_bool_mask(&ranges[0], &[false, false, true, true]);
     }
 
     #[test]
@@ -570,6 +600,67 @@ mod tests {
                 if message.contains("<|video_pad|>") && message.contains("`video`")
         ));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
+    }
+
+    /// Step3-VL/Step5-VL image prepared media: `<im_patch>` is both the prompt
+    /// marker and the embed token; the other five special tokens are
+    /// structural.
+    fn step3_vl_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
+            Modality::Image,
+            "<im_patch>",
+            STEP3_IM_PATCH_ID,
+            STEP3_IM_PATCH_ID,
+            replacements,
+        )
+    }
+
+    /// The replacement layout `Step3VLVisionSpec` builds for one image with
+    /// two patches (newline flag on the first) plus the global-view span.
+    fn step3_vl_expanded_tokens() -> Vec<u32> {
+        let mut tokens = vec![STEP3_PATCH_START_ID];
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 81));
+        tokens.push(STEP3_PATCH_END_ID);
+        tokens.push(STEP3_PATCH_NEWLINE_ID);
+        tokens.push(STEP3_PATCH_START_ID);
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 81));
+        tokens.push(STEP3_PATCH_END_ID);
+        tokens.push(STEP3_IM_START_ID);
+        tokens.extend(std::iter::repeat_n(STEP3_IM_PATCH_ID, 169));
+        tokens.push(STEP3_IM_END_ID);
+        tokens
+    }
+
+    #[test]
+    fn expand_prompt_tokens_marks_only_step3_vl_im_patch_tokens_as_embed() {
+        use vllm_text::tokenizer::Tokenizer as _;
+
+        let tokenizer = step3_vl_tokenizer();
+        let mut prompt_token_ids = tokenizer.encode("a <im_patch> b", false).unwrap();
+        let replacement = step3_vl_expanded_tokens();
+        let prepared = vec![step3_vl_prepared(vec![PromptReplacement::sequence(
+            Modality::Image,
+            "<im_patch>",
+            replacement.iter().map(|&token| token as TokenId).collect(),
+        )])];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
+        let ranges = &ranges[&Modality::Image];
+
+        let mut expected = vec![u32::from(b'a'), u32::from(b' ')];
+        expected.extend(&replacement);
+        expected.extend([u32::from(b' '), u32::from(b'b')]);
+        assert_eq!(prompt_token_ids, expected);
+
+        // Two text bytes precede the marker; the span covers both patch spans
+        // and the global-view span.
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].offset, 2);
+        assert_eq!(ranges[0].length, replacement.len());
+
+        let expected_mask =
+            replacement.iter().map(|&token| token == STEP3_IM_PATCH_ID).collect::<Vec<_>>();
+        assert_bool_mask(&ranges[0], &expected_mask);
     }
 
     // DeepSeek-V4.1 image spans: every span position carries the image token

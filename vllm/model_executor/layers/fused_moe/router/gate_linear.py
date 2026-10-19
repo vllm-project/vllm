@@ -486,6 +486,13 @@ def fp32_router_gemm_dispatch_impl(
     ):
         # GB200: four token groups win through 48 for multiples of eight.
         max_tokens = 48 if x.shape[0] % 8 == 0 else 16
+    elif (
+        allow_bf16x3_router_gemm
+        and x.dtype == torch.bfloat16
+        and weight.shape == (352, 4096)
+    ):
+        # Step-5 on B300: BF16x3 becomes competitive at M=12.
+        max_tokens = 11
     if x.shape[0] <= max_tokens:
         return ops.fp32_router_gemm(x, weight)
 

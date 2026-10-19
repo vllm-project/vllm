@@ -581,6 +581,9 @@ def dummy_hf_overrides(
             }
         )
 
+        if model_arch == "Step5ForConditionalGeneration":
+            vision_config.update({"layers": 1})
+
         # Keep per-layer metadata consistent with the reduced layer count.
         if layer_types := getattr(vision_config, "layer_types", None):
             vision_config.update({"layer_types": layer_types[:1]})
