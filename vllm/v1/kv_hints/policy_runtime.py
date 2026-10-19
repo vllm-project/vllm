@@ -16,7 +16,7 @@ import msgspec
 from vllm.config.kv_control import KVControlConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.kv_hints.actions import (
     PRIMITIVE_VERSION,
     CopyTo,
@@ -219,25 +219,8 @@ class KVPolicyRuntime:
                 )
                 computed_tokens = cache_hits
             remaining = max(0, request.max_tokens - request.num_output_tokens)
-            estimate_tokens = min(
-                self.manager.max_model_len,
-                request.num_tokens
-                + min(remaining, self.settings.policy_decode_lookahead_tokens),
-            )
-            estimated = len(blocks) + sum(
-                group.get_num_blocks_to_allocate(
-                    request.request_id,
-                    estimate_tokens,
-                    computed.blocks[group_id],
-                    computed_tokens,
-                    computed_tokens,
-                    estimate_tokens,
-                    apply_admission_cap=True,
-                )
-                for group_id, group in enumerate(
-                    self.manager.coordinator.single_type_managers
-                )
-                if group.block_pool is self.manager.block_pool
+            estimated = len(blocks) + self._allocation_demand(
+                request, computed, computed_tokens, computed_tokens
             )
             if waiting:
                 since = self._waiting_since.setdefault(
@@ -363,41 +346,75 @@ class KVPolicyRuntime:
         ):
             return True
         guidance = self._guidance.get(request.request_id)
-        if guidance is None:
-            return True
-        if not guidance.admit or not guidance.reserve_running_growth:
-            return guidance.admit
-        growth = 0
-        for running in self.requests():
-            if running.status != RequestStatus.RUNNING:
-                continue
-            remaining = max(0, running.max_tokens - running.num_output_tokens)
-            tokens = min(
-                self.manager.max_model_len,
-                running.num_tokens
-                + min(remaining, self.settings.policy_decode_lookahead_tokens),
-            )
-            growth += sum(
-                group.get_num_blocks_to_allocate(
-                    running.request_id,
-                    tokens,
-                    (),
-                    running.num_computed_tokens,
-                    running.num_computed_tokens,
-                    tokens,
-                    apply_admission_cap=True,
-                )
-                for group in self.manager.coordinator.single_type_managers
-                if group.block_pool is self.manager.block_pool
-            )
-        additional = max(0, observed.estimated_blocks - observed.held_blocks)
-        return additional <= max(
-            0, self.manager.block_pool.get_num_free_blocks() - growth
-        )
+        return guidance.admit if guidance is not None else True
 
     def _waiting_seconds(self, request: RequestDemand) -> float:
         assert self._view is not None
         return request.waiting_seconds + max(0.0, self.clock() - self._view.now)
+
+    def _allocation_demand(
+        self,
+        request: Request,
+        computed: KVCacheBlocks,
+        computed_tokens: int,
+        local_computed_tokens: int,
+    ) -> int:
+        """Estimate capacity using the scheduler's current cache hit."""
+        remaining = max(0, request.max_tokens - request.num_output_tokens)
+        tokens = min(
+            self.manager.max_model_len,
+            request.num_tokens
+            + min(remaining, self.settings.policy_decode_lookahead_tokens),
+        )
+        return sum(
+            group.get_num_blocks_to_allocate(
+                request.request_id,
+                tokens,
+                computed.blocks[group_id],
+                computed_tokens,
+                local_computed_tokens,
+                tokens,
+                apply_admission_cap=True,
+            )
+            for group_id, group in enumerate(
+                self.manager.coordinator.single_type_managers
+            )
+            if group.block_pool is self.manager.block_pool
+        )
+
+    def allows_allocation(
+        self,
+        request: Request,
+        computed: KVCacheBlocks,
+        computed_tokens: int,
+        local_computed_tokens: int,
+    ) -> bool:
+        observed = self._request_views.get(request.request_id)
+        guidance = self._guidance.get(request.request_id)
+        if (
+            self._view is None
+            or observed is None
+            or guidance is None
+            or not guidance.reserve_running_growth
+            or self._waiting_seconds(observed) >= self.settings.max_policy_wait_seconds
+        ):
+            return True
+        growth = sum(
+            self._allocation_demand(
+                running,
+                self.manager.empty_kv_cache_blocks,
+                running.num_computed_tokens,
+                running.num_computed_tokens,
+            )
+            for running in self.requests()
+            if running.status == RequestStatus.RUNNING
+        )
+        additional = self._allocation_demand(
+            request, computed, computed_tokens, local_computed_tokens
+        )
+        return additional <= max(
+            0, self.manager.block_pool.get_num_free_blocks() - growth
+        )
 
     def before_admission(self, request: Request) -> bool:
         """Start a selected session's preparation and await its publication."""

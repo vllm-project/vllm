@@ -155,11 +155,13 @@ def quota_scheduler(
     interval=10,
     max_policy_requests=4096,
     max_num_seqs=1,
+    num_blocks=9,
+    same_prompt=False,
 ):
     scheduler = create_scheduler(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=64,
-        num_blocks=9,
+        num_blocks=num_blocks,
         enable_prefix_caching=True,
         scheduling_policy=scheduling_policy,
         async_scheduling=async_scheduling,
@@ -187,7 +189,9 @@ def quota_scheduler(
     runtime.clock = lambda: now[0]
     runtime.wall_clock = lambda: 1000.0
     scheduler.kv_policy_runtime = runtime
-    requests = create_requests(num_requests=2, num_tokens=32, req_ids=["a", "b"])
+    requests = create_requests(
+        num_requests=2, num_tokens=32, req_ids=["a", "b"], same_prompt=same_prompt
+    )
     for request in requests:
         request.arrival_time = 1000.0
         request.session_id = request.request_id
@@ -302,6 +306,25 @@ def test_quota_does_not_spend_the_same_growth_budget_on_two_admissions():
     output = scheduler.schedule()
     assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
     assert scheduler.requests["b"].num_preemptions == 0
+
+
+def test_quota_counts_a_shared_cached_prefix_once_across_admissions():
+    scheduler, _, _ = quota_scheduler(max_num_seqs=2, num_blocks=6, same_prompt=True)
+    runtime = scheduler.kv_policy_runtime
+    runtime.settings.policy_decode_lookahead_tokens = 16
+    policy = runtime.policies["quota"]
+    policy.borrow_idle_capacity = True
+    policy.reserve_running_growth = True
+    manager = scheduler.kv_cache_manager
+    request = scheduler.requests["a"]
+    assert manager.allocate_slots(request, 16) is not None
+    manager.cache_blocks(request, 16)
+    manager.free(request)
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a", "b"]
+    first, second = (manager.get_blocks(name).blocks[0] for name in ("a", "b"))
+    assert first[0] is second[0]
+    assert manager.block_pool.get_num_free_blocks() == 2
 
 
 @pytest.mark.parametrize("success", [False, True])

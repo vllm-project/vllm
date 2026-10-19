@@ -1082,6 +1082,15 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
+                if policy_runtime is not None and not policy_runtime.allows_allocation(
+                    request,
+                    new_computed_blocks,
+                    num_computed_tokens,
+                    num_new_local_computed_tokens,
+                ):
+                    skip_request(request_queue)
+                    continue
+
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget

@@ -144,7 +144,7 @@ Queries/events use the common OperationRegistry, including message/action IDs, a
 | Status | Meaning |
 | --- | --- |
 | received | Admitted and correlated |
-| queued | Waiting for request completion or a compatible COPY prerequisite; nonterminal, no reservation |
+| queued | Waiting for request completion, session admission, or a compatible COPY prerequisite; nonterminal, no reservation |
 | accepted / running | Approved work; not yet a guarantee of complete reusable scope |
 | completed / partial | Terminal outcome with actual stages and target scope |
 | deferred | Terminal resource refusal; retry intentionally with a new message ID |
@@ -193,6 +193,31 @@ Policies may declare `consumed_signals` as an immutable set of signal names.
 Signals with no configured consumer return `unconsumed` without building a request observation or invalidating scheduler guidance.
 The default `None` preserves delivery of every signal to existing third-party policies.
 Subclasses must explicitly redeclare the filter to opt in, so an overridden handler does not silently inherit a narrower signal set.
+
+The built-in tool-wait policy accepts `resume_after_seconds` on the initial
+`tool_wait` signal. It skips a speculative round trip when that estimate does
+not exceed `min_pause_seconds` (default 0.5) or its observed store-plus-load time.
+`consider_pause_duration=false` selects the pressure-only ablation. Missing
+estimates keep pressure-based demotion. Skipped movement history is bounded and
+cleaned with its logical owners; explicit movement commands are unaffected.
+This heuristic does not estimate GPU recomputation cost or guarantee residency.
+
+`prefetch_on_admission=true` enables scheduler coordination for the movement
+policy. Under queued demand, a matching session's GPU COPY waits until that
+session is selected for admission. The scheduler starts preparation before cache
+lookup and waits for terminal publication; failure permits ordinary recomputation.
+Without queued demand the predicted preparation may execute early. Cancellation
+and task cleanup release queued scope without acquiring transfer buffers.
+Custom policies emitting `PolicyProposal.wait_for_admission` must enable
+`uses_scheduler_guidance` at startup. Only GPU COPY proposals support this flag.
+
+A concrete policy may implement `needs_request_observation(payload)` and return
+false when it does not read request or session demand. The observation still
+contains time and physical counters, but request/session tuples are empty and
+arrival history is preserved. Subclasses default to full observations unless
+they explicitly implement this method. A concrete scheduler policy may also set
+`signal_updates_guidance=false` if its signals cannot change request guidance.
+The built-in quota importance signal continues to invalidate cached guidance.
 
 Source references: [RFC #59708](https://github.com/vllm-project/vllm/issues/59708), [PR #59714 at 7966f717dd4e](https://github.com/vllm-project/vllm/tree/7966f717dd4eb09461dd97102db1352c924bbf50/vllm/v1/kv_hints).
 Copy claims use the existing eviction queue; the branch does not add the draft PR's separate victim-selection heap.

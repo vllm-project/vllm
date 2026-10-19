@@ -3,6 +3,7 @@
 - [分支实现与验证结果](../../docs/programmable-kvc/testing.md)
 - [已执行实验报告](../../docs/programmable-kvc/rollout-report-2026-10-12.md)
 - [控制开销与扩大工作集实验](../../docs/programmable-kvc/rollout-report-2026-10-18.md)
+- [暂停时间与准入协同实验](../../docs/programmable-kvc/rollout-report-2026-10-19.md)
 - [当前与历史证据索引](../../openspec/changes/programmable-kv-cache/validation.md)
 - [原语与生命周期契约](../../vllm/v1/kv_hints/README.md)
 
@@ -75,7 +76,12 @@ PYTHONPATH=../verl \
 | `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
 | `--trace` | 固定原输入、输出长度和暂停，重新生成；不执行工具或报告回放奖励分数 |
 | `--tool-delay` / `--replay-pause-floor` | 明确标记的人为工具等待；不能代替真实服务延迟 |
-| `--oracle` / `--prediction-seconds` | 回放预测诊断；检查实际信号及派生 COPY 覆盖 |
+| `--prediction-mode adaptive` | 默认使用已完成工具批次更新预测；在线按工具组合区分，旧 trace 无工具名时使用统一估计 |
+| `--prediction-mode fixed` / `--prediction-seconds` | 固定预测对照；`prediction-seconds` 也作为自适应估计的初始值 |
+| `--oracle` | 回放时使用真实暂停时长，明确标为 oracle；不能作为应用未知未来时的成绩 |
+| `--movement-min-pause-seconds` | movement 的最低预计暂停窗口，默认 0.5 秒；还须覆盖已观测的存出加加载耗时 |
+| `--movement-pressure-only` | 忽略暂停时长的消融，保留压力判断 |
+| `--prefetch-on-admission` | 有排队需求时等调度器选中对应 session 再准备，失败后回退重算；结果收集期限包含准入等待预算 |
 | `--enforce-eager` / `--disable-custom-all-reduce` | 显式诊断选项；不与默认编译/图执行的速度混算 |
 | `--profile` | 服务预热后启用 Yappi 多线程 CPU 计时；GPU 默认跳过 128 个迭代后采集 32 个迭代，由 `--profile-delay-iterations` / `--profile-iterations` 调整。与普通计时实验分开 |
 
@@ -86,8 +92,14 @@ CPU profiling 需要 `uv pip install yappi`。
 GPU trace 在负载期间保存为未压缩 JSON，压缩应在服务结束后执行，避免同步压缩阻塞推理和控制进度。
 各轮记录等价工作量摘要、控制 RPC 次数与耗时、准备等待分位数，以及服务端排队、prefill、decode、inference 的计数和时间总和。
 RPC 与逐请求耗时存在并发重叠，不能相加当作整轮耗时。
-后台控制不阻塞下一轮推理；任务结束时仍收齐控制结果并清理，相关时间包含在整轮计时内。
+客户端在后台收集控制结果，无需收齐结果才发送下一请求；任务结束时仍收齐控制结果并清理，相关时间包含在整轮计时内。
+启用按准入准备后，请求在引擎内等待对应加载发布，等待计入服务端排队和 TTFT。
 真实加载和缓存发布继续遵守引擎资源屏障。
+
+`analyze_rollout.py --run LABEL=REPORT.json.gz --baseline LABEL --output /tmp/comparison.json`
+可以合并多个完整结果，核对输入/输出长度指纹、服务参数，并输出耗时分布、吞吐差值与家族尾延迟。
+同一标签可传入多轮；profile 轮不参与普通吞吐对比。
+仍须检查各轮 GPU 归属与并行活动；工具不会根据 token 指纹认定测量环境有效。
 
 ## 功能测试的服务配置
 

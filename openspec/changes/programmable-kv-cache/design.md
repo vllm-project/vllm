@@ -341,6 +341,9 @@ These observations motivate two independent changes and separate ablations:
   Several requests admitted in one scheduling iteration must not each spend the
   same observation's free capacity. Policy scores remain interval-cached, the
   scheduler owns admission, and its finite fairness bypass remains in force.
+  Candidate demand uses the scheduler's actual cache-hit blocks immediately
+  before allocation. This reuses its lookup and counts a newly shared prefix
+  once even when several admissions occur within one observation interval.
 - Optional admission-coupled COPY proposals wait while foreground requests are
   queued. When the scheduler selects a matching session/content prefix, its
   runtime starts the preparation before cache lookup and waits for terminal
