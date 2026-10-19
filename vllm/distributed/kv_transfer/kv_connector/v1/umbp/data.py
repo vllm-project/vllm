@@ -22,7 +22,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
+)
+
+
+def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
+    """Map each layer of a cache group to the spec describing its own pages."""
+    spec = group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return {name: spec.kv_cache_specs[name] for name in group.layer_names}
+    return dict.fromkeys(group.layer_names, spec)
 
 
 @dataclass(frozen=True)
@@ -269,20 +282,19 @@ class KVLayoutPlanner:
 
     @classmethod
     def from_kv_cache_config(cls, config: KVCacheConfig) -> KVLayoutPlanner:
-        group_by_layer = {
-            layer: group_id
+        layer_specs = {
+            layer: (group_id, spec)
             for group_id, group in enumerate(config.kv_cache_groups)
-            for layer in group.layer_names
             if group.enable_kv_transfer
+            for layer, spec in _layer_specs(group).items()
         }
         regions: list[KVRegion] = []
         offset = 0
         for tensor in config.kv_cache_tensors:
             for layer_name in tensor.layers:
-                group_id = group_by_layer.get(layer_name)
-                if group_id is None:
+                if layer_name not in layer_specs:
                     continue
-                spec = config.kv_cache_groups[group_id].kv_cache_spec
+                group_id, spec = layer_specs[layer_name]
                 block_bytes = spec.page_size_bytes
                 regions.append(
                     KVRegion(
