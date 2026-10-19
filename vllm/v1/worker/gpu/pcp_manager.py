@@ -189,10 +189,12 @@ class PCPManager:
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
+            and getattr(model_config.hf_text_config, "model_type", None)
+            not in ("deepseek_v32", "glm_moe_dsa")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
+                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
