@@ -22,7 +22,7 @@ from .shm import (
 
 def _get_cache_type(
     vllm_config: VllmConfig,
-) -> Literal[None, "processor_only", "lru", "shm"]:
+) -> Literal[None, "processor_only", "lru", "shm", "paged_shm"]:
     model_config = vllm_config.model_config
     if not model_config.supports_multimodal_inputs:
         return None
@@ -59,6 +59,10 @@ def processor_cache_from_config(
         return LruKeyReplicatedSenderCache(vllm_config.model_config)
     elif cache_type == "shm":
         return ShmObjectStoreSenderCache(vllm_config)
+    elif cache_type == "paged_shm":
+        from ..paged_shm.cache import PagedShmSenderCache
+
+        return PagedShmSenderCache(vllm_config)
     else:
         raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -83,6 +87,10 @@ def engine_receiver_cache_from_config(
         return None
     elif cache_type == "lru":
         return LruKeyReplicatedReceiverCache(vllm_config.model_config)
+    elif cache_type == "paged_shm":
+        from ..paged_shm.cache import PagedShmReceiverCache
+
+        return PagedShmReceiverCache(vllm_config)
     else:
         raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -103,5 +111,9 @@ def worker_receiver_cache_from_config(
             )
 
         return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
+    elif cache_type == "paged_shm":
+        from ..paged_shm.cache import PagedShmReceiverCache
+
+        return PagedShmReceiverCache(vllm_config)
     else:
         raise ValueError(f"Unknown cache type: {cache_type!r}")

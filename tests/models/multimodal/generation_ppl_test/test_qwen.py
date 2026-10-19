@@ -56,3 +56,24 @@ def test_ppl(
         },
         mm_processor_kwargs=_pixel_factor(factor),
     )
+
+
+@pytest.mark.parametrize("model_info,factor,extra_kwargs", MODELS[:1])
+def test_pshm(
+    hf_runner,
+    vllm_runner,
+    model_info: GenerateModelInfo,
+    factor: int,
+    extra_kwargs: dict,
+):
+    vqa_ppl_test(
+        hf_runner,
+        vllm_runner,
+        model_info,
+        vllm_extra_kwargs={
+            "mm_processor_cache_gb": 4,
+            "mm_processor_cache_type": "paged_shm",
+            **extra_kwargs,
+        },
+        mm_processor_kwargs=_pixel_factor(factor),
+    )

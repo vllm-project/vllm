@@ -24,6 +24,7 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.paged_shm.server import maybe_start_paged_shm_server
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
@@ -95,6 +96,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
+        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
         # Convert EngineInput --> EngineCoreRequest.

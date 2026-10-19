@@ -7,7 +7,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -82,6 +82,8 @@ def __getattr__(name: str) -> Any:
     if name == "PIN_MEMORY":
         return is_pin_memory_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+DeviceLikeType: TypeAlias = str | torch.device | int
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
