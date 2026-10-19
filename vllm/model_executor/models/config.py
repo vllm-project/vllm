@@ -992,7 +992,7 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
-            current_platform.is_cuda()
+            current_platform.is_cuda_alike()
             and parallel_config.use_sequence_parallel_moe
             and parallel_config.pipeline_parallel_size != 1
         ):
