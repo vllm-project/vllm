@@ -100,30 +100,71 @@ steps:
       # It did not remove the refusal at the scale down, where the groups being
       # replaced are still in use and cannot be retired in advance.
       #
-      # On ROCm 10 the failure finally has a name. Every real case fails the
-      # same way: two ranks report "Memory access fault by GPU node-2" with
-      # "Write access to a read-only page" and "GPU node-3" with "Page not
-      # present", always those two nodes, which are the GPUs of the ranks that
-      # just joined, while every rank sits in _wait_for_all_transfers. Ten
-      # faults across the three passes of build 95849, the same shape each
-      # time.
+      # The complete log of build 95867, read from download.txt rather than the
+      # 2 MB the log endpoint returns, separates this group's failures into two
+      # that have nothing in common but the assert they end at. The traceback
+      # line says which is which: line 266 of the test is the scale up, line 273
+      # is the scale back down. Three of the four cases fail on the way up and
+      # the fourth on the way down, in both full passes, and the group pressure
+      # line agrees independently, since only the cases that fail on the way
+      # down ever reach "standby groups for dp=2".
       #
-      # The slowness is a consequence of that fault rather than a second
-      # problem. Over 31 measurements the reshuffle is either 3.8 to 55 s or
-      # 258 to 266 s with nothing in between, and the nineteen slow ones follow
-      # the six fault groups one for one. A run that faults waits a fixed
-      # recovery budget of about 260 s, the scale command passes its 300 s
-      # deadline and the assert fires. The server is late, not dead.
+      # Going up, the groups are built and the transfer is what dies. Two ranks
+      # report "Memory access fault by GPU node-2" with "Write access to a
+      # read-only page" and "GPU node-3" with "Page not present", always those
+      # two nodes, which are the GPUs of the ranks that just joined, while every
+      # other rank sits in _wait_for_all_transfers. The reason split matters:
+      # a peer's memory imported for reading is mapped read only on the
+      # importing device, and a write to it gives exactly that first reason.
       #
-      # So one question is left: does the faulting address fall inside the span
-      # a peer published, or outside it. Inside means a mapping was revoked
-      # under a descriptor that was still correct, and the ticket belongs to
-      # ROCm. Outside means send_base plus src_row times send_stride walked off
-      # the registration, which is arithmetic this repository owns. The address
-      # on its own cannot tell those apart, so VLLM_EEP_DEBUG_XFER_DESCS=1 logs
-      # one local and one remote range per layer and peer before the wait, and
-      # VLLM_EPLB_NIXL_XFER_REPORT_S=10 names who is still in PROC while the
-      # wait runs, which separates one stalled layer from every layer crawling.
+      # Coming down, nothing has moved yet. The whole traceback is inside group
+      # creation, create_standby_groups through _init_stateless_group and
+      # PyNcclCommunicator into ncclCommInitRank, which returns "unhandled cuda
+      # error" after rocmemory.cpp reports "Failed to create memory for IPC,
+      # failed with hsa_status: 4097". That is the same stack as the scale down
+      # refusal from build 95233, so it is the known one, not a new one. It is
+      # also not stale communicators: the pressure line immediately before each
+      # of those four failures reads "0 pynccl comm(s)", so early retirement did
+      # its job and the refusal has another cause. No step named scale_down ever
+      # runs, because this kills the path while it is still preparing.
+      #
+      # The slowness on the way up is a consequence of the fault rather than a
+      # second problem. Over 39 measurements the reshuffle is either under 10 s
+      # or over 200 s, twenty against nineteen, with nothing at all in between,
+      # and the slow ones follow the fault groups one for one. A run that faults
+      # waits a fixed recovery budget of about 260 s, the scale command passes
+      # its 300 s deadline and the assert fires. The server is late, not dead.
+      #
+      # So one question is left on the way up: does the faulting address fall
+      # inside what the peer registered, or outside it. Inside means a mapping
+      # was revoked under a descriptor that was still correct, and the ticket
+      # belongs to ROCm. Outside means send_base plus src_row times send_stride
+      # walked off the registration, which is arithmetic this repository owns.
+      # Comparing the address against the span a layer reads does not answer it,
+      # because a span sits inside its registration with slack measured at up to
+      # 319 MB, so an address tens of MB outside every span can still be inside
+      # a registration. VLLM_EEP_DEBUG_XFER_DESCS=1 therefore prints the
+      # registered bound next to the span, and the row bound is now checked
+      # before the READ is issued, so our own arithmetic reports itself by name
+      # instead of as an address. VLLM_EPLB_NIXL_XFER_REPORT_S=10 names who is
+      # still in PROC while the wait runs, which separates one stalled layer
+      # from every layer crawling.
+      #
+      # Nothing above says anything about the way down, which fails inside NCCL
+      # rather than inside this repository, and the error it raises asks for the
+      # missing information in so many words: run with NCCL_DEBUG=INFO. Both
+      # passes carry it, narrowed to INIT and ALLOC, because ALLOC is what
+      # prints "Allocated shareable buffer" with a size and an ipcDesc, which is
+      # the count of IPC registrations this investigation has wanted since the
+      # first refusal and that ROCm offers no way to read.
+      #
+      # It goes to NCCL_DEBUG_FILE rather than to the step log, because on
+      # stdout it is unusable: measured locally it adds 2 MB a minute, about
+      # 73 MB per pass, and 62 per cent of that is one tuning line about PXN
+      # repeated. Writing per process keeps stdout clean, verified at zero NCCL
+      # lines on stdout, and the command after each pass prints the tail of each
+      # file with its buffer and init counts, which is where a rank that died
+      # leaves its last state.
       #
       # Levers that are dead, each by measurement. UCX_RMA_PPLN_ENABLE=n and
       # UCX_RNDV_SCHEME=get_zcopy both reproduced the fault unchanged in build
@@ -136,12 +177,27 @@ steps:
       # unable to register its buffers, so both were discarded locally before
       # costing CI time.
       #
-      # The last pass turns off the caching allocator so a freed buffer is
-      # really unmapped instead of handed back from the pool. If a published
-      # buffer is being reused after it was freed, that pass moves the fault to
-      # the moment of reuse. The file runs three times because a group that
-      # passes sometimes is not a group that passes, and because the fault does
-      # not appear in every case.
+      # The second pass turns off the caching allocator so a freed buffer is
+      # really unmapped instead of handed back from the pool, and that pass is
+      # no longer only a probe. In build 95867 all three cases it reached
+      # climbed from two ranks to four, which only one case in eight managed
+      # while the allocator was on, and then all three died on the way back
+      # down. So the failure going up depends on the allocator and the one
+      # coming down does not, which is the cleanest separation between them so
+      # far. The likely reason is time rather than memory: hipMalloc and hipFree
+      # synchronize the device, so without a pool every allocation becomes a
+      # fence and the overlap a race would need is gone, which is a heavy
+      # version of the targeted synchronize added upstream for the same race.
+      # That makes this pass a test of the race, not a fix for it.
+      #
+      # The file used to run the same command twice before this pass, to see
+      # whether a case that passes keeps passing. It does not need to any more:
+      # in build 95867 the two identical passes failed on exactly the same four
+      # cases, three on the scale up and one on the scale down, so the
+      # repetition has already answered its question. Dropping it halves the
+      # runtime of the step, which matters because the first attempt at that
+      # build was cut off at 1 h 30 min when the agent was stopped, before the
+      # third pass could finish.
       #
       # The watchdog stays on at 60 s. Both unbounded waits this investigation
       # found, drain_async and _wait_for_all_transfers, announced themselves
@@ -161,8 +217,9 @@ steps:
       # came back green under the same CPU quota, and dropping cma so that the
       # rendezvous has to run over tcp with rocm_copy, the combination the
       # crashing stack shows, still passed.
-      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
+      - PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.

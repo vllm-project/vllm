@@ -357,6 +357,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._layer_idx: int | None = None
         # (layer, peer) -> local and remote address ranges, diagnostic only.
         self._desc_ranges: dict[tuple[int, int], list[int]] = {}
+        # (layer, tensor) -> (base_ptr, bytes) as published to the peers.
+        self._published_ptrs: dict[tuple[int, int], tuple[int, int]] = {}
         self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
@@ -370,9 +372,10 @@ class NixlEplbCommunicator(EplbCommunicator):
         # NIXL registration handles; deregistered in __del__.
         self._registered_descs: list[object] = []
         self._remote_agents: dict[int, str] = {}
-        # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
+        # peer -> (layer, tensor) ->
+        # (base_ptr, bytes_per_expert, dev_id, total_bytes, num_rows).
         self._remote_send_meta: dict[
-            int, dict[tuple[int, int], tuple[int, int, int]]
+            int, dict[tuple[int, int], tuple[int, int, int, int, int]]
         ] = {}
 
         self._cuda_device_id = int(self._device.index or 0)
@@ -433,12 +436,40 @@ class NixlEplbCommunicator(EplbCommunicator):
                 if self._stream is not None:
                     self._stream.synchronize()
         self._layer_idx = layer_idx
+        self._check_published_ptrs(layer_idx)
         n = self._num_local_experts
         rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)
         self._expert_to_src_row = [
             {int(eid): i for i, eid in enumerate(row) if eid != -1}
             for row in rank_experts
         ]
+
+    def _check_published_ptrs(self, layer_idx: int) -> None:
+        """Confirm this rank's expert weights still sit where it said they do.
+
+        Every peer reads this layer straight out of the addresses handed out
+        once, at init. Nothing re-publishes them, so a reallocation of these
+        tensors afterwards leaves the peers reading an address this rank no
+        longer owns, and a READ served from a freed or reused mapping is a
+        fault on this device, not on theirs. The rank that moved its tensors
+        is the only one that can see it happen, which is why the check lives on
+        the sending side.
+        """
+        for t_idx, t in enumerate(self._all_expert_weights[layer_idx]):
+            published = self._published_ptrs.get((layer_idx, t_idx))
+            if published is None:
+                continue
+            base, nbytes = published
+            if t.data_ptr() == base and t.nbytes == nbytes:
+                continue
+            raise RuntimeError(
+                f"NIXL EPLB expert weights moved after their addresses were "
+                f"published: layer {layer_idx} tensor {t_idx} was "
+                f"{nbytes} byte(s) at 0x{base:x} and is now {t.nbytes} "
+                f"byte(s) at 0x{t.data_ptr():x}. Every peer still reads the "
+                f"old address, so their READs land on memory this rank has "
+                f"released."
+            )
 
     def add_recv(
         self,
@@ -457,13 +488,36 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         local_descs: list[tuple[int, int, int]] = []
         remote_descs: list[tuple[int, int, int]] = []
+        # What the peer registered, as opposed to what this layer reads.
+        valid_bounds: list[tuple[int, int]] = []
         for t_idx, t in enumerate(tensors):
-            send_base, send_stride, remote_dev = self._remote_send_meta[src_rank][
-                (layer_idx, t_idx)
-            ]
+            (
+                send_base,
+                send_stride,
+                remote_dev,
+                send_total,
+                send_rows,
+            ) = self._remote_send_meta[src_rank][(layer_idx, t_idx)]
             assert t.nbytes == send_stride, (
                 f"tensor {t_idx} size {t.nbytes} != remote stride {send_stride}"
             )
+            # A READ past the end of the peer's tensor is not refused: the
+            # address is still a plausible device address, so the peer's GPU
+            # takes the access and faults, which kills that rank with nothing
+            # but an address to show for it and leaves every other rank
+            # spinning on a transfer that will never report DONE. The bound is
+            # known here, before the READ is issued, so check it here.
+            if not 0 <= src_row < send_rows:
+                raise RuntimeError(
+                    f"NIXL EPLB would read outside rank {src_rank}'s expert "
+                    f"weights: layer {layer_idx} tensor {t_idx} expert "
+                    f"{expert_id} resolved to row {src_row}, but that peer "
+                    f"holds {send_rows} row(s). The read would start at "
+                    f"0x{send_base + src_row * send_stride:x}, which is "
+                    f"{(src_row - send_rows + 1) * send_stride} byte(s) past "
+                    f"the end of a {send_total} byte region based at "
+                    f"0x{send_base:x}."
+                )
             local_descs.append(
                 (
                     t.data_ptr(),
@@ -478,9 +532,12 @@ class NixlEplbCommunicator(EplbCommunicator):
                     remote_dev,
                 )
             )
+            valid_bounds.append((send_base, send_base + send_total))
 
         if os.getenv("VLLM_EEP_DEBUG_XFER_DESCS") == "1":
-            self._record_desc_range(layer_idx, src_rank, local_descs, remote_descs)
+            self._record_desc_range(
+                layer_idx, src_rank, local_descs, remote_descs, valid_bounds
+            )
 
         local_h, remote_h, xfer_h = self._create_peer_xfer(
             src_rank, local_descs, remote_descs
@@ -494,17 +551,20 @@ class NixlEplbCommunicator(EplbCommunicator):
         src_rank: int,
         local_descs: list[tuple[int, int, int]],
         remote_descs: list[tuple[int, int, int]],
+        valid_bounds: list[tuple[int, int]],
     ) -> None:
         """Keep the address span this layer reads from each peer.
 
         A fault during the reshuffle names the device and the address but
         nothing else, and the two readings it can have need opposite fixes. If
-        the address falls inside the span a peer published, the mapping was
-        revoked under a descriptor that was still correct. If it falls outside,
-        send_base plus src_row times send_stride walked off the registration,
-        which is arithmetic this file owns. One span per layer and peer is
-        enough to tell those apart and is cheap, where a line per expert is
-        thousands of lines per reconfiguration.
+        the address falls inside what the peer registered, the mapping was
+        revoked under a descriptor that was still correct, which is a runtime
+        question. If it falls outside, send_base plus src_row times send_stride
+        walked off the registration, which is arithmetic this file owns. The
+        registered bound is recorded next to the span so one line answers that
+        without cross-referencing a second one. One span per layer and peer is
+        cheap, where a line per expert is thousands of lines per
+        reconfiguration.
 
         Diagnostic only.
         """
@@ -514,6 +574,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         local_hi = max(addr + size for addr, size, _ in local_descs)
         remote_lo = min(addr for addr, _, _ in remote_descs)
         remote_hi = max(addr + size for addr, size, _ in remote_descs)
+        valid_lo = min(lo for lo, _ in valid_bounds)
+        valid_hi = max(hi for _, hi in valid_bounds)
         remote_dev = remote_descs[0][2]
         if span is None:
             self._desc_ranges[key] = [
@@ -523,6 +585,8 @@ class NixlEplbCommunicator(EplbCommunicator):
                 remote_hi,
                 remote_dev,
                 1,
+                valid_lo,
+                valid_hi,
             ]
             return
         span[0] = min(span[0], local_lo)
@@ -530,6 +594,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         span[2] = min(span[2], remote_lo)
         span[3] = max(span[3], remote_hi)
         span[5] += 1
+        span[6] = min(span[6], valid_lo)
+        span[7] = max(span[7], valid_hi)
 
     def _init_remote_agents(self) -> None:
         local_metadata = self._nixl_wrapper.get_agent_metadata()
@@ -559,22 +625,27 @@ class NixlEplbCommunicator(EplbCommunicator):
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
         remote RDMA addresses at transfer time."""
-        local_meta: dict[tuple[int, int], tuple[int, int, int]] = {}
+        local_meta: dict[tuple[int, int], tuple[int, int, int, int, int]] = {}
         for layer_idx, layer_tensors in enumerate(self._all_expert_weights):
             for t_idx, t in enumerate(layer_tensors):
                 nbytes_per_expert = t.nbytes // self._num_local_experts
+                self._published_ptrs[(layer_idx, t_idx)] = (t.data_ptr(), t.nbytes)
                 local_meta[(layer_idx, t_idx)] = (
                     t.data_ptr(),
                     nbytes_per_expert,
                     self._cuda_device_id,
+                    t.nbytes,
+                    t.shape[0],
                 )
 
-        # Per-rank map: (layer_idx, tensor_idx) -> (base_ptr, bytes_per_expert, dev_id).
+        # Per-rank map: (layer_idx, tensor_idx) ->
+        # (base_ptr, bytes_per_expert, dev_id, total_bytes, num_rows).
         # add_recv uses base_ptr + src_row * bytes_per_expert to compute
-        # the remote RDMA address for each expert.
-        gathered_meta: list[dict[tuple[int, int], tuple[int, int, int]] | None] = [
-            None
-        ] * self._world_size
+        # the remote RDMA address for each expert, and total_bytes to confirm
+        # that address is still inside what the peer registered.
+        gathered_meta: list[
+            dict[tuple[int, int], tuple[int, int, int, int, int]] | None
+        ] = [None] * self._world_size
         torch.distributed.all_gather_object(
             gathered_meta, local_meta, group=self._cpu_group
         )
@@ -590,13 +661,21 @@ class NixlEplbCommunicator(EplbCommunicator):
                     f"local={sorted(local_keys)}, peer={sorted(peer_keys)}"
                 )
             for key in local_keys:
-                _, local_stride, _ = local_meta[key]
-                _, peer_stride, _ = peer_meta[key]
+                _, local_stride, _, _, local_rows = local_meta[key]
+                _, peer_stride, _, _, peer_rows = peer_meta[key]
                 if local_stride != peer_stride:
                     raise RuntimeError(
                         f"NIXL EPLB nbytes_per_expert mismatch for {key} "
                         f"with rank {peer}: "
                         f"local={local_stride}, peer={peer_stride}"
+                    )
+                if local_rows != peer_rows:
+                    raise RuntimeError(
+                        f"NIXL EPLB expert row count mismatch for {key} "
+                        f"with rank {peer}: "
+                        f"local={local_rows}, peer={peer_rows}. Rows index the "
+                        f"remote read, so a peer holding fewer rows than this "
+                        f"rank expects is read past the end of its tensor."
                     )
             self._remote_send_meta[peer] = peer_meta
 
@@ -727,16 +806,28 @@ class NixlEplbCommunicator(EplbCommunicator):
             )
         # Before the wait, never after: the fault ends the process.
         for (layer, peer), span in self._desc_ranges.items():
-            local_lo, local_hi, remote_lo, remote_hi, remote_dev, reads = span
+            (
+                local_lo,
+                local_hi,
+                remote_lo,
+                remote_hi,
+                remote_dev,
+                reads,
+                valid_lo,
+                valid_hi,
+            ) = span
             logger.warning(
                 "[EEP-DEBUG] layer %s reads %d expert(s) from rank %s on "
-                "device %s: remote 0x%x-0x%x, local 0x%x-0x%x",
+                "device %s: remote 0x%x-0x%x of registered 0x%x-0x%x, "
+                "local 0x%x-0x%x",
                 layer,
                 reads,
                 peer,
                 remote_dev,
                 remote_lo,
                 remote_hi,
+                valid_lo,
+                valid_hi,
                 local_lo,
                 local_hi,
             )
