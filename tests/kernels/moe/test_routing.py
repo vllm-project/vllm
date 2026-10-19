@@ -167,6 +167,38 @@ def test_single_expert_group_with_non_unit_scale_uses_grouped_topk() -> None:
     assert isinstance(router, GroupedTopKRouter)
 
 
+def test_sigmoid_bias_routing_with_routed_scale_is_minimax2() -> None:
+    """FlashInfer's MiniMax2 routing applies routed_scaling_factor, so a
+    non-unit scale (MiniMax-M3 uses 2.0) must not block fused routing."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        routed_scaling_factor=2.0,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+    assert router.routing_method_type == RoutingMethodType.MiniMax2
+
+
+def test_zero_expert_routing_is_unspecified() -> None:
+    """Zero experts are resolved in the router, so kernels with built-in
+    routing must never be selected for them."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(160),
+        zero_expert_type="identity",
+        num_logical_experts=160,
+    )
+
+    assert router.routing_method_type == RoutingMethodType.Unspecified
+
+
 def setup_eplb_state(
     enable_eplb: bool, global_num_experts: int
 ) -> EplbLayerState | None:
@@ -548,6 +580,20 @@ def test_fused_topk_bias(
 
     # Compare results
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
+
+
+@pytest.mark.parametrize("scoring_func", [0, 1])
+def test_fused_grouped_topk_accepts_idle_rank(scoring_func):
+    """Zero-token routing must leave CUDA ready for the next batch."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA required")
+    from vllm import _custom_ops as ops
+
+    scores = torch.empty((0, 8), device="cuda", dtype=torch.float32)
+    bias = torch.zeros(8, device="cuda")
+    weights, ids = ops.grouped_topk(scores, 2, 1, 2, True, 1.0, bias, scoring_func)
+    torch.testing.assert_close(weights, scores.new_empty((0, 2)))
+    torch.testing.assert_close(ids, scores.new_empty((0, 2), dtype=torch.int32))
 
 
 @pytest.mark.parametrize("m,k", MK_S)

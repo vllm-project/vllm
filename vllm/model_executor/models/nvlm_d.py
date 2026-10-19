@@ -11,7 +11,7 @@ from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -161,7 +161,7 @@ class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo
     dummy_inputs=NVLMDummyInputsBuilder,
 )
 class NVLM_D_Model(InternVLChatModel):
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_intermediate_size = config.text_config.intermediate_size
         llm_hidden_size = config.text_config.hidden_size
@@ -179,7 +179,7 @@ class NVLM_D_Model(InternVLChatModel):
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,

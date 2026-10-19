@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
@@ -52,6 +52,7 @@ from vllm.transformers_utils.processors.mimo_v2_omni import (
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -68,7 +69,10 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import _create_qwen2vl_field_factory
+from .qwen2_vl import (
+    Qwen2VLMultiModalDataParser,
+    _create_qwen2vl_field_factory,
+)
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -417,7 +421,7 @@ class MiMoVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_cfg: PretrainedConfig,
+        vision_cfg: PreTrainedConfig,
         *,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -669,6 +673,14 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
+    # Video stays raw: get_video_replacement also reads second_per_grid_ts and
+    # video_start_times, which a metadata-only rewrite would not carry.
+    embedding_fields = {
+        "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
+    }
+
+
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
@@ -688,9 +700,14 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        from vllm.multimodal.parse import MultiModalDataParser
-
-        return MultiModalDataParser(target_sr=24000.0)
+        # Without embedding_fields the EC producer publishes no metadata and
+        # the EPD proxy never rewrites the media item.
+        return MiMoV2OmniMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=24000.0,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
@@ -1209,7 +1226,9 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
     info=MiMoV2OmniProcessingInfo,
     dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
-class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
+class MiMoV2OmniForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
+):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

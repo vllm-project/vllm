@@ -73,7 +73,7 @@ def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
 _INT32_BIG = tl.constexpr(2**31 - 1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["end_ptr"])
 def _expand_candidates_kernel(
     cand_ptr,
     cand_stride,
@@ -146,19 +146,21 @@ def _sparse_topk_remap_kernel(
     out_ptr,
     out_stride,
     k,
+    width,
     SBK: tl.constexpr,
     K_POW2: tl.constexpr,
 ):
     """Remap sparse top-k columns to request-local positions.
 
     Column ``j * SBK + o`` scores the token at
-    ``(si[row, j] - ks // SBK) * SBK + o``; -1 columns stay -1.
+    ``(si[row, j] - ks // SBK) * SBK + o``; columns outside ``[0, width)``
+    (including DeepSelect's sentinel for NaN rows) become -1.
     """
     row = tl.program_id(0)
     ks_base = tl.load(ks_ptr + row * ks_stride) // SBK
     cols = tl.arange(0, K_POW2)
     c = tl.load(col_ptr + row * col_stride + cols, mask=cols < k, other=-1)
-    valid = c >= 0
+    valid = (c >= 0) & (c < width)
     cc = tl.where(valid, c, 0)
     blocks = tl.load(si_ptr + row * si_stride + cc // SBK)
     pos = (blocks - ks_base) * SBK + cc % SBK
@@ -301,6 +303,7 @@ def sparse_topk_remap(
         topk_indices,
         topk_indices.stride(0),
         topk_tokens,
+        width,
         SBK=sparse_block_kv,
         K_POW2=triton.next_power_of_2(topk_tokens),
     )
@@ -424,7 +427,7 @@ def sparse_mqa_logits_paged_decode(
         q: [rows, 1, H, D] packed Q values (MXFP4 viewed as int8).
         q_scale: [rows, 1, H] int32 packed UE8M0 Q scales.
         kv_cache: 4D [num_pages, page_kv, 1, head_bytes] uint8 fused cache
-            view; the page stride must be 512B-aligned.
+            view; the page stride must be 256B-aligned.
         weights: [rows, H] bf16 per-head weights.
         context_lens: [rows] int32 per-row (compressed) context lengths.
         block_table: [rows, P] int32 per-row page table, ``stride(-1) == 1``.
@@ -448,8 +451,8 @@ def sparse_mqa_logits_paged_decode(
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]
     assert weights.dtype == torch.bfloat16, weights.dtype
-    assert kv_cache.stride(0) % 512 == 0, (
-        "paged cache page stride must be 512B-aligned: "
+    assert kv_cache.stride(0) % 256 == 0, (
+        "paged cache page stride must be 256B-aligned: "
         f"shape={tuple(kv_cache.shape)} stride={kv_cache.stride()}"
     )
     assert page_kv % sparse_block_kv == 0, (page_kv, sparse_block_kv)

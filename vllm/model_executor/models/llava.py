@@ -12,7 +12,7 @@ from transformers import (
     CLIPVisionConfig,
     LlavaConfig,
     PixtralVisionConfig,
-    PretrainedConfig,
+    PreTrainedConfig,
     SiglipVisionConfig,
 )
 from transformers.models.llava import LlavaProcessor
@@ -25,7 +25,6 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
@@ -157,7 +156,7 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: PretrainedConfig
+    vision_config: PreTrainedConfig
     image_token_index: int
     vision_feature_select_strategy: str
     vision_feature_layer: int | list[int]
@@ -407,21 +406,17 @@ def _build_llava_or_pixtral_hf_info(
 def _build_llava_or_pixtral_hf_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
-            cache=cache,
         )
 
     if isinstance(info, LlavaProcessingInfo):
         return LlavaMultiModalProcessor(
             info,
             dummy_inputs,  # type: ignore
-            cache=cache,
         )
 
     raise NotImplementedError(type(info))
