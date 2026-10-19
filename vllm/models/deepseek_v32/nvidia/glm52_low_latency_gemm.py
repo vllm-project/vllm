@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM103."""
+"""GLM-5.2 decode GEMM selection for unquantized BF16 on SM103/SM107.
+
+Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
+:data:`GLM52_PROJECTIONS` was measured on B300 (SM103) and
+:data:`GLM52_PROJECTIONS_SM107` on VR200 (SM107). The SM107 table also covers
+the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
+projections, which run as BF16 GEMMs at decode batch sizes.
+
+``VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM=1`` restores the default unquantized
+GEMM. An explicit ``--linear-backend`` that provides its own unquantized BF16
+GEMM also takes precedence over this selection.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +23,8 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config_or_none
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
@@ -20,7 +33,13 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.utils import (
+    default_unquantized_gemm,
+    dispatch_unquantized_gemm,
+)
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 Backend = Literal["cute", "dsv3_fused_a"]
 ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
@@ -84,9 +103,162 @@ GLM52_PROJECTIONS = {
     )
 }
 
+# SM107 (VR200): tuned CuTe DSL skinny-GEMM configs, swept against cuBLAS on one
+# GPU. A (shape, M) is listed only where CuTe beat cuBLAS by more than the 0.15 us
+# noise band; every other M stays on cuBLAS. The times are CuTe / cuBLAS at M=4
+# (one request with MTP K=3) unless noted.
+# q_a + kv_a, replicated: 5.84 / 6.91 us. On SM107 dsv3_fused_a_gemm wins only
+# at M=6..8 and loses to cuBLAS from M=12.
+_SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
+    n=2624,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 4, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 128, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 2, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2)),
+    ),
+    dsv3_tokens=frozenset(range(6, 9)),
+)
+
+# MTP eh_proj (draft M = number of requests): 12.90 / 16.96 us at M=1.
+_SM107_EH_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=12288,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=12288)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 4)),
+    ),
+)
+
+# q_b_proj at TP4 and the indexer wq_b (replicated): 4.31 / 5.71 us.
+_SM107_Q_B_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=4096,
+    k=2048,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 4, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 128, 4, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 128, 4, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 64, 4, k_unroll=4)),
+        (5, SkinnyGemmConfig(5, 64, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 64, 2, k_unroll=2)),
+    ),
+)
+
+# o_proj at TP4: CuTe wins only for M<=3 (draft passes): 5.90 / 7.77 us at M=1.
+_SM107_O_PROJ_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=4096,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 128, 3, k_unroll=4)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 128, 4)),
+    ),
+)
+
+# indexer wk + weights_proj, replicated: 2.83 / 5.43 us.
+_SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
+    n=160,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 1, k_unroll=2, static_k=6144)),
+        (2, SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=6144)),
+        (3, SkinnyGemmConfig(3, 256, 1, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 256, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
+        (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
+        (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
+        (16, SkinnyGemmConfig(16, 256, 1, k_unroll=2)),
+    ),
+)
+
+# shared expert gate_up at TP4: 3.96 / 5.40 us.
+_SM107_SHARED_GATE_UP_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=1024,
+    k=6144,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 256, 2, k_unroll=2)),
+        (2, SkinnyGemmConfig(2, 256, 2, k_unroll=2)),
+        (3, SkinnyGemmConfig(3, 256, 2, k_unroll=2)),
+        (4, SkinnyGemmConfig(4, 128, 1, k_unroll=2)),
+        (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 128, 1, k_unroll=2)),
+        (8, SkinnyGemmConfig(8, 128, 2, k_unroll=2)),
+    ),
+)
+
+# shared expert down at TP4: 3.19 / 4.28 us.
+_SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
+    n=6144,
+    k=512,
+    cute_configs=(
+        (1, SkinnyGemmConfig(1, 64, 6, k_unroll=4)),
+        (2, SkinnyGemmConfig(2, 64, 4, k_unroll=4)),
+        (3, SkinnyGemmConfig(3, 64, 4)),
+        (4, SkinnyGemmConfig(4, 32, 4, k_unroll=2)),
+        (6, SkinnyGemmConfig(6, 32, 4, k_unroll=2)),
+    ),
+)
+
+GLM52_PROJECTIONS_SM107 = {
+    (spec.n, spec.k): spec
+    for spec in (
+        _SM107_QKV_A_PROJECTION,
+        GLM52_Q_B_PROJECTION,
+        _SM107_EH_PROJECTION,
+        _SM107_Q_B_TP4_PROJECTION,
+        _SM107_O_PROJ_TP4_PROJECTION,
+        _SM107_WK_WEIGHTS_PROJECTION,
+        _SM107_SHARED_GATE_UP_TP4_PROJECTION,
+        _SM107_SHARED_DOWN_TP4_PROJECTION,
+    )
+}
+
 
 def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
+
+
+def _is_sm107() -> bool:
+    return current_platform.is_device_capability((10, 7))
+
+
+def _explicit_bf16_linear_backend() -> str | None:
+    """The ``--linear-backend`` that replaces the default BF16 GEMM, if any."""
+    config = get_current_vllm_config_or_none()
+    if config is None:
+        return None
+    linear_backend = config.kernel_config.linear_backend
+    if linear_backend == "auto":
+        return None
+    # Backends without an unquantized implementation leave these layers on
+    # automatic selection, which includes this table.
+    if dispatch_unquantized_gemm(linear_backend) is default_unquantized_gemm:
+        return None
+    return linear_backend
+
+
+def _low_latency_table() -> dict[tuple[int, int], GLM52ProjectionSpec] | None:
+    """Measured dispatch table for the current device, or None if unsupported."""
+    if envs.VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM:
+        return None
+    if not (_is_sm103() or _is_sm107()):
+        return None
+    linear_backend = _explicit_bf16_linear_backend()
+    if linear_backend is not None:
+        logger.info_once(
+            "GLM-5.2 low-latency BF16 GEMM disabled: --linear-backend=%s "
+            "selects the unquantized BF16 GEMM.",
+            linear_backend,
+        )
+        return None
+    if _is_sm107():
+        return GLM52_PROJECTIONS_SM107
+    return GLM52_PROJECTIONS
 
 
 def _is_supported_row_major(tensor: torch.Tensor) -> bool:
@@ -144,11 +316,14 @@ def build_glm52_plan(
     weight: torch.Tensor | None, dtype: torch.dtype
 ) -> dict[int, ResolvedCall] | None:
     """Plan for a weight the walk below cannot reach (a plain ``nn.Linear``)."""
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if dtype != torch.bfloat16:
+        return None
+    table = _low_latency_table()
+    if table is None:
         return None
     if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
         return None
-    spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
+    spec = table.get(tuple(weight.shape))
     if spec is None:
         return None
     _request_warmup(dtype, {config for _, config in spec.cute_configs})
@@ -177,10 +352,14 @@ def enable_glm52_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    if dtype != torch.bfloat16 or not _is_sm103():
+    if dtype != torch.bfloat16:
+        return
+    table = _low_latency_table()
+    if table is None:
         return
 
     warmup_configs: set[SkinnyGemmConfig] = set()
+    installed: dict[tuple[int, int], int] = {}
     for child in module.modules():
         if (
             not isinstance(child, LinearBase)
@@ -190,10 +369,21 @@ def enable_glm52_low_latency_gemm(
         weight = getattr(child, "weight", None)
         if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
             continue
-        spec = GLM52_PROJECTIONS.get(tuple(weight.shape))
+        spec = table.get(tuple(weight.shape))
         if spec is None:
             continue
         child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
         warmup_configs.update(config for _, config in spec.cute_configs)
+        installed[(spec.n, spec.k)] = installed.get((spec.n, spec.k), 0) + 1
 
+    if installed:
+        # A missing backend silently falls back to the default GEMM for its
+        # token counts, so report both.
+        logger.info_once(
+            "GLM-5.2 low-latency BF16 GEMM installed for local (N, K): %s "
+            "(CuTe DSL available: %s, dsv3_fused_a_gemm available: %s).",
+            ", ".join(f"{n}x{k} (x{count})" for (n, k), count in installed.items()),
+            shape_dynamic_skinny_gemm.is_available(),
+            hasattr(torch.ops._C, "dsv3_fused_a_gemm"),
+        )
     _request_warmup(dtype, warmup_configs)

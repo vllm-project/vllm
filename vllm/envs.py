@@ -213,6 +213,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1651,6 +1652,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # GLM-5.2/5.3 (glm_moe_dsa) only. On SM103 and SM107 the measured unquantized
+    # BF16 decode projections (per-device tables in glm52_low_latency_gemm.py)
+    # run the CuTe DSL skinny GEMM / dsv3 fused-A kernels at small M. Set to 1
+    # to use the default unquantized GEMM instead.
+    "VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM": lambda: (
+        os.getenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", "0").lower() in ("1", "true")
+    ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
