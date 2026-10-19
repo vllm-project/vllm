@@ -159,9 +159,9 @@ def test_snapshot_environment_contract(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ):
-    from vllm.entrypoints.serve.utils import api_utils
+    from vllm.entrypoints.common import setup
 
-    monkeypatch.setattr(api_utils, "cli_env_setup", pytest.fail)
+    monkeypatch.setattr(setup, "cli_env_setup", pytest.fail)
     secret = "snapshot-secret"
     monkeypatch.setenv("VLLM_API_KEY", secret)
     monkeypatch.setenv("VLLM_USER_SETTING", secret)
