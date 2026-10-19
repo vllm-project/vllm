@@ -537,12 +537,12 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   }
 
   // Large path: init mbarriers + state, then dispatch fused or twopass.
-  // Elements per block as large_topk partitions the row: its float4 units
-  // split evenly across the cluster. Sized by the row's length, not its
-  // stride, so a short row in a wide logits buffer still fits the single-pass
-  // staging.
-  const uint32_t per_block =
-      ((static_cast<uint32_t>(sl) + 3) / 4 + CS - 1) / CS * 4;
+  // Elements per block, sized by the row's length rather than its stride so a
+  // short row in a wide logits buffer still takes the single-pass staging.
+  // large_topk splits the row in 16-byte units, but kFusedMax and
+  // kSizePerStage are multiples of that unit, so the path and stage count
+  // come out the same.
+  const uint32_t per_block = (static_cast<uint32_t>(sl) + CS - 1) / CS;
   constexpr uint32_t kFusedMax = ((CS == 16)  ? kFusedStagesCS16
                                   : (CS == 8) ? kFusedStagesCS8
                                               : kMaxSinglePassStages) *
