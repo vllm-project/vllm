@@ -51,6 +51,46 @@ Key flags (plus all `EngineArgs`):
 
 Read `median_us` (each replay is already the max over ranks).
 
+## Kernel breakdown
+
+Add `--profile-dir DIR` to see where the time goes. After timing, each case is
+replayed 3 more times under `torch.profiler`; every rank writes
+`DIR/<case>.rank<r>.kernels.json` (GPU time per kernel per forward, sorted)
+and `DIR/<case>.rank<r>.trace.json.gz` (open in Perfetto). Rank 0's top
+kernels are printed and included in `--output-json`.
+
+```bash
+python -m vllm.benchmarks.forward.profile DIR/decode.rank0.kernels.json
+# Before/after a change, same case: per-kernel deltas, largest first.
+python -m vllm.benchmarks.forward.profile base/decode.rank0.kernels.json new/decode.rank0.kernels.json
+```
+
+- Kernels are grouped by name without template or function arguments; the
+  JSON keeps one full name per group in `example`.
+- Only the timed forward is included: the in-graph KV restore and rank
+  rendezvous are excluded (`pre_forward_us`). `span_us` (first to last
+  forward kernel) should be close to `median_us`, a bit higher from profiler
+  overhead; `busy_us` can exceed it when streams overlap.
+- Compare the same rank across runs: under EP, ranks differ (e.g. collective
+  wait time shows up inside communication kernels).
+
+For Nsight Systems (NVTX, NCCL, CPU side, GPU metrics), skip `--profile-dir`:
+the two can't share CUPTI. Each case's 3 profiled replays run between
+`cudaProfilerStart`/`Stop` in an NVTX range `forward/<case>`, so a capture range
+records only them, one report per case (and rank):
+
+```bash
+nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat \
+  --cuda-graph-trace=node -o prof vllm bench forward ...       # prof.1, prof.2, ...
+torchrun --nproc-per-node=4 --no-python nsys profile ... -o prof_rank%q{RANK} \
+  python -m vllm.entrypoints.cli.main bench forward ...
+nsys stats --report cuda_gpu_kern_sum --format csv -o kern prof.1.nsys-rep
+```
+
+Keep `--capture-range-end=repeat`: nsys's default stops after the first case
+and leaves the bench hanging. `nsys stats` also counts the KV restore copies
+that the JSON summary excludes.
+
 ## Caveats
 
 - **Dummy weights lie for data-dependent kernels.** Dummy gates route every
