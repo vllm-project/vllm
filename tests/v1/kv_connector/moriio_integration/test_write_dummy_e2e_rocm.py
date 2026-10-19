@@ -50,6 +50,7 @@ import os
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -444,7 +445,7 @@ def _server(
     extra_args: tuple[str, ...] = (),
     kv_transfer_config: dict[str, Any] | None = None,
 ) -> RemoteOpenAIServer:
-    port = port or get_open_port()
+    port = port or _open_port()
     args = [
         *arch.args,
         *extra_args,
@@ -483,7 +484,8 @@ def _server(
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
         **_device_env(selector, devices),
         "VLLM_HOST_IP": "127.0.0.1",
-        "VLLM_PORT": str(get_open_port()),
+        # vLLM scans upward from VLLM_PORT for the server internal sockets.
+        "VLLM_PORT": str(_open_port_block(32)),
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
         "VLLM_CACHE_ROOT": str(_CACHE_ROOT / role),
@@ -499,6 +501,40 @@ def _server(
     )
 
 
+# Ports handed to a server of this test session, so later picks avoid them.
+_HANDED_OUT: set[int] = set()
+# MoRIIO binds ``port + tp_rank`` (times the DP rank) on every rank, so a
+# handshake or notify port needs a free block, not one free port.
+_PORT_BLOCK = 8
+
+
+def _bindable(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+def _open_port() -> int:
+    while True:
+        port = get_open_port()
+        if port not in _HANDED_OUT:
+            _HANDED_OUT.add(port)
+            return port
+
+
+def _open_port_block(size: int = _PORT_BLOCK) -> int:
+    """First port of ``size`` consecutive free ports no other server got."""
+    while True:
+        base = get_open_port()
+        block = range(base, base + size)
+        if _HANDED_OUT.isdisjoint(block) and all(_bindable(p) for p in block):
+            _HANDED_OUT.update(block)
+            return base
+
+
 def _moriio_config(
     role: str, http_port: int, ping_port: int, read_mode: bool = False
 ) -> dict[str, Any]:
@@ -512,8 +548,9 @@ def _moriio_config(
             "proxy_ip": "127.0.0.1",
             "proxy_ping_port": str(ping_port),
             "http_port": str(http_port),
-            "handshake_port": str(get_open_port()),
-            "notify_port": str(get_open_port()),
+            # Every TP rank binds its port plus its rank offset.
+            "handshake_port": str(_open_port_block()),
+            "notify_port": str(_open_port_block()),
         },
     }
 
@@ -522,7 +559,7 @@ def _moriio_config(
 def _proxy(ping_port: int) -> Iterator[str]:
     # Free ports for both sockets, so cases from parallel shards on one host
     # do not collide.
-    port = get_open_port()
+    port = _open_port()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -569,7 +606,7 @@ def _pd_pair(
     assert len(decode_devices) == case.decode_tp, (
         f"needs {case.prefill_tp} GPUs for prefill and {case.decode_tp} for decode"
     )
-    prefill_port, decode_port, ping_port = (get_open_port() for _ in range(3))
+    prefill_port, decode_port, ping_port = (_open_port() for _ in range(3))
     with _proxy(ping_port) as proxy_url, contextlib.ExitStack() as stack:
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
