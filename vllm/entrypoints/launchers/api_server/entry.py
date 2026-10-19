@@ -15,7 +15,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.cli_args import init_parser_plugin
+from vllm.entrypoints.common.cli_args import init_parser_plugin
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
@@ -50,7 +50,7 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    from ..cli_args import propagate_flash_late_interaction
+    from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
 
     propagate_flash_late_interaction(args, engine_args)
     if client_config:
@@ -207,7 +207,7 @@ def main():
     from vllm.entrypoints.common.setup import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    from ..cli_args import (
+    from vllm.entrypoints.common.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )

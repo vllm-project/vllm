@@ -8,7 +8,7 @@ import uvloop
 
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.setup import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.entrypoints.launchers.cli_args import (
+from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )

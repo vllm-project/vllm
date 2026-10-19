@@ -69,7 +69,7 @@ from vllm.utils.mem_constants import MiB_bytes
 from vllm.version import __version__ as VLLM_VERSION
 
 from .api_server.entry import init_app_state
-from .cli_args import BaseFrontendArgs
+from vllm.entrypoints.common.cli_args import BaseFrontendArgs
 
 logger = init_logger(__name__)
 
