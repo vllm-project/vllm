@@ -37,9 +37,7 @@ def fused_allreduce_rms_norm(
     if tp_size == 1:
         return norm(hidden_states, residual)
 
-    # Some RMSNorm adapters must run additional behavior between residual-add
-    # and normalization. The fused kernel reads ``norm.weight`` directly and
-    # would bypass that behavior, so preserve the module's forward contract.
+    # The fused kernel reads norm.weight directly, bypassing adapter forward().
     if not getattr(norm, "supports_fused_allreduce_rms_norm", True):
         reduced = tensor_model_parallel_all_reduce(hidden_states)
         return norm(reduced, residual)

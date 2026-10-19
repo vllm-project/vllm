@@ -79,8 +79,6 @@ def initialize_model(
     model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
-    # Import lazily because rotation uses helpers from models.utils,
-    # which in turn exposes initialize_model through a local import.
     from vllm.model_executor.layers.rotation import prepare_rotation_transforms
 
     if model_config is None:

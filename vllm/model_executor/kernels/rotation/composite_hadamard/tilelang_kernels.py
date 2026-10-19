@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright (c) 2026 MetaX Integrated Circuits (Shanghai) Co., Ltd.
 
-"""Fuse checkpoint K-axis mixing and signs after normalized HadaCore."""
+"""Fuse K-axis mixing, 1/sqrt(K) scaling, and inverse signs after HadaCore."""
 
 import math
 

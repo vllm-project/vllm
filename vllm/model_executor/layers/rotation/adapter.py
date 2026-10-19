@@ -29,8 +29,6 @@ class RotationAdapter:
         self.rotation_tag = tag
         self.inverse = inverse
         self.rotation_hidden_size = hidden_size
-        # Bypass module registration: the registry must remain the sole
-        # parameter owner and checkpoint namespace.
         object.__setattr__(self, "_rotation", None)
 
     @property
@@ -46,6 +44,7 @@ class RotationAdapter:
                 f"{rotation_hidden_size} does not match consumer hidden_size="
                 f"{self.rotation_hidden_size}"
             )
+        # Keep parameters under the registry's checkpoint namespace.
         object.__setattr__(self, "_rotation", rotation)
 
     def apply_rotation(self, hidden_states: torch.Tensor) -> torch.Tensor:
