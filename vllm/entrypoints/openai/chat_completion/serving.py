@@ -387,6 +387,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
                 )
             else:
                 generator = self.engine_client.generate(

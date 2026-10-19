@@ -208,7 +208,13 @@ impl HuggingFaceTokenizer {
             Arc::from(ids)
         };
         let byte_level = tokenizer.decoder().is_some_and(is_byte_level_only);
-        let vocab_size = tokenizer.vocab_size();
+        // Added tokens can also be present in the base vocabulary (e.g. Step-5).
+        // Count the merged vocabulary, matching Hugging Face tokenizers.
+        let vocab_size = tokenizer.model().vocab_size()
+            + added_vocab
+                .iter()
+                .filter(|(token, _)| tokenizer.model().token_to_id(token).is_none())
+                .count();
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -610,6 +616,28 @@ mod tests {
 
         let wrapper = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
         assert_eq!(wrapper.vocab_size(), expected);
+    }
+
+    #[test]
+    fn fastokens_vocab_size_counts_overlapping_added_tokens_once() {
+        let mut tokenizer = tiny_bpe_tokenizer();
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<unk>", true),
+            AddedToken::from("<|im_end|>", true),
+        ]);
+        tokenizer.add_tokens(&[AddedToken::from("hello", false)]);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        tokenizer.save(&path, false).unwrap();
+
+        let hf = HuggingFaceTokenizer::new_hf(&path).unwrap();
+        let fast = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
+        assert_eq!(fast.vocab_size(), hf.vocab_size());
+        assert_eq!(fast.vocab_size(), 10);
+        assert_eq!(
+            fast.encode("hello<|im_end|>", false).unwrap(),
+            hf.encode("hello<|im_end|>", false).unwrap()
+        );
     }
 
     #[test]
