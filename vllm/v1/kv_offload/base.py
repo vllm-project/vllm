@@ -7,7 +7,16 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    NamedTuple,
+    NewType,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -554,8 +563,10 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class CanonicalKVCacheTensor:
     """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    With standardized layouts (RFC #42082) num_blocks is always the leading
-    logical dimension.
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
@@ -640,6 +651,60 @@ class CanonicalKVCaches:
 
 
 @dataclass
+class DevicePointers:
+    """Pre-resolved device pointers for a transfer.
+
+    Flat arrays in canonical order:
+        for each group:
+            for each data_ref in group:
+                for each block in group:
+                    ptrs[i], sizes[i]
+    """
+
+    ptrs: np.ndarray  # uint64, device memory addresses
+    sizes: np.ndarray  # uint64, byte sizes per copy op
+    group_block_counts: tuple[int, ...]  # device blocks per group
+    group_data_ref_counts: tuple[int, ...]  # data_refs per group
+    block_indices: tuple[int, ...]  # logical block offset per group
+
+
+class DevicePointerGroupInfo(NamedTuple):
+    group_idx: int
+    group_size: int
+    n_data_refs: int
+    skip: int
+    n_chunks: int
+    dev_ptr_offset: int
+
+
+@runtime_checkable
+class IOCompletion(Protocol):
+    """Completion handle for an async I/O operation.
+
+    `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
+    backends can use `StreamCompletion` instead, avoiding a thread.
+    """
+
+    def done(self) -> bool: ...
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+class StreamCompletion:
+    """IOCompletion backed by a CUDA event — no host thread required."""
+
+    __slots__ = ("_event",)
+
+    def __init__(self, event: torch.Event):
+        self._event = event
+
+    def done(self) -> bool:
+        return self._event.query()
+
+    def result(self, timeout: float | None = None) -> None:
+        self._event.synchronize()
+
+
+@dataclass
 class TransferResult:
     job_id: int
     success: bool
@@ -654,15 +719,15 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        """Async GPU -> offloaded medium."""
+        """Async device -> offloaded medium."""
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self, job_id: int, src_spec: LoadStoreSpec, device_ptrs: DevicePointers
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> device."""
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...
