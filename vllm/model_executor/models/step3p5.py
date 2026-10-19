@@ -17,7 +17,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
@@ -459,7 +458,6 @@ class Step3p5DecoderLayer(nn.Module):
                 f"Unsupported attention implementation: {config.att_impl_type}"
             )
         self.use_moe = False
-        self.tp_group = get_tp_group()
         self.use_fused_all_reduce = (
             get_tensor_model_parallel_world_size() > 1
             and get_dp_group().world_size == 1
@@ -495,13 +493,6 @@ class Step3p5DecoderLayer(nn.Module):
             config.hidden_size, config.rms_norm_eps
         )
         self.prefix = prefix
-
-    def add_and_maybe_inplace_all_reduce(
-        self, in1: torch.Tensor, in2: torch.Tensor
-    ) -> torch.Tensor:
-        if not self.use_fused_all_reduce:
-            return in1 + in2
-        return self.tp_group.all_reduce(in1 + in2)
 
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor

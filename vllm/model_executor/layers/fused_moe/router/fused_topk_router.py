@@ -61,10 +61,73 @@ def vllm_topk_sigmoid(
     return topk_weights, topk_indices
 
 
+# At E=512 / top-10, AITER's topk_gating is faster than the legacy launcher
+# through this many tokens; its one-row generic prefill path regresses above it.
+_AITER_TOPK_GATING_MAX_TOKENS = 4096
+
+
+def _aiter_topk_gating_supported(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    num_shared_experts: int,
+    shared_expert_scoring_func: str,
+) -> bool:
+    """Whether AITER's ``topk_gating`` can serve this softmax top-k launch.
+
+    It needs contiguous gating rows and at most ``_AITER_TOPK_GATING_MAX_TOKENS``
+    tokens. Fused shared experts are scored with sigmoid after the routed
+    top-k: 1, 2, 4 or 8 of them, with ``topk_weights`` and ``topk_indices``
+    sharing a row stride and ``topk_weights`` wide enough for the shared
+    columns. Shared expert ids stay as the caller prefilled them.
+    """
+    if (
+        not gating_output.is_contiguous()
+        or gating_output.shape[0] > _AITER_TOPK_GATING_MAX_TOKENS
+    ):
+        return False
+    if num_shared_experts == 0:
+        return not shared_expert_scoring_func
+    return (
+        shared_expert_scoring_func == "sigmoid"
+        and num_shared_experts in (1, 2, 4, 8)
+        and topk_weights.stride(0) == topk_indices.stride(0)
+        and topk_weights.shape[-1] >= topk_indices.shape[-1] + num_shared_experts
+    )
+
+
 def dispatch_topk_softmax_func(
     use_rocm_aiter: bool = False,
+    *,
+    topk_weights: torch.Tensor | None = None,
+    topk_indices: torch.Tensor | None = None,
+    gating_output: torch.Tensor | None = None,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
+    """Pick the softmax top-k implementation for one launch.
+
+    On ROCm with AITER, ``topk_gating`` is chosen on gfx942 and gfx950 when the
+    launch described by the tensors and shared-expert arguments is one it supports;
+    every other AITER launch uses the legacy ``topk_softmax``. The tensors are
+    optional: without them the launch cannot be judged and the legacy launcher
+    is used.
+    """
     if use_rocm_aiter:
+        if (
+            rocm_aiter_ops.is_topk_gating_enabled()
+            and topk_weights is not None
+            and topk_indices is not None
+            and gating_output is not None
+            and _aiter_topk_gating_supported(
+                topk_weights,
+                topk_indices,
+                gating_output,
+                num_shared_experts,
+                shared_expert_scoring_func,
+            )
+        ):
+            return rocm_aiter_ops.topk_gating
         return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
 
@@ -104,7 +167,10 @@ def fused_topk(
 
     if scoring_func == "softmax":
         topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled(),
+            topk_weights=topk_weights,
+            topk_indices=topk_ids,
+            gating_output=gating_output,
         )
         topk_weights, topk_ids = topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
