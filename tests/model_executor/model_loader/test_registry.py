@@ -182,36 +182,19 @@ class _StubModel(nn.Module):
         return None
 
 
-@pytest.mark.parametrize("multiple_models", [False, True])
-def test_loading_weights_took_names_the_model_only_for_multiple_models(
-    monkeypatch, caplog, multiple_models
-):
-    monkeypatch.setattr(DefaultModelLoader, "_loads_multiple_models", False)
-    monkeypatch.setattr(
-        BaseModelLoader,
-        "create_model",
-        lambda self, vllm_config, model_config, prefix="": _StubModel(),
-    )
-
+def test_loading_weights_took_names_the_model(caplog):
     loader = DefaultModelLoader(LoadConfig())
     loader._init_ep_weight_filter = lambda model_config: None
     loader._init_mm_encoder_only_weight_filter = lambda model, model_config: None
     loader.get_all_weights = lambda model_config, model: iter(())
 
-    # create_model is what flags a process that also loads a draft head.
-    model = loader.create_model(
-        vllm_config=SimpleNamespace(
-            speculative_config=object() if multiple_models else None
-        ),
-        model_config=SimpleNamespace(),
-    )
-
     with caplog.at_level(logging.INFO):
-        loader.load_weights(model, SimpleNamespace(quantization=None))
+        loader.load_weights(_StubModel(), SimpleNamespace(quantization=None))
 
     message = next(
         r.getMessage()
         for r in caplog.records
         if "Loading weights took" in r.getMessage()
     )
-    assert ("(model=_StubModel)" in message) is multiple_models
+    # A worker can load a target model and a draft head; both must be attributable.
+    assert message.endswith("(model=_StubModel)")
