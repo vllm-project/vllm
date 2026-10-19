@@ -3,9 +3,11 @@
 
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     MoRIIOTransferAck,
@@ -470,7 +472,7 @@ def test_hybrid_step_barrier_fails_closed():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = True
-    worker._reads_issued_this_step = [object()]
+    worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
     with pytest.raises(TransferError, match="failed"):
@@ -523,7 +525,7 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
-    worker._reads_issued_this_step = [object()]
+    worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
     worker._await_reads_issued_this_step()
@@ -547,19 +549,53 @@ class _ReadStatus:
         return -1
 
 
-def _worker_with_failed_and_late_read(has_mamba, monkeypatch):
-    """Request a's read has failed; request b's lands 0.2 s later."""
-    failed_a, late_b = _ReadStatus("failed"), _ReadStatus("in_progress")
+class _PolledStatus(_ReadStatus):
+    """Lands on its succeed_after-th Succeeded() poll; never if None."""
+
+    def __init__(self, succeed_after: int | None = None):
+        super().__init__("in_progress")
+        self.succeed_after = succeed_after
+        self.polls = 0
+
+    def Succeeded(self):
+        self.polls += 1
+        if self.polls == self.succeed_after:
+            self.state = "success"
+        return super().Succeeded()
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = 0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+        self.now += seconds
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(moriio_engine, "time", clock)
+    return clock
+
+
+def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
+    failed_a = _ReadStatus("failed")
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
     worker.world_size = 1
     worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=5.0)
     monkeypatch.setattr(worker.moriio_wrapper, "send_notify", lambda *a, **kw: None)
-    worker._reads_issued_this_step = [failed_a, late_b]
+    worker._reads_issued_this_step = [failed_a, pending_b]
     worker._recving_transfers = {
         "a": {"layer0": [failed_a]},
-        "b": {"layer0": [late_b]},
+        "b": {"layer0": [pending_b]},
     }
     worker._recving_transfers_callback_addr = {
         "a": ("127.0.0.1", "7000", "tx-a"),
@@ -568,32 +604,63 @@ def _worker_with_failed_and_late_read(has_mamba, monkeypatch):
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
-    timer = threading.Timer(0.2, lambda: setattr(late_b, "state", "success"))
-    return worker, late_b, timer
+    return worker
 
 
-def test_step_barrier_failure_still_awaits_other_requests(monkeypatch):
-    worker, late_b, timer = _worker_with_failed_and_late_read(False, monkeypatch)
-    timer.start()
-    try:
-        worker._await_reads_issued_this_step()
-    finally:
-        timer.cancel()
+def test_step_barrier_failure_still_awaits_other_requests(monkeypatch, fake_clock):
+    late_b = _PolledStatus(succeed_after=5)
+    worker = _worker_with_failed_and_pending_read(False, late_b, monkeypatch)
 
-    assert late_b.Succeeded()
+    worker._await_reads_issued_this_step()
+
+    assert late_b.state == "success"
+    assert late_b.polls >= 5
+    assert fake_clock.sleeps >= 4
     assert worker._pop_done_transfers() == {"tx-b"}
     assert worker.get_block_ids_with_load_errors() == {1, 2}
 
 
-def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch):
-    worker, late_b, timer = _worker_with_failed_and_late_read(True, monkeypatch)
-    timer.start()
-    try:
-        with pytest.raises(TransferError, match="SQ full"):
-            worker._await_reads_issued_this_step()
-        assert not late_b.Succeeded()
-    finally:
-        timer.cancel()
+def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch, fake_clock):
+    pending_b = _PolledStatus()
+    worker = _worker_with_failed_and_pending_read(True, pending_b, monkeypatch)
+
+    with pytest.raises(TransferError, match="SQ full"):
+        worker._await_reads_issued_this_step()
+
+    assert pending_b.state == "in_progress"
+    assert fake_clock.sleeps == 0
+
+
+@pytest.mark.parametrize("has_mamba", [False, True])
+def test_step_barrier_timeout_fails_closed_while_reads_in_flight(has_mamba, fake_clock):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=0.05)
+    worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
+
+    with pytest.raises(TransferError, match="timed out"):
+        worker._await_reads_issued_this_step()
+
+    assert fake_clock.now > 0.05
+
+
+@pytest.mark.skipif(
+    moriio_engine.StatusCode is None, reason="mori batched wait unavailable"
+)
+@pytest.mark.parametrize("has_mamba", [False, True])
+def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(has_mamba):
+    engine = SimpleNamespace(
+        wait_all=Mock(return_value=moriio_engine.StatusCode.IN_PROGRESS)
+    )
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
+    worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
+
+    with pytest.raises(TransferError, match="timed out"):
+        worker._await_reads_issued_this_step()
+
+    engine.wait_all.assert_called_once()
 
 
 def test_step_barrier_noop_when_no_reads_posted():

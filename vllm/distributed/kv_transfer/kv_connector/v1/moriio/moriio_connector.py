@@ -2885,11 +2885,12 @@ class MoRIIOConnectorWorker:
         per-layer barrier can't keep it: illegal under FULL cudagraph, and absent
         for mamba/KDA state and indexer caches.
 
-        Attention-only failures are reported via
-        get_block_ids_with_load_errors. Hybrid failures are re-raised because
-        the scheduler's recovery path does not support multiple cache groups;
-        this fails the step closed instead of running forward with incomplete
-        recurrent state.
+        A READ still in flight when the wait gives up fails the step in both
+        modes: RDMA may still write into its blocks, so the forward must not
+        consume them. If every READ is terminal, attention-only failures are
+        reported via get_block_ids_with_load_errors. Hybrid failures are
+        re-raised because the scheduler's recovery path does not support
+        multiple cache groups.
         """
         statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
@@ -2900,6 +2901,15 @@ class MoRIIOConnectorWorker:
                 statuses, fail_fast=self._has_mamba
             )
         except TransferError:
+            in_flight = sum(not (s.Succeeded() or s.Failed()) for s in statuses)
+            if in_flight:
+                logger.exception(
+                    "MoRIIO READ barrier failed with %d/%d reads still in "
+                    "flight; failing the step.",
+                    in_flight,
+                    len(statuses),
+                )
+                raise
             if self._has_mamba:
                 logger.exception(
                     "MoRIIO hybrid READ failed before the forward; aborting "
