@@ -43,6 +43,9 @@ class FusedMoERouter(ABC):
     def supports_monolithic_kernels(self) -> bool:
         return True
 
+    def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        return router_logits
+
     def prepare_monolithic_bias(
         self, e_score_correction_bias: torch.Tensor | None
     ) -> torch.Tensor | None:

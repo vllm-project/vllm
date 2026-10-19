@@ -366,6 +366,9 @@ class RoutingSimulatorRouter(BaseRouter):
     def supports_monolithic_kernels(self) -> bool:
         return self._strategy.supports_monolithic_logits
 
+    def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        return self._strategy.generate_monolithic_logits(router_logits)
+
     def prepare_monolithic_bias(
         self, e_score_correction_bias: torch.Tensor | None
     ) -> torch.Tensor | None:
