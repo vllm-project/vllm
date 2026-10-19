@@ -62,6 +62,60 @@ impl FromStr for PauseMode {
     }
 }
 
+/// Process checkpoint lifecycle of an engine, as Python's `CheckpointState`.
+///
+/// Scheduling runs only while `Running`. Display/from-str serde keeps the
+/// Python literal strings on the MessagePack wire and in JSON responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
+pub enum CheckpointState {
+    /// Serving requests.
+    Running,
+    /// Draining, then releasing what a checkpoint must not contain.
+    Preparing,
+    /// Safe to capture.
+    Prepared,
+    /// Bringing back what preparing released.
+    Restoring,
+    /// Preparing or restoring failed.
+    Failed,
+}
+
+impl CheckpointState {
+    /// Return the Python literal used on the utility-call wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Restoring => "restoring",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for CheckpointState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CheckpointState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        [
+            Self::Running,
+            Self::Preparing,
+            Self::Prepared,
+            Self::Restoring,
+            Self::Failed,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == value)
+        .ok_or_else(|| format!("invalid checkpoint state `{value}`"))
+    }
+}
+
 /// Utility call id as carried on the engine-core MessagePack wire.
 ///
 /// Python emits utility ids as MessagePack integers, including values that may
