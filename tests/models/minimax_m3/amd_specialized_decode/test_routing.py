@@ -111,6 +111,7 @@ def _config(**overrides):
         kernel_config=SimpleNamespace(moe_backend="aiter", monokernel=True),
         lora_config=None,
         kv_transfer_config=SimpleNamespace(kv_connector=None),
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
         speculative_config=None,
         weight_transfer_config=None,
         offload_config=SimpleNamespace(
@@ -140,6 +141,13 @@ def test_static_refusals_report_all_reasons():
     reasons = DECODE_CONFIG.refusal_reasons(config)
     assert any("tensor parallel" in reason for reason in reasons)
     assert any("block size" in reason for reason in reasons)
+
+
+def test_routed_expert_capture_is_refused():
+    config = _config()
+    config.aux_output_config.enable_return_routed_experts = True
+    reasons = DECODE_CONFIG.refusal_reasons(config)
+    assert any("routed-expert capture" in reason for reason in reasons)
 
 
 def test_step_layer_lookup_is_immutable():

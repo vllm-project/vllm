@@ -75,7 +75,8 @@ class DecodeConfig:
             reasons.append("does not support cross-layer index reuse")
         if getattr(text_config, "index_topk_freq", 1) != 1:
             reasons.append("requires the default index_topk_freq")
-        if getattr(config, "routed_experts_capturer_config", None) is not None:
+        aux = getattr(config, "aux_output_config", None)
+        if getattr(aux, "enable_return_routed_experts", False):
             reasons.append("does not support routed-expert capture")
         if config.kernel_config.moe_backend != "aiter":
             reasons.append("requires --moe-backend aiter")
