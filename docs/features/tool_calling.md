@@ -567,6 +567,25 @@ Supported models:
 
 Flags: `--tool-call-parser apertus`
 
+### Muse Models (`muse`)
+
+The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
+Enable tool calling with `--enable-auto-tool-choice`,
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
+their original channel semantics, including recipient-less tool-parser content.
+
+The parsers route `to=self` and recipient-less messages to reasoning,
+`to=user` and `to=commentary` messages to content, and tool recipients to
+ATEM tool-call extraction. `to=developer` messages are omitted. Framing
+special tokens are preserved for parsing and removed from surfaced content.
+
+The Rust frontend also provides a Muse unified parser under `muse` and
+`musespark1x`, and selects it automatically for Muse Spark model names.
+Existing automatic parser selection for Muse Glimmer is unchanged.
+
+Parser availability alone does not enable Muse Spark model execution.
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
