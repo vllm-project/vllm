@@ -20,6 +20,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAMetadata,
     KimiK3KDAMetadataBuilder,
     _mamba_get_block_table_tensor,
+    plan_flashinfer_kda_checkpoints,
     stage_spec_decode_metadata,
 )
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
@@ -54,6 +55,22 @@ PRUNED_METADATA_FIELDS = {
     "flashinfer_prefill_query_start_loc",
     "flashinfer_prefill_seq_order",
 }
+
+
+@pytest.mark.parametrize(
+    "offsets,query_lens,expected_starts,expected_destinations",
+    [
+        ([64, 0, 32], [96, 16, 64], [0, 3, 3, 5], [-1, 0, -1, 2, -1]),
+        ([0, 32, 0], [0, 32, 1], [0, 0, 1, 1], [1]),
+        ([0, 0], [64, 32], [0, 2, 3], [-1, -1, -1]),
+    ],
+)
+def test_flashinfer_checkpoint_plan_retains_only_requested_states(
+    offsets, query_lens, expected_starts, expected_destinations
+):
+    starts, destinations = plan_flashinfer_kda_checkpoints(offsets, query_lens)
+    assert starts == expected_starts
+    assert destinations == expected_destinations
 
 
 def _assert_matches_shared_gdn(
@@ -102,6 +119,7 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
+    prefill_backend: str = "flashkda",
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -124,6 +142,7 @@ def _make_builder(
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    vllm_config.additional_config = {"kda_prefill_backend": prefill_backend}
     hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
     vllm_config.cache_config.hash_block_size = hash_block_size
     vllm_config.cache_config.cache_hit_alignment_tokens = (
@@ -138,7 +157,9 @@ def _make_builder(
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
-                16 if num_prefill_checkpoint_blocks > 0 else None
+                (32 if prefill_backend == "flashinfer" else 16)
+                if num_prefill_checkpoint_blocks > 0
+                else None
             ),
         ),
         layer_names=["layer.0"],
@@ -369,11 +390,13 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("prefill_backend", ["flashkda", "flashinfer"])
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     seq_len: int,
     disable_eagle_block_drop: bool,
     prefix_match_unit: int,
     expected_offset: int | None,
+    prefill_backend: str,
 ) -> None:
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
@@ -394,6 +417,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
         disable_eagle_block_drop=disable_eagle_block_drop,
+        prefill_backend=prefill_backend,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -403,7 +427,14 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         builder.kv_cache_spec,
         "align",
     )
-    actual = builder.build(0, common_attn_metadata)
+    with torch.inference_mode():
+        actual = builder.build(0, common_attn_metadata)
+
+    if prefill_backend == "flashinfer":
+        assert actual.flashinfer_prefill_query_start_loc.dtype == torch.int64
+        assert not actual.flashinfer_prefill_query_start_loc.is_inference()
+        if expected_offset is not None and expected_offset % 32:
+            expected_offset = None
 
     if expected_offset is None:
         assert actual.checkpoint is None
@@ -417,6 +448,14 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         actual.checkpoint.checkpoint_offsets,
         torch.tensor([expected_offset], dtype=torch.int32, device=device),
     )
+    if prefill_backend == "flashinfer":
+        plan = actual.flashinfer_prefill_checkpoint_plan
+        assert plan is not None
+        starts, destinations = plan_flashinfer_kda_checkpoints(
+            [expected_offset], [seq_len]
+        )
+        assert plan.cu_starts.tolist() == starts
+        assert plan.destinations.tolist() == destinations
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
