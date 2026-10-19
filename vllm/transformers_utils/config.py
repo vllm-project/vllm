@@ -14,6 +14,7 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -52,6 +53,46 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "total_num_kv_heads": (
+        "n_head_kv",  # Falcon
+        "num_kv_heads",
+        "num_key_value_heads",  # LLaMA-2
+        "multi_query_group_num",  # ChatGLM
+        "num_attention_groups",  # Step3p5
+    ),
+    "num_experts": (
+        "num_experts",  # Jamba
+        "moe_num_experts",  # Dbrx
+        "n_routed_experts",  # DeepSeek
+        "num_local_experts",  # Mixtral
+    ),
+    "num_experts_per_token": (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "top_k_experts",
+        "moe_topk",  # Hunyuan
+        "moe_top_k",
+        "top_k",
+    ),
+    "moe_intermediate_size": (
+        "moe_intermediate_size",
+        "intermediate_size",
+    ),
+    "num_shared_experts": (
+        "n_shared_experts",  # DeepSeek, Docs, GLM
+        "moe_num_shared_experts",  # Aria, Ernie
+    ),
+}
+"""HF config fields that models spell differently, keyed by the name vLLM uses.
+
+`ModelArchConfigConvertorBase` reads a scalar from these; a caller that needs the
+raw value (a per-layer `list`, say) passes the aliases to `getattr_iter` itself."""
+
+_ST_TRANSFORMER_MODULE_TYPES = {
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.base.modules.transformer.Transformer",
+}
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
@@ -81,8 +122,10 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
+    beam="BeamConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
+    ultravbert="ColUltraVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
@@ -90,7 +133,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
-    deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -108,8 +150,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    mlp_speculator="MLPSpeculatorConfig",
-    medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -123,15 +163,18 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
     step3p5="Step3p5Config",
+    step5="Step5Config",
+    step5_vl="Step5VLConfig",
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 # Checkpoints whose config.json has no model_type, only remote code in auto_map
 _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
@@ -180,7 +223,10 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
+    # DeepSeek-V4 nests by rope type ("main", "compress") instead
+    return set(rope_parameters.keys()).issubset(
+        {*ALLOWED_LAYER_TYPES, "main", "compress"}
+    )
 
 
 @contextmanager
@@ -807,6 +853,19 @@ def maybe_override_with_speculators(
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
+    verifier_error = (
+        "Speculators verifier must name a remote model repository. "
+        "Select local verifiers explicitly with --model and --speculative-config."
+    )
+    if not isinstance(verifier_model, str):
+        raise ValueError(verifier_error)
+    try:
+        validate_repo_id(verifier_model)
+    except HFValidationError as exc:
+        raise ValueError(verifier_error) from exc
+    verifier_path = Path(verifier_model)
+    if verifier_path.exists() or verifier_path.is_symlink():
+        raise ValueError(verifier_error)
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config
@@ -1301,6 +1360,88 @@ def try_get_dense_modules(
         return layer_configs
     except Exception:
         return None
+
+
+@cache
+def get_sentence_transformers_chat_template_kwargs(
+    model: str | Path,
+    revision: str | None = None,
+) -> dict[str, Any] | None:
+    """Get the saved chat template settings of a Sentence Transformers
+    CrossEncoder whose single Transformer module declares the `message`
+    modality.
+
+    Sentence Transformers formats the pairs of such checkpoints as
+    `query`/`document` messages with the saved chat template.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+
+    Returns:
+        The saved `processing_kwargs.chat_template` (possibly empty), or
+        `None` if the checkpoint does not declare the `message` modality.
+
+    Raises:
+        ValueError: If the saved chat template settings are unsupported.
+
+    """
+    try:
+        st_config = get_hf_file_to_dict(
+            "config_sentence_transformers.json", model, revision
+        )
+        if not isinstance(st_config, dict) or (
+            st_config.get("model_type") != "CrossEncoder"
+        ):
+            return None
+        modules = get_hf_file_to_dict("modules.json", model, revision)
+        transformer_config = get_hf_file_to_dict(
+            "sentence_bert_config.json", model, revision
+        )
+    except Exception:
+        logger.debug("Failed to read the Sentence Transformers config", exc_info=True)
+        return None
+
+    if isinstance(modules, dict):
+        modules = modules.get("modules")
+    if not (
+        isinstance(modules, list)
+        and len(modules) == 1
+        and isinstance(modules[0], dict)
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and not modules[0].get("path")
+        and isinstance(transformer_config, dict)
+        and transformer_config.get("transformer_task") == "sequence-classification"
+        and isinstance(
+            modality_config := transformer_config.get("modality_config"), dict
+        )
+        and "message" in modality_config
+    ):
+        return None
+
+    processing_kwargs = transformer_config.get("processing_kwargs") or {}
+    chat_template_kwargs = (
+        processing_kwargs.get("chat_template") or {}
+        if isinstance(processing_kwargs, dict)
+        else None
+    )
+    if not isinstance(chat_template_kwargs, dict):
+        raise ValueError(
+            "The Sentence Transformers processing_kwargs.chat_template must be "
+            "a JSON object."
+        )
+    chat_template_kwargs = dict(chat_template_kwargs)
+    # vLLM does not restore the template suffix after truncation.
+    chat_template_kwargs.pop("restore_suffix", None)
+    if not isinstance(chat_template_kwargs.get("chat_template", ""), str):
+        raise ValueError(
+            "The Sentence Transformers chat template name must be a string."
+        )
+    if reserved := {"tokenize", "tools"} & chat_template_kwargs.keys():
+        raise ValueError(
+            f"Unsupported Sentence Transformers chat template settings: {reserved}"
+        )
+    return chat_template_kwargs
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:

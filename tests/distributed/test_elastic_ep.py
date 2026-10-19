@@ -51,7 +51,7 @@ def _traffic_loop(
     stop: threading.Event,
     finished: threading.Event,
     is_probe: bool = False,
-) -> list[tuple[float, float, int | None]]:
+) -> list[tuple[float, float, int | None, str | None]]:
     url = server.url_for("is_scaling_elastic_ep" if is_probe else "v1/completions")
     payload = {"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 4}
     headers = None if dp_rank is None else {"X-data-parallel-rank": str(dp_rank)}
@@ -60,15 +60,18 @@ def _traffic_loop(
     is_ready = False
     while not stop.is_set():
         request_start = time.perf_counter()
+        phase = None
         try:
             response = requests.post(
                 url, json=request_payload, headers=headers, timeout=120
             )
             status_code = response.status_code
+            if is_probe and status_code == 200:
+                phase = response.json()["phase"]
         except requests.exceptions.RequestException:
             status_code = None
-        responses.append((request_start, time.perf_counter(), status_code))
-        if status_code == 200:
+        responses.append((request_start, time.perf_counter(), status_code, phase))
+        if status_code == 200 and (not is_probe or phase in ("idle", "completed")):
             if not is_ready:
                 ready.wait(timeout=120)
                 is_ready = True
@@ -78,14 +81,16 @@ def _traffic_loop(
     return responses
 
 
-def _downtime(responses: list[tuple[float, float, int | None]]) -> float:
-    rejected = [end for _, end, status in responses if status == 503]
-    if not rejected:
+def _downtime(responses: list[tuple[float, float, int | None, str | None]]) -> float:
+    committing = [end for _, end, _, phase in responses if phase == "committing"]
+    if not committing:
         return 0
     recovered = next(
-        end for _, end, status in responses if status == 200 and end > rejected[-1]
+        end
+        for _, end, status, phase in responses
+        if status == 200 and phase in ("idle", "completed") and end > committing[-1]
     )
-    return recovered - rejected[0]
+    return recovered - committing[0]
 
 
 def _scale_with_traffic(
@@ -124,16 +129,20 @@ def _scale_with_traffic(
     bad_statuses = {
         status
         for responses in [probe_result, *results]
-        for _, _, status in responses
+        for _, _, status, _ in responses
         if status not in (200, 503)
     }
     assert not bad_statuses, f"traffic got unexpected statuses {bad_statuses}"
-    probe_503 = [start for start, _, status in probe_result if status == 503]
-    assert probe_503, "Scaling probe did not observe commit"
+    probe_committing = [
+        start for start, _, _, phase in probe_result if phase == "committing"
+    ]
+    assert probe_committing, "Scaling probe did not observe commit"
     assert not results or any(
-        status == 200 and start_time <= request_start and request_end < probe_503[0]
+        status == 200
+        and start_time <= request_start
+        and request_end < probe_committing[0]
         for responses in results
-        for request_start, request_end, status in responses
+        for request_start, request_end, status, _ in responses
     ), "No request completed successfully during preparation"
 
     print(

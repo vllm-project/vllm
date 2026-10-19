@@ -1534,8 +1534,8 @@ class ModelConfig:
         parallel_config: ParallelConfig,
     ) -> None:
         if parallel_config.enable_hc_sp and parallel_config.tensor_parallel_size > 1:
-            if not current_platform.is_cuda():
-                raise ValueError("--enable-hc-sp currently requires CUDA")
+            if not current_platform.is_cuda_alike():
+                raise ValueError("--enable-hc-sp currently requires CUDA or ROCm")
             if not self.registry.is_hc_sp_supported_model(self.architectures, self):
                 raise ValueError("--enable-hc-sp is not supported for this model")
             if parallel_config.pipeline_parallel_size != 1:
@@ -1622,8 +1622,8 @@ class ModelConfig:
     def get_inputs_embeds_size(self) -> int:
         # The size of inputs_embeds is usually identical to the size
         # of the hidden states, however there are exceptions, such as
-        # embedding models like CLIP and SigLIP
-        names = ("projection_dim", "projection_size")
+        # OPT's projected token embeddings and embedding models like CLIP/SigLIP.
+        names = ("word_embed_proj_dim", "projection_dim", "projection_size")
         return getattr_iter(
             self.hf_text_config, names, default_factory=self.get_hidden_size
         )
@@ -2016,6 +2016,10 @@ class ModelConfig:
         return self._model_info.supports_pp
 
     @property
+    def is_lora_supported(self) -> bool:
+        return self._model_info.supports_lora
+
+    @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
 
@@ -2035,12 +2039,12 @@ class ModelConfig:
         return self._model_info.has_noops
 
     @property
-    def has_inner_state(self):
-        return self._model_info.has_inner_state
+    def supports_kv_cache_grouping(self) -> bool:
+        return self._model_info.supports_kv_cache_grouping
 
     @property
-    def supports_mamba_prefix_caching(self) -> bool:
-        return self._model_info.supports_mamba_prefix_caching
+    def has_inner_state(self):
+        return self._model_info.has_inner_state
 
     @property
     def supports_replayssm(self) -> bool:
