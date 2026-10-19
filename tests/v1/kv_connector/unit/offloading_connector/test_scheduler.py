@@ -43,6 +43,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     KVCacheBlockCopy,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
@@ -57,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpecKind,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -318,10 +320,11 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert full_attention_event.parent_block_hash is not None
 
     recurrent_event = events_by_group[1]
-    assert recurrent_event.block_size == 0
-    assert recurrent_event.token_ids == []
-    assert len(recurrent_event.block_hashes) == 1
-    assert recurrent_event.parent_block_hash is None
+    assert recurrent_event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+    assert recurrent_event.block_size == 4
+    assert recurrent_event.token_ids == list(range(24, 28))
+    assert recurrent_event.block_hashes == full_attention_event.block_hashes[-1:]
+    assert recurrent_event.parent_block_hash == full_attention_event.block_hashes[-2]
 
 
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
@@ -5088,3 +5091,28 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+    def test_mamba_boundary_store_emits_self_describing_event(self):
+        """An offloaded mamba checkpoint is announced with its boundary hash
+        and tokens, not a block_size=0 placeholder, so KV-aware routers can
+        tell where a hybrid prefix is reusable."""
+        scheduler = self._make_scheduler(None)
+        assert self._roundtrip_served_tokens(scheduler) == 16
+        boundary_hash = BlockHash(f"h{self.MAMBA_BLOCK // self.BLOCK - 1}".encode())
+        scheduler.manager.take_events.return_value = [
+            OffloadingEvent(
+                keys=[make_offload_key(boundary_hash, 1)],
+                medium=Medium.CPU,
+                removed=False,
+            )
+        ]
+
+        [event] = scheduler.take_events()
+
+        assert isinstance(event, BlockStored)
+        assert event.group_idx == 1
+        assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+        assert event.block_hashes == [maybe_convert_block_hash(boundary_hash)]
+        assert event.parent_block_hash is None
+        assert event.token_ids == list(range(self.MAMBA_BLOCK))
+        assert event.block_size == self.MAMBA_BLOCK

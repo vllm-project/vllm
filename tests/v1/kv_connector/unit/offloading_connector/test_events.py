@@ -45,6 +45,10 @@ _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
     kv_cache_spec_kind=KVCacheSpecKind.FULL_ATTENTION.value,
     kv_cache_spec_sliding_window=None,
 )
+_MAMBA_EVENT_SPEC = OffloadingEventGroupSpec(
+    kv_cache_spec_kind=KVCacheSpecKind.MAMBA.value,
+    kv_cache_spec_sliding_window=None,
+)
 
 
 def _tracker(
@@ -106,6 +110,12 @@ def _group_config(
         kv_cache_spec=kv_spec,
         manager_cls=manager_cls,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
+    )
+
+
+def _mamba_group_config(**kwargs) -> GroupOffloadConfig:
+    return _group_config(sliding_window_size_in_chunks=1, **kwargs)._replace(
+        kv_event_group_spec=_MAMBA_EVENT_SPEC
     )
 
 
@@ -280,6 +290,79 @@ def test_partial_tail_sliding_window_event_uses_placeholder(record_method):
     assert event.block_hashes == [_wire_hash(_hash(0))]
     assert event.token_ids == []
     assert event.block_size == 0
+
+
+@pytest.mark.parametrize(
+    ("block_size", "tokens_per_hash", "blocks_per_chunk"),
+    [(4, 4, 1), (4, 4, 2), (8, 4, 1)],
+)
+def test_mamba_store_event_describes_only_state_block(
+    block_size: int, tokens_per_hash: int, blocks_per_chunk: int
+):
+    """A Mamba chunk is reusable only at its end, so routers must not be
+    told about the chunk's earlier block positions."""
+    tracker = _tracker()
+    group_config = _mamba_group_config(
+        group_idx=1,
+        block_size=block_size,
+        tokens_per_hash=tokens_per_hash,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+    num_hashes = 2 * group_config.hashes_per_chunk
+    num_tokens = num_hashes * tokens_per_hash
+    hashes_per_block = block_size // tokens_per_hash
+    req = _request(
+        block_hashes=[_hash(i) for i in range(num_hashes)], token_count=num_tokens
+    )
+    key = _record_chunks(tracker, req, group_config, num_chunks=2)[1]
+
+    [stored] = tracker.take_events([_stored_event([key])])
+    [removed] = tracker.take_events([_removed_event([key])])
+
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(_hash(num_hashes - 1))]
+    assert stored.parent_block_hash == _wire_hash(
+        _hash(num_hashes - 1 - hashes_per_block)
+    )
+    assert stored.token_ids == list(range(num_tokens - block_size + 1, num_tokens + 1))
+    assert stored.block_size == block_size
+    assert stored.group_idx == 1
+    assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == stored.block_hashes
+    assert removed.group_idx == 1
+    assert key not in tracker._pending_event_metadata
+
+
+def test_mamba_lookup_backfill_describes_first_state_block():
+    tracker = _tracker()
+    group_config = _mamba_group_config()
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = _record_lookup_chunks(tracker, req, group_config, num_chunks=1)[0]
+
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.parent_block_hash is None
+    assert event.token_ids == [1, 2, 3, 4]
+
+
+def test_mamba_partial_tail_event_describes_boundary_state():
+    tracker = _tracker()
+    group_config = _mamba_group_config(block_size=16, tokens_per_hash=4)
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+
+    tracker.record_partial_store(req, group_config, 28, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(6))]
+    assert event.parent_block_hash == _wire_hash(_hash(5))
+    assert event.token_ids == list(range(25, 29))
+    assert event.block_size == 4
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 
 
 def test_take_events_forwards_locality_to_remove():
@@ -485,9 +568,9 @@ def test_take_events_opt_out_keeps_placeholders():
 @pytest.mark.parametrize(
     "sliding_window_size_in_chunks",
     [1, 2],
-    ids=["ssm", "sliding-window"],
+    ids=["chunked-local", "sliding-window"],
 )
-def test_event_metadata_skips_non_full_attention_group(
+def test_event_metadata_skips_windowed_attention_group(
     sliding_window_size_in_chunks: int,
 ):
     tracker = _tracker()

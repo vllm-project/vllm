@@ -2169,8 +2169,9 @@ class OffloadingConnectorScheduler:
         """Drain pending KV cache events.
 
         Complete metadata is available only when self-describing KV events
-        are enabled, and only for full-attention groups. Other shapes retain
-        the previous placeholder payload so consumers can ignore them.
+        are enabled, and only for full-attention and Mamba groups. Windowed
+        attention groups retain the previous placeholder payload so consumers
+        can ignore them.
 
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to

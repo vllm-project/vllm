@@ -35,6 +35,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
+    KVCacheSpecKind,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -74,6 +75,19 @@ def get_offloading_event_group_spec(
         kv_cache_spec_kind=get_kv_cache_spec_kind(kv_cache_spec).value,
         kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(kv_cache_spec),
     )
+
+
+def _is_mamba_group(group_config: "GroupOffloadConfig") -> bool:
+    return (
+        group_config.kv_event_group_spec.kv_cache_spec_kind
+        == KVCacheSpecKind.MAMBA.value
+    )
+
+
+def _uses_placeholder_events(group_config: "GroupOffloadConfig") -> bool:
+    """Windowed attention groups keep the legacy placeholder payload."""
+    is_windowed = group_config.sliding_window_size_in_chunks is not None
+    return is_windowed and not _is_mamba_group(group_config)
 
 
 @dataclass(slots=True)
@@ -125,11 +139,11 @@ class OffloadingEventsTracker:
         """Snapshot the KV cache event payload for one offloaded chunk.
 
         No-op when self-describing event capture is disabled or for
-        sliding-window / SSM groups, which keep the legacy placeholder payload.
+        windowed attention groups, which keep the legacy placeholder payload.
         """
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_chunks is not None:
+        if _uses_placeholder_events(group_config):
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         if existing := self._pending_event_metadata.get(offload_key):
@@ -146,7 +160,7 @@ class OffloadingEventsTracker:
         """Snapshot metadata for a ready primary-tier lookup hit."""
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_chunks is not None:
+        if _uses_placeholder_events(group_config):
             return
         if offload_key not in self._pending_event_metadata:
             self._pending_event_metadata[offload_key] = self._build_event_metadata(
@@ -161,7 +175,7 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Snapshot metadata for a newly stored partial recurrent tail."""
-        if group_config.sliding_window_size_in_chunks is not None:
+        if _uses_placeholder_events(group_config):
             return
         self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
 
@@ -173,7 +187,7 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Backfill metadata for a partial recurrent tail lookup hit."""
-        if group_config.sliding_window_size_in_chunks is not None:
+        if _uses_placeholder_events(group_config):
             return
         if offload_key not in self._pending_event_metadata:
             self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
@@ -200,8 +214,11 @@ class OffloadingEventsTracker:
         chunk_start = (
             (boundary_tokens - 1) // group_config.tokens_per_chunk
         ) * group_config.tokens_per_chunk
-        first_hash_idx = chunk_start // tokens_per_hash
         last_hash_idx = boundary_tokens // tokens_per_hash
+        if _is_mamba_group(group_config):
+            # Only the recurrent state at the boundary itself is reusable.
+            chunk_start = boundary_tokens - tokens_per_hash
+        first_hash_idx = chunk_start // tokens_per_hash
         assert chunk_start < boundary_tokens
         assert boundary_tokens % tokens_per_hash == 0
         assert last_hash_idx <= len(req.block_hashes)
@@ -239,9 +256,10 @@ class OffloadingEventsTracker:
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
 
-        Complete metadata is available only for full-attention groups when
-        the tracker is enabled. Other shapes retain the legacy placeholder
-        payload so consumers can ignore them.
+        Complete metadata is available for full-attention and Mamba groups
+        when the tracker is enabled. A Mamba event describes only the block
+        holding the recurrent state. Windowed attention groups retain the
+        legacy placeholder payload so consumers can ignore them.
 
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
@@ -299,9 +317,19 @@ class OffloadingEventsTracker:
             group_config.tokens_per_chunk // group_config.tokens_per_block
         )
 
-        if group_config.sliding_window_size_in_chunks is not None:
+        if _uses_placeholder_events(group_config):
             # The recording methods filter these out before calling this helper.
-            raise AssertionError("self-describing events only support full attention")
+            raise AssertionError("self-describing events skip windowed attention")
+
+        tok_start = chunk_idx * group_config.tokens_per_chunk
+        tok_end = tok_start + group_config.tokens_per_chunk
+        if _is_mamba_group(group_config):
+            # A recurrent state is reusable only at its chunk's end boundary,
+            # so describe just the chunk's final block.
+            hashes_per_block = group_config.tokens_per_block // tokens_per_hash
+            chunk_hashes = chunk_hashes[-1:]
+            first_hash_idx = last_hash_idx - hashes_per_block
+            tok_start = tok_end - group_config.tokens_per_block
 
         parent_block_hash: BlockHash | None
         if first_hash_idx == 0:
@@ -310,8 +338,6 @@ class OffloadingEventsTracker:
             parent_block_hash = req.block_hashes[first_hash_idx - 1]
             assert parent_block_hash is not None
 
-        tok_start = chunk_idx * group_config.tokens_per_chunk
-        tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
         token_ids = tuple(req.all_token_ids[tok_start:tok_end])
 
@@ -369,7 +395,7 @@ class OffloadingEventsTracker:
                     logger.warning_once(
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
-                        "placeholder payload. Expected for non-full-attention "
+                        "placeholder payload. Expected for windowed attention "
                         "groups and promotions not observed as a primary-tier "
                         "hit before translation."
                     )
