@@ -29,8 +29,7 @@ function "cto" {
 # Images and cache layers are zstd: on the CI fleet, unpacking dominates pull time (vllm#60258,
 # vllm#28656). Pulling needs Docker >= 23 or containerd >= 1.5. force-compression keeps every layer
 # zstd: without it, a builder exports whichever copy of a layer it holds, e.g. a gzip one imported
-# from an older cache. Images built once per key (stack, runtime, release) also get reproducible
-# timestamps.
+# from an older cache. Images built once per key (stack, runtime) also get reproducible timestamps.
 function "out" {
   params = [rewrite]
   result = PUSH ? join(",", concat(["type=registry", "compression=zstd", "compression-level=3", "force-compression=true", "oci-mediatypes=true"],
@@ -92,6 +91,7 @@ target "_app" {
   dockerfile = "docker/Dockerfile.rocm"
   contexts   = ctx()
   args       = { ARCH = "", AITER_SPEC = AITER_SPEC, AITER_NIGHTLY = AITER_NIGHTLY, VLLM_VERSION = VLLM_VERSION }
+  output     = [out(false)]   # per-commit images: rewriting would hand them second copies of inherited layers
   cache-from = cfrom(["runtime", "ci", "compile", "csrc", "release"])   # dev/csrc records are shared
 }
 target "test" {
@@ -99,7 +99,6 @@ target "test" {
   target   = "test"
   args     = { ARCH = CI_ARCH }
   tags     = [TAG]
-  output   = [out(false)]   # per-build image: rewriting would hand it second copies of inherited layers
   cache-to = CACHE_CI ? cto("ci") : []
   no-cache-filter = AITER_SPEC == "" && AITER_NIGHTLY != "1" ? [] : ["test-base"]   # AITER nightly: always fetch the newest wheel
 }
