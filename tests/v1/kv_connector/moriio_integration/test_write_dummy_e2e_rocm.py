@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-node MoRIIO WRITE P/D checks on dummy weights.
+"""Single-node MoRIIO P/D checks on dummy weights, in WRITE and READ mode.
 
 Each case serves a real model architecture with ``--load-format dummy``, widened
 by ``moriio_wide_dummy`` (see ``DUMMY_WEIGHT_RANGE``): the
@@ -13,7 +13,10 @@ Cases marked ``HMA_off`` run every server with
 ``--disable-hybrid-kv-cache-manager``, so all layers, sliding-window ones
 included, share a single cache group.
 
-Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI.
+Prefill runs on one GPU, decode on another, and MoRI moves the KV over xGMI:
+prefill pushes it in WRITE mode, and decode pulls it in READ mode (cases
+marked ``READ``). The proxy runs a READ request's prefill to completion before
+it sends the request to decode.
 Either way decode computes the last prompt token itself. For hybrid models
 prefill computes only the first ``n - 1`` tokens and transfers the KV and the
 recurrent state after them. For attention-only models prefill computes and
@@ -267,6 +270,8 @@ class Case:
     decode_tp: int = 1
     # Extra arguments for every server of the case.
     server_args: tuple[str, ...] = ()
+    # Decode pulls the KV (READ) instead of prefill pushing it (WRITE).
+    read_mode: bool = False
 
     @property
     def extra_args(self) -> tuple[str, ...]:
@@ -288,6 +293,7 @@ class Case:
                 if self.heterogeneous_tp
                 else ""
             )
+            + ("-READ" if self.read_mode else "")
         )
 
 
@@ -338,6 +344,39 @@ HETEROGENEOUS_TP_CASES = [
         _DEFAULT,
         prefill_tp=2,
         server_args=("--block-size", "2048"),
+    ),
+]
+# READ mode, equal TP: one case per cache-group kind (KDA + MLA, Gated DeltaNet
+# + full attention, full attention, and single-group MLA and sliding window).
+READ_CASES = [
+    Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, read_mode=True),
+    Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, read_mode=True),
+    Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, read_mode=True),
+]
+# READ mode between different TP sizes: MLA latents are replicated, so decode
+# TP2 reads its copy from prefill TP1 and decode TP1 reads one copy from
+# prefill TP2, releasing both.
+HETEROGENEOUS_TP_READ_CASES = [
+    Case(
+        "deepseek_v3",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        True,
+        decode_tp=2,
+        read_mode=True,
+    ),
+    Case(
+        "deepseek_v3",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        True,
+        prefill_tp=2,
+        read_mode=True,
     ),
 ]
 
@@ -460,13 +499,15 @@ def _server(
     )
 
 
-def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
+def _moriio_config(
+    role: str, http_port: int, ping_port: int, read_mode: bool = False
+) -> dict[str, Any]:
     return {
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
         "kv_connector_extra_config": {
             "backend": BACKEND,
-            "read_mode": False,
+            "read_mode": read_mode,
             "host_ip": "127.0.0.1",
             "proxy_ip": "127.0.0.1",
             "proxy_ping_port": str(ping_port),
@@ -545,7 +586,7 @@ def _pd_pair(
                     port=prefill_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_producer", prefill_port, ping_port
+                        "kv_producer", prefill_port, ping_port, case.read_mode
                     ),
                 ),
                 pool.submit(
@@ -559,7 +600,7 @@ def _pd_pair(
                     port=decode_port,
                     extra_args=case.extra_args,
                     kv_transfer_config=_moriio_config(
-                        "kv_consumer", decode_port, ping_port
+                        "kv_consumer", decode_port, ping_port, case.read_mode
                     ),
                 ),
             ]
@@ -680,12 +721,20 @@ class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
     hybrid: bool
+    read_mode: bool = False
 
     @property
     def expected_external_hits(self) -> int:
-        # Hybrid prefill stops one token short; attention-only prefill hands
-        # decode the whole prompt.
-        return sum(len(p) - int(self.hybrid) for p in self.prompts)
+        return _expected_external_hits(self.prompts, self.hybrid, self.read_mode)
+
+
+def _expected_external_hits(
+    prompts: list[list[int]], hybrid: bool, read_mode: bool
+) -> int:
+    # Hybrid prefill stops one token short, and a READ decode always computes
+    # the last prompt token itself; an attention-only WRITE hands decode the
+    # whole prompt.
+    return sum(len(p) - int(hybrid or read_mode) for p in prompts)
 
 
 def _reference(
@@ -727,7 +776,7 @@ def _reference(
         # Determinism of the reference itself (served from its prefix cache).
         again = _first_step(url, arch.model, prompts[-1])
         print(f"[noise] repeat distance={_distance(refs[-1], again)}")
-    return Reference(prompts, refs, arch.hybrid)
+    return Reference(prompts, refs, arch.hybrid, case.read_mode)
 
 
 def _pd_distances(
@@ -756,8 +805,7 @@ def _pd_distances(
 # Tests
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
-def test_write_matches_direct_serve(case: Case):
+def _check_matches_direct_serve(case: Case) -> None:
     arch = ARCHS[case.arch]
     overrides = _arch_overrides(arch)
     ref = _reference(arch, overrides, case)
@@ -773,16 +821,29 @@ def test_write_matches_direct_serve(case: Case):
     assert not bad, f"P/D first-token log-probs differ from direct serve: {bad}"
 
 
-@pytest.mark.parametrize("case", HETEROGENEOUS_TP_CASES, ids=lambda c: c.id)
-def test_heterogeneous_tp_write_hands_decode_every_prompt_token(case: Case):
-    """Prefill and decode of different TP sizes complete WRITE transfers.
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
+def test_write_matches_direct_serve(case: Case):
+    _check_matches_direct_serve(case)
+
+
+@pytest.mark.parametrize("case", READ_CASES, ids=lambda c: c.id)
+def test_read_matches_direct_serve(case: Case):
+    _check_matches_direct_serve(case)
+
+
+@pytest.mark.parametrize(
+    "case", HETEROGENEOUS_TP_CASES + HETEROGENEOUS_TP_READ_CASES, ids=lambda c: c.id
+)
+def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
+    """Prefill and decode of different TP sizes complete WRITE and READ.
 
     Unlike the equal-TP cases this cannot compare against a direct serve:
     a different TP size sums in a different order, and on dummy weights that
     changes the top tokens entirely, so log-probs only show the transfer did
     not hang and decode consumed the transferred KV. That every head and state
     slice lands at the right offset is pinned byte for byte by
-    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py.
+    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py and
+    tests/v1/kv_connector/unit/test_moriio_read_tp.py.
     """
     _, devices = _visible_devices()
     if len(devices) < case.prefill_tp + case.decode_tp:
@@ -797,7 +858,7 @@ def test_heterogeneous_tp_write_hands_decode_every_prompt_token(case: Case):
         hits = _external_hits(decode) - hits_before
     print(f"[pd] {case.id} lens={lengths} external_hits={hits}")
 
-    expected = sum(len(p) - int(arch.hybrid) for p in prompts)
+    expected = _expected_external_hits(prompts, arch.hybrid, case.read_mode)
     assert hits == expected, (
         f"decode reported {hits} external prefix-cache hits, expected {expected}"
     )
@@ -810,10 +871,25 @@ def test_heterogeneous_tp_write_hands_decode_every_prompt_token(case: Case):
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))
 def test_corrupted_prefill_state_is_detected(arch_name: str):
     """Negative control: KV computed with different values must fail."""
+    _check_corrupted_prefill_state_is_detected(arch_name, read_mode=False)
+
+
+@pytest.mark.parametrize("arch_name", ["kimi_linear", "qwen3_dense"])
+def test_corrupted_prefill_state_is_detected_read(arch_name: str):
+    """The same negative control with decode pulling the KV."""
+    _check_corrupted_prefill_state_is_detected(arch_name, read_mode=True)
+
+
+def _check_corrupted_prefill_state_is_detected(arch_name: str, read_mode: bool) -> None:
     arch = ARCHS[arch_name]
     default = next(c for c in CASES if c.arch == arch_name)
     case = Case(
-        arch_name, default.attention_backend, _DEFAULT, _DEFAULT, default.hma_off
+        arch_name,
+        default.attention_backend,
+        _DEFAULT,
+        _DEFAULT,
+        default.hma_off,
+        read_mode=read_mode,
     )
     overrides = _arch_overrides(arch)
     ref = _reference(arch, overrides, case)
