@@ -94,6 +94,18 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_mlp_layer_types(config: AXK1Config) -> list[str]:
+    if (mlp_layer_types := getattr(config, "mlp_layer_types", None)) is not None:
+        return mlp_layer_types[: config.num_hidden_layers]
+    # Transformers < 5.20
+    first_k_dense_replace = config.first_k_dense_replace
+    moe_layer_freq = getattr(config, "moe_layer_freq", 1)
+    return [
+        "sparse" if i >= first_k_dense_replace and i % moe_layer_freq == 0 else "dense"
+        for i in range(config.num_hidden_layers)
+    ]
+
+
 class AXK1MLP(DeepseekV2MLP):
     pass
 
@@ -646,8 +658,7 @@ class AXK1DecoderLayer(nn.Module):
     def _is_layer_sparse(self) -> bool:
         return (
             self.config.n_routed_experts is not None
-            and self.layer_idx >= self.config.first_k_dense_replace
-            and self.layer_idx % getattr(self.config, "moe_layer_freq", 1) == 0
+            and _get_mlp_layer_types(self.config)[self.layer_idx] == "sparse"
         )
 
     def forward(
@@ -1097,9 +1108,7 @@ class AXK1ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
         # Set MoE hyperparameters
-        self.num_moe_layers = (
-            self.config.num_hidden_layers - self.config.first_k_dense_replace
-        )
+        self.num_moe_layers = _get_mlp_layer_types(self.config).count("sparse")
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
