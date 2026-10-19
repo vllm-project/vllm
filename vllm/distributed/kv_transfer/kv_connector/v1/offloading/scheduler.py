@@ -81,6 +81,8 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
+    # Unlike an async load, store jobs may be created next to it.
+    is_sync_load: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -185,6 +187,7 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    sync_load_max_tokens: int = 0
 
     @classmethod
     def from_spec(
@@ -342,6 +345,8 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            # Hits up to this many tokens load within the step (0 disables).
+            sync_load_max_tokens=int(spec.extra_config.get("sync_load_max_tokens", 0)),
         )
 
 
@@ -378,6 +383,7 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    sync_load: bool = False
     # Fine-grained token boundary selected beyond the last complete offload
     # chunk. It is consumed when the corresponding load is scheduled.
     partial_tail_boundary: int | None = None
@@ -1276,7 +1282,13 @@ class OffloadingConnectorScheduler:
                 self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
-        return num_hit_tokens, bool(num_hit_tokens)
+        # Keep at least one token to compute, or the request can't be scheduled.
+        req_status.sync_load = (
+            num_hit_tokens is not None
+            and 0 < num_hit_tokens <= self.config.sync_load_max_tokens
+            and num_computed_tokens + num_hit_tokens < request.num_tokens
+        )
+        return num_hit_tokens, bool(num_hit_tokens) and not req_status.sync_load
 
     def get_external_cache_hit_sources(
         self,
@@ -1337,6 +1349,9 @@ class OffloadingConnectorScheduler:
             )
 
         if num_external_tokens == 0:
+            # The scheduler may drop the hit after the lookup.
+            if req_status := self._req_status.get(request.request_id):
+                req_status.sync_load = False
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
@@ -1380,7 +1395,10 @@ class OffloadingConnectorScheduler:
             load_start_gpu_block_idx = num_gpu_blocks
             for i in range(first_fresh_gpu_block_idx, num_gpu_blocks):
                 block = group_blocks[i]
-                if not block.is_null and block.block_hash is None:
+                # Sync-load blocks are hashed at allocation: match by position.
+                if not block.is_null and (
+                    req_status.sync_load or block.block_hash is None
+                ):
                     load_start_gpu_block_idx = i
                     break
 
@@ -1456,6 +1474,7 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             src_spec=src_spec,
             dst_spec=dst_spec,
+            sync=req_status.sync_load,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -1465,6 +1484,7 @@ class OffloadingConnectorScheduler:
             pending_count=self.config.num_workers,
             keys=set(keys_to_load),
             is_store=False,
+            is_sync_load=req_status.sync_load,
         )
 
         if self._chunks_being_loaded is not None:
@@ -2020,7 +2040,8 @@ class OffloadingConnectorScheduler:
             # a store can only be issued when no load is pending.
             if req_status.transfer_jobs:
                 any_jid = next(iter(req_status.transfer_jobs))
-                assert self._jobs[any_jid].is_store
+                any_job = self._jobs[any_jid]
+                assert any_job.is_store or any_job.is_sync_load
             req_status.transfer_jobs.add(job_id)
 
             # Watch sliding window blocks as they may get evicted
@@ -2087,7 +2108,8 @@ class OffloadingConnectorScheduler:
             if req_status is None or not req_status.transfer_jobs:
                 continue
             any_jid = next(iter(req_status.transfer_jobs))
-            assert self._jobs[any_jid].is_store
+            any_job = self._jobs[any_jid]
+            assert any_job.is_store or any_job.is_sync_load
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
         # Flush jobs that contain re-allocated blocks.
