@@ -264,7 +264,7 @@ def test_partial_tail_lookup_does_not_overwrite_store_metadata():
     assert event.token_ids == [1, 2, 3, 4]
 
 
-def test_partial_tail_lookup_is_not_marked_as_pending_store():
+def test_partial_tail_lookup_records_only_primary_residency():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -272,7 +272,9 @@ def test_partial_tail_lookup_is_not_marked_as_pending_store():
 
     tracker.record_partial_lookup(req, group_config, 4, key)
 
-    assert tracker._pending_event_metadata[key].pending_primary_stores == 0
+    assert tracker._pending_event_metadata[key].active_residencies == {
+        (Medium.CPU, None): 1
+    }
 
 
 @pytest.mark.parametrize(
@@ -601,7 +603,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     ]
 
 
-def test_cpu_secondary_store_does_not_consume_primary_store_pending_count():
+def test_cpu_secondary_store_tracks_primary_and_secondary_residencies():
     tracker = _tracker()
     group_config = _group_config()
     req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -621,8 +623,10 @@ def test_cpu_secondary_store_does_not_consume_primary_store_pending_count():
     )
 
     meta = tracker._pending_event_metadata[key]
-    assert meta.pending_primary_stores == 1
-    assert (Medium.CPU, "kvcr") in meta.active_residencies
+    assert meta.active_residencies == {
+        (Medium.CPU, None): 1,
+        (Medium.CPU, "kvcr"): 1,
+    }
 
 
 def test_unmatched_removal_keeps_metadata_and_emits_placeholder():
@@ -663,7 +667,6 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
         (Medium.CPU, None): 2,
         (Medium.STORAGE, "custom"): 1,
     }
-    assert meta.pending_primary_stores == 1
     [removed] = tracker.take_events(
         [_removed_event([key], Medium.STORAGE, ownership="custom")]
     )

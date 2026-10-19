@@ -97,8 +97,6 @@ class _OffloadEventMetadata:
     kv_cache_spec: OffloadingEventGroupSpec
     # Number of outstanding residency lifecycles for each medium/owner.
     active_residencies: dict[tuple[Medium, str | None], int]
-    # Primary stores recorded but not yet translated into BlockStored events.
-    pending_primary_stores: int = 0
 
 
 class OffloadingEventsTracker:
@@ -117,8 +115,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until final removal and all
-        # registered primary stores have produced their events.
+        # OffloadKey -> payload snapshot, kept until all residency counts drain.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -141,10 +138,8 @@ class OffloadingEventsTracker:
         existing = self._pending_event_metadata.get(offload_key)
         if existing is None:
             self._pending_event_metadata[offload_key] = meta
-            meta.pending_primary_stores = 1
             return
         self._add_residency(existing, _PRIMARY_RESIDENCY)
-        existing.pending_primary_stores += 1
 
     def record_lookup(
         self,
@@ -179,11 +174,8 @@ class OffloadingEventsTracker:
         meta = self._record_partial_tail(
             req, group_config, boundary_tokens, offload_key
         )
-        if existing is None:
-            meta.pending_primary_stores = 1
-        else:
+        if existing is not None:
             self._add_residency(meta, _PRIMARY_RESIDENCY)
-            meta.pending_primary_stores += 1
 
     def record_partial_lookup(
         self,
@@ -318,24 +310,11 @@ class OffloadingEventsTracker:
             return meta
         return None
 
-    def _metadata_for_store(
-        self, offload_key: OffloadKey, event: OffloadingEvent
-    ) -> _OffloadEventMetadata | None:
-        """Return metadata associated with a store event."""
-        meta = self._pending_event_metadata.get(offload_key)
-        if meta is None:
-            return None
-
-        residency = (event.medium, event.ownership)
-        if residency == _PRIMARY_RESIDENCY and meta.pending_primary_stores > 0:
-            meta.pending_primary_stores -= 1
-        return meta
-
     def _prune_inactive_metadata(self, offload_key: OffloadKey) -> None:
         meta = self._pending_event_metadata.get(offload_key)
         if meta is None:
             return
-        if not meta.active_residencies and meta.pending_primary_stores == 0:
+        if not meta.active_residencies:
             self._pending_event_metadata.pop(offload_key, None)
 
     def _build_event_metadata(
@@ -431,7 +410,7 @@ class OffloadingEventsTracker:
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
-            meta = self._metadata_for_store(key, event)
+            meta = self._pending_event_metadata.get(key)
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
