@@ -1814,6 +1814,18 @@ class MooncakeConnectorWorker:
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
     ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
+        return self._build_transfer_params_sync(
+            ready_reqs, agent_meta, local_regions, remote_regions
+        )
+
+    def _build_transfer_params_sync(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
+        """Build addresses without I/O; shared by whole-cache and layerwise sends."""
         src_ptrs = []
         dst_ptrs = []
         lengths = []
