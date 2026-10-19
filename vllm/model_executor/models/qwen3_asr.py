@@ -93,7 +93,6 @@ from vllm.transformers_utils.configs.qwen3_asr import (
     Qwen3ASRThinkerConfig,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -425,6 +424,10 @@ class Qwen3ASRForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "model.multi_modal_projector.linear_1.": "audio_tower.proj1.",
             "model.multi_modal_projector.linear_2.": "audio_tower.proj2.",
+            # Ignore lists use the bare module name. A dotted prefix does not
+            # match it: startswith("...linear_1.") fails on "...linear_1".
+            "model.multi_modal_projector.linear_1": "audio_tower.proj1",
+            "model.multi_modal_projector.linear_2": "audio_tower.proj2",
             "talker.": None,
             "code2wav.": None,
         }
@@ -444,6 +447,9 @@ class Qwen3ASRForConditionalGeneration(
             vllm_config.model_config.hf_config.thinker_config
         )
         quant_config = vllm_config.quant_config
+        if quant_config is not None:
+            quant_config.apply_vllm_mapper(self.hf_to_vllm_mapper.get_rename_mapper())
+            quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
@@ -453,6 +459,7 @@ class Qwen3ASRForConditionalGeneration(
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
                 thinker_config.audio_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
+                quant_config=quant_config,
             )
 
         with self._mark_language_model(vllm_config):
@@ -516,22 +523,17 @@ class Qwen3ASRForConditionalGeneration(
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # Lengths stay on the CPU (keep_on_cpu=True). H2D only the tower inputs.
+        audio_feature_lengths = audio_input["audio_feature_lengths"]
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
+        device = input_features.device
 
         audio_features = self.audio_tower(
             input_features.to(self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_output_lengths,
+            feature_lens=async_tensor_h2d(audio_feature_lengths, device),
+            aftercnn_lens=async_tensor_h2d(audio_output_lengths, device),
         )
-        with gpu_sync_allowed():
-            split_sizes = audio_output_lengths.tolist()
-        return audio_features.split(split_sizes)
+        return audio_features.split(audio_output_lengths.tolist())
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
