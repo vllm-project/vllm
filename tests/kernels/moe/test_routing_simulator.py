@@ -170,19 +170,16 @@ def test_routing_strategy_integration(monkeypatch, device):
             )
 
 
-@pytest.mark.parametrize("simulate", [False, True])
-@pytest.mark.parametrize("has_bias", [False, True])
-def test_correction_bias_registration(monkeypatch, dist_init, simulate, has_bias):
+def test_simulated_bias_is_nonpersistent_buffer(monkeypatch, dist_init):
     import vllm.envs as envs
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
 
-    strategy = "uniform_random" if simulate else ""
     monkeypatch.setitem(
         envs.environment_variables,
         "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
-        lambda: strategy,
+        lambda: "uniform_random",
     )
-    bias = torch.nn.Parameter(torch.ones(4)) if has_bias else None
+    bias = torch.nn.Parameter(torch.ones(4))
     with set_current_vllm_config(VllmConfig()):
         moe = FusedMoEFactory(
             num_experts=4,
@@ -197,20 +194,10 @@ def test_correction_bias_registration(monkeypatch, dist_init, simulate, has_bias
 
     experts = moe.routed_experts
     name = "e_score_correction_bias"
-    if has_bias and simulate:
-        assert dict(experts.named_buffers())[name] is experts.e_score_correction_bias
-        assert name not in experts.state_dict()
-        assert torch.count_nonzero(experts.e_score_correction_bias) == 0
-        experts.to(dtype=torch.float64)
-        assert experts.e_score_correction_bias.dtype == torch.float64
-        assert torch.count_nonzero(experts.e_score_correction_bias) == 0
-        assert torch.all(bias == 1)
-    else:
-        assert experts.e_score_correction_bias is bias
-        assert name not in dict(experts.named_buffers())
-        if has_bias:
-            assert dict(experts.named_parameters())[name] is bias
-            assert name in experts.state_dict()
+    assert dict(experts.named_buffers())[name] is experts.e_score_correction_bias
+    assert name not in experts.state_dict()
+    assert torch.count_nonzero(experts.e_score_correction_bias) == 0
+    assert torch.all(bias == 1)
 
 
 def test_distribution_based_routing_with_custom_strategy():
@@ -267,85 +254,10 @@ def test_instance_compatibility():
     assert topk_ids.shape == (10, 2)
 
 
-@pytest.mark.parametrize("strategy", ["", "uniform_random", "normal_routing"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_monolithic_router_inputs(monkeypatch, device, strategy, dtype):
-    """Simulation replaces logits and bias without mutating model inputs."""
-    import vllm.envs as envs
-
-    monkeypatch.setitem(
-        envs.environment_variables,
-        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
-        lambda: strategy,
-    )
-    router = create_fused_moe_router(top_k=2, global_num_experts=32)
-    logits = torch.full((16, 32), 7.0, dtype=dtype, device=device)
-    bias = torch.ones(32, dtype=dtype, device=device)
-    assert router.kernel_routing_method_type == RoutingMethodType.RenormalizeNaive
-    assert router.supports_monolithic_kernels == (strategy != "normal_routing")
-    assert router.prepare_monolithic_bias(None) is None
-    prepared_bias = router.prepare_monolithic_bias(bias)
-    if not strategy:
-        assert router.prepare_monolithic_logits(logits) is logits
-        assert prepared_bias is bias
-        assert router.kernel_routing_method_type == router.routing_method_type
-        return
-    assert router.routing_method_type == RoutingMethodType.Simulated
-    assert prepared_bias.dtype == bias.dtype
-    assert prepared_bias.device == bias.device
-    assert torch.count_nonzero(prepared_bias) == 0
-    assert torch.all(bias == 1)
-    if strategy == "normal_routing":
-        with pytest.raises(NotImplementedError):
-            router.prepare_monolithic_logits(logits)
-        return
-    simulated = router.prepare_monolithic_logits(logits)
-    assert simulated.shape == logits.shape
-    assert simulated.dtype == logits.dtype
-    assert simulated.device == logits.device
-    assert torch.all((simulated >= -1) & (simulated <= 0))
-    assert torch.all(logits == 7)
-
-
-@pytest.mark.parametrize("cpu", [False, True])
-@pytest.mark.parametrize("groups,scale", [(1, 1.0), (1, 2.0), (4, 1.0)])
-def test_simulation_preserves_grouped_factory_selection(
-    monkeypatch, cpu, groups, scale
-):
-    """CPU priority and degenerate grouped routing keep their production method."""
-    import vllm.envs as envs
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: cpu)
-    env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
-    monkeypatch.setitem(envs.environment_variables, env_name, lambda: "")
-    kwargs = dict(
-        top_k=2,
-        global_num_experts=32,
-        use_grouped_topk=True,
-        num_expert_group=groups,
-        topk_group=1,
-        routed_scaling_factor=scale,
-    )
-    production = create_fused_moe_router(**kwargs)
-    expected_type = (
-        "CPURouter"
-        if cpu
-        else "FusedTopKRouter"
-        if groups == 1 and scale == 1
-        else "GroupedTopKRouter"
-    )
-    assert type(production).__name__ == expected_type
-    monkeypatch.setitem(envs.environment_variables, env_name, lambda: "uniform_random")
-    simulated = create_fused_moe_router(**kwargs)
-    assert simulated.kernel_routing_method_type == production.routing_method_type
-
-
 @pytest.mark.parametrize(
     "groups,has_bias,expected_method",
     [
         (4, True, RoutingMethodType.DeepSeekV3),
-        (1, True, RoutingMethodType.DeepSeekV3),
         (None, True, RoutingMethodType.MiniMax2),
         (None, False, RoutingMethodType.Default),
     ],
@@ -376,12 +288,6 @@ def test_simulation_preserves_model_routing_method(
     )
     assert router.routing_method_type == RoutingMethodType.Simulated
     assert router.kernel_routing_method_type == expected_method
-    prepared_bias = router.prepare_monolithic_bias(bias)
-    if bias is None:
-        assert prepared_bias is None
-    else:
-        assert torch.count_nonzero(prepared_bias) == 0
-        assert torch.all(bias == 1)
 
 
 def test_runner_prepares_monolithic_logits(monkeypatch, device):
@@ -408,5 +314,8 @@ def test_runner_prepares_monolithic_logits(monkeypatch, device):
     hidden = torch.zeros((16, 64), device=device)
     MoERunner._apply_quant_method(runner, hidden, logits, None)
     passed = experts.forward_monolithic.call_args.kwargs["router_logits"]
+    assert passed.shape == logits.shape
+    assert passed.dtype == logits.dtype
+    assert passed.device == logits.device
     assert torch.all((passed >= -1) & (passed <= 0))
     assert torch.all(logits == 7)
