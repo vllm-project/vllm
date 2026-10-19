@@ -3439,25 +3439,37 @@ class GPUModelRunner(
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
+        # CPU generators have no offset for _bookkeeping_sync to rewind, so
+        # restore those of discarded requests after sampling instead.
+        cpu_gen_states = []
+        if self.input_batch.generators:
+            num_reqs = self.input_batch.num_reqs
+            for i in np.nonzero(self.discard_request_mask.np[:num_reqs])[0]:
+                gen = self.input_batch.generators.get(int(i))
+                if gen is not None and gen.device.type == "cpu":
+                    cpu_gen_states.append((gen, gen.get_state()))
         if spec_decode_metadata is None:
-            return self.sampler(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+        else:
+            # Update spec_token_ids with real draft tokens from pre step only
+            # when output_token_ids is needed (penalties or bad_words are in
+            # use).
+            if self.use_async_scheduling and self._draft_token_req_ids is not None:
+                draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
+                self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
-        # Update spec_token_ids with real draft tokens from pre step only when
-        # output_token_ids is needed (penalties or bad_words are in use).
-        if self.use_async_scheduling and self._draft_token_req_ids is not None:
-            draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
-            self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
-
-        draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
-        sampler_output = self.rejection_sampler(
-            spec_decode_metadata,
-            draft_probs,
-            logits,
-            sampling_metadata,
-        )
+            draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                draft_probs,
+                logits,
+                sampling_metadata,
+            )
+        for gen, state in cpu_gen_states:
+            gen.set_state(state)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -3493,7 +3505,8 @@ class GPUModelRunner(
         )[0]
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
-            if gen is not None:
+            # CPU generators were already restored in _sample.
+            if gen is not None and gen.device.type != "cpu":
                 gen.set_offset(gen.get_offset() - 4)
 
         # Copy some objects so they don't get modified after returning.

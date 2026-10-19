@@ -131,10 +131,11 @@ steps:
   - tests/models/language/generation/
   - tests/models/language/pooling/
   - tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
+  - tests/v1/e2e/test_cpu_seeded_chunked_prefill.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 25m "
-      pytest -x -v -s tests/models/language/generation tests/models/language/pooling tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+      pytest -x -v -s tests/models/language/generation tests/models/language/pooling tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py tests/v1/e2e/test_cpu_seeded_chunked_prefill.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 3
 
 - label: CPU-Quantization Model Tests

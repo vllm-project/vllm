@@ -1181,6 +1181,7 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         sampling_metadata=Mock(spec=SamplingMetadata),
         update_async_output_token_ids=Mock(),
         req_ids=["req_a", "req_b", "req_c"],
+        generators={},
     )
     runner.rejection_sampler = Mock(return_value="sampler_output")
     runner.sampler = Mock()
