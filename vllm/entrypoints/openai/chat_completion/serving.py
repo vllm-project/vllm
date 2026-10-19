@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort_metrics import record_reasoning_effort
 from vllm.entrypoints.serve.engine.protocol import (
     CompletionTokenUsageInfo,
     ErrorResponse,
@@ -199,6 +200,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -311,6 +313,7 @@ class OpenAIServingChat(GenerateBaseServing):
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
+        record_reasoning_effort(chat_template_kwargs)
 
         conversation, engine_inputs = result
 

@@ -94,6 +94,20 @@ pub struct PromptTokenSourceLabels {
 pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
 pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 
+/// API reasoning efforts reported as their own `reasoning_effort` label.
+pub const REASONING_EFFORTS: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// `reasoning_effort` label values are limited to [`REASONING_EFFORTS`],
+/// `other` and `unset` to bound cardinality.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ReasoningEffortLabels {
+    pub model_name: String,
+    pub reasoning_effort: &'static str,
+}
+
+pub(crate) type ReasoningEffortCounterFamily = Family<ReasoningEffortLabels, U64Counter>;
+
 /// Request and output-batch Prometheus families.
 pub struct RequestMetrics {
     /// Computed prompt and generated tokens per nonempty engine output batch,
@@ -125,6 +139,7 @@ pub struct RequestMetrics {
     pub request_decode_time_seconds: HistogramFamily,
     pub request_inference_time_seconds: HistogramFamily,
     pub request_time_per_output_token_seconds: HistogramFamily,
+    pub request_reasoning_effort: ReasoningEffortCounterFamily,
 }
 
 impl RequestMetrics {
@@ -310,6 +325,14 @@ impl RequestMetrics {
             request_time_per_output_token_seconds.clone(),
         );
 
+        let request_reasoning_effort = ReasoningEffortCounterFamily::default();
+        registry.register(
+            "vllm:request_reasoning_effort",
+            "Number of generation requests by the reasoning_effort they were rendered with, \
+             after --reasoning-effort-map. Values outside the API efforts are reported as 'other'.",
+            request_reasoning_effort.clone(),
+        );
+
         Self {
             iteration_tokens_total,
             num_preemptions,
@@ -334,6 +357,7 @@ impl RequestMetrics {
             request_decode_time_seconds,
             request_inference_time_seconds,
             request_time_per_output_token_seconds,
+            request_reasoning_effort,
         }
     }
 }

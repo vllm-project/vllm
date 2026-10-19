@@ -60,10 +60,14 @@ mod renderer;
 mod request;
 mod stream;
 
+use std::collections::HashMap;
+
+use serde_json::Value;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
+use vllm_metrics::{METRICS, REASONING_EFFORTS, ReasoningEffortLabels};
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -82,6 +86,8 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
+    /// Server-side rewrites of the request's typed reasoning effort.
+    reasoning_effort_map: HashMap<String, String>,
 }
 
 impl ChatRequestProcessor {
@@ -95,6 +101,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
         }
     }
 
@@ -107,6 +114,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
+            reasoning_effort_map: HashMap::new(),
         }
     }
 
@@ -126,6 +134,24 @@ impl ChatRequestProcessor {
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
         self
+    }
+
+    /// Configure server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.reasoning_effort_map = reasoning_effort_map;
+        self
+    }
+
+    /// Rewrite the typed reasoning effort; `chat_template_kwargs` is left as-is.
+    fn map_reasoning_effort(&self, request: &mut ChatRequest) {
+        if let Some(EffortValue::String(effort)) = &mut request.chat_options.reasoning_effort
+            && let Some(mapped) = self.reasoning_effort_map.get(effort.as_str())
+        {
+            *effort = mapped.clone();
+        }
     }
 
     async fn finalize_rendered_prompt(
@@ -214,8 +240,9 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request for tokenization without constructing an output processor.
-    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+    pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
         self.prepare_text_request(request).await
     }
 
@@ -231,6 +258,7 @@ impl ChatRequestProcessor {
         text_processor: &TextRequestProcessor,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
+        self.map_reasoning_effort(&mut request);
 
         let mut output_processor = self.backend.new_chat_output_processor(
             &mut request,
@@ -271,6 +299,9 @@ impl ChatLlm {
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         let model_dtype = text.engine_core_client().model_dtype();
         let max_model_len = text.engine_core_client().max_model_len();
+        for reasoning_effort in REASONING_EFFORTS.into_iter().chain(["other", "unset"]) {
+            reasoning_effort_counter(text.engine_core_client().model_name(), reasoning_effort);
+        }
 
         Self {
             text,
@@ -301,6 +332,15 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set server-side rewrites of the request's typed reasoning effort.
+    pub fn with_reasoning_effort_map(
+        mut self,
+        reasoning_effort_map: HashMap<String, String>,
+    ) -> Self {
+        self.processor.reasoning_effort_map = reasoning_effort_map;
         self
     }
 
@@ -372,6 +412,15 @@ impl ChatLlm {
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         let (text_request, output_processor) =
             self.processor.prepare(request, self.text.request_processor()).await?;
+        let effort = text_request
+            .reasoning_parser_kwargs
+            .chat_template_kwargs
+            .get("reasoning_effort");
+        reasoning_effort_counter(
+            self.engine_core_client().model_name(),
+            reasoning_effort_label(effort),
+        )
+        .inc();
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
@@ -393,12 +442,48 @@ impl ChatLlm {
     }
 }
 
+fn reasoning_effort_counter(
+    model_name: &str,
+    reasoning_effort: &'static str,
+) -> vllm_metrics::U64Counter {
+    METRICS
+        .request
+        .request_reasoning_effort
+        .get_or_create_owned(&ReasoningEffortLabels {
+            model_name: model_name.to_string(),
+            reasoning_effort,
+        })
+}
+
+fn reasoning_effort_label(effort: Option<&Value>) -> &'static str {
+    match effort {
+        None | Some(Value::Null) => "unset",
+        Some(Value::String(effort)) => {
+            REASONING_EFFORTS.into_iter().find(|known| known == effort).unwrap_or("other")
+        }
+        Some(_) => "other",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use thiserror_ext::AsReport;
 
-    use super::{ParserSelection, validate_parser_overrides};
+    use serde_json::json;
+
+    use super::{ParserSelection, reasoning_effort_label, validate_parser_overrides};
     use crate::parser::reasoning::names;
+
+    #[test]
+    fn reasoning_effort_label_is_bounded() {
+        assert_eq!(reasoning_effort_label(Some(&json!("high"))), "high");
+        assert_eq!(
+            reasoning_effort_label(Some(&json!("template_specific"))),
+            "other"
+        );
+        assert_eq!(reasoning_effort_label(Some(&json!(42))), "other");
+        assert_eq!(reasoning_effort_label(None), "unset");
+    }
 
     #[test]
     fn validate_parser_overrides_accepts_registered_names() {

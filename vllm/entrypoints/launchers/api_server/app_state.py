@@ -36,6 +36,14 @@ async def init_app_state(
             model_name=cast(str, vllm_config.model_config.served_model_name)
         )
 
+    from vllm.entrypoints.openai.reasoning_effort_metrics import (
+        init_reasoning_effort_metrics,
+    )
+
+    init_reasoning_effort_metrics(
+        model_name=cast(str, vllm_config.model_config.served_model_name)
+    )
+
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -99,6 +107,7 @@ async def init_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -116,6 +125,7 @@ async def init_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
 

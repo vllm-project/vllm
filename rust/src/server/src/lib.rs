@@ -37,6 +37,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
+pub use routes::openai::utils::types::ReasoningEffort;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -131,7 +132,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone())
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(config.reasoning_effort_map.clone());
 
     let state = Arc::new(
         AppState::new(served_model_names, chat)

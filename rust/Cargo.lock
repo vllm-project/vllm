@@ -5777,6 +5777,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
