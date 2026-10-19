@@ -26,16 +26,14 @@ pub(super) struct ResponseOptions {
     pub include_usage: bool,
     /// Whether the caller asked for usage on every streamed chunk.
     pub include_continuous_usage: bool,
-    /// Requested output logprobs (`sampling_params.logprobs`): `None` omits
-    /// them, `Some(n)` returns `max(n, 1)` candidates per position, `Some(-1)`
-    /// all of them.
-    pub logprobs: Option<i32>,
+    /// Whether the caller requested output logprobs on generate choices.
+    pub include_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether the caller requested final prompt token metadata.
     pub return_token_ids: bool,
-    /// Whether output logprobs are the packed `top_k` block.
-    pub return_top_k_logprobs: bool,
+    /// The requested `k` when output logprobs are the packed `top_k` block.
+    pub top_k_logprobs: Option<usize>,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -60,10 +58,12 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let logprobs = request.sampling_params.inner.logprobs;
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
-    let return_top_k_logprobs = request.return_top_k_logprobs.unwrap_or(false);
+    // Validation guarantees `logprobs >= 1` for `return_top_k_logprobs`.
+    let top_k_logprobs = (request.return_top_k_logprobs == Some(true))
+        .then(|| request.sampling_params.inner.logprobs.unwrap_or(1).max(1) as usize);
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -101,10 +101,10 @@ pub(super) fn prepare_generate_request(
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
-            logprobs,
+            include_logprobs,
             include_prompt_logprobs,
             return_token_ids,
-            return_top_k_logprobs,
+            top_k_logprobs,
         },
     })
 }
