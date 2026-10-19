@@ -17,6 +17,7 @@ from vllm.v1.pool.late_interaction import (
 )
 
 from ..base.io_processor import PoolingIOProcessor
+from ..base.observability import TO_S
 from ..base.serving import PoolingServing
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
@@ -199,6 +200,14 @@ class ServingScores(PoolingServing):
         await self._preprocessing_async(self.io_processor, ctx)
         ctx.arrival_time_ns = arrival_time_ns
 
+        if self.is_tracing_request:
+            ctx.preprocessing_finished = time.time_ns()
+            assert ctx.engine_inputs is not None
+            for engine_input in ctx.engine_inputs:
+                engine_input["prompts"]["arrival_time"] = (
+                    ctx.preprocessing_finished / TO_S
+                )
+
         async with self.maybe_tracing(ctx, self.io_processor):
             try:
                 # stage 1: encode queries and cache token embeddings on workers.
@@ -212,7 +221,15 @@ class ServingScores(PoolingServing):
                     logger.exception("Failed to clean up late-interaction query cache.")
                 raise
 
-            return await self._postprocessing_async(self.io_processor, ctx)
+            if self.is_tracing_request:
+                ctx.engine_call_finished = time.time_ns()
+
+            response = await self._postprocessing_async(self.io_processor, ctx)
+
+            if self.is_tracing_request:
+                ctx.postprocessing_finished = time.time_ns()
+
+            return response
 
     async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
         query_keys = ctx.late_interaction_query_keys

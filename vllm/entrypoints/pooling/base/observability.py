@@ -18,7 +18,7 @@ from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
 )
-from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Span, Tracer, init_otel_trace_provider
+from vllm.tracing.otel import _IS_OTEL_AVAILABLE, Tracer, init_otel_trace_provider
 
 from ..base.io_processor import PoolingIOProcessor
 from ..typing import PoolingServeContext
@@ -27,6 +27,9 @@ logger = init_logger(__name__)
 
 TO_S = 1000_000_000
 TO_MS = 1000_000
+
+CANCELLED_ATTRIBUTE = "vllm.request.cancelled"
+CANCELLED_EVENT = "cancelled"
 
 
 class _ObservabilityMixin:
@@ -92,7 +95,7 @@ class _ObservabilityMixin:
             return None
         return extract_trace_headers(headers)
 
-    def _get_span_trace_headers(self, span: Span) -> dict[str, str]:
+    def _get_span_trace_headers(self, span) -> dict[str, str]:
         return {}
 
 
@@ -166,7 +169,7 @@ else:
                 yield
 
             except asyncio.CancelledError:
-                request_span.set_status(Status(StatusCode.UNSET, "cancelled"))
+                _mark_cancelled(request_span)
                 raise
 
             except Exception as e:
@@ -203,6 +206,9 @@ else:
             )
             try:
                 yield span
+            except asyncio.CancelledError:
+                _mark_cancelled(span)
+                raise
             except Exception as e:
                 span.set_status(get_status_error(e))
                 span.record_exception(e)
@@ -230,7 +236,7 @@ else:
             try:
                 yield span
             except asyncio.CancelledError:
-                span.set_status(Status(StatusCode.UNSET, "cancelled"))
+                _mark_cancelled(span)
                 raise
             except Exception as e:
                 span.set_status(get_status_error(e))
@@ -288,5 +294,9 @@ else:
             return Status(StatusCode.ERROR)
         description = f"{type(e).__name__}: {e}"[:1024]
         return Status(StatusCode.ERROR, description)
+
+    def _mark_cancelled(span: Span) -> None:
+        span.set_attribute(CANCELLED_ATTRIBUTE, True)
+        span.add_event(CANCELLED_EVENT)
 
     ObservabilityMixin = _ObservabilityMixinWithOpenTelemetry
