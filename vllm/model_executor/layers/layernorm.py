@@ -9,10 +9,15 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import envs, ir
+from vllm.kernels.triton.gemma_rms_norm import (
+    gemma_fused_add_rms_norm,
+    gemma_rms_norm,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.triton_utils import HAS_TRITON
 
 logger = init_logger(__name__)
 
@@ -177,6 +182,17 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if HAS_TRITON and x.ndim == 2 and x.stride(-1) == 1:
+            if residual is None:
+                return gemma_rms_norm(x, self.weight.data, self.variance_epsilon)
+            if (
+                residual.shape == x.shape
+                and residual.dtype == x.dtype
+                and residual.stride(-1) == 1
+            ):
+                return gemma_fused_add_rms_norm(
+                    x, residual, self.weight.data, self.variance_epsilon
+                )
         return self.forward_native(x, residual)
 
     def forward_xpu(

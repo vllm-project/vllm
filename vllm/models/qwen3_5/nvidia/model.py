@@ -40,9 +40,15 @@ from transformers import (
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    flashinfer_trtllm_fused_allreduce_norm,
+    fused_allreduce_gemma_rms_norm,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -102,6 +108,7 @@ from vllm.models.qwen3_5.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -149,6 +156,24 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
         )
+        # Fuse the TP all-reduce of every row-parallel output into the
+        # following GemmaRMSNorm (deepseek_v32 pattern): producers run with
+        # reduce_results=False and hand an un-reduced partial to the norm.
+        # Restricted to PP==1 so intermediate_tensors always carry the
+        # (partial, residual) pair between stages -- never consumed raw.
+        self.use_fused_allreduce_norm = (
+            get_tensor_model_parallel_world_size() > 1
+            and parallel_config.pipeline_parallel_size == 1
+            and not self.use_attn_reduce_scatter_for_moe
+            and current_platform.is_cuda()
+            and flashinfer_trtllm_fused_allreduce_norm is not None
+        )
+        # Whether this layer's MLP/MoE leaves an un-reduced partial, i.e.
+        # whether the *next* norm (or the final norm) must do the all-reduce.
+        self.mlp_output_is_partial = self.use_fused_allreduce_norm
+        reduce_results = not (
+            self.use_attn_reduce_scatter_for_moe or self.use_fused_allreduce_norm
+        )
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -156,7 +181,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=reduce_results,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -165,9 +190,12 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                reduce_results=reduce_results,
                 mrope_positions_factor=mrope_positions_factor(vllm_config),
             )
+            # Qwen3.5 dropped torch.compile for breakable CUDA graphs; recover
+            # the sigmoid-gate-mul fusion with the Triton kernel.
+            self.self_attn.use_fused_output_gate = current_platform.is_cuda()
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
 
@@ -177,7 +205,24 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             self.mlp = Qwen3NextSparseMoeBlock(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_fused_allreduce_norm,
             )
+            if self.use_fused_allreduce_norm:
+                # reduce_results=False is only honored on the plain-TP late-AR
+                # path (skip_final_all_reduce); EP/all2all, SP, zero experts,
+                # and replicated shared experts all produce or add a complete
+                # output, which a downstream fused norm would all-reduce again.
+                moe_config = self.mlp.experts.moe_config
+                moe_partial_ok = (
+                    moe_config.skip_final_all_reduce
+                    and moe_config.tp_size > 1
+                    and moe_config.ep_size == 1
+                    and moe_config.dp_size == 1
+                    and not self.mlp.replicate_shared_expert
+                )
+                if moe_config.skip_final_all_reduce and not moe_partial_ok:
+                    moe_config.skip_final_all_reduce = False
+                self.mlp_output_is_partial = moe_partial_ok
         elif config.model_type == "qwen3_5_text":
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
@@ -185,6 +230,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_fused_allreduce_norm,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
@@ -212,6 +258,71 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     config.hidden_size,
                 ),
             )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        positions: torch.Tensor,
+        **kwargs: object,
+    ):
+        if not self.use_fused_allreduce_norm:
+            return super().forward(hidden_states, residual, positions, **kwargs)
+
+        # Fused path: row-parallel outputs stay un-reduced and their TP
+        # all-reduce fuses into the following GemmaRMSNorm. layer_scale is a
+        # per-channel multiply, which commutes with the deferred all-reduce.
+        # The SP-MoE branches are unreachable here (excluded by the switch).
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        elif self.mlp_output_is_partial:
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if self.layer_type == "linear_attention":
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
+        elif self.layer_type == "full_attention":
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+        else:
+            raise ValueError("Invalid layer_type")
+
+        if self.layer_scale:
+            if len(hidden_states.shape) == 2:
+                hidden_states = hidden_states * (
+                    self.attn_layer_scale.to(hidden_states.dtype)[0] + 1
+                )
+            else:
+                hidden_states = hidden_states * (
+                    self.attn_layer_scale.to(hidden_states.dtype) + 1
+                )
+
+        hidden_states, residual = fused_allreduce_gemma_rms_norm(
+            hidden_states, residual, self.post_attention_layernorm
+        )
+        hidden_states = self.mlp(hidden_states)
+
+        if self.layer_scale:
+            if len(hidden_states.shape) == 2:
+                hidden_states = hidden_states * (
+                    self.ffn_layer_scale.to(hidden_states.dtype)[0] + 1
+                )
+            else:
+                assert len(hidden_states.shape) == len(self.ffn_layer_scale.shape), (
+                    f"shape must be the same {len(hidden_states.shape)}, "
+                    f"{len(self.ffn_layer_scale.shape)}"
+                )
+                hidden_states = hidden_states * (
+                    self.ffn_layer_scale.to(hidden_states.dtype) + 1
+                )
+
+        return hidden_states, residual
 
 
 class Qwen3_5Model(nn.Module, EagleModelMixin):
@@ -257,6 +368,12 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        # Mirror of the decoder layers' flag (uniform across layers): when
+        # True, every layer returns its MLP/MoE output as an un-reduced TP
+        # partial, so the final norm and eagle aux captures must all-reduce.
+        self.mlp_output_is_partial = getattr(
+            self.layers[self.start_layer], "mlp_output_is_partial", False
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -270,6 +387,25 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if (
+            residual is not None
+            and self.mlp_output_is_partial
+            and layer_idx in self.aux_hidden_state_layers
+        ):
+            # hidden_states is an un-reduced TP partial; the aux capture needs
+            # the complete hidden state.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        return super()._maybe_add_hidden_state(
+            aux_hidden_states, layer_idx, hidden_states, residual
+        )
 
     def forward(
         self,
@@ -334,7 +470,14 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
                 full_num_tokens,
                 self.config.hidden_size,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.mlp_output_is_partial:
+            # The last layer's MLP/MoE output is an un-reduced TP partial;
+            # fuse its all-reduce into the final norm.
+            hidden_states, _ = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

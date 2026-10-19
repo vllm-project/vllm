@@ -12,6 +12,9 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    fused_allreduce_gemma_rms_norm,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -34,9 +37,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
+from .ops.fused_pre_fc_norms import fused_pre_fc_norms
 
 logger = init_logger(__name__)
 
@@ -130,6 +136,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.pre_fc_norm_embedding = Qwen3_5RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.use_fused_pre_fc_norms = HAS_TRITON and current_platform.is_cuda()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -149,9 +156,18 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
-            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-            hidden_states = self.pre_fc_norm_hidden(hidden_states)
-            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            if self.use_fused_pre_fc_norms:
+                hidden_states = fused_pre_fc_norms(
+                    inputs_embeds,
+                    hidden_states,
+                    self.pre_fc_norm_embedding.weight,
+                    self.pre_fc_norm_hidden.weight,
+                    self.pre_fc_norm_embedding.variance_epsilon,
+                )
+            else:
+                inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+                hidden_states = self.pre_fc_norm_hidden(hidden_states)
+                hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
             hidden_states = self.fc(hidden_states)
             residual = None
         else:
@@ -183,7 +199,14 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 self.config.hidden_size,
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if mtp_layer.mlp_output_is_partial:
+            # The MTP layer's MLP/MoE output is an un-reduced TP partial;
+            # fuse its all-reduce into the final norm.
+            hidden_states, _ = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

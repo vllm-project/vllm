@@ -18,6 +18,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -393,6 +394,10 @@ class Qwen3NextAttention(nn.Module):
             and (text_only or supports_mrope)
         )
 
+        # Off by default; Qwen3.5 enables the fused sigmoid-gate-mul Triton
+        # kernel post-construction (see Qwen3_5DecoderLayer).
+        self.use_fused_output_gate = False
+
     def _project_qkv_gate(
         self,
         qkv: torch.Tensor,
@@ -464,7 +469,10 @@ class Qwen3NextAttention(nn.Module):
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            if self.use_fused_output_gate:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
+            else:
+                attn_output = attn_output * torch.sigmoid(gate)
         output, _ = self.o_proj(attn_output)
         return output
 
