@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
+import torch.distributed as dist
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
@@ -23,7 +24,9 @@ from vllm.models.deepseek_v41.amd.mono.common.peer_memory import PeerBuffer
 TP = 4
 THREADS = 256
 ELEMENTS = 256
-POLL_LIMIT = 1 << 18
+# The first launch may reach this loop while peer ranks are still compiling the
+# FlyDSL specialization. Keep the wait bounded, but allow for that startup skew.
+POLL_LIMIT = 1 << 24
 DATA_BYTES = TP * ELEMENTS * 4
 TAG_OFFSET = DATA_BYTES
 ERROR_OFFSET = TAG_OFFSET + TP * 4
@@ -194,6 +197,8 @@ class BoundedAllReducePrototype:
         self.rank = rank
         self.peer = PeerBuffer(PEER_BYTES, group, rank, TP, device)
         self.peer.bytes.zero_()
+        torch.accelerator.synchronize()
+        dist.barrier(group=group)
         self.output = torch.empty(ELEMENTS, dtype=torch.float32, device=device)
         self._launch = build_bounded_allreduce()
 
