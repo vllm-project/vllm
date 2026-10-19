@@ -1193,7 +1193,9 @@ def _ds41_swa_bi_config(lengths):
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=max_tokens, max_num_seqs=3
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, prefill_context_parallel_size=1
+        ),
         speculative_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
@@ -1408,6 +1410,7 @@ def _assert_ds41_flashmla_bi_schedule(monkeypatch, length, compress_ratio):
     attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
     torch.nn.Module.__init__(attention)
     attention.compress_ratio = compress_ratio
+    attention.use_pcp = False
     attention.compressed_cache_prefix = "compressed" if compress_ratio else None
     attention.swa_cache_layer = swa
     attention.window_size = window
@@ -2259,6 +2262,7 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
     attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
     torch.nn.Module.__init__(attention)
     attention.compress_ratio = 0
+    attention.use_pcp = False
     attention.compressed_cache_prefix = None
     attention.window_size = window
     attention.max_num_batched_tokens = max(length, 1024)
