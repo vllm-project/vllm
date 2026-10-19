@@ -2,19 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for FSOffloadingWorker._submit_io block_indices handling."""
 
+from unittest.mock import MagicMock
+
 import numpy as np
 
 from vllm.v1.kv_offload.base import DevicePointers, make_offload_key
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.fs.worker import ThreadPoolFSWorker
+from vllm.v1.kv_offload.fs.worker import FSOffloadingWorker
 
 
 def _keys(n: int):
     return [make_offload_key(f"k{i}".encode().ljust(8, b"\0"), 0) for i in range(n)]
 
 
-class RecordingFSWorker(ThreadPoolFSWorker):
-    """Concrete ThreadPoolFSWorker that records I/O ops instead of doing I/O."""
+class _DoneCompletion:
+    """Already-done IOCompletion for tests."""
+
+    def done(self) -> bool:
+        return True
+
+    def result(self, timeout=None) -> None:
+        return None
+
+
+class RecordingFSWorker(FSOffloadingWorker):
+    """Concrete FSOffloadingWorker that records I/O ops instead of doing I/O."""
 
     def __init__(self, block_size_factor: int):
         mapper = FileMapper(
@@ -32,11 +44,9 @@ class RecordingFSWorker(ThreadPoolFSWorker):
         super().__init__(file_mapper=mapper, block_size_factor=block_size_factor)
         self.recorded: list[tuple[str, list[tuple[int, int, int]]]] = []
 
-    def write_block(self, file_path, ops):
-        self.recorded.append((file_path, ops))
-
-    def read_block(self, file_path, ops):
-        self.recorded.append((file_path, ops))
+    def submit_io(self, file_ops, is_store, ready_event):
+        self.recorded.extend(file_ops)
+        return [_DoneCompletion() for _ in file_ops]
 
 
 def _make_device_ptrs(
@@ -58,8 +68,12 @@ def _make_device_ptrs(
     )
 
 
-def test_offset_within_single_file():
+def test_offset_within_single_file(monkeypatch):
     """block_size_factor=3, block_indices=(1,), 2 blocks → 1 file at positions 1,2."""
+    import torch
+
+    monkeypatch.setattr(torch, "Event", lambda: MagicMock(record=MagicMock()))
+
     worker = RecordingFSWorker(block_size_factor=3)
     block_size = 64
     device_ptrs = _make_device_ptrs(
@@ -67,9 +81,9 @@ def test_offset_within_single_file():
     )
     keys = _keys(1)
 
-    futures, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
-    for f in futures:
-        f.result()
+    completions, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
+    for c in completions:
+        c.result()
 
     assert len(worker.recorded) == 1
     _, ops = worker.recorded[0]
@@ -79,12 +93,16 @@ def test_offset_within_single_file():
     assert ops[1][2] == 2 * block_size
 
 
-def test_offset_spanning_two_files():
+def test_offset_spanning_two_files(monkeypatch):
     """block_size_factor=3, block_indices=(2,), 3 blocks → 2 files.
 
     First file: 1 block at position 2.
     Second file: 2 blocks at positions 0,1.
     """
+    import torch
+
+    monkeypatch.setattr(torch, "Event", lambda: MagicMock(record=MagicMock()))
+
     worker = RecordingFSWorker(block_size_factor=3)
     block_size = 64
     device_ptrs = _make_device_ptrs(
@@ -92,9 +110,9 @@ def test_offset_spanning_two_files():
     )
     keys = _keys(2)
 
-    futures, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
-    for f in futures:
-        f.result()
+    completions, total_bytes = worker._submit_io(device_ptrs, keys, is_store=True)
+    for c in completions:
+        c.result()
 
     assert len(worker.recorded) == 2
 
