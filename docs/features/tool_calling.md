@@ -175,6 +175,10 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
+When a custom structured-output grammar includes reasoning or tool-call
+delimiters, its token constraints must match the configured parser. See
+[Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
+
 ### Checkpoint Response Templates (`hf`)
 
 Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the
@@ -566,6 +570,25 @@ Supported models:
 * `swiss-ai/Apertus-70B-Instruct-2509`
 
 Flags: `--tool-call-parser apertus`
+
+### Muse Models (`muse`)
+
+The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
+Enable tool calling with `--enable-auto-tool-choice`,
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
+their original channel semantics, including recipient-less tool-parser content.
+
+The parsers route `to=self` and recipient-less messages to reasoning,
+`to=user` and `to=commentary` messages to content, and tool recipients to
+ATEM tool-call extraction. `to=developer` messages are omitted. Framing
+special tokens are preserved for parsing and removed from surfaced content.
+
+The Rust frontend also provides a Muse unified parser under `muse` and
+`musespark1x`, and selects it automatically for Muse Spark model names.
+Existing automatic parser selection for Muse Glimmer is unchanged.
+
+Parser availability alone does not enable Muse Spark model execution.
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

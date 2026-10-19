@@ -773,6 +773,16 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            error = engine_core_output.error
+            if error is not None and req_state.queue is not None:
+                # Rejected on arrival, e.g. by a paused engine; nothing was run.
+                req_state.queue.put(error.to_exception())
+                self._finish_request(req_state)
+                if req_state.streaming_input:
+                    # Input chunks sent since may re-create the session.
+                    reqs_to_abort.append(req_id)
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -933,8 +943,10 @@ class OutputProcessor:
 
         # Remove parent request if applicable.
         parent_req = req_state.parent_req
-        if parent_req and not parent_req.child_requests:
-            self.parent_requests.pop(parent_req.request_id, None)
+        if parent_req:
+            parent_req.child_requests.discard(req_id)
+            if not parent_req.child_requests:
+                self.parent_requests.pop(parent_req.request_id, None)
         self._update_admission_stats()
 
     def _update_admission_stats(self) -> None:

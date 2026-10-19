@@ -2283,6 +2283,7 @@ def recv_worker():
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2875,6 +2876,75 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_sleep_unregisters_and_restores_kv_caches(dist_init):
+    """Sleep drops everything built on the KV cache registration; wake-up
+    registers the same memory again and publishes the new agent metadata."""
+    vllm_config = create_vllm_config()
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+    )
+    raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
+    (cache,) = dense_kv_cache_views(
+        raw, spec, 2, num_layers=1, layout=KVCacheLayout.BLHNC
+    )
+    with set_current_vllm_config(vllm_config):
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+        connector.register_kv_caches({"layer0": cache})
+    worker = connector.connector_worker
+    nixl = worker.nixl_wrapper = MagicMock(wraps=worker.nixl_wrapper)
+    worker._remote_agents["remote"] = {(0, 0): "agent"}
+    descs = list(worker._registered_descs)
+
+    connector.unregister_kv_caches()
+    connector.unregister_kv_caches()  # a discard, then a sleep
+    assert nixl.deregister_memory.call_args_list == [call(d) for d in descs]
+    assert not worker._remote_agents
+
+    nixl.get_agent_metadata.return_value = b"re-registered"
+    connector.restore_kv_caches()
+    connector.restore_kv_caches()
+    assert nixl.register_memory.call_count == len(descs)
+    payload = worker.xfer_handshake_metadata
+    agent = msgspec.msgpack.decode(payload.agent_metadata_bytes, type=NixlAgentMetadata)
+    assert agent.agent_metadata == b"re-registered"
+    connector.shutdown()
+
+
+def test_registration_generation_bumps_on_changed_payload(
+    default_vllm_config, dist_init
+):
+    """Requests tell decoders to handshake again only when the published
+    registration changed."""
+    vllm_config = create_vllm_config()
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(16)
+    )
+    scheduler._nixl_handshake_listener_t = MagicMock()  # already serving
+    generations: list[int] = []
+    for i, agent in enumerate((b"old", b"old", b"new")):  # startup, same, changed
+        payload = NixlHandshakePayload(
+            compatibility_hash="h", agent_metadata_bytes=agent
+        )
+        scheduler.set_xfer_handshake_metadata({(0, 0): payload})
+        request = create_request(request_id=i, num_tokens=40, do_remote_decode=True)
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        params = scheduler.request_finished(request, ([0, 1, 2],))[1]
+        assert params is not None
+        generations.append(params["remote_registration_generation"])
+    assert generations[0] == generations[1] < generations[2]
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
@@ -3415,6 +3485,14 @@ class TestPeerReplacement:
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
+
+    def test_rehandshakes_re_registered_peer(self):
+        metadata = self._request("old")
+        metadata.reqs_to_recv["old-req"].remote.registration_generation = 1
+        self.worker.start_load_kv(metadata)
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert "old" in self.worker._handshake_futures
 
 
 def test_transfer_topology_unregister():
