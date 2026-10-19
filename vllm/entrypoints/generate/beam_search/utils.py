@@ -117,6 +117,7 @@ class BeamSearchInstance:
         prompt: TokensInput | MultiModalInput | EncoderDecoderInput,
         lora_request: LoRARequest | None = None,
         logprobs: list[dict[int, Logprob]] | None = None,
+        priority: int = 0,
         **kwargs,
     ):
         decoder_prompt = (
@@ -134,6 +135,7 @@ class BeamSearchInstance:
             )
         ]
         self.completed: list[BeamSearchSequence] = []
+        self.priority = priority
 
 
 def get_beam_search_score(
