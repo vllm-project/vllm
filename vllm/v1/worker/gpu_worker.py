@@ -1068,6 +1068,34 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
+        if (
+            self.use_v2_model_runner
+            and get_pp_group().is_last_rank
+            and not self.model_runner.is_pooling_model
+        ):
+            # MRV2 counterpart of the block above. The sampler allocates an fp32
+            # copy of the [num_reqs, vocab] logits on every step that needs
+            # logits processing. Its size follows the batch size, and the
+            # empty_cache() in capture_model() has released the block that
+            # warmup_kernels() left, so each new largest batch reserves a new,
+            # slightly bigger segment while the smaller ones stay cached.
+            # Run the sampler once at the largest batch so that one block of
+            # that size stays cached and later steps reuse it.
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            # Random values, as in the V1 dummy sampler run: only the shape
+            # matters, and uninitialized memory may hold inf/nan.
+            hidden_states = torch.rand(
+                max_num_reqs,
+                self.model_config.get_hidden_size(),
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
+            self.model_runner._dummy_sampler_run(hidden_states=hidden_states)
+            del hidden_states
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(
