@@ -42,6 +42,7 @@ separately started servers can drift apart by a few bf16 logit steps. Guards:
 import atexit
 import contextlib
 import json
+import math
 import os
 import random
 import shutil
@@ -82,6 +83,8 @@ MIN_CONTEXT_EFFECT = 0.05
 # top-k set entirely.
 DUMMY_WEIGHT_RANGE = 0.1
 _WIDE_DUMMY_DIR = Path(__file__).resolve().parent
+# MoRI transport between the single-node prefill and decode GPUs.
+BACKEND = os.getenv("MORIIO_DUMMY_E2E_BACKEND", "xgmi")
 TOP_K = 20
 MAX_TOKENS = 4
 MAX_MODEL_LEN = 4096
@@ -260,10 +263,19 @@ class Case:
     decode_graph: str
     # Run every server of the case without the hybrid KV cache manager.
     hma_off: bool = False
+    prefill_tp: int = 1
+    decode_tp: int = 1
+    # Extra arguments for every server of the case.
+    server_args: tuple[str, ...] = ()
 
     @property
     def extra_args(self) -> tuple[str, ...]:
-        return ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        hma = ("--disable-hybrid-kv-cache-manager",) if self.hma_off else ()
+        return hma + self.server_args
+
+    @property
+    def heterogeneous_tp(self) -> bool:
+        return self.prefill_tp != self.decode_tp
 
     @property
     def id(self) -> str:
@@ -271,6 +283,11 @@ class Case:
             f"{self.arch}-{self.attention_backend}-"
             f"P_{self.prefill_graph}-D_{self.decode_graph}"
             + ("-HMA_off" if self.hma_off else "")
+            + (
+                f"-TP{self.prefill_tp}to{self.decode_tp}"
+                if self.heterogeneous_tp
+                else ""
+            )
         )
 
 
@@ -297,6 +314,31 @@ CASES = [
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
     Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
+]
+
+
+# Prefill TP2 writing into decode TP1: split GQA heads gathered into one
+# block, MLA latents and replicated heads written by one prefill rank, and
+# recurrent state gathered from both. Decode TP larger than prefill TP is not
+# here: on one node MoRI's xGMI backend cannot open a session to a peer's second
+# GPU from a prefill rank that sees fewer GPUs (see the MoRIIO usage guide).
+HETEROGENEOUS_TP_CASES = [
+    Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, True, prefill_tp=2),
+    Case("gemma3", "TRITON_ATTN", _DEFAULT, _DEFAULT, True, prefill_tp=2),
+    Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, prefill_tp=2),
+    # Hybrid models size attention blocks to the per-rank recurrent state, and
+    # an MLA page does not shrink with TP like KDA state does: pin one block
+    # size on both sides (TP2 alone picks 1024 tokens, TP1 1920).
+    Case(
+        "kimi_linear",
+        "ROCM_AITER_MLA",
+        _DEFAULT,
+        _DEFAULT,
+        prefill_tp=2,
+        server_args=("--block-size", "2048"),
+    ),
 ]
 
 
@@ -330,14 +372,15 @@ def _visible_devices() -> tuple[str, list[str]]:
     return selector, devices
 
 
-def _device_env(selector: str, device: str) -> dict[str, str]:
+def _device_env(selector: str, devices: list[str]) -> dict[str, str]:
     # vLLM mirrors HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES at import, so
     # the test process carries both; pin every selector or the server refuses
     # the mismatch. ROCR narrows the set first, so HIP/CUDA then index into it.
-    env = {selector: device}
+    env = {selector: ",".join(devices)}
+    indexed = ",".join(str(i) for i in range(len(devices)))
     for key in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         if key != selector:
-            env[key] = "0" if selector == "ROCR_VISIBLE_DEVICES" else device
+            env[key] = indexed if selector == "ROCR_VISIBLE_DEVICES" else env[selector]
     return env
 
 
@@ -355,7 +398,7 @@ def _server(
     overrides: dict[str, Any],
     backend: str,
     graph: str,
-    device: str,
+    devices: list[str],
     selector: str,
     *,
     port: int | None = None,
@@ -389,6 +432,8 @@ def _server(
         "--gpu-memory-utilization",
         "0.5",
         "--enable-prefix-caching",
+        "--tensor-parallel-size",
+        str(len(devices)),
         *_graph_args(graph),
     ]
     role = "direct"
@@ -397,7 +442,7 @@ def _server(
         role = kv_transfer_config["kv_role"]
     env = {
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
-        **_device_env(selector, device),
+        **_device_env(selector, devices),
         "VLLM_HOST_IP": "127.0.0.1",
         "VLLM_PORT": str(get_open_port()),
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -420,7 +465,7 @@ def _moriio_config(role: str, http_port: int, ping_port: int) -> dict[str, Any]:
         "kv_connector": "MoRIIOConnector",
         "kv_role": role,
         "kv_connector_extra_config": {
-            "backend": "xgmi",
+            "backend": BACKEND,
             "read_mode": False,
             "host_ip": "127.0.0.1",
             "proxy_ip": "127.0.0.1",
@@ -478,7 +523,11 @@ def _pd_pair(
     case: Case,
 ) -> Iterator[tuple[str, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
-    assert len(devices) >= 2, "needs one GPU for prefill and one for decode"
+    prefill_devices = devices[: case.prefill_tp]
+    decode_devices = devices[case.prefill_tp : case.prefill_tp + case.decode_tp]
+    assert len(decode_devices) == case.decode_tp, (
+        f"needs {case.prefill_tp} GPUs for prefill and {case.decode_tp} for decode"
+    )
     prefill_port, decode_port, ping_port = (get_open_port() for _ in range(3))
     with _proxy(ping_port) as proxy_url, contextlib.ExitStack() as stack:
         servers: list[RemoteOpenAIServer] = []
@@ -491,7 +540,7 @@ def _pd_pair(
                     prefill_overrides,
                     case.attention_backend,
                     case.prefill_graph,
-                    devices[0],
+                    prefill_devices,
                     selector,
                     port=prefill_port,
                     extra_args=case.extra_args,
@@ -505,7 +554,7 @@ def _pd_pair(
                     decode_overrides,
                     case.attention_backend,
                     case.decode_graph,
-                    devices[1],
+                    decode_devices,
                     selector,
                     port=decode_port,
                     extra_args=case.extra_args,
@@ -639,9 +688,15 @@ class Reference:
         return sum(len(p) - int(self.hybrid) for p in self.prompts)
 
 
-def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Reference:
-    """Direct serve; also checks that the comparison can see a wrong prefix."""
+def _reference(
+    arch: ArchCase, overrides: dict[str, Any], case: Case, tp: int | None = None
+) -> Reference:
+    """Direct serve; also checks that the comparison can see a wrong prefix.
+
+    It runs at the decode TP size unless ``tp`` is given.
+    """
     selector, devices = _visible_devices()
+    devices = devices[: tp or case.decode_tp]
     # Prefill graphs run the chunks and the decode-only last step runs the same
     # captured graph in every decode mode used here, so the prefill mode
     # reproduces both halves of the P/D computation.
@@ -650,7 +705,7 @@ def _reference(arch: ArchCase, overrides: dict[str, Any], case: Case) -> Referen
         overrides,
         case.attention_backend,
         case.prefill_graph,
-        devices[0],
+        devices,
         selector,
         extra_args=case.extra_args,
     ) as server:
@@ -716,6 +771,40 @@ def test_write_matches_direct_serve(case: Case):
     lengths = [len(p) for p in ref.prompts]
     bad = {n: d for n, d in zip(lengths, distances) if not d <= TOLERANCE}
     assert not bad, f"P/D first-token log-probs differ from direct serve: {bad}"
+
+
+@pytest.mark.parametrize("case", HETEROGENEOUS_TP_CASES, ids=lambda c: c.id)
+def test_heterogeneous_tp_write_hands_decode_every_prompt_token(case: Case):
+    """Prefill and decode of different TP sizes complete WRITE transfers.
+
+    Unlike the equal-TP cases this cannot compare against a direct serve:
+    a different TP size sums in a different order, and on dummy weights that
+    changes the top tokens entirely, so log-probs only show the transfer did
+    not hang and decode consumed the transferred KV. That every head and state
+    slice lands at the right offset is pinned byte for byte by
+    tests/v1/kv_connector/unit/test_moriio_hetero_tp_write.py.
+    """
+    _, devices = _visible_devices()
+    if len(devices) < case.prefill_tp + case.decode_tp:
+        pytest.skip(f"needs {case.prefill_tp + case.decode_tp} GPUs")
+    arch = ARCHS[case.arch]
+    overrides = _arch_overrides(arch)
+    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, decode):
+        lengths = _prompt_lengths(arch, decode)
+        prompts = _prompts(lengths)
+        hits_before = _external_hits(decode)
+        tops = [_first_step(proxy_url, arch.model, prompt) for prompt in prompts]
+        hits = _external_hits(decode) - hits_before
+    print(f"[pd] {case.id} lens={lengths} external_hits={hits}")
+
+    expected = sum(len(p) - int(arch.hybrid) for p in prompts)
+    assert hits == expected, (
+        f"decode reported {hits} external prefix-cache hits, expected {expected}"
+    )
+    assert all(
+        len(top) >= TOP_K and all(math.isfinite(v) for v in top.values())
+        for top in tops
+    ), f"decode returned non-finite log-probs: {tops}"
 
 
 @pytest.mark.parametrize("arch_name", sorted(ARCHS))
