@@ -574,7 +574,6 @@ def propagate_flash_late_interaction(args, engine_args) -> None:
 
 def init_parser_plugin(args: argparse.Namespace):
     from vllm.reasoning import ReasoningParserManager
-    from vllm.tool_parsers import ToolParserManager
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
@@ -585,7 +584,6 @@ def init_parser_plugin(args: argparse.Namespace):
 
 def validate_api_server_args(args: argparse.Namespace):
     from vllm.reasoning import ReasoningParserManager
-    from vllm.tool_parsers import ToolParserManager
 
     valid_tool_parses = ToolParserManager.list_registered()
     if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
