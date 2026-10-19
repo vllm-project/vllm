@@ -45,7 +45,7 @@ from ..utils import check_logprobs_close
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize(
-    "backend", ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+    "backend", [None] if current_platform.is_rocm() else ["FLASH_ATTN"]
 )
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.

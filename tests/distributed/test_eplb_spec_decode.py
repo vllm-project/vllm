@@ -61,12 +61,6 @@ def get_model_args(
     return model_args
 
 
-skip_on_rocm = pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="EPLB with Spec Decode is a work in progress on ROCm.",
-)
-
-
 class FakeEplbState:
     instances: list[FakeEplbState] = []
 
@@ -278,7 +272,6 @@ def test_eplb_dspark_draft_registration(
     ],
     ids=["qwen3_next_mtp", "llama4_eagle", "dsv4_dspark"],
 )
-@skip_on_rocm
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
     model_setup: tuple[str, str, str | None, int, float, int],
@@ -325,7 +318,6 @@ def test_eplb_spec_decode(
     ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
 
 
-@skip_on_rocm
 @large_gpu_mark(min_gb=80)
 def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
     """Ensure async EPLB works with MTP speculative decoding for Qwen3-Next."""

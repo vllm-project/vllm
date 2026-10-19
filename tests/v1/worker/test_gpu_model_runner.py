@@ -1528,9 +1528,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(
-        backend=AttentionBackendEnum.TRITON_ATTN
-        if current_platform.is_rocm()
-        else AttentionBackendEnum.FLASHINFER
+        backend=None if current_platform.is_rocm() else AttentionBackendEnum.FLASHINFER
     )
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -1967,9 +1965,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     cache_config.kv_cache_layout = "LBNHC"
     parallel_config = ParallelConfig()
     attention_config = AttentionConfig(
-        backend=AttentionBackendEnum.TRITON_ATTN
-        if current_platform.is_rocm()
-        else AttentionBackendEnum.FLASHINFER
+        backend=None if current_platform.is_rocm() else AttentionBackendEnum.FLASHINFER
     )
     vllm_config = VllmConfig(
         model_config=model_config,

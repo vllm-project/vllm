@@ -79,9 +79,7 @@ def test_pixtral_compilation(
             max_model_len=4096,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.8,
-            attention_backend=(
-                "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
-            ),
+            attention_backend=None if current_platform.is_rocm() else "FLASH_ATTN",
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": compile_mm_encoder,
