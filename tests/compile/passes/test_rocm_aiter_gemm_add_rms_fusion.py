@@ -142,7 +142,8 @@ def test_fuse_gemm_add_rms(
         if not fused_op_available:
             # Without the AITER op the pass registers nothing; the graph stays unfused.
             assert fusion_pass.matched_count == 0 and not input_ranks
-            backend.check_after_ops(model.ops_in_model_before())
+            assert all(backend.op_count(op) > 0 for op in model.ops_in_model_before())
+            assert backend.op_count(model.ops_in_model_after()[0]) == 0
             return
 
         assert fusion_pass.matched_count == num_layers
