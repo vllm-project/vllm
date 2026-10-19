@@ -1159,12 +1159,17 @@ class MultiSwitch(nn.Module):
         )  # [total_tokens]
 
         # Step 1: counting via single-head attention -> write address n.
-        _zero = torch.tensor(0.0, dtype=dtype, device=device)
-        _one = torch.tensor(1.0, dtype=dtype, device=device)
+        #
+        # The 0.0/1.0 below stay Python scalars, which `masked_fill_` and slice
+        # assignment bake directly into the kernel. Materializing them as
+        # ``torch.tensor(0.0, device=device)`` instead costs a host->device copy
+        # out of pageable memory, which blocks the forward and trips
+        # ``VLLM_GPU_SYNC_CHECK``. torch.compile constant-folds such a tensor
+        # away, so the stall appears only under ``--enforce-eager``.
 
         # Keys: masked (-1e9) by default; un-masked (0) at the anchor and at
-        # control tokens, so the one-hot query attends only to those. Arithmetic
-        # (torch.where), no boolean-index assignment.
+        # control tokens, so the one-hot query attends only to those. Shaped
+        # ops throughout, no boolean-index assignment.
         k_count = torch.full(
             (total_tokens, self.num_kv_heads, self.counting_head_dim),
             _NEG_INF,
@@ -1172,7 +1177,7 @@ class MultiSwitch(nn.Module):
             dtype=dtype,
         )
         anchor_or_control = is_counting_anchor | is_control_token
-        k_count[:, 0, 0] = torch.where(anchor_or_control, _zero, k_count[:, 0, 0])
+        k_count[:, 0, 0].masked_fill_(anchor_or_control, 0.0)
 
         # Values: v=1 at the position-0 anchor only (the 1/(1+n) numerator).
         v_count = torch.zeros(
@@ -1180,7 +1185,7 @@ class MultiSwitch(nn.Module):
             device=device,
             dtype=dtype,
         )
-        v_count[:, 0, 0] = torch.where(is_counting_anchor, _one, _zero)
+        v_count[:, 0, 0].masked_fill_(is_counting_anchor, 1.0)
 
         # Query: one-hot on dim 0, so Q dot K == K[0] (0 when attended, -1e9
         # when masked).
@@ -1189,7 +1194,7 @@ class MultiSwitch(nn.Module):
             device=device,
             dtype=dtype,
         )
-        q_count[:, 0, 0] = _one
+        q_count[:, 0, 0] = 1.0
 
         count_output = self.counting_attn(q_count, k_count, v_count)
         count_output = count_output.reshape(
