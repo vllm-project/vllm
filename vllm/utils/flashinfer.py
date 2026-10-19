@@ -515,6 +515,21 @@ def has_flashinfer_recurrent_kda() -> bool:
 
 
 @functools.cache
+def has_flashinfer_kda_prefill_checkpoints() -> bool:
+    """Whether the validated sparse CuTe KDA checkpoint API is available."""
+    if not has_flashinfer_recurrent_kda():
+        return False
+    flashinfer_version = _installed_version("flashinfer-python")
+    cutlass_version = _installed_version("nvidia-cutlass-dsl")
+    return (
+        flashinfer_version is not None
+        and Version(flashinfer_version) >= Version("0.7.2")
+        and cutlass_version is not None
+        and Version(cutlass_version) >= Version("4.7")
+    )
+
+
+@functools.cache
 def has_flashinfer_fused_kda_decode() -> bool:
     """Return whether FlashInfer fused KDA decode is available."""
     if not has_flashinfer():

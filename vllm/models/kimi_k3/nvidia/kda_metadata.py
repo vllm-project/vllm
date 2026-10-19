@@ -44,6 +44,34 @@ if TYPE_CHECKING:
     )
 
 
+FLASHINFER_KDA_CHECKPOINT_ALIGNMENT = 32
+
+
+def plan_flashinfer_kda_checkpoints(
+    offsets: list[int], query_lens: list[int]
+) -> tuple[list[int], list[int]]:
+    """Map periodic boundaries to one retained checkpoint row per request."""
+    assert len(offsets) == len(query_lens)
+    cu_starts = [0]
+    destinations: list[int] = []
+    for row, (offset, query_len) in enumerate(zip(offsets, query_lens)):
+        count = query_len // FLASHINFER_KDA_CHECKPOINT_ALIGNMENT
+        destinations.extend([-1] * count)
+        if offset:
+            assert 0 < offset <= query_len
+            assert offset % FLASHINFER_KDA_CHECKPOINT_ALIGNMENT == 0
+            slot = cu_starts[-1] + offset // FLASHINFER_KDA_CHECKPOINT_ALIGNMENT - 1
+            destinations[slot] = row
+        cu_starts.append(len(destinations))
+    return cu_starts, destinations
+
+
+@dataclass
+class FlashInferKDACheckpointPlan:
+    cu_starts: torch.Tensor
+    destinations: torch.Tensor
+
+
 @cache
 def _metadata_launch_pdl() -> bool:
     return current_platform.is_arch_support_pdl()
@@ -263,6 +291,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     non_spec_token_start: int | None = None
     flashinfer_prefill_query_start_loc: torch.Tensor | None = None
     flashinfer_prefill_seq_order: torch.Tensor | None = None
+    flashinfer_prefill_checkpoint_plan: FlashInferKDACheckpointPlan | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
@@ -685,9 +714,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         flashinfer_prefill_seq_order = None
         if self.use_flashinfer_prefill and num_prefills > 0:
             assert non_spec_query_start_loc is not None
-            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
-                torch.int64
-            )
+            # FlashInfer caches packed offsets by pointer and version counter.
+            with torch.inference_mode(False):
+                flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
+                    torch.int64, copy=True
+                )
             num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
             num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
             if num_non_spec_tokens > num_non_spec_requests:
@@ -701,6 +732,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             if active_non_spec_mask_cpu is not None:
                 request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
+
+        flashinfer_prefill_checkpoint_plan = None
+        if checkpoint is not None and self.use_flashinfer_prefill:
+            assert checkpoint.offsets is not None
+            assert checkpoint.query_lens is not None
+            cu_starts, destinations = plan_flashinfer_kda_checkpoints(
+                checkpoint.offsets, checkpoint.query_lens
+            )
+            flashinfer_prefill_checkpoint_plan = FlashInferKDACheckpointPlan(
+                cu_starts=async_tensor_h2d(
+                    cu_starts, query_start_loc.device, torch.int64
+                ),
+                destinations=async_tensor_h2d(
+                    destinations, query_start_loc.device, torch.int32
+                ),
+            )
 
         return KimiK3KDAMetadata(
             num_prefills=num_prefills,
@@ -723,6 +770,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_token_start=non_spec_token_start,
             flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
             flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
+            flashinfer_prefill_checkpoint_plan=flashinfer_prefill_checkpoint_plan,
             recoverssm_commit=recoverssm_commit,
             recoverssm_context=(
                 self._get_recoverssm_context()
