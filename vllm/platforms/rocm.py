@@ -218,6 +218,7 @@ _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
+_ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -317,6 +318,10 @@ def on_gfx1100() -> bool:
 
 def on_gfx1151() -> bool:
     return _ON_GFX1151
+
+
+def on_gfx1201() -> bool:
+    return _ON_GFX1201
 
 
 def on_gfx12x() -> bool:
@@ -439,44 +444,6 @@ def use_rocm_custom_paged_attention(
             and kv_cache_dtype == "auto"
             and sinks is None
         )
-
-
-def _rocm_attn_uses_custom_paged_attention(
-    attn_selector_config: "AttentionSelectorConfig",
-    vllm_config: "VllmConfig | None",
-) -> bool:
-    """Selection-time copy of the gate in chunked_prefill_paged_decode() that
-    picks ROCM_ATTN's HIP paged-attention decode kernel. Without that kernel,
-    ROCM_ATTN decodes with a Triton kernel without split-KV, which is slower
-    than TRITON_ATTN."""
-    cfg = attn_selector_config
-    model_config = getattr(vllm_config, "model_config", None)
-    if model_config is None:
-        return True
-    assert vllm_config is not None
-    from vllm.config import CacheConfig
-
-    # --block-size if given, else the default. Hybrid models set the block size
-    # after backend selection and use a padded (non-native) KV cache layout.
-    block_size = cfg.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
-    has_native_layout = not model_config.is_hybrid
-    num_heads = model_config.get_num_attention_heads(vllm_config.parallel_config)
-    num_kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
-
-    use_custom = not cfg.has_sink and use_rocm_custom_paged_attention(
-        qtype=cfg.dtype,
-        head_size=cfg.head_size,
-        block_size=block_size,
-        gqa_ratio=num_heads // num_kv_heads,
-        # CUDA graphs are captured with max_seq_len = max_model_len.
-        max_seq_len=model_config.max_model_len,
-        sliding_window=1 if cfg.has_sliding_window else 0,
-        kv_cache_dtype=cfg.kv_cache_dtype or "auto",
-    )
-    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2 or not has_native_layout:
-        use_custom = False
-    return use_custom
 
 
 @cache
@@ -737,20 +704,16 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        # On RDNA4, swap TRITON_ATTN and ROCM_ATTN when ROCM_ATTN cannot use
-        # its HIP paged-attention decode kernel. Other RDNA parts (e.g. gfx1100,
-        # gfx1151) are not switched until TRITON_ATTN is tuned for them.
-        # fp8 KV cache and head_size <= 64 keep ROCM_ATTN: there TRITON_ATTN's
-        # prefill is slower than ROCM_ATTN's Triton fallback.
+        # On gfx1201, TRITON_ATTN is faster than ROCM_ATTN, including where
+        # ROCM_ATTN uses its HIP paged-attention decode kernel. An fp8_e5m2 KV
+        # cache keeps ROCM_ATTN: Attention quantizes the query only for
+        # fp8/fp8_e4m3 caches and rejects fp8_e5m2 for backends that take an
+        # fp8 query, as TRITON_ATTN does on gfx1201.
         if (
-            on_rdna4()
+            on_gfx1201()
             and AttentionBackendEnum.ROCM_ATTN in backend_priorities
             and AttentionBackendEnum.TRITON_ATTN in backend_priorities
-            and not (attn_selector_config.kv_cache_dtype or "auto").startswith("fp8")
-            and attn_selector_config.head_size > 64
-            and not _rocm_attn_uses_custom_paged_attention(
-                attn_selector_config, vllm_config
-            )
+            and attn_selector_config.kv_cache_dtype != "fp8_e5m2"
         ):
             # Swap the two so every other backend keeps its position.
             rocm_idx = backend_priorities.index(AttentionBackendEnum.ROCM_ATTN)

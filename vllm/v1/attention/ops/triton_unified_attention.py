@@ -36,6 +36,31 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
 
+is_gfx1201 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1201
+
+    is_gfx1201 = on_gfx1201()
+
+# gfx1201 2D launch configs for prefill / chunked-prefill / mixed batches:
+# padded head_size -> (config for 64 < max_seqlen_q < 4096,
+# for max_seqlen_q >= 4096), each config = (BLOCK_M, TILE_SIZE, num_warps,
+# num_stages). Keyed by the padded head size (next power of 2) because the
+# kernel's tiles use it: head_size 96 runs as 128, 192 as 256.
+_GFX1201_2D_CONFIGS = {
+    64: ((64, 64, 4, 1), (128, 64, 8, 1)),
+    128: ((64, 32, 4, 1), (128, 32, 8, 2)),
+    256: ((32, 32, 4, 1), (128, 32, 8, 1)),
+    512: ((64, 16, 8, 1), (64, 16, 8, 1)),
+}
+# gfx1201 2D decode (batches above the 3D threshold): padded head size ->
+# (TILE_SIZE, num_warps, num_stages).
+_GFX1201_2D_DECODE_CONFIGS = {
+    128: (16, 2, 1),
+    256: (16, 2, 1),
+    512: (16, 8, 1),
+}
+
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -980,6 +1005,38 @@ def unified_attention(
         launch_num_warps = 8
         launch_num_stages = 2
 
+    # gfx1201: the default BLOCK_M=16 gives each program only 16 / GQA query
+    # rows, too few for prefill. Taller Q blocks are ~2x faster for prefill,
+    # chunked-prefill and mixed batches (synthetic sweep over head_dim
+    # 64/128/256/512, GQA 1-16, KV heads 1-8, block size 16/528, bf16 and
+    # fp8 query). An fp8 query needs TILE_SIZE >= 32 (fp8 P @ V dot); configs
+    # with a narrower tile are not used for it.
+    gfx1201_tile_prefill = None
+    gfx1201_head_size = triton.next_power_of_2(head_size)
+    if (
+        is_gfx1201
+        and gfx1201_head_size in _GFX1201_2D_CONFIGS
+        and max_seqlen_q > 64
+        and num_queries_per_kv <= 16
+        and q.element_size() <= 2
+        and not is_batch_invariant
+    ):
+        mid_cfg, long_cfg = _GFX1201_2D_CONFIGS[gfx1201_head_size]
+        cfg_block_m, cfg_tile, cfg_warps, cfg_stages = (
+            long_cfg if max_seqlen_q >= 4096 else mid_cfg
+        )
+        # A decode-heavy mixed batch with few Q heads per KV head would pad
+        # every decode sequence to BLOCK_Q rows; keep the default there.
+        avg_query_len = q.shape[0] // max(num_seqs, 1)
+        if not (cfg_block_m // num_queries_per_kv > 16 and avg_query_len < 16) and (
+            q.element_size() == 2 or cfg_tile >= 32
+        ):
+            BLOCK_M = cfg_block_m
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            gfx1201_tile_prefill = cfg_tile
+            launch_num_warps = cfg_warps
+            launch_num_stages = cfg_stages
+
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -1012,6 +1069,8 @@ def unified_attention(
     # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
     if tuned_large_head:
         TILE_SIZE_PREFILL = 128
+    elif gfx1201_tile_prefill is not None:
+        TILE_SIZE_PREFILL = gfx1201_tile_prefill
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1058,6 +1117,19 @@ def unified_attention(
             f"USE_TD_QO requires contiguous output heads "
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
+
+    # gfx1201 decode: switch to the 2D kernel at half the threshold
+    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Split-KV
+    # cuts short contexts into tiny segments, so 2D is faster earlier; short
+    # multi-token queries and fp8 KV caches keep the full threshold.
+    if (
+        is_gfx1201
+        and max_seqlen_q == 1
+        and k.element_size() == 2
+        and seq_threshold_3D is not None
+        and not is_batch_invariant
+    ):
+        seq_threshold_3D = max(1, seq_threshold_3D // 2)
 
     # Launch the 2D kernel if
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
@@ -1118,6 +1190,22 @@ def unified_attention(
     if not use_3d:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
+        # gfx1201 decode batches above the 3D threshold: a narrow KV tile is
+        # ~1.2x (head_dim 128), ~1.5x (256) and ~2.5x (512, with 8 warps)
+        # faster. Padded head size, as for the prefill configs above.
+        if (
+            is_gfx1201
+            and max_seqlen_q == 1
+            and gfx1201_head_size in _GFX1201_2D_DECODE_CONFIGS
+            and q.element_size() <= 2
+            and not is_batch_invariant
+        ):
+            tile_size, launch_num_warps, launch_num_stages = _GFX1201_2D_DECODE_CONFIGS[
+                gfx1201_head_size
+            ]
+            if q.element_size() == 1:
+                # fp8 P @ V dot needs TILE_SIZE >= 32
+                tile_size = max(tile_size, 32)
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
