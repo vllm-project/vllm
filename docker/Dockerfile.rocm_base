@@ -2,10 +2,9 @@ ARG BASE_IMAGE=ubuntu:22.04
 ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.13.0+rocm10.1.0
 ARG TORCHVISION_VERSION=0.28.0+rocm10.1.0
-ARG TORCHAUDIO_VERSION=2.11.0.2+rocm10.1.0
+ARG TORCHAUDIO_VERSION=2.11.0..3+rocm10.1.0
 ARG TRITON_BRANCH="669b31ac" # release/internal/3.8.x as of 09/29/2026
-ARG TRITON_VERSION=3.8.0+git669b31ac
-ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_VERSION=3.8.0+git669b31ac.rocm10.1.0
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.25"
@@ -18,7 +17,6 @@ ARG ROCM_RUNTIME_COMMIT="4baa0670543683461635633d59c1f665c82a9fd8" # users/rasmi
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL="https://stable.repo.amd.com/rocm/whl-next/" # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=10.1.0
 
 # Build configuration
@@ -83,23 +81,22 @@ RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all s
 
 # Install ROCm SDK via TheRock
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
 RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels (nightly for latest torch, release as fallback)
+# Install PyTorch wheels, with the triton TheRock's torch pins
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
+ARG TRITON_VERSION
 RUN pip install \
     --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}"
+    "torchvision==${TORCHVISION_VERSION}" \
+    "triton==${TRITON_VERSION}"
 
 # Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
 
@@ -115,7 +112,6 @@ RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-            --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
             "torch[device-${arch}]==${TORCH_VER}" \
             "torchvision[device-${arch}]==${TORCHVISION_VERSION}" \
             "rocm[device-${arch}]==${ROCM_SDK_VERSION}"; \
@@ -259,20 +255,6 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
-### Triton Build
-###
-FROM base AS build_triton
-ARG TRITON_BRANCH
-ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
-
-
-###
 ### ROCr + CLR build
 ###
 # Brings in multi-stream perf improvements; drop after these arrive in an official release
@@ -335,39 +317,29 @@ RUN mkdir -p /staging/lib \
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# The wheel index also serves a torch repacked to require our triton instead of
-# the one TheRock built it with, and amdsmi, which TheRock ships only as sources
-# inside rocm-sdk-core.
+# The wheel index also serves TheRock's torch and the triton it pins, and amdsmi,
+# which TheRock ships only as sources inside rocm-sdk-core.
 ARG TORCH_VERSION
+ARG TRITON_VERSION
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
-# regex and pybase64 aren't installed here; fall back to the stdlib modules.
-RUN sed -i -e 's/import regex as re/import re/' \
-        -e 's/import pybase64 as base64/import base64/' /tmp/therock_wheels.py \
-    && pip download --no-deps --dest /tmp/torch-dl \
+# regex isn't installed here; fall back to the stdlib module.
+RUN sed -i 's/import regex as re/import re/' /tmp/therock_wheels.py \
+    && pip download --no-deps --dest /app/debs \
         --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-        "torch==${TORCH_VERSION}" \
-    && TRITON_VER=$(basename /app/debs/triton-*.whl | cut -d- -f2) \
-    && python3 /tmp/therock_wheels.py repack-torch /tmp/torch-dl/torch-*.whl \
-        --triton-version "${TRITON_VER}" --out-dir /app/debs \
+        "torch==${TORCH_VERSION}" "triton==${TRITON_VERSION}" \
     && python3 /tmp/therock_wheels.py patch-amdsmi "${SDK_CORE}/share/amd_smi" \
         --out-dir /tmp/amd_smi \
     && pip wheel --no-deps --wheel-dir /app/debs /tmp/amd_smi \
-    && rm -rf /tmp/torch-dl /tmp/amd_smi /tmp/therock_wheels.py \
+    && rm -rf /tmp/amd_smi /tmp/therock_wheels.py \
     && ls -l /app/debs
 
 FROM base AS debs
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -378,7 +350,7 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 FROM base AS final
 ARG TRITON_VERSION
 
-# torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
+# torch 2.13 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
 # teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
 
@@ -400,15 +372,6 @@ RUN set -eux; \
     done
 
 RUN ldconfig
-
-# This is to prevent resolvers from checking METADATA and RECORD and clobbering
-# the Triton source build we installed. Constraints files are unable to help
-# with this. However, these entries are optional and can be blanked which
-# solves the problem.
-RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
-    && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
 
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl \
@@ -433,8 +396,6 @@ ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
 ARG PYTORCH_ROCM_ARCH
 ARG AITER_ROCM_ARCH
-ARG TRITON_BRANCH
-ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
@@ -453,8 +414,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
     && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
     && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
-    && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
-    && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \

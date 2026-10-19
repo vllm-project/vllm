@@ -724,7 +724,7 @@ steps:
     key: trigger-perf-eval-rocm
     if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
     depends_on:
-      - build-rocm100-release-image
+      - build-rocm101-release-image
     async: true
     soft_fail: true
     build:
@@ -733,7 +733,7 @@ steps:
       env:
         NIGHTLY: 1 # run all perf-eval workloads
         VLLM_COMMIT: "$BUILDKITE_COMMIT"
-        VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm100"
+        VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm101"
 
   # =============================================================================
   # ROCm Release Pipelines (x86_64 only)
@@ -742,9 +742,9 @@ steps:
   # One group per ROCm stack, identified by its base Dockerfile (ROCM_BASE_DOCKERFILE).
   # The scripts derive the ROCm version, wheel variant, cache keys and image tags from
   # it (.buildkite/scripts/rocm/stack.sh), so both groups share one set of step
-  # definitions, anchored on the ROCm 10.0 group.
+  # definitions, anchored on the ROCm 10.1 group.
   #
-  # - ROCm 10.0 (TheRock, docker/Dockerfile.rocm{,_base}) is the default: it owns the
+  # - ROCm 10.1 (TheRock, docker/Dockerfile.rocm{,_base}) is the default: it owns the
   #   :nightly / :latest images and the root wheel index.
   # - ROCm 7.2 (docker/Dockerfile.rocm_72{,_base}) is kept for a transition period as
   #   rocm72 images and wheels.
@@ -752,17 +752,17 @@ steps:
   # vLLM version is determined by the Buildkite checkout (like the CUDA pipeline).
   # =============================================================================
 
-  - group: "Build ROCm 10.0 Wheel / Image"
-    key: "build-rocm100"
+  - group: "Build ROCm 10.1 Wheel / Image"
+    key: "build-rocm101"
     depends_on: ~
     steps:
-      - label: ":rocm: Build ROCm 10.0 Base Image & Wheels"
-        id: build-rocm100-base
+      - label: ":rocm: Build ROCm 10.1 Base Image & Wheels"
+        id: build-rocm101-base
         depends_on: ~
         agents: &rocm_build_agents
           queue: cpu_queue_release
         timeout_in_minutes: 360
-        env: &rocm100_env
+        env: &rocm101_env
           ROCM_BASE_DOCKERFILE: "docker/Dockerfile.rocm_base"
           ROCM_DEFAULT_ARG: "--default"
           DOCKER_BUILDKIT: "1"
@@ -801,12 +801,12 @@ steps:
             fi
             buildkite-agent artifact upload "$${ROCM_STACK_BASE_WHEELS_DIR}/*.whl"
 
-      - label: ":python: Build vLLM ROCm 10.0 Wheel - x86_64"
-        id: build-rocm100-vllm-wheel
-        depends_on: build-rocm100-base
+      - label: ":python: Build vLLM ROCm 10.1 Wheel - x86_64"
+        id: build-rocm101-vllm-wheel
+        depends_on: build-rocm101-base
         agents: *rocm_build_agents
         timeout_in_minutes: 180
-        env: *rocm100_env
+        env: *rocm101_env
         commands: &rocm_vllm_wheel_commands
           - |
             set -euo pipefail
@@ -830,12 +830,12 @@ steps:
             cp rocm-dist/*.whl "$${ROCM_STACK_VLLM_WHEEL_DIR}/"
             buildkite-agent artifact upload "$${ROCM_STACK_VLLM_WHEEL_DIR}/*.whl"
 
-      - label: ":s3: Upload ROCm 10.0 Wheels to S3"
-        id: upload-rocm100-wheels
-        depends_on: build-rocm100-vllm-wheel
+      - label: ":s3: Upload ROCm 10.1 Wheels to S3"
+        id: upload-rocm101-wheels
+        depends_on: build-rocm101-vllm-wheel
         agents: *rocm_build_agents
         timeout_in_minutes: 60
-        env: *rocm100_env
+        env: *rocm101_env
         commands: &rocm_upload_commands
           - |
             set -euo pipefail
@@ -844,11 +844,11 @@ steps:
             buildkite-agent artifact download "$${ROCM_STACK_VLLM_WHEEL_DIR}/*.whl" .
             bash .buildkite/scripts/upload-rocm-wheels.sh "$${ROCM_BASE_DOCKERFILE}"
 
-      - label: ":memo: Annotate ROCm 10.0 wheel release"
-        id: annotate-rocm100-release
-        depends_on: upload-rocm100-wheels
+      - label: ":memo: Annotate ROCm 10.1 wheel release"
+        id: annotate-rocm101-release
+        depends_on: upload-rocm101-wheels
         agents: *rocm_build_agents
-        env: *rocm100_env
+        env: *rocm101_env
         commands: &rocm_annotate_commands
           - bash .buildkite/scripts/annotate-rocm-release.sh "$${ROCM_BASE_DOCKERFILE}" $${ROCM_DEFAULT_ARG}
 
@@ -857,27 +857,27 @@ steps:
       - block: "Generate Root Index for ROCm Wheels for Release"
         key: block-generate-root-index-rocm-wheels
         depends_on:
-          - upload-rocm100-wheels
+          - upload-rocm101-wheels
           - upload-rocm72-wheels
 
       - label: ":package: Generate Root Index for ROCm Wheels for Release"
         depends_on: block-generate-root-index-rocm-wheels
         id: generate-root-index-rocm-wheels
         agents: *rocm_build_agents
-        env: *rocm100_env
+        env: *rocm101_env
         commands:
           - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
 
-      - label: ":docker: Build release image - x86_64 - ROCm 10.0"
-        id: build-rocm100-release-image
+      - label: ":docker: Build release image - x86_64 - ROCm 10.1"
+        id: build-rocm101-release-image
         depends_on:
           - step: block-build-release-images
             allow_failure: true
-          - step: build-rocm100-base
+          - step: build-rocm101-base
             allow_failure: false
         agents: *rocm_build_agents
         timeout_in_minutes: 180
-        env: *rocm100_env
+        env: *rocm101_env
         commands: &rocm_release_image_commands
           - |
             set -euo pipefail
@@ -893,13 +893,13 @@ steps:
               --build-arg SCCACHE_REGION_NAME=us-west-2 --build-arg SCCACHE_S3_NO_CREDENTIALS=0 .
             docker push "$${ROCM_STACK_ECR_IMAGE}"
 
-      - label: "Publish nightly ROCm 10.0 image to DockerHub"
-        id: publish-rocm100-nightly
-        depends_on: build-rocm100-release-image
+      - label: "Publish nightly ROCm 10.1 image to DockerHub"
+        id: publish-rocm101-nightly
+        depends_on: build-rocm101-release-image
         if: build.env("NIGHTLY") == "1"
         agents: &rocm_publish_agents
           queue: small_cpu_queue_release
-        env: *rocm100_env
+        env: *rocm101_env
         commands: &rocm_publish_nightly_commands
           - bash .buildkite/scripts/push-nightly-builds-rocm.sh "$${ROCM_BASE_DOCKERFILE}" $${ROCM_DEFAULT_ARG}
         plugins: &rocm_dockerhub_login
@@ -997,7 +997,7 @@ steps:
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
       - create-manifest-xpu
-      - build-rocm100-release-image
+      - build-rocm101-release-image
       - build-rocm72-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
