@@ -155,6 +155,49 @@ def test_routing_strategy_integration(monkeypatch, device):
             )
 
 
+@pytest.mark.parametrize("simulate", [False, True])
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_correction_bias_registration(monkeypatch, dist_init, simulate, has_bias):
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+
+    strategy = "uniform_random" if simulate else ""
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+        lambda: strategy,
+    )
+    bias = torch.nn.Parameter(torch.ones(4)) if has_bias else None
+    with set_current_vllm_config(VllmConfig()):
+        moe = FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            renormalize=True,
+            scoring_func="sigmoid",
+            e_score_correction_bias=bias,
+            prefix="bias_registration",
+        )
+
+    experts = moe.routed_experts
+    name = "e_score_correction_bias"
+    if has_bias and simulate:
+        assert dict(experts.named_buffers())[name] is experts.e_score_correction_bias
+        assert name not in experts.state_dict()
+        assert torch.count_nonzero(experts.e_score_correction_bias) == 0
+        experts.to(dtype=torch.float64)
+        assert experts.e_score_correction_bias.dtype == torch.float64
+        assert torch.count_nonzero(experts.e_score_correction_bias) == 0
+        assert torch.all(bias == 1)
+    else:
+        assert experts.e_score_correction_bias is bias
+        assert name not in dict(experts.named_buffers())
+        if has_bias:
+            assert dict(experts.named_parameters())[name] is bias
+            assert name in experts.state_dict()
+
+
 def test_distribution_based_routing_with_custom_strategy():
     """Test registering and using DistributionBasedRouting with custom
     parameters."""

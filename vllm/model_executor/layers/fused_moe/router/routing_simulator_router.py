@@ -366,6 +366,19 @@ class RoutingSimulatorRouter(BaseRouter):
     def supports_monolithic_kernels(self) -> bool:
         return self._strategy.supports_monolithic_logits
 
+    def prepare_monolithic_bias(
+        self, e_score_correction_bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if e_score_correction_bias is None:
+            return None
+        # Buffer assignment registers this with RoutedExperts, preserving its
+        # zeros across level-2 sleep/wake without adding a checkpoint weight.
+        # Synthetic router logits need no such preservation: they are regenerated
+        # on each forward, including CUDA graph replay.
+        return torch.nn.Buffer(
+            torch.zeros_like(e_score_correction_bias), persistent=False
+        )
+
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
