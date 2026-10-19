@@ -6565,6 +6565,92 @@ def submit_movement(controller, message_id, action, payload):
     ).results[0]
 
 
+@pytest.mark.parametrize("resident_first", [False, True])
+def test_prefetch_keeps_the_complete_prefix_until_all_transfers_finish(resident_first):
+    manager, request, controller, adapter, target = make_movement_controller()
+    target = {
+        **target,
+        "blocks": [
+            *target["blocks"],
+            {
+                "group_id": 0,
+                "block_hash": request.block_hashes[1].hex(),
+                "start_token": 4,
+                "end_token": 8,
+            },
+        ],
+    }
+    if resident_first:
+        assert manager.allocate_slots(request, 4) is not None
+        manager.cache_blocks(request, 4)
+        manager.free(request)
+    operation = submit_movement(
+        controller, "prefix", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    if not resident_first:
+        first = adapter.jobs.pop(0)
+        adapter.completions.append(
+            KVTransferCompletion(first.transfer_id, first.generation, True)
+        )
+        controller.executor.progress()
+    competitor = make_request("competitor", list(range(20, 29)), 4, sha256)
+    assert manager.allocate_slots(competitor, 8) is None
+    adapter.finish()
+    controller.executor.progress()
+    assert (
+        controller.registry.get(operation.message_id, operation.action_id).status
+        == OperationStatus.COMPLETED
+    )
+    assert manager.get_computed_blocks(request)[1] == 8
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert not manager.get_transfer_manager().has_pending
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_shared_prefix_completion_hold_survives_one_callers_cancellation(reset):
+    manager, request, controller, adapter, target = make_movement_controller()
+    target = {
+        **target,
+        "blocks": [
+            *target["blocks"],
+            {
+                "group_id": 0,
+                "block_hash": request.block_hashes[1].hex(),
+                "start_token": 4,
+                "end_token": 8,
+            },
+        ],
+    }
+    first = submit_movement(
+        controller, "first", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    second = submit_movement(
+        controller, "second", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    done = adapter.jobs.pop(0)
+    adapter.completions.append(
+        KVTransferCompletion(done.transfer_id, done.generation, True)
+    )
+    controller.executor.progress()
+    controller.executor.cancel_operations({first.operation_id}, "First caller finished")
+    assert manager.block_pool.get_num_free_blocks() == 1
+    if reset:
+        assert not manager.reset_prefix_cache()
+        controller.executor.progress()
+        assert manager.block_pool.get_num_free_blocks() == 2
+    adapter.finish()
+    controller.executor.progress()
+    expected = OperationStatus.CANCELLED if reset else OperationStatus.COMPLETED
+    assert (
+        controller.registry.get(second.message_id, second.action_id).status == expected
+    )
+    if reset:
+        assert manager.reset_prefix_cache()
+    assert manager.get_computed_blocks(request)[1] == (0 if reset else 8)
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert not manager.get_transfer_manager().has_pending
+
+
 @pytest.mark.parametrize("cancel_action", [False, True])
 def test_native_shared_prefetch_survives_independent_task_cleanup(cancel_action):
     manager, request, controller, adapter, target = make_movement_controller()

@@ -77,6 +77,7 @@ class _Movement:
     outcomes: dict[BlockHashWithGroupId, TargetOutcome] = field(default_factory=dict)
     unresolved: tuple[TargetOutcome, ...] = ()
     transferred_bytes: int = 0
+    completed_holds: set[KVCacheTransferLease] = field(default_factory=set)
 
 
 @dataclass
@@ -209,6 +210,14 @@ class KVTransferOperations:
                 self._target_error(movement, key, error.code, str(error))
                 continue
             if lease is None:
+                movement.completed_holds.add(
+                    self.resources.hold_resident(
+                        key,
+                        num_tokens,
+                        operation.operation_id,
+                        scope=f"{tier}/{self.namespace}",
+                    )
+                )
                 movement.succeeded.add(key)
                 self._target_success(movement, key)
                 movement.outcomes[key] = replace(
@@ -277,7 +286,11 @@ class KVTransferOperations:
                     or job.lease.scope != f"{adapter.tier}/{self.namespace}"
                 ):
                     continue
-                valid = self.resources.complete(job.lease, success=completion.success)
+                valid = self.resources.complete(
+                    job.lease,
+                    success=completion.success,
+                    retain=job.lease.direction == "load",
+                )
                 self.statistics[f"{job.lease.direction}_bytes"] += (
                     completion.bytes_transferred
                 )
@@ -297,6 +310,8 @@ class KVTransferOperations:
                     movement.transferred_bytes += completion.bytes_transferred
                     movement.pending.remove(completion.transfer_id)
                     if valid:
+                        if job.lease.direction == "load":
+                            movement.completed_holds.add(job.lease)
                         movement.succeeded.add(job.lease.key)
                         self._target_success(movement, job.lease.key)
                     else:
@@ -354,6 +369,8 @@ class KVTransferOperations:
             job = self._jobs[job_id]
             job.callers.discard(caller)
             self.resources.cancel(job.lease, caller)
+        for lease in movement.completed_holds:
+            self.resources.cancel(lease, caller)
         self.registry.update(
             movement.operation,
             OperationStatus.CANCELLED,
@@ -456,6 +473,8 @@ class KVTransferOperations:
                 else ""
             ),
         )
+        for lease in movement.completed_holds:
+            self.resources.cancel(lease, movement.operation.operation_id)
         del self._operations[movement.operation.operation_id]
 
     @staticmethod
