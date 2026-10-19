@@ -74,6 +74,13 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     parser.add_argument("--iters", type=int, default=20, help="Replays per sample.")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--output-json", help="Write results to this file.")
+    parser.add_argument(
+        "--profile-dir",
+        help="After timing, trace a few replays of each case and write "
+        "`<case>.rank<r>.trace.json.gz` (Perfetto) and `<case>.rank<r>.kernels.json` "
+        "(GPU time per kernel per forward) here. Summarize or compare with "
+        "`python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]`.",
+    )
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(load_format="dummy", enable_prefix_caching=False)
 
@@ -97,36 +104,10 @@ def _setup_env() -> None:
     )
 
 
-def _register_dummy_loader() -> str:
-    """Dummy loader that also runs load-time model finalization.
-
-    TODO(woosuk): Remove once #60096 lands. DeepSeek-V4.1 fuses its MegaMoE
-    shared experts at the end of `load_weights`, before the generic linear
-    post-processing repacks their scales. Dummy loading never calls
-    `load_weights`, so the fusion would fail and the bench would time unfused
-    shared experts.
-    """
-    from vllm.model_executor.model_loader import register_model_loader
-    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-
-    name = "forward_bench_dummy"
-
-    @register_model_loader(name)
-    class ForwardBenchDummyLoader(DummyModelLoader):
-        def load_weights(self, model, model_config) -> None:
-            super().load_weights(model, model_config)
-            if any(hasattr(m, "finalize_mega_moe_weights") for m in model.modules()):
-                model.process_weights_after_loading()
-
-    return name
-
-
 def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
     from vllm.config.compilation import CompilationMode, CUDAGraphMode
 
     engine_args = EngineArgs.from_cli_args(args)
-    if engine_args.load_format == "dummy":
-        engine_args.load_format = _register_dummy_loader()
     engine_args.distributed_executor_backend = "external_launcher"
     engine_args.enable_prefix_caching = False
     engine_args.compilation_config.mode = CompilationMode.NONE
@@ -146,6 +127,14 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
 
 
 def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any]:
+    required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
+    if required_drafts > runner.num_speculative_steps:
+        raise ValueError(
+            f"Case {case.name!r} needs {required_drafts} draft tokens per request, "
+            f"but the runner supports {runner.num_speculative_steps}. "
+            "Set --speculative-config with a sufficient num_speculative_tokens."
+        )
+
     from vllm.benchmarks.forward.batch import build_batch
     from vllm.benchmarks.forward.capture import ForwardBench
     from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
@@ -164,6 +153,13 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         dcp_size,
     )
     zero_kv_blocks(context, kv_config.kv_cache_groups, batch, kv_config.num_blocks)
+    profile_prefix = None
+    if args.profile_dir:
+        from vllm.distributed.parallel_state import get_world_group
+
+        os.makedirs(args.profile_dir, exist_ok=True)
+        rank = get_world_group().rank
+        profile_prefix = os.path.join(args.profile_dir, f"{case.name}.rank{rank}")
     bench = ForwardBench(
         runner,
         batch,
@@ -172,6 +168,8 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         touched_kv_views(
             context, kv_config.kv_cache_groups, batch, kv_config.num_blocks, dcp_size
         ),
+        case.name,
+        profile_prefix,
     )
     routing, balanced = install_routing(
         runner, args.routing, args.load_format == "dummy", batch.num_tokens, args.seed
@@ -239,6 +237,14 @@ def main(args: argparse.Namespace) -> None:
                 f"eager rel rms {rank0['graph_vs_eager']['relative_rms']:.1e}",
                 flush=True,
             )
+            if profile := rank0.get("profile"):
+                from vllm.benchmarks.forward.profile import format_summary
+
+                print(
+                    f"[forward] {case.name} rank 0 kernels ({profile['summary']}):\n"
+                    + format_summary({**profile, "kernels": profile["top_kernels"]}),
+                    flush=True,
+                )
             if latency["sample_spread_pct"] > 0.5:
                 logger.warning(
                     "%s: unstable timing (sample medians spread %.2f%%).",

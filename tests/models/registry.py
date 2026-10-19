@@ -197,6 +197,10 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
+    "AliceAIForCausalLM": _HfExamplesInfo(
+        "yandex/AliceAI-Foundation-80B-A3B-Base",
+        trust_remote_code=True,
+    ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
@@ -211,6 +215,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "BailingMoeV3ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-3.0-flash", trust_remote_code=True
+    ),
+    "BeamForCausalLM": _HfExamplesInfo(
+        "reflection/Beam-1.0-501B-A23B-NVFP4",
+        is_available_online=False,
+        # Include MoE in the reduced one-layer initialization test.
+        hf_overrides={"mlp_layer_types": ["sparse"]},
     ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
@@ -458,7 +468,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo(
-        "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
+        "facebook/opt-125m",
+        {"350m": "facebook/opt-350m", "1b": "facebook/opt-iml-max-1.3b"},
     ),
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
@@ -551,6 +562,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         hf_overrides={"num_hidden_layers": 4},
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
+    "Step5ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        # Published checkpoints wrap the text model in Step5ForConditionalGeneration.
+        is_available_online=False,
+    ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
@@ -667,6 +683,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo("athrael-soju/ColUltraVBERT"),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
         "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
@@ -727,7 +744,13 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "D3ForSequenceClassification": _HfExamplesInfo(
         "vllm-sr/d3-edge",
-        extras={"d3": "vllm-sr/d3", "d3-mini": "vllm-sr/d3-mini"},
+        extras={
+            "d3": "vllm-sr/d3",
+            "d3-flash": "vllm-sr/d3-flash",
+            "d3-mini": "vllm-sr/d3-mini",
+            "d3-nano": "vllm-sr/d3-nano",
+            "d3-lite": "vllm-sr/d3-lite",
+        },
         max_model_len=4096,
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
@@ -1421,6 +1444,20 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # ``dummy_hf_overrides``) to avoid OOM during init.
         hf_overrides={"text_config": {"num_hidden_layers": 4, "moe_num_experts": 8}},
     ),
+    "Step5ForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        use_original_num_layers=True,
+        max_model_len=4096,
+        # Retain three SWA dense layers and the first DSA MoE layer.
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 4,
+                "moe_num_experts": 8,
+                "moe_layer_list": [3],
+                "moe_layers_enum": "3",
+            },
+        },
+    ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
@@ -1442,7 +1479,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        extras={"2.0": "nvidia/NVIDIA-Nemotron-Parse-2.0"},
+        trust_remote_code=True,
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
@@ -1454,16 +1493,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    # [Medusa]
-    "MedusaModel": _HfExamplesInfo(
-        "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
-    ),
-    # Temporarily disabled.
-    # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
-    # "MLPSpeculatorPreTrainedModel": _HfExamplesInfo(
-    #     "JackFram/llama-160m",
-    #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
-    # ),
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-4B",
@@ -1486,6 +1515,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         max_model_len=8192,
         max_num_seqs=32,
+    ),
+    "DFlash2BeamDraftModel": _HfExamplesInfo(
+        "reflection/Beam-1.0-501B-A23B-NVFP4",
+        speculative_model="reflection/Beam-1.0-501B-A23B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
     ),
     "DFlashLagunaForCausalLM": _HfExamplesInfo(
         "poolside/Laguna-XS-2.1-NVFP4",
@@ -1820,6 +1855,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
+        is_available_online=False,
+    ),
+    "Step5MTP": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        speculative_model="stepfun-ai/Step-5-Preview",
+        speculative_method="mtp",
         is_available_online=False,
     ),
 }
