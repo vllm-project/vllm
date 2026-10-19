@@ -127,6 +127,32 @@ def test_synthid_accelerator_matches_cpu(depth):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_synthid_accelerator_skip_mask(dtype):
+    generator = torch.Generator().manual_seed(1)
+    logits = torch.randn(6, 5000, generator=generator).to(dtype).cuda()
+    logits[2, 50:] = float("-inf")
+    contexts = torch.randint(0, 1000, (6, 4), generator=generator).cuda()
+    skip_mask = torch.tensor([True, False, True, False, False, True]).cuda()
+    watermarker = SynthIDWatermarker(42, context_width=4, depth=32)
+    sampled_logits = []
+
+    def random_sampler(scores):
+        sampled_logits.append(scores)
+        return scores.argmax(dim=-1)
+
+    watermarker.sample(logits, contexts, random_sampler, skip_mask)
+    expected = watermarker.watermark_logits(logits, contexts)
+
+    (actual,) = sampled_logits
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual[skip_mask], logits[skip_mask].float())
+    assert torch.equal(actual[~skip_mask], expected[~skip_mask])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
 def test_synthid_accelerator_peaked_row_keeps_only_input_inf():
     # Underflowed in-support tokens are clamped; only the input's -inf stay -inf.
     logits = torch.randn(2, 5000, generator=torch.Generator().manual_seed(2))
