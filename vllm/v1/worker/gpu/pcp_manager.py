@@ -186,15 +186,6 @@ class PCPManager:
             # chunk rows, so the ranks' collectives diverge (#53573).
             raise NotImplementedError("MRV2 PCP + DCP supports sparse MLA models only.")
         if (
-            is_sparse_mla
-            and parallel_config.decode_context_parallel_size == 1
-            and cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
-            )
-        if (
             cudagraph_mode.has_full_cudagraphs()
             and not cudagraph_mode.separate_routine()
         ):
