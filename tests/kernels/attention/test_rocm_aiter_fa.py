@@ -1174,3 +1174,25 @@ def test_aiter_paged_decode_over_window_trimmed_block_table_matches_reference():
         )
         ref[i] = torch.einsum("hl,lhd->hd", weights, values).to(dtype)
     torch.testing.assert_close(output, ref, atol=1.5e-2, rtol=1e-2)
+
+
+def test_asm_kv_scale_tables_shared_across_builders():
+    """Builders share one AsmKvScaleTables; equal (shape, scale) requests must
+    return the same dense table, a different scale a different one."""
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionMetadataBuilder,
+        AsmKvScaleTables,
+    )
+
+    tables = AsmKvScaleTables()
+    device = torch.device("cuda")
+    table = tables.get(device, 8, 2, 16, 0.5)
+    assert tables.get(device, 8, 2, 16, 0.5) is table
+    assert tables.get(device, 8, 2, 16, 1.0) is not table
+    assert table.shape == (8, 2, 16)
+    assert table.dtype == torch.float32
+    assert torch.all(table == 0.5)
+    # The builder class holds the single process-wide instance.
+    assert isinstance(
+        AiterFlashAttentionMetadataBuilder.asm_kv_scale_tables, AsmKvScaleTables
+    )

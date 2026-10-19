@@ -418,6 +418,10 @@ impl RoundtripCase {
     }
 
     /// Kimi K3 XTML tool/reasoning channels (native renderer + unified parser).
+    ///
+    /// Needs HF tokenizer files under `HF_HOME` (`tiktoken.model` +
+    /// `tokenizer_config.json`). Weights are not required for this text-level
+    /// roundtrip.
     fn kimi_k3() -> Self {
         Self {
             model_id: "moonshotai/Kimi-K3",
@@ -431,11 +435,11 @@ impl RoundtripCase {
         }
     }
 
-    /// Muse Spark 1.2 recipient-routed segments with ATEM tool calls (generic
+    /// Muse Spark recipient-routed segments with ATEM tool calls (generic
     /// HF Jinja renderer + unified parser).
     fn muse_spark() -> Self {
         Self {
-            model_id: "meta-models/Muse-Spark-1.2-820B-A42B-NVFP4",
+            model_id: "meta-models/Muse-Spark-open-816B-A42B-NVFP4",
             assistant_stop_suffix: "<|eot|>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -462,8 +466,8 @@ impl RoundtripCase {
         Self {
             model_id: "meta-models/Muse-Glimmer-30B",
             assistant_stop_suffix: "<|eot|>",
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
+            tool_call_parser: ParserSelection::Explicit("muse".to_owned()),
+            reasoning_parser: ParserSelection::Explicit("muse".to_owned()),
             // The template has no thinking switch; `reasoning_strength` only
             // tunes the hint.
             thinking_behavior: ThinkingBehavior::Always { value: true },

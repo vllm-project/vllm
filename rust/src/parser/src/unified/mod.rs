@@ -3,6 +3,7 @@
 
 //! Unified parser interface for reasoning and tool-call deltas.
 
+mod beam;
 mod combined;
 mod gemma4;
 mod hf;
@@ -11,9 +12,10 @@ mod inkling;
 mod kimi_k3;
 mod muse;
 
+pub use beam::BeamUnifiedParser;
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
-pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
+pub use hf::{HfPosition, HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::KimiK3UnifiedParser;

@@ -1,0 +1,149 @@
+meta:
+  title: "K2-Horizon-375B-A23B"
+  slug: "k2-horizon-375b-a23b"
+  provider: "IFM"
+  description: "Frontier-scale sparse MoE model for long-context research and high-capacity serving"
+  date_added: 2026-08-31
+  date_updated: 2026-09-08
+  tasks: [text]
+  performance_headline: "379.17B stored parameters including embeddings / 26.67B active parameters per token"
+  related_recipes: ["IFM/K2-Horizon-MoVA-36B-A4B"]
+  hardware:
+    h200: verified
+    mi355x: verified
+model:
+  model_id: "IFM/K2-Horizon-375B-A23B"
+  architecture: moe
+  parameter_count: "379.17B"
+  active_parameters: "26.67B"
+  context_length: 524288
+  # --enable-expert-parallel is not here: in base_args it would reach the AMD
+  # path too, which deliberately runs pure TP (see strategy_hardware). The TEP
+  # strategies emit it themselves; multi_node_tp_pp does not, so it carries its
+  # own copy in strategy_overrides below.
+  base_args: ["--trust-remote-code", "--chat-template-content-format", "string", "--dtype", "bfloat16"]
+  base_env: {}
+features:
+  reasoning:
+    description: "Extract K2-Horizon reasoning into message.reasoning"
+    args: ["--reasoning-parser", "k2_horizon"]
+  tool_calling:
+    description: "Enable automatic tool choice with the K2-Horizon parser"
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "k2_horizon"]
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 911
+    description: "BF16 serving runtime with an eight-GPU tensor-parallel baseline"
+compatible_strategies: [single_node_tep, single_node_tp, multi_node_tep, multi_node_tp_pp]
+default_strategy: single_node_tep
+
+# On AMD the expert-parallel dispatch is slower than replicating the experts
+# across a pure tensor-parallel shard, so the TEP strategies are opted out and
+# single-node TP is the offered path. multi_node_tp_pp is left available: EP
+# works there, it is just not the fast default at single-node scale.
+strategy_hardware:
+  single_node_tep:
+    amd: unsupported
+  multi_node_tep:
+    amd: unsupported
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "--gpu-memory-utilization"
+      - "0.9"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      NCCL_MIN_NCHANNELS: "112"
+strategy_overrides:
+  single_node_tep:
+    tp: 8
+  # multi_node_tp_pp emits no EP flag of its own, and this recipe has always
+  # run it with expert parallel on. Restored here rather than in base_args so
+  # it stays off the AMD single-node TP path.
+  multi_node_tp_pp:
+    extra_args: ["--enable-expert-parallel"]
+guide: |
+  ## Overview
+
+  K2-Horizon-375B-A23B is a frontier-scale mixture-of-expert (MoE) model in the IFM
+  K2-Horizon family, with 379.17B stored parameters including embeddings,
+  26.67B active parameters per token, and support for up to 524,288 tokens of
+  context.
+
+  K2-Horizon is an open-weight IFM model family built for transparent
+  foundation-model research, staged checkpoint analysis, and practical
+  deployment. The series spans compact dense models for local experimentation,
+  dense mid-size and large models for high-quality research workloads, and
+  mixture-of-expert (MoE) models such as K2-Horizon-375B-A23B for frontier-scale
+  research and higher-capacity serving.
+
+  ## Launch Commands
+
+  ```bash
+  vllm serve IFM/K2-Horizon-375B-A23B \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --chat-template-content-format string \
+    --dtype bfloat16 \
+    --enable-expert-parallel \
+    --reasoning-parser k2_horizon \
+    --enable-auto-tool-choice \
+    --tool-call-parser k2_horizon
+  ```
+
+  ### AMD MI355X
+
+  Verified on an 8-GPU MI355X (gfx950) node. AITER supplies the fused MoE and
+  the unified attention backend:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export NCCL_MIN_NCHANNELS=112
+
+  vllm serve IFM/K2-Horizon-375B-A23B \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --chat-template-content-format string \
+    --dtype bfloat16 \
+    --max-model-len 131072 \
+    --gpu-memory-utilization 0.9 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --generation-config auto \
+    --reasoning-parser k2_horizon \
+    --enable-auto-tool-choice \
+    --tool-call-parser k2_horizon
+  ```
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600
+  )
+
+  resp = client.chat.completions.create(
+      model="IFM/K2-Horizon-375B-A23B",
+      messages=[{"role": "user", "content": "Give me three primes above 100."}],
+      temperature=1.0, top_p=0.95, max_tokens=2048,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ### Thinking modes
+
+  The model supports selectable thinking through `chat_template_kwargs`, per
+  request or server-wide via `--default-chat-template-kwargs`:
+
+  - `{"reasoning_effort": "high"}` — full thinking (default).
+  - `{"reasoning_effort": "medium"}` — faster thinking.
+  - `{"reasoning_effort": "low"}` — fastest thinking.
+
+  ## References
+
+  - [IFM/K2-Horizon-375B-A23B on Hugging Face](https://huggingface.co/IFM/K2-Horizon-375B-A23B)
+  - [K2 Horizon Collection](https://huggingface.co/collections/IFM/k2-horizon)

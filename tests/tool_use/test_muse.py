@@ -8,7 +8,7 @@ than JSON, so the two parsers are tested together: the reasoning parser strips
 the reasoning span and forwards the remaining channels as content, and the tool
 parser reads ATEM markup out of those channels.
 
-Six areas, in order:
+Five areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
      ``<atem:invoke>`` echoed inside reasoning must never become a call);
@@ -19,14 +19,14 @@ Six areas, in order:
      header written without the closing ``<|eom|>`` still ends the reasoning;
   4. streaming, where markers routinely straddle chunk boundaries, plus
      truncation isolation for an unterminated ``to=self`` block;
-  5. tool-name normalization against the tools registered on the request;
-  6. reasoning token counting.
+  5. tool-name normalization against the tools registered on the request.
 
 These drive the parsers directly and need no checkpoint. The tests that require
 a real tokenizer live in ``test_muse_parse_delta.py``.
 """
 
 import json
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
 
@@ -35,6 +35,7 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
+from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
 R: MuseReasoningParser
@@ -501,6 +502,119 @@ def test_adjust_request_forces_skip_special_tokens_off():
     assert req.skip_special_tokens is False
 
 
+def test_named_custom_tool_choice_skips_structured_outputs():
+    # Custom tools ride the function shim; a named custom choice must skip
+    # the base adjust_request like a named function choice does.
+    request = ResponsesRequest(
+        input="hi",
+        tools=[{"type": "custom", "name": "emit_command"}],
+        tool_choice={"type": "custom", "name": "emit_command"},
+    )
+    T.adjust_request(request)
+    assert request.structured_outputs is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "reasoning", "content"),
+    [
+        ("<|message|>Thinking.<|eot|>", "Thinking.", None),
+        ("to=developer<|message|>internal note<|eom|>", None, None),
+        (
+            "to=commentary<|message|>Checking. "
+            "to=developer<|message|>internal note<|eom|>",
+            None,
+            "Checking. ",
+        ),
+        (
+            "<|message|>Think.<|start|>assistant to=user<|message|>Done.<|eot|>",
+            "Think.",
+            "Done.",
+        ),
+        (
+            "to=self<|message|>First.<|eom|>"
+            "<|start|>assistant<|message|>Second.<|eot|>",
+            "First.Second.",
+            None,
+        ),
+    ],
+)
+def test_channel_boundaries_match_streaming(raw, reasoning, content):
+    """Hidden channels and message boundaries must not leak in either path."""
+    assert R.extract_reasoning(raw, _NO_REQ) == (reasoning, content)
+    for chunk in (1, 3, len(raw)):
+        parser = MuseReasoningParser(object())
+        reasons, contents = [], []
+        for end in range(chunk, len(raw) + chunk, chunk):
+            previous = raw[: max(0, end - chunk)]
+            current = raw[:end]
+            delta = parser.extract_reasoning_streaming(
+                previous, current, current[len(previous) :], [], [], []
+            )
+            if delta:
+                reasons.append(delta.reasoning or "")
+                contents.append(delta.content or "")
+        assert "".join(reasons) == (reasoning or "")
+        assert "".join(contents) == (content or "")
+
+
+@pytest.mark.parametrize(
+    "value", ["25", "true", "null", "[1,2]", '{"x":1}', "3%", "1,500", " 25 "]
+)
+@pytest.mark.parametrize("request_kind", ["chat", "responses"])
+@pytest.mark.parametrize("parser_class", [MuseToolParser, MuseGlimmerToolParser])
+def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_class):
+    """String schemas disambiguate ATEM values; Glimmer keeps legacy decoding."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "count": {"type": "integer"},
+            "items": {"type": "array", "items": {"type": "integer"}},
+        },
+    }
+    function = {"name": "echo", "parameters": parameters}
+    if request_kind == "chat":
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[],
+            tools=[{"type": "function", "function": function}],
+        )
+    else:
+        request = ResponsesRequest(input="hi", tools=[{"type": "function", **function}])
+    raw = (
+        'to=echo.echo<|message|><atem:function_calls><atem:invoke name="echo.echo">'
+        f'<atem:parameter name="text">{value}</atem:parameter>'
+        '<atem:parameter name="count">25</atem:parameter>'
+        '<atem:parameter name="items">[1,2]</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eot|>"
+    )
+    expected_text = value
+    if parser_class is MuseGlimmerToolParser:
+        with suppress(ValueError):
+            expected_text = json.loads(value)
+    expected = {"text": expected_text, "count": 25, "items": [1, 2]}
+    parser = parser_class(object())
+    calls = parser.extract_tool_calls(raw, request).tool_calls
+    assert len(calls) == 1
+    assert calls[0].function.name == "echo"
+    assert json.loads(calls[0].function.arguments) == expected
+
+    for chunk in (1, 17, len(raw)):
+        parser = parser_class(object())
+        calls = []
+        for end in range(chunk, len(raw) + chunk, chunk):
+            previous, current = raw[: end - chunk], raw[:end]
+            delta = parser.extract_tool_calls_streaming(
+                previous, current, current[len(previous) :], [], [], [], request
+            )
+            if delta and delta.tool_calls:
+                calls.extend(delta.tool_calls)
+        assert len(calls) == 1
+        name, arguments = _fn_of(calls[0])
+        assert name == "echo"
+        assert json.loads(arguments) == expected
+
+
 # --------------------------------------------------- reasoning token counting
 
 _SPECIALS = ["<|message|>", "<|start|>", "<|eom|>", "<|eot|>"]
@@ -549,15 +663,3 @@ def test_count_reasoning_tokens(raw, expected):
     tok = _CharTokenizer()
     parser = MuseReasoningParser(tok)
     assert parser.count_reasoning_tokens(tok.encode(raw)) == expected
-
-
-def test_named_custom_tool_choice_skips_structured_outputs():
-    # Custom tools ride the function shim; a named custom choice must skip
-    # the base adjust_request like a named function choice does.
-    request = ResponsesRequest(
-        input="hi",
-        tools=[{"type": "custom", "name": "emit_command"}],
-        tool_choice={"type": "custom", "name": "emit_command"},
-    )
-    T.adjust_request(request)
-    assert request.structured_outputs is None

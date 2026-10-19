@@ -90,6 +90,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "response_template_tool_parser",
         "ResponseTemplateToolParser",
     ),
+    "beam": (
+        "beam_tool_parser",
+        "BeamToolParser",
+    ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
         "PoolsideV1ToolParser",
@@ -178,11 +182,11 @@ _TOOL_PARSERS_TO_REGISTER = {
         "muse_tool_parser",
         "MuseToolParser",
     ),
-    # Aliases of "muse".
     "muse_glimmer": (
-        "muse_tool_parser",
-        "MuseToolParser",
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
     ),
+    # Alias of "muse".
     "musespark1x": (
         "muse_tool_parser",
         "MuseToolParser",

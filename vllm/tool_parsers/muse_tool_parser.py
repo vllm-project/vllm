@@ -79,11 +79,6 @@ _MSG_HEADER_RE = re.compile(
 )
 _MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 
-# Recipients whose bodies are NOT tool calls.
-_REASONING_RECIPIENT = "self"
-_CONTENT_RECIPIENTS = ("user", "commentary")
-_NON_TOOL_RECIPIENTS = (_REASONING_RECIPIENT, *_CONTENT_RECIPIENTS, "developer")
-
 # Structural markers that must never reach the client. A streamed body is held
 # back by up to len(marker)-1 characters so a marker split across two chunks is
 # not emitted as content.
@@ -183,6 +178,11 @@ def _safe_open_body(body: str) -> str:
 
 
 class MuseToolParser(ToolParser):
+    _preserve_string_parameters = True
+    _reasoning_recipients: tuple[str | None, ...] = (None, "self")
+    _content_recipients: tuple[str | None, ...] = ("user", "commentary")
+    _non_tool_recipients: tuple[str, ...] = ("self", "user", "commentary", "developer")
+
     # Muse emits ATEM markup around tool-call arguments. The generic
     # named/required tool_choice path in vllm/parser/abstract_parser.py assigns
     # the raw model text straight to FunctionCall.arguments, which leaks that
@@ -256,7 +256,7 @@ class MuseToolParser(ToolParser):
         bodies = [
             body
             for rcpt, body, _closed in _iter_messages(text)
-            if rcpt is not None and rcpt not in _NON_TOOL_RECIPIENTS
+            if rcpt is not None and rcpt not in cls._non_tool_recipients
         ]
         if bodies:
             return "\n".join(bodies)
@@ -285,10 +285,10 @@ class MuseToolParser(ToolParser):
         content_open = False
         reasoning_open = False
         for rcpt, body, closed in _iter_messages(text):
-            if rcpt is None or rcpt == _REASONING_RECIPIENT:
+            if rcpt in cls._reasoning_recipients:
                 reasoning_parts.append(body)
                 reasoning_open = not closed
-            elif rcpt in _CONTENT_RECIPIENTS:
+            elif rcpt in cls._content_recipients:
                 content_parts.append(body)
                 content_open = not closed
         return (
@@ -313,6 +313,29 @@ class MuseToolParser(ToolParser):
             if name:
                 names.add(name)
         return names
+
+    @classmethod
+    def _string_parameters(
+        cls, request: ChatCompletionRequest | ResponsesRequest | None
+    ) -> dict[str, set[str]]:
+        if not cls._preserve_string_parameters:
+            return {}
+        strings: dict[str, set[str]] = {}
+        for tool in getattr(request, "tools", None) or []:
+            function = getattr(tool, "function", None) or tool
+            if isinstance(function, dict):
+                name = function.get("name")
+                parameters = function.get("parameters")
+            else:
+                name = getattr(function, "name", None)
+                parameters = getattr(function, "parameters", None)
+            if name and isinstance(parameters, dict):
+                strings[name] = {
+                    key
+                    for key, schema in parameters.get("properties", {}).items()
+                    if isinstance(schema, dict) and schema.get("type") == "string"
+                }
+        return strings
 
     @staticmethod
     def _normalize_name(emitted: str, registered: set[str]) -> str:
@@ -343,7 +366,10 @@ class MuseToolParser(ToolParser):
 
     @classmethod
     def _parse_tool_calls(
-        cls, text: str, registered: set[str] | None = None
+        cls,
+        text: str,
+        registered: set[str] | None = None,
+        strings: dict[str, set[str]] | None = None,
     ) -> list[ToolCall]:
         registered = registered or set()
         scoped = cls._tool_channel_text(text)
@@ -353,9 +379,11 @@ class MuseToolParser(ToolParser):
             if not name_m:
                 continue
             name = cls._normalize_name(name_m.group(1), registered)
+            string_parameters = (strings or {}).get(name, set())
             args: dict = {}
             for pm in _PARAM_RE.finditer(invoke):
-                args[pm.group("key")] = _decode_value(pm.group("value"))
+                key, raw = pm.group("key"), pm.group("value")
+                args[key] = raw if key in string_parameters else _decode_value(raw)
             tool_calls.append(
                 ToolCall(
                     function=FunctionCall(
@@ -393,7 +421,9 @@ class MuseToolParser(ToolParser):
             )
         try:
             registered = self._registered_names(request)
-            tool_calls = self._parse_tool_calls(model_output, registered)
+            tool_calls = self._parse_tool_calls(
+                model_output, registered, self._string_parameters(request)
+            )
             if not tool_calls:
                 # A tool block was opened but no COMPLETE
                 # <atem:invoke>...</atem:invoke> parsed -- typically a truncated
@@ -457,7 +487,9 @@ class MuseToolParser(ToolParser):
 
         try:
             registered = self._registered_names(request)
-            calls = self._parse_tool_calls(current_text, registered)
+            calls = self._parse_tool_calls(
+                current_text, registered, self._string_parameters(request)
+            )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
             )

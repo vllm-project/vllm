@@ -20,10 +20,10 @@
 //!
 //! `self` bodies are reasoning, `commentary`/`user` bodies are visible text,
 //! and any other recipient names a tool whose body is one ATEM block with one
-//! or more `<atem:invoke>` calls. Parameter values are JSON-decoded when
-//! possible and kept as raw strings otherwise (matching the Python
-//! `json.loads` fallback); each invoke's arguments are reassembled as a
-//! compact JSON object preserving parameter order.
+//! or more `<atem:invoke>` calls. Parameters declared as strings retain their
+//! raw text; other values are JSON-decoded when possible and kept as raw
+//! strings otherwise. Each invoke's arguments are reassembled as a compact
+//! JSON object preserving parameter order.
 //!
 //! The model sometimes opens the next segment without closing the current one
 //! with `<|eom|>`, e.g. writing `to=FUNCTION<|message|>` straight after its
@@ -31,7 +31,7 @@
 //! `<|message|>` never occur inside a body, either one also ends the current
 //! segment and starts the next.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
@@ -72,6 +72,12 @@ const DEVELOPER_RECIPIENT: &str = "developer";
 type MuseInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct MuseToolCall {
+    name: String,
+    parameters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MuseEvent {
     Text,
     Reasoning,
@@ -86,9 +92,9 @@ enum MuseEvent {
     SegmentEnd,
     /// `<|eot|>`: the assistant turn ends.
     TurnEnd,
-    /// One complete ATEM block parsed into (name, arguments) call pairs.
+    /// One complete ATEM block parsed into raw calls.
     ToolCalls {
-        calls: Vec<(String, String)>,
+        calls: Vec<MuseToolCall>,
     },
 }
 
@@ -125,6 +131,7 @@ pub struct MuseUnifiedParser {
     mode: MuseMode,
     /// Names of the tools registered on the request.
     tool_names: HashSet<String>,
+    string_parameters: HashMap<String, HashSet<String>>,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
 }
@@ -141,6 +148,23 @@ impl MuseUnifiedParser {
             buffer: DecodedText::default(),
             mode: MuseMode::default(),
             tool_names: tools.iter().map(|tool| tool.name.clone()).collect(),
+            string_parameters: tools
+                .iter()
+                .map(|tool| {
+                    let strings = tool
+                        .parameters
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(_, schema)| {
+                            schema.get("type").and_then(Value::as_str) == Some("string")
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    (tool.name.clone(), strings)
+                })
+                .collect(),
             emitted_call_count: 0,
         })
     }
@@ -172,12 +196,27 @@ impl MuseUnifiedParser {
             }
             MuseEvent::TurnEnd => self.mode = MuseMode::Done,
             MuseEvent::ToolCalls { calls } => {
-                for (name, arguments) in calls {
+                for call in calls {
+                    let name = normalize_tool_name(call.name, &self.tool_names);
+                    let strings = self.string_parameters.get(&name);
+                    let arguments: Map<String, Value> = call
+                        .parameters
+                        .into_iter()
+                        .map(|(key, raw)| {
+                            let value = if strings.is_some_and(|strings| strings.contains(&key)) {
+                                Value::String(raw)
+                            } else {
+                                decode_parameter_value(&raw)
+                            };
+                            (key, value)
+                        })
+                        .collect();
+                    let arguments = Value::Object(arguments).to_string();
                     let tool_index = self.emitted_call_count;
                     self.emitted_call_count += 1;
                     output.push_call(ToolCallDelta {
                         tool_index,
-                        name: Some(normalize_tool_name(name, &self.tool_names)),
+                        name: Some(name),
                         arguments,
                     });
                 }
@@ -393,8 +432,8 @@ fn is_recipient_char(char: char) -> bool {
 }
 
 /// Parse one complete ATEM block body (up to `</atem:function_calls>`) into
-/// (name, arguments) pairs, one per `<atem:invoke>`.
-fn parse_atem_block(body: &str) -> ModalResult<Vec<(String, String)>> {
+/// raw calls, one per `<atem:invoke>`.
+fn parse_atem_block(body: &str) -> ModalResult<Vec<MuseToolCall>> {
     let mut input = body;
     delimited(
         (ws0, literal(ATEM_OPEN)),
@@ -405,9 +444,9 @@ fn parse_atem_block(body: &str) -> ModalResult<Vec<(String, String)>> {
     .map_err(|_| muse_error("Muse ATEM block"))
 }
 
-/// Parse one `<atem:invoke>` element into its name and compact JSON arguments.
-fn atem_invoke(input: &mut &str) -> ModalResult<(String, String)> {
-    let (name, parameters): (String, Vec<(String, Value)>) = seq!(
+/// Parse one `<atem:invoke>` element into its name and raw parameters.
+fn atem_invoke(input: &mut &str) -> ModalResult<MuseToolCall> {
+    let (name, parameters): (String, Vec<(String, String)>) = seq!(
         _: (ws0, literal(INVOKE_OPEN), ws1, literal("name"), literal("=")),
         atem_attr_value,
         _: (take_until(0.., ">"), literal(">")),
@@ -416,14 +455,11 @@ fn atem_invoke(input: &mut &str) -> ModalResult<(String, String)> {
     )
     .parse_next(input)?;
 
-    let arguments: Map<String, Value> = parameters.into_iter().collect();
-    let arguments =
-        serde_json::to_string(&arguments).map_err(|_| muse_error("Muse ATEM arguments"))?;
-    Ok((name, arguments))
+    Ok(MuseToolCall { name, parameters })
 }
 
 /// Parse one `<atem:parameter>` element into its key/value pair.
-fn atem_parameter(input: &mut &str) -> ModalResult<(String, Value)> {
+fn atem_parameter(input: &mut &str) -> ModalResult<(String, String)> {
     let (name, raw) = seq!(
         _: (ws0, literal(PARAMETER_OPEN), ws1, literal("name"), literal("=")),
         atem_attr_value,
@@ -433,7 +469,7 @@ fn atem_parameter(input: &mut &str) -> ModalResult<(String, Value)> {
     )
     .parse_next(input)?;
 
-    Ok((name, decode_parameter_value(raw)))
+    Ok((name, raw.to_string()))
 }
 
 /// Parse one ATEM attribute value, double/single-quoted or bare.
@@ -451,12 +487,6 @@ fn atem_attr_value(input: &mut &str) -> ModalResult<String> {
 ///
 /// The raw value is used verbatim — whitespace inside string values is
 /// significant ("spaces for string values are not stripped").
-///
-/// Intentionally schema-free (matching the Python `json.loads` fallback)
-/// rather than using the shared schema-driven parameter converter: the chat
-/// template renders argument values by their JSON type (bool → `true`/`false`,
-/// mapping/list → `tojson`, anything else → escaped string), so coercing a
-/// value's type at parse time can break rerender fidelity.
 fn decode_parameter_value(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
@@ -599,20 +629,18 @@ mod tests {
 
     /// A completion exercising every recipient kind and both boundary markers.
     fn full_completion() -> String {
-        format!(
-            " to=self{MESSAGE}plan it{EOM}{}{}{}",
-            segment("commentary", "working"),
-            format!(
-                "{START}assistant to=get_weather{MESSAGE}{}{EOM}",
-                atem(&[
-                    (
-                        "get_weather",
-                        &[("location", "Shanghai"), ("days", "1.5")][..]
-                    ),
-                    ("get_time", &[][..]),
-                ])
+        let commentary = segment("commentary", "working");
+        let calls = atem(&[
+            (
+                "get_weather",
+                &[("location", "Shanghai"), ("days", "1.5")][..],
             ),
-            format!("{START}assistant to=user{MESSAGE}done{EOT}"),
+            ("get_time", &[][..]),
+        ]);
+        format!(
+            " to=self{MESSAGE}plan it{EOM}{commentary}\
+             {START}assistant to=get_weather{MESSAGE}{calls}{EOM}\
+             {START}assistant to=user{MESSAGE}done{EOT}"
         )
     }
 
@@ -637,9 +665,9 @@ mod tests {
     #[test]
     fn muse_parses_self_commentary_user_segments() {
         let text = format!(
-            " to=self{MESSAGE}think step{EOM}{}{}",
+            " to=self{MESSAGE}think step{EOM}{}\
+             {START}assistant to=user{MESSAGE}final answer{EOT}",
             segment("commentary", "intermediate"),
-            format!("{START}assistant to=user{MESSAGE}final answer{EOT}"),
         );
 
         let output = test_parser().parse_complete(&text).unwrap();
@@ -708,6 +736,57 @@ mod tests {
     }
 
     #[test]
+    fn muse_preserves_schema_string_parameters_in_batch_and_streaming() {
+        let tools = [Tool {
+            name: "echo".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "items": {"type": "array", "items": {"type": "integer"}}
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        for value in [
+            "25",
+            "true",
+            "null",
+            "[1,2]",
+            r#"{"x":1}"#,
+            "3%",
+            "1,500",
+            " 25 ",
+        ] {
+            let text = format!(
+                " to=echo.echo{MESSAGE}{}{EOT}",
+                atem(&[(
+                    "echo.echo",
+                    &[("text", value), ("count", "25"), ("items", "[1,2]")]
+                )])
+            );
+            let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+            let batch = parser.parse_complete(&text).unwrap();
+            let calls = batch.calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name.as_deref(), Some("echo"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+                json!({"text": value, "count": 25, "items": [1, 2]})
+            );
+            for size in [1, 17, text.len()] {
+                parser.reset();
+                let chunks = char_chunks(&text, size);
+                let chunks: Vec<_> = chunks.iter().map(String::as_str).collect();
+                assert_eq!(collect_stream(&mut parser, &chunks), batch);
+            }
+        }
+    }
+
+    #[test]
     fn muse_arguments_preserve_order_and_compact_number_formatting() {
         let text = format!(
             " to=add{MESSAGE}{}{EOT}",
@@ -755,15 +834,12 @@ mod tests {
     #[test]
     fn muse_parses_consecutive_tool_segments_across_eom() {
         let text = format!(
-            "{}{}",
+            "{}{START}assistant to=add{MESSAGE}{}{EOT}",
             segment(
                 "get_weather",
                 &atem(&[("get_weather", &[("location", "SF")][..])])
             ),
-            format!(
-                "{START}assistant to=add{MESSAGE}{}{EOT}",
-                atem(&[("add", &[("x", "2")][..])])
-            ),
+            atem(&[("add", &[("x", "2")][..])]),
         );
 
         let output = test_parser().parse_complete(&text).unwrap();
@@ -988,6 +1064,57 @@ mod tests {
         assert_eq!(output.reasoning_text(), "thinkingmore");
         assert_eq!(output.normal_text(), "answer");
         assert_streaming_matches_batch(&text);
+    }
+
+    #[test]
+    fn muse_mixed_channels_match_python_routing() {
+        let text = concat!(
+            "<|message|>Think.<|eom|>",
+            "<|start|>assistant to=commentary<|message|>Checking. ",
+            "to=developer<|message|>internal<|eom|>",
+            "<|start|>assistant to=weather.get<|message|>",
+            "<atem:function_calls><atem:invoke name=\"weather.get\">",
+            "<atem:parameter name=\"city\">Paris</atem:parameter>",
+            "</atem:invoke></atem:function_calls><|eom|>",
+            "<|start|>assistant to=self<|message|>Recheck.<|eom|>",
+            "<|start|>assistant to=user<|message|>Done.<|eot|>",
+        );
+        let output = test_parser().parse_complete(text).unwrap();
+        expect_test::expect![[r#"
+            UnifiedParserOutput {
+                events: [
+                    Reasoning(
+                        DecodedText {
+                            text: "Think.",
+                            attributions: [],
+                        },
+                    ),
+                    Text(
+                        "Checking. ",
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "weather.get",
+                            ),
+                            arguments: "{\"city\":\"Paris\"}",
+                        },
+                    ),
+                    Reasoning(
+                        DecodedText {
+                            text: "Recheck.",
+                            attributions: [],
+                        },
+                    ),
+                    Text(
+                        "Done.",
+                    ),
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&output);
+        assert_streaming_matches_batch(text);
     }
 
     #[test]

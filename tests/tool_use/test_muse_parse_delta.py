@@ -62,7 +62,7 @@ def parser_cls():
     )
 
 
-def _drive(parser_cls, tok, gen_text, req=None):
+def _drive(parser_cls, tok, gen_text, req=None, chunk=1):
     """Feed gen_text token-by-token through parse_delta (as serving does)."""
     from vllm.parser.abstract_parser import StreamState
 
@@ -73,13 +73,14 @@ def _drive(parser_cls, tok, gen_text, req=None):
     prompt_ids = tok.encode(PROMPT, add_special_tokens=False)
     gen_ids = tok.encode(gen_text, add_special_tokens=False)
     reasoning, content, tools = [], [], []
-    for i, tid in enumerate(gen_ids):
+    for i in range(0, len(gen_ids), chunk):
+        delta_ids = gen_ids[i : i + chunk]
         dm = parser.parse_delta(
-            tok.decode([tid]),
-            [tid],
+            tok.decode(delta_ids),
+            delta_ids,
             req,
             prompt_token_ids=prompt_ids if i == 0 else None,
-            finished=(i == len(gen_ids) - 1),
+            finished=(i + chunk >= len(gen_ids)),
         )
         if dm is None:
             continue
@@ -185,3 +186,43 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 10000])
+@pytest.mark.parametrize(
+    ("raw", "reasoning", "content"),
+    [
+        ("<|message|>Think.<|eot|>", "Think.", ""),
+        ("to=developer<|message|>internal<|eot|>", "", ""),
+        (
+            "to=commentary<|message|>Working. to=developer<|message|>internal"
+            "<|eom|><|start|>assistant to=user<|message|>Done.<|eot|>",
+            "",
+            "Working. Done.",
+        ),
+    ],
+)
+def test_parse_delta_channel_boundaries(
+    parser_cls, tok, raw, reasoning, content, chunk
+):
+    assert _drive(parser_cls, tok, raw, chunk=chunk) == (reasoning, content, [])
+
+
+@pytest.mark.parametrize("chunk", [1, 3, 10000])
+def test_parse_delta_commentary_tool_and_answer(parser_cls, tok, chunk):
+    raw = (
+        "<|message|>Think.<|eom|>"
+        "<|start|>assistant to=commentary<|message|>Checking. <|eom|>"
+        "<|start|>assistant to=weather.get<|message|>"
+        '<atem:function_calls><atem:invoke name="weather.get">'
+        '<atem:parameter name="city">Paris</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eom|>"
+        "<|start|>assistant to=self<|message|>Recheck.<|eom|>"
+        "<|start|>assistant to=user<|message|>Done.<|eot|>"
+    )
+    reasoning, content, tools = _drive(parser_cls, tok, raw, chunk=chunk)
+    assert reasoning == "Think.Recheck."
+    assert content == "Checking. Done."
+    assert len(tools) == 1
+    assert tools[0][1] == "weather.get"
+    assert json.loads(tools[0][2]) == {"city": "Paris"}

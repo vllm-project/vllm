@@ -116,6 +116,9 @@ def test_rocm_set_out_dtype_respects_bias_guard(monkeypatch):
         (6144, 128),
         (6144, 256),
         (8192, 256),
+        (2048, 64),
+        (2560, 512),
+        (7168, 384),
     ],
 )
 def test_rocm_gfx950_enables_fp32_router_gemm(
@@ -154,7 +157,6 @@ def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
     ("input_size", "output_size", "params_dtype", "bias", "on_gfx950"),
     [
         pytest.param(6144, 128, torch.float32, False, False, id="gfx942"),
-        pytest.param(2048, 64, torch.float32, False, True, id="shape"),
         pytest.param(6144, 128, torch.bfloat16, False, True, id="bf16-weight"),
         pytest.param(6144, 128, torch.float32, True, True, id="bias"),
     ],
