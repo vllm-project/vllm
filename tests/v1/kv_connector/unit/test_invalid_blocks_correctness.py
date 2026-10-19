@@ -604,7 +604,7 @@ def test_pressure_preempts_sync_load_before_failure_report(
 
 @pytest.mark.parametrize("policy", ["fail", "recompute"])
 @pytest.mark.parametrize("failed", [False, True])
-def test_reset_then_schedule_discards_rejected_next_frame(policy, failed):
+def test_reset_then_schedule_discards_rejected_next_frame(policy, failed, caplog_vllm):
     scheduler, offers = _ordered_load_scheduler(policy, "kv_consumer")
     bs = scheduler.block_size
     owner = create_request(num_tokens=8 * bs, common_prefix_len=8 * bs)
@@ -615,6 +615,7 @@ def test_reset_then_schedule_discards_rejected_next_frame(policy, failed):
     with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
         scheduler.reset_prefix_cache(reset_running_requests=True)
     second = scheduler.schedule()
+    assert owner.request_id not in second.num_scheduled_tokens
     scheduler.update_from_output(
         first,
         create_model_runner_output(
@@ -636,6 +637,7 @@ def test_reset_then_schedule_discards_rejected_next_frame(policy, failed):
     ]
     assert 999 not in owner.output_token_ids
     if failed:
+        assert "0 tokens affected, excluding preempted requests" in caplog_vllm.text
         assert 998 not in delivered
         assert 998 not in owner.output_token_ids
         if policy == "fail":

@@ -3916,7 +3916,8 @@ class Scheduler(SchedulerInterface):
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
+                "(failure_policy=fail, %d tokens affected, excluding preempted "
+                "requests). Request IDs: %s",
                 total_failed_requests,
                 total_failed_tokens,
                 all_failed_req_ids,
@@ -3925,7 +3926,8 @@ class Scheduler(SchedulerInterface):
 
         logger.warning(
             "Recovered from KV load failure: "
-            "%d request(s) rescheduled (%d tokens affected).",
+            "%d request(s) rescheduled "
+            "(%d tokens affected, excluding preempted requests).",
             total_failed_requests,
             total_failed_tokens,
         )
