@@ -1156,6 +1156,16 @@ class OpenAIServingResponses(GenerateBaseServing):
             return self._make_not_found_error(response_id)
 
         if stream:
+            if response_id not in self.event_store:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        f"Response '{response_id}' was not created with "
+                        "background=true and stream=true, so it cannot be "
+                        "streamed."
+                    ),
+                    param="stream",
+                )
             return self.responses_background_stream_generator(
                 response_id,
                 starting_after,
