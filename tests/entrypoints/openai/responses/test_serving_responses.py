@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -51,6 +53,7 @@ from vllm.entrypoints.openai.responses.context import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseIncompleteEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
     ResponsesResponse,
@@ -67,7 +70,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -515,7 +518,11 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
     result = await renderer.render_responses(request)
 
     assert not isinstance(result, ErrorResponse)
-    assert result.engine_input["prompt_token_ids"] == [4, 5, 6]
+    # `max_tokens` is an output upper bound rather than a reservation off the
+    # context window, so the prompt budget is the full max_model_len minus the
+    # one token held back for output: 6 tokens truncate to 4, not to
+    # max_model_len - max_output_tokens.
+    assert result.engine_input["prompt_token_ids"] == [3, 4, 5, 6]
 
 
 @pytest.mark.asyncio
@@ -1410,6 +1417,7 @@ def _make_request_output(
     text,
     token_ids,
     metrics: RequestStateStats | None = None,
+    finish_reason: str | None = None,
 ):
     completion = CompletionOutput(
         index=0,
@@ -1417,7 +1425,7 @@ def _make_request_output(
         token_ids=token_ids,
         cumulative_logprob=0.0,
         logprobs=None,
-        finish_reason=None,
+        finish_reason=finish_reason,
         stop_reason=None,
     )
     return RequestOutput(
@@ -1437,10 +1445,11 @@ def _make_simple_context_with_output(
     token_ids,
     response_parser=None,
     metrics: RequestStateStats | None = None,
+    finish_reason: str | None = None,
 ):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
-    req_output = _make_request_output(text, token_ids, metrics)
+    req_output = _make_request_output(text, token_ids, metrics, finish_reason)
     ctx.append_output(req_output)
     ctx.request_metrics = metrics
     return ctx
@@ -1555,6 +1564,66 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+async def _stream_truncated_by_length(serving: OpenAIServingResponses):
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "cut mid sen", [10, 20], finish_reason="length"
+    )
+
+    async def one_context():
+        yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=2),
+            result_generator=one_context(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_truncated_by_length_reports_incomplete():
+    """A max_output_tokens cut must end the stream with ``response.incomplete``
+    and mark the cut item ``incomplete`` in both ``output_item.done`` and the
+    final response (#57998)."""
+    events = await _stream_truncated_by_length(_make_serving_instance())
+
+    item_done = [e for e in events if e.type == "response.output_item.done"]
+    assert [e.item.status for e in item_done] == ["incomplete"]
+    final = events[-1]
+    assert isinstance(final, ResponseIncompleteEvent)
+    assert final.response.status == "incomplete"
+    assert final.response.incomplete_details.reason == "max_output_tokens"
+    assert [item.status for item in final.response.output] == ["incomplete"]
+
+
+@pytest.mark.asyncio
+async def test_background_stream_replay_stops_on_response_incomplete():
+    """Replaying a stored background stream must end at ``response.incomplete``
+    as it does at ``response.completed``, instead of waiting for more events."""
+    serving = _make_serving_instance()
+    events = await _stream_truncated_by_length(serving)
+    assert isinstance(events[-1], ResponseIncompleteEvent)
+    serving.event_store["resp_bg"] = (deque(events), asyncio.Event())
+
+    async def replay(starting_after=None):
+        return [
+            event
+            async for event in serving.responses_background_stream_generator(
+                "resp_bg", starting_after=starting_after
+            )
+        ]
+
+    assert await asyncio.wait_for(replay(), timeout=5) == events
+    assert await asyncio.wait_for(replay(starting_after=0), timeout=5) == events[1:]
 
 
 @pytest.mark.asyncio
@@ -2127,6 +2196,87 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     _, message, function_call = streamed
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+def _harmony_msg(channel: str, text: str, recipient: str | None = None):
+    msg = OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, text)
+    msg = msg.with_channel(channel)
+    return msg.with_recipient(recipient) if recipient else msg
+
+
+def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
+    """Segments the parser yields for one message: a content delta (absent
+    for a zero-delta message), then the completed message."""
+    delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
+    completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
+    return (delta if streamed else []) + [completed]
+
+
+async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+    serving = _make_serving_instance()
+    serving.use_harmony = True
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(segments=segments, reasoning_token_count=0)
+        for segments in segment_chunks
+    ]
+    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+
+    async def result_generator():
+        for token_id in range(len(segment_chunks)):
+            context.append_output(_make_request_output("", [token_id]))
+            yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(input="hi", stream=True, store=False),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_completed_response_reuses_streamed_ids():
+    """response.completed must carry the id and call_id each item was streamed
+    with, not ones minted when the harmony messages are converted again."""
+    messages = [
+        _harmony_msg("analysis", "think"),
+        _harmony_msg("commentary", '{"city": "Paris"}', "functions.get_weather"),
+        _harmony_msg("final", "Sunny"),
+    ]
+
+    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["reasoning", "function_call", "message"]
+    assert [item.id for item in output] == [item.id for item in streamed]
+    assert output[1].call_id == streamed[1].call_id
+    assert output[2].content[0].text == "Sunny"
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_unstreamed_item_keeps_own_id():
+    """An item with no done event (zero-delta) must not take the streamed id
+    of a later item of the same type."""
+    unstreamed = _harmony_msg("analysis", "skipped")
+    reasoning = _harmony_msg("analysis", "think")
+
+    events = await _harmony_stream_events(
+        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+    )
+
+    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    first, second = events[-1].response.output
+    assert first.content[0].text == "skipped"
+    assert first.id != streamed.id
+    assert second.id == streamed.id
 
 
 @pytest.mark.asyncio

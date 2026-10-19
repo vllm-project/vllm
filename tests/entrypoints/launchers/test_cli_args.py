@@ -44,6 +44,13 @@ def serve_parser():
     return _build_vllm_parsers()["vllm serve"]
 
 
+def test_cors_origins_require_explicit_opt_in(serve_parser):
+    assert serve_parser.parse_args([]).allowed_origins == []
+    assert serve_parser.parse_args(
+        ["--allowed-origins", '["http://trusted.example"]']
+    ).allowed_origins == ["http://trusted.example"]
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])
@@ -242,7 +249,7 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
         validate_parsed_serve_args(args)
 
 
-def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
+def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
     args = serve_parser.parse_args(args=["--enable-auto-tool-choice"])
@@ -262,17 +269,23 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
-def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
-    """Ensure validation fails if reasoning is enabled with auto tool choice."""
+def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
+    """Auto tool choice combined with a reasoning parser is supported.
+
+    See docs/features/tool_calling.md, which documents using
+    ``--tool-call-parser`` together with ``--reasoning-parser``. This
+    combination must pass validation as long as a tool call parser is set.
+    """
     args = serve_parser.parse_args(
         args=[
             "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "mistral",
             "--reasoning-parser",
             "deepseek_r1",
         ]
     )
-    with pytest.raises(TypeError):
-        validate_parsed_serve_args(args)
+    validate_parsed_serve_args(args)
 
 
 def test_passes_with_reasoning_parser(serve_parser):
@@ -285,6 +298,16 @@ def test_passes_with_reasoning_parser(serve_parser):
         ]
     )
     validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("none", ""), ("None", ""), ("NONE", ""), ("deepseek_r1", "deepseek_r1")],
+)
+def test_reasoning_parser_none_disables_parser(serve_parser, value, expected):
+    """`--reasoning-parser none` disables parsing, as in `vllm-rs serve`."""
+    args = serve_parser.parse_args(args=["--reasoning-parser", value])
+    assert args.reasoning_parser == expected
 
 
 def test_chat_template_validation_for_happy_paths(serve_parser):
