@@ -80,14 +80,13 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
-    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -472,10 +471,7 @@ class NixlBaseConnectorWorker:
             self.vllm_config.attention_config.flashinfer_separate_kv_head_slots
             and isinstance(layer_spec, AttentionSpec)
             and not isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-            and layer_spec.kv_quant_mode == KVQuantMode.NONE
-            and layer_spec.num_head_slots == 2 * layer_spec.num_kv_heads
-            and layer_spec.state_content_bytes
-            == layer_spec.head_size * get_dtype_size(layer_spec.dtype)
+            and layer_spec.has_separate_kv_head_slots
             and KVCacheLayout[self.kv_cache_layout].is_block_contiguous
             and physical_page_size == layer_spec.page_size_bytes
         )
