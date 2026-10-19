@@ -32,6 +32,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s distributed/test_comm_ops.py -k "not test_multi_process_tensor_parallel and not test_multi_process_pipeline_parallel" || true &&
+    pytest -v -s distributed/test_cpu_all_reduce.py || true &&
     pytest -v -s distributed/test_shm_broadcast.py || true &&
     pytest -v -s distributed/test_shm_buffer.py || true &&
     pytest -v -s distributed/test_shm_storage.py || true'
