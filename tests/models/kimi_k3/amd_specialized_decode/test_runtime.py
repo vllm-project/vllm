@@ -100,6 +100,10 @@ def test_widths_are_whole_requests_up_to_eight_rows(k, want):
     assert DecodeConfig(q=k + 1).widths == want
 
 
+def test_regular_decode_widths_are_one_to_eight_rows():
+    assert DecodeConfig(q=1).widths == tuple(range(1, 9))
+
+
 def _k3_text_config():
     """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
     layer 0 dense."""
@@ -141,6 +145,11 @@ def test_supported_config_is_accepted(on_mi355x):
     assert specialized_decode_config(_vllm_config()) == DecodeConfig(q=8)
 
 
+def test_regular_decode_config_is_accepted(on_mi355x):
+    cfg = _vllm_config(speculative_config=None)
+    assert specialized_decode_config(cfg) == DecodeConfig(q=1)
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
@@ -154,7 +163,6 @@ def test_supported_config_is_accepted(on_mi355x):
         ({"parallel_config.pipeline_parallel_size": 2}, "pipeline parallelism"),
         ({"parallel_config.decode_context_parallel_size": 2}, "decode context"),
         ({"kv_transfer_config": object()}, "KV transfer connectors"),
-        ({"speculative_config": None}, "without speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 8}, "more than 7"),
         ({"speculative_config.enable_adaptive_verification": True}, "adaptive"),
         ({"speculative_config.dynamic": True}, "dynamic speculative"),
@@ -209,6 +217,7 @@ def _kda_metadata(**md):
         num_decodes=0,
         num_spec_decodes=1,
         spec_state_indices_tensor=torch.zeros(1, 4, dtype=torch.int32),
+        non_spec_state_indices_tensor=None,
         uniform_spec_sequence_length=4,
     )
     for k, v in md.items():
@@ -223,17 +232,109 @@ def _kda_metadata(**md):
         (8, {"num_spec_decodes": 2}, None),
         (4, {"num_prefills": 1}, "not pure decode"),
         (4, {"num_decodes": 1}, "not pure decode"),
-        (4, {"spec_sequence_masks": None}, "not spec-verify"),
+        (4, {"spec_sequence_masks": None}, "not pure decode"),
         (8, {}, "not uniform"),
         (4, {"uniform_spec_sequence_length": None}, "not uniform"),
     ],
 )
 def test_steps_must_be_pure_uniform_spec_verify(width, md, why):
-    assert step_reason(_kda_metadata(**md), "kda", width) == why
+    assert step_reason(_kda_metadata(**md), "kda", width, q=4) == why
+
+
+@pytest.mark.parametrize("width", [1, 4, 8])
+def test_steps_accept_pure_regular_decode(width):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(width, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", width, q=1) is None
+
+
+def test_regular_decode_falls_back_when_speculation_is_configured():
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(4, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", 4, q=4) == "not spec-verify"
+
+
+@pytest.mark.parametrize(
+    "width, state_indices",
+    [
+        (4, torch.arange(3, dtype=torch.int32)),
+        (4, torch.arange(4, dtype=torch.int32).view(2, 2)),
+        (4, None),
+    ],
+)
+def test_regular_decode_requires_one_state_slot_per_row(width, state_indices):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=state_indices,
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", width, q=1) == "not uniform"
+
+
+def test_regular_decode_rejects_graph_padding():
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(8, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert step_reason(md, "kda", 8, q=1) == "not uniform"
+
+
+def test_regular_decode_k1_metadata_uses_one_accepted_token_per_row():
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k1_metadata
+
+    state_indices = torch.tensor([7, 11, 13, 17], dtype=torch.int32)
+    accepted = torch.ones(8, dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=0,
+        non_spec_state_indices_tensor=state_indices,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(
+        m, SimpleNamespace(regular_num_accepted=accepted)
+    )
+    assert qlen == 1
+    assert state_view.shape == (4, 1)
+    assert state_view[:, 0].tolist() == state_indices.tolist()
+    assert num_accepted.data_ptr() == accepted.data_ptr()
+    assert num_accepted.tolist() == [1, 1, 1, 1]
+
+
+def test_spec_decode_k1_metadata_is_unchanged():
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import _k1_metadata
+
+    state_indices = torch.arange(8, dtype=torch.int32).view(2, 4)
+    accepted = torch.tensor([2, 4], dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=2,
+        spec_state_indices_tensor=state_indices,
+        num_accepted_tokens=accepted,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(m, SimpleNamespace())
+    assert qlen == 4
+    assert state_view is state_indices
+    assert num_accepted is accepted
 
 
 def test_steps_need_metadata():
-    assert step_reason(None, "kda", 4) == "no metadata"
+    assert step_reason(None, "kda", 4, q=4) == "no metadata"
 
 
 class _Kernel:
@@ -241,11 +342,11 @@ class _Kernel:
         return "kernel", step.width
 
 
-def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None):
+def _decode(monkeypatch, mode=CUDAGraphMode.FULL, md=None, q=4):
     """An executor with kernels on layers 1 and 2 at widths 4 and 8, bound to a
     KV cache, under a forward context of ``mode``."""
     decode = object.__new__(SpecializedDecode)
-    decode.config = DecodeConfig(q=4)
+    decode.config = DecodeConfig(q=q)
     decode.runner = SimpleNamespace(kda_prefix="kda")
     decode.kernels = {w: {1: _Kernel(), 2: _Kernel()} for w in (4, 8)}
     decode._kv = (1, 2)
@@ -264,6 +365,19 @@ def test_plan_runs_the_kernels_of_its_width(monkeypatch):
     assert step is not None and step.width == 4
     assert step.layer(1)(None, None, None, None) == ("kernel", 4)
     assert step.layer(0) is None and step.layer(3) is None
+
+
+def test_plan_runs_regular_decode(monkeypatch):
+    md = _kda_metadata(
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(4, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    step = _decode(monkeypatch, md=md, q=1).plan(torch.zeros(4), None)
+    assert step is not None and step.width == 4
 
 
 @pytest.mark.parametrize(
