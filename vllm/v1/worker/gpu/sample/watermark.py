@@ -1080,6 +1080,27 @@ def _synthid_words(
     )
 
 
+@triton.jit
+def _synthid_apply_chunk(
+    probs,
+    words,
+    row,
+    factors_ptr,
+    C: tl.constexpr,
+    DEPTH: tl.constexpr,
+    CHUNK_BITS: tl.constexpr,
+):
+    # Same fp32 products, in the same order, as applying every layer in one go.
+    for bit in tl.static_range(CHUNK_BITS):
+        layer = C * CHUNK_BITS + bit
+        if layer < DEPTH:
+            factor_0 = tl.load(factors_ptr + (row * DEPTH + layer) * 2)
+            factor_1 = tl.load(factors_ptr + (row * DEPTH + layer) * 2 + 1)
+            g = (words >> (layer % 32)) & 1
+            probs = probs * tl.where(g != 0, factor_1, factor_0)
+    return probs
+
+
 @triton.jit(
     do_not_specialize=["key_0_value", "key_1_value", "stream_0_value", "stream_1_value"]
 )
@@ -1107,19 +1128,20 @@ def _synthid_tournament_kernel(
     FINAL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # Pass CHUNK (not FINAL) applies chunk CHUNK - 1 to the probs that pass
+    # CHUNK - 1 left in `output`, stores them back and bins chunk CHUNK. The
+    # FINAL pass applies the last chunk. Every layer reads one Philox word.
+    tl.static_assert(DEPTH <= 32)
+    NUM_CHUNKS: tl.constexpr = (DEPTH + CHUNK_BITS - 1) // CHUNK_BITS
     row = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
     candidate = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = candidate < vocab_size
-    logits = tl.load(
-        logits_ptr + row * logits_stride + candidate,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
+    logits_ptrs = logits_ptr + row * logits_stride + candidate
+    output_ptrs = output_ptr + row * output_stride + candidate
 
     key_0 = key_0_value.to(tl.uint32)
     key_1 = key_1_value.to(tl.uint32)
-    stream_1 = stream_1_value.to(tl.uint32)
     state_0, state_1, state_2, state_3 = _philox_context_state(
         contexts_ptr + row * context_stride, key_0, key_1, CONTEXT_WIDTH
     )
@@ -1132,60 +1154,68 @@ def _synthid_tournament_kernel(
         key_0,
         key_1,
         stream_0_value.to(tl.uint32),
-        stream_1,
+        stream_1_value.to(tl.uint32),
         BLOCK_SIZE,
     )
 
-    if FINAL or CHUNK > 0:
-        row_max = tl.load(row_stats_ptr + row * 2)
-        row_sum = tl.load(row_stats_ptr + row * 2 + 1)
-        probs = tl.exp(logits - row_max) / row_sum
-        NUM_APPLIED: tl.constexpr = DEPTH if FINAL else CHUNK * CHUNK_BITS
-        for layer in tl.static_range(NUM_APPLIED):
-            if layer % 32 == 0 and layer > 0:
-                words = _synthid_words(
-                    block_idx,
-                    state_0,
-                    state_1,
-                    state_2,
-                    state_3,
-                    key_0,
-                    key_1,
-                    (stream_0_value + layer // 32).to(tl.uint32),
-                    stream_1,
-                    BLOCK_SIZE,
-                )
-            factor_0 = tl.load(factors_ptr + (row * DEPTH + layer) * 2)
-            factor_1 = tl.load(factors_ptr + (row * DEPTH + layer) * 2 + 1)
-            g = (words >> (layer % 32)) & 1
-            probs = probs * tl.where(g != 0, factor_1, factor_0)
-    else:
-        block_max = tl.max(logits, axis=0)
-        tl.store(local_max_ptr + row * num_blocks + block_idx, block_max)
-        probs = tl.exp(logits - tl.where(block_max == float("-inf"), 0.0, block_max))
-
     if FINAL:
+        if NUM_CHUNKS == 1:
+            logits = tl.load(logits_ptrs, mask=mask, other=float("-inf")).to(tl.float32)
+            row_max = tl.load(row_stats_ptr + row * 2)
+            row_sum = tl.load(row_stats_ptr + row * 2 + 1)
+            probs = tl.exp(logits - row_max) / row_sum
+            probs = _synthid_apply_chunk(
+                probs, words, row, factors_ptr, 0, DEPTH, CHUNK_BITS
+            )
+            logits_is_neg_inf = logits == float("-inf")
+        else:
+            probs = tl.load(output_ptrs, mask=mask, other=0.0)
+            probs = _synthid_apply_chunk(
+                probs, words, row, factors_ptr, NUM_CHUNKS - 1, DEPTH, CHUNK_BITS
+            )
+            # Logits only matter where probs is 0 (underflow or masked token)
+            # or NaN (fully masked row); probs > 0 keeps log_probs anyway.
+            logits = tl.load(logits_ptrs, mask=mask & ~(probs > 0.0), other=0.0)
+            logits_is_neg_inf = logits == float("-inf")
         log_probs = tl.log(probs)
         # Same as the eager path: masked tokens stay -inf, underflow -> min.
-        keep = (log_probs > float("-inf")) | (logits == float("-inf"))
+        keep = (log_probs > float("-inf")) | logits_is_neg_inf
         log_probs = tl.where(keep, log_probs, -3.4028234663852886e38)
-        tl.store(output_ptr + row * output_stride + candidate, log_probs, mask=mask)
+        tl.store(output_ptrs, log_probs, mask=mask)
     else:
+        if CHUNK == 0:
+            logits = tl.load(logits_ptrs, mask=mask, other=float("-inf")).to(tl.float32)
+            block_max = tl.max(logits, axis=0)
+            tl.store(local_max_ptr + row * num_blocks + block_idx, block_max)
+            probs = tl.exp(
+                logits - tl.where(block_max == float("-inf"), 0.0, block_max)
+            )
+        else:
+            if CHUNK == 1:
+                logits = tl.load(logits_ptrs, mask=mask, other=float("-inf")).to(
+                    tl.float32
+                )
+                row_max = tl.load(row_stats_ptr + row * 2)
+                row_sum = tl.load(row_stats_ptr + row * 2 + 1)
+                probs = tl.exp(logits - row_max) / row_sum
+            else:
+                probs = tl.load(output_ptrs, mask=mask, other=0.0)
+                if logits_ptr.dtype.element_ty.primitive_bitwidth < 32:
+                    # Identity (probs >= 0, so probs == 0 means +0.0). A
+                    # 16-bit logits load gives passes 0 and 1 a wider register
+                    # layout than the FP32 probs load alone would; keeping one
+                    # here keeps that layout, so the histogram sums below add
+                    # in the same order and give the same bits.
+                    zero_logits = tl.load(
+                        logits_ptrs, mask=mask & (probs == 0.0), other=0.0
+                    )
+                    probs = tl.where(zero_logits == float("-inf"), 0.0, probs)
+            probs = _synthid_apply_chunk(
+                probs, words, row, factors_ptr, CHUNK - 1, DEPTH, CHUNK_BITS
+            )
+            tl.store(output_ptrs, probs, mask=mask)
         FIRST: tl.constexpr = CHUNK * CHUNK_BITS
         NUM_BINS: tl.constexpr = 1 << CHUNK_BITS
-        if FIRST % 32 == 0 and FIRST > 0:
-            words = _synthid_words(
-                block_idx,
-                state_0,
-                state_1,
-                state_2,
-                state_3,
-                key_0,
-                key_1,
-                (stream_0_value + FIRST // 32).to(tl.uint32),
-                stream_1,
-                BLOCK_SIZE,
-            )
         pattern = (words >> (FIRST % 32)) & (NUM_BINS - 1)
         bins = tl.arange(0, NUM_BINS)
         hist = tl.zeros((NUM_BINS,), tl.float32)
