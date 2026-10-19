@@ -3,9 +3,9 @@
 
 import enum
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Annotated
+from typing import Annotated, Any, ClassVar, Literal
 
 import numpy as np
 import torch
@@ -74,6 +74,7 @@ from vllm.v1.attention.backend import (
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsTranscription,
@@ -563,28 +564,86 @@ class WhisperEncoder(nn.Module):
                 sinusoids(*self.embed_positions.weight.shape)
             )
 
-    def forward(
-        self, input_features: torch.Tensor | list[torch.Tensor]
+    def _conv_embed(self, features: torch.Tensor) -> torch.Tensor:
+        """Conv stem shared by rank-2 and rank-3 mel features."""
+        embeds = nn.functional.gelu(self.conv1(features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+        embeds = embeds.transpose(-1, -2)
+        embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
+            embeds.dtype
+        )
+        return embeds
+
+    def static_full_chunk_mel_frames(self) -> int | None:
+        """Mel length whose conv output equals ``max_source_positions``.
+
+        Stock Whisper stride 2 turns 1500 source positions into 3000 mel
+        frames. Any other conv geometry returns None.
+        """
+        if not isinstance(self.conv1, nn.Conv1d) or not isinstance(
+            self.conv2, nn.Conv1d
+        ):
+            return None
+        if (
+            self.conv1.stride[0] != 1
+            or self.conv2.stride[0] != 2
+            or self.conv1.kernel_size[0] != 3
+            or self.conv2.kernel_size[0] != 3
+            or self.conv1.padding[0] != 1
+            or self.conv2.padding[0] != 1
+        ):
+            return None
+        mel_len = self.max_source_positions * self.conv2.stride[0]
+        if (mel_len - 1) // 2 + 1 != self.max_source_positions:
+            return None
+        return mel_len
+
+    def _embed_per_item(
+        self, input_features: torch.Tensor | Sequence[torch.Tensor]
     ) -> torch.Tensor:
         hidden_states = []
         input_is_batched = False
         for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
-
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
-
+            embeds = self._conv_embed(features)
             hidden_states.append(embeds)
             input_is_batched = embeds.ndim > 2
-        # Input to MHA must be B x T x D
+        # A rank-3 item is already a batch. Equal chunks are concatenated
+        # before the stem; unequal chunks still concatenate after it.
         if input_is_batched:
-            # Models using WhisperEncoder may handle batching internally.
-            hidden_states = torch.cat(hidden_states)
-        else:
-            hidden_states = torch.stack(hidden_states, dim=0)
+            return torch.cat(hidden_states)
+        return torch.stack(hidden_states, dim=0)
+
+    @staticmethod
+    def _uniform_feature_batch(items: Sequence[torch.Tensor], ndim: int) -> bool:
+        if not items:
+            return False
+        shape = items[0].shape
+        return all(item.ndim == ndim and item.shape == shape for item in items)
+
+    def _embed_features(
+        self, input_features: torch.Tensor | Sequence[torch.Tensor]
+    ) -> torch.Tensor:
+        if isinstance(input_features, torch.Tensor):
+            if input_features.ndim == 3:
+                return self._conv_embed(input_features)
+            # A bare rank-2 spectrogram stays on the per-item loop.
+            return self._embed_per_item(input_features)
+
+        items = list(input_features)
+        if self._uniform_feature_batch(items, 3):
+            # Moss calls ``forward([rank-3 chunk])``. Cat, do not stack.
+            return self._conv_embed(torch.cat(items, dim=0))
+        if self._uniform_feature_batch(items, 2):
+            return self._conv_embed(torch.stack(items, dim=0))
+        # Unequal lengths stay per-item. Time-padding is wrong for odd T:
+        # conv2's last window reads an implicit zero, and a padded frame
+        # replaces it.
+        return self._embed_per_item(items)
+
+    def forward(
+        self, input_features: torch.Tensor | Sequence[torch.Tensor]
+    ) -> torch.Tensor:
+        hidden_states = self._embed_features(input_features)
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
@@ -805,7 +864,13 @@ class WhisperForConditionalGeneration(
     SupportsTranscription,
     SupportsMultiModal,
     SupportsLoRA,
+    SupportsEncoderCudaGraph,
 ):
+    # Opt-in here, not on WhisperEncoder. Ultravox replaces the encoder
+    # forward and must not inherit this protocol. Kimi still uses the
+    # batched stem because it calls WhisperEncoder.forward.
+    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+
     # LoRA-specific attributes
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -964,6 +1029,7 @@ class WhisperForConditionalGeneration(
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.vllm_config = vllm_config
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
@@ -1031,6 +1097,144 @@ class WhisperForConditionalGeneration(
             input_features = json_map_leaves(to_dtype, input_features)
 
         return WhisperAudioInputs(input_features=input_features)
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["audio"],
+            buffer_keys=["input_features"],
+            out_hidden_size=self.config.d_model,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        # max_model_len is the decoder length (often 448), which is below
+        # max_source_positions (1500). Clamping with it makes the manager raise.
+        return (
+            self.config.max_source_positions,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        features = mm_kwargs["input_features"]
+        positions = self.config.max_source_positions
+        num_items = int(features.shape[0])
+        mel_frames = int(features.shape[-1])
+        return [
+            EncoderItemSpec(input_size=mel_frames, output_tokens=positions)
+            for _ in range(num_items)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        features = mm_kwargs["input_features"]
+        if len(indices) == 0:
+            return {"input_features": features[:0]}
+        return {"input_features": features[indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        del max_frames_per_batch, path, axis_keys
+        positions = self.config.max_source_positions
+        mel_len = self.model.encoder.static_full_chunk_mel_frames()
+        if mel_len is None:
+            raise RuntimeError(
+                "Whisper conv stem is not the stock full-chunk geometry."
+            )
+        width = min(token_budget // positions, max_batch_size)
+        if width < 1:
+            raise ValueError(
+                f"Encoder CUDA graph budget {token_budget} cannot hold one "
+                f"Whisper clip of {positions} source positions."
+            )
+        features = torch.zeros(
+            width,
+            self.config.num_mel_bins,
+            mel_len,
+            device=device,
+            dtype=dtype,
+        )
+        return EncoderCudaGraphCaptureInputs(values={"input_features": features})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        del max_batch_size, max_frames_per_batch, path
+        features = mm_kwargs["input_features"]
+        weight = self.model.encoder.conv1.weight
+        features = features.to(device=weight.device, dtype=weight.dtype)
+        return EncoderCudaGraphReplayBuffers(values={"input_features": features})
+
+    def _flat_encoder_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states.reshape(-1, self.config.d_model)
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        del path
+        hidden_states = self.model.encoder(inputs["input_features"])
+        return self._flat_encoder_output(hidden_states)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        del path
+        hidden_states = self.model.encoder(mm_kwargs["input_features"])
+        return self._flat_encoder_output(hidden_states)
+
+    def encoder_cudagraph_capture_allowed(self) -> bool:
+        if self.vllm_config.lora_config is not None:
+            return False
+        if self.model.encoder.static_full_chunk_mel_frames() is None:
+            return False
+        mm_config = self.vllm_config.model_config.get_multimodal_config()
+        dynamic_fp8 = (
+            mm_config.mm_encoder_attn_dtype == "fp8"
+            and not mm_config.mm_encoder_fp8_scale_path
+        )
+        return not dynamic_fp8
+
+    def should_use_encoder_cudagraph(self, mm_kwargs: dict[str, Any]) -> bool:
+        features = mm_kwargs.get("input_features")
+        if not isinstance(features, torch.Tensor) or features.ndim != 3:
+            return False
+        if features.shape[1] != self.model.encoder.num_mel_bins:
+            return False
+        mel_len = self.model.encoder.static_full_chunk_mel_frames()
+        # mel_len - 1 has the same conv length and still declines. The
+        # manager pads the batch axis, never time.
+        return mel_len is not None and features.shape[-1] == mel_len
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.proj_out, hidden_states)
