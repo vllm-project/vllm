@@ -103,3 +103,19 @@ Multi-module MiMo MTP requires Model Runner V2. Set
 Use one speculative token for a single-module comparison. More draft modules
 do not imply higher throughput: measure acceptance, decode throughput, and
 prefill latency for the intended workload, including chunked prefill.
+
+### MiMo proposal-logit scale
+
+MiMo V2 Pro/Flash MTP in Model Runner V2 accepts a positive finite
+`mimo_draft_logit_scale` with probabilistic drafting and standard rejection.
+The default `1.0` leaves logits unchanged. A non-default scale multiplies
+proposal logits before both sampling and caching the rejection distribution;
+it does not change target logits or temperature. Omni is not enabled.
+
+```json
+{"method": "mtp", "num_speculative_tokens": 3, "draft_sample_method": "probabilistic", "rejection_sample_method": "standard", "mimo_draft_logit_scale": 1.25}
+```
+
+`1.25` is an example, not a universal recommendation. Historical measurements
+also include slower settings. Evaluate acceptance and target-model quality
+along with throughput before choosing a scale.

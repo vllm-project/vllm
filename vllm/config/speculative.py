@@ -611,6 +611,11 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    mimo_draft_logit_scale: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    """Positive MiMo MTP proposal-logit scale. Requires probabilistic drafting
+    and standard rejection. The same scaled logits are sampled and cached for
+    rejection; target logits and temperature are unchanged. Opt-in."""
+
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
@@ -636,7 +641,7 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
+        factors: list[Any] = [self.mimo_draft_logit_scale]
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -1603,7 +1608,24 @@ class SpeculativeConfig:
                 "materializes. Disable one of them."
             )
 
+        self._validate_mimo_draft_logit_scale()
         return self
+
+    def _validate_mimo_draft_logit_scale(self) -> None:
+        if self.mimo_draft_logit_scale == 1.0:
+            return
+        if (
+            self.method != "mtp"
+            or self.draft_sample_method != "probabilistic"
+            or self.rejection_sample_method != "standard"
+            or self.draft_model_config is None
+            or self.draft_model_config.hf_config.model_type != "mimo_v2_mtp"
+            or self.draft_model_config.hf_config.architectures != ["MiMoV2MTPModel"]
+        ):
+            raise ValueError(
+                "mimo_draft_logit_scale requires MiMo V2 MTP with probabilistic "
+                "drafting and standard rejection"
+            )
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
@@ -2031,9 +2053,11 @@ class SpeculativeConfig:
             not use_v2
             and self.draft_model_config is not None
             and self.draft_model_config.hf_config.model_type == "mimo_v2_mtp"
-            and self.use_multi_module_mtp()
+            and (self.use_multi_module_mtp() or self.mimo_draft_logit_scale != 1.0)
         ):
-            raise ValueError("Multi-layer MiMo MTP requires Model Runner V2")
+            raise ValueError(
+                "Multi-layer or calibrated MiMo MTP requires Model Runner V2"
+            )
 
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
