@@ -2056,11 +2056,73 @@ class TestProbeDisabledThinkingEffort:
             )
         )
         resolver = DisabledThinkingEffortResolver(renderer)
-        effort = await resolver.resolve()
-        calls = renderer.render_chat.await_count
-        assert await resolver.resolve() == effort
-        assert renderer.render_chat.await_count == calls
-        return effort
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
+        )
+        return await resolver.resolve_for(request)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expected_effort", ["low", "none"])
+    async def test_resolution_is_cached(self, expected_effort):
+        renderer = MagicMock()
+        renderer.model_config.is_encoder_decoder = False
+
+        def render(request):
+            if expected_effort == "low":
+                raise ValueError("unsupported none")
+            return [], [{"prompt_token_ids": [int(request.reasoning_effort == "none")]}]
+
+        renderer.render_chat = AsyncMock(side_effect=render)
+        resolver = DisabledThinkingEffortResolver(renderer)
+        calls = []
+        for request_cls, request_kwargs in (
+            (AnthropicMessagesRequest, {"max_tokens": 16}),
+            (AnthropicCountTokensRequest, {}),
+        ):
+            request = request_cls(
+                model="test",
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking={"type": "disabled"},
+                **request_kwargs,
+            )
+            assert await resolver.resolve_for(request) == expected_effort
+            calls.append(renderer.render_chat.await_count)
+        assert calls[0] == calls[1] > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "max"])
+    async def test_explicit_effort_skips_probe(self, effort):
+        renderer = MagicMock()
+        renderer.render_chat = AsyncMock()
+        resolver = DisabledThinkingEffortResolver(renderer, effort)
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
+        )
+        assert await resolver.resolve_for(request) == effort
+        renderer.render_chat.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "thinking",
+        [None, {"type": "enabled", "budget_tokens": 1024}, {"type": "adaptive"}],
+    )
+    async def test_other_thinking_modes_skip_probe(self, thinking):
+        renderer = MagicMock()
+        renderer.render_chat = AsyncMock(side_effect=ValueError("unsupported none"))
+        resolver = DisabledThinkingEffortResolver(renderer)
+        request = AnthropicMessagesRequest(
+            model="test",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+        )
+        assert await resolver.resolve_for(request) == "none"
+        renderer.render_chat.assert_not_awaited()
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}], thinking={"type": "disabled"}
+        )
+        assert await resolver.resolve_for(request) == "low"
+        renderer.render_chat.assert_awaited_once()
 
     @staticmethod
     def _reject_none(effort):

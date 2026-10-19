@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 from fastapi import Request
 
 from vllm.entrypoints.anthropic.protocol import (
-    AnthropicDisabledThinkingEffort,
     AnthropicDisabledThinkingEffortOption,
     AnthropicMessagesRequest,
 )
@@ -76,6 +75,7 @@ class ServingRender(BaseServing):
         request_logger: RequestLogger | None = None,
         tool_server: "ToolServer | None" = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        disabled_thinking_effort_resolver: DisabledThinkingEffortResolver | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -85,8 +85,13 @@ class ServingRender(BaseServing):
 
         self.online_renderer = online_renderer
         self.tool_server = tool_server
-        self._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
-            online_renderer, disabled_thinking_effort
+        # A shared resolver takes precedence over disabled_thinking_effort.
+        self._disabled_thinking_effort_resolver = (
+            disabled_thinking_effort_resolver
+            if disabled_thinking_effort_resolver is not None
+            else DisabledThinkingEffortResolver(
+                online_renderer, disabled_thinking_effort
+            )
         )
 
         self._merge_inline_system = (
@@ -207,11 +212,9 @@ class ServingRender(BaseServing):
         conversion as the /v1/messages server path, then delegates to
         render_chat_request so the rendered tokens match the server exactly.
         """
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = (
-                await self._disabled_thinking_effort_resolver.resolve()
-            )
+        disabled_thinking_effort = (
+            await self._disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,

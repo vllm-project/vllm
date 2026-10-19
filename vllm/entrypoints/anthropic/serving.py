@@ -157,7 +157,11 @@ class DisabledThinkingEffortResolver:
             None if effort == "auto" else effort
         )
 
-    async def resolve(self) -> AnthropicDisabledThinkingEffort:
+    async def resolve_for(
+        self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+    ) -> AnthropicDisabledThinkingEffort:
+        if request.thinking is None or request.thinking.type != "disabled":
+            return "none"
         if self._effort is None:
             self._effort = await self._probe()
             logger.info(
@@ -246,7 +250,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
-        self._disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
+        self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
             online_renderer, disabled_thinking_effort
         )
 
@@ -816,11 +820,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = (
-                await self._disabled_thinking_effort_resolver.resolve()
-            )
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
@@ -1231,11 +1233,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
-        if request.thinking is not None and request.thinking.type == "disabled":
-            disabled_thinking_effort = (
-                await self._disabled_thinking_effort_resolver.resolve()
-            )
+        disabled_thinking_effort = (
+            await self.disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,

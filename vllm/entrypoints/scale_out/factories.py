@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.anthropic.protocol import (
         AnthropicDisabledThinkingEffortOption,
     )
+    from vllm.entrypoints.anthropic.serving import DisabledThinkingEffortResolver
     from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 else:
     RequestLogger = object
@@ -33,6 +34,7 @@ def init_render_state(
     request_logger: RequestLogger | None,
     *,
     disabled_thinking_effort: "AnthropicDisabledThinkingEffortOption" = "auto",
+    disabled_thinking_effort_resolver: "DisabledThinkingEffortResolver | None" = None,
 ):
     from .derender.serving import ServingDerender
     from .render.serving import ServingRender
@@ -43,6 +45,7 @@ def init_render_state(
         request_logger=request_logger,
         tool_server=state.tool_server,
         disabled_thinking_effort=disabled_thinking_effort,
+        disabled_thinking_effort_resolver=disabled_thinking_effort_resolver,
     )
 
     state.serving_derender = ServingDerender(
@@ -61,7 +64,9 @@ def init_scale_out_state(
     init_render_state(
         state,
         request_logger,
-        disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+        disabled_thinking_effort_resolver=(
+            state.anthropic_serving_messages.disabled_thinking_effort_resolver
+        ),
     )
 
     from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
