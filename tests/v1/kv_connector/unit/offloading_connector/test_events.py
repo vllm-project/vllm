@@ -665,6 +665,45 @@ def test_take_events_supports_restore_after_eviction():
     assert second_store[0].token_ids == [5, 6, 7, 8]
 
 
+@pytest.mark.parametrize("drain_together", [False, True])
+def test_take_events_preserves_payload_when_key_is_reused_before_removal(
+    drain_together,
+):
+    tracker = _tracker()
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    old_req = _request(
+        block_hashes=[_hash(0), _hash(1)],
+        token_count=8,
+    )
+    key = _record_chunks(tracker, old_req, group_config, num_chunks=1)[0]
+    [old_stored] = tracker.take_events([_stored_event([key])])
+
+    new_req = _request(
+        block_hashes=[_hash(10), _hash(1)],
+        token_count=8,
+    )
+    new_req.all_token_ids = list(range(101, 109))
+    tracker.record_store(new_req, group_config, chunk_idx=0, offload_key=key)
+
+    if drain_together:
+        old_removed, new_stored = tracker.take_events(
+            [_removed_event([key]), _stored_event([key])]
+        )
+    else:
+        [old_removed] = tracker.take_events([_removed_event([key])])
+        [new_stored] = tracker.take_events([_stored_event([key])])
+
+    assert old_stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+    assert old_removed.block_hashes == old_stored.block_hashes
+    assert new_stored.block_hashes == [_wire_hash(_hash(10)), _wire_hash(_hash(1))]
+    assert new_stored.token_ids == list(range(101, 109))
+    assert new_stored.block_size == 4
+
+    [new_removed] = tracker.take_events([_removed_event([key])])
+    assert new_removed.block_hashes == new_stored.block_hashes
+    assert not tracker._pending_event_metadata
+
+
 def test_reset_cache_clears_side_table():
     tracker = _tracker()
     group_config = _group_config()

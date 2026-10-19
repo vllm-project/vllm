@@ -15,6 +15,7 @@ of the same hash. Opt-in via
 KV cache events are enabled. See the PR description for the full design.
 """
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -60,6 +61,8 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.STORAGE: MEDIUM_STORAGE,
 }
 
+_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
+
 
 class OffloadingEventGroupSpec(NamedTuple):
     kv_cache_spec_kind: str | None
@@ -94,6 +97,7 @@ class _OffloadEventMetadata:
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: set[tuple[Medium, str | None]]
+    primary_store_pending: bool = False
 
 
 class OffloadingEventsTracker:
@@ -114,6 +118,12 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # A key can be re-used before the previous primary removal is drained.
+        # Keep the old payloads separately so those removals do not consume the
+        # metadata for the new store.
+        self._superseded_event_metadata: dict[
+            OffloadKey, deque[_OffloadEventMetadata]
+        ] = {}
 
     def record_store(
         self,
@@ -132,9 +142,8 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_chunks is not None:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
-        self._pending_event_metadata[offload_key] = meta
+        meta.primary_store_pending = True
+        self._replace_event_metadata(offload_key, meta)
 
     def record_lookup(
         self,
@@ -232,8 +241,26 @@ class OffloadingEventsTracker:
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
         )
-        if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
+        meta.primary_store_pending = True
+        self._replace_event_metadata(offload_key, meta)
+
+    def _replace_event_metadata(
+        self, offload_key: OffloadKey, meta: _OffloadEventMetadata
+    ) -> None:
+        """Install a new payload while retaining an undrained primary payload."""
+        existing = self._pending_event_metadata.get(offload_key)
+        if existing is not None:
+            existing_residencies = set(existing.active_residencies)
+            meta.active_residencies.update(existing_residencies)
+            if _PRIMARY_RESIDENCY in existing_residencies:
+                # A primary store supersedes the old primary payload, but the
+                # old CPU removal can still be queued by the manager. Keep a
+                # snapshot for that removal and let the new generation own any
+                # secondary residency carried forward from the old payload.
+                existing.active_residencies = {_PRIMARY_RESIDENCY}
+                self._superseded_event_metadata.setdefault(offload_key, deque()).append(
+                    existing
+                )
         self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
@@ -257,17 +284,74 @@ class OffloadingEventsTracker:
             else:
                 yield from self._take_stored_event(event)
 
-        # A primary removal can precede a queued secondary store in this batch.
-        # Keep its payload until all stores have registered their residencies.
         for key in removed_keys:
-            meta = self._pending_event_metadata.get(key)
-            if meta is not None and not meta.active_residencies:
-                self._pending_event_metadata.pop(key)
+            self._prune_inactive_metadata(key)
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+        self._superseded_event_metadata.clear()
+
+    def _metadata_for_removal(
+        self,
+        offload_key: OffloadKey,
+        residency: tuple[Medium, str | None],
+    ) -> _OffloadEventMetadata | None:
+        """Find the generation that owns a removal residency."""
+        if residency == _PRIMARY_RESIDENCY:
+            for meta in self._superseded_event_metadata.get(offload_key, ()):
+                if residency in meta.active_residencies:
+                    return meta
+
+        current_meta = self._pending_event_metadata.get(offload_key)
+        if current_meta is not None and residency in current_meta.active_residencies:
+            return current_meta
+
+        for meta in self._superseded_event_metadata.get(offload_key, ()):
+            if residency in meta.active_residencies:
+                return meta
+        return current_meta
+
+    def _metadata_for_store(
+        self, offload_key: OffloadKey, medium: Medium
+    ) -> _OffloadEventMetadata | None:
+        """Return the generation associated with a store event."""
+        generations = self._superseded_event_metadata.get(offload_key)
+        if medium == Medium.CPU and generations:
+            for meta in generations:
+                if meta.primary_store_pending:
+                    meta.primary_store_pending = False
+                    return meta
+
+        current_meta = self._pending_event_metadata.get(offload_key)
+        if current_meta is not None:
+            if medium == Medium.CPU:
+                current_meta.primary_store_pending = False
+            return current_meta
+
+        if not generations:
+            return None
+        meta = generations.pop()
+        if not generations:
+            self._superseded_event_metadata.pop(offload_key)
+        return meta
+
+    def _prune_inactive_metadata(self, offload_key: OffloadKey) -> None:
+        meta = self._pending_event_metadata.get(offload_key)
+        if meta is not None and not meta.active_residencies:
+            self._pending_event_metadata.pop(offload_key)
+
+        generations = self._superseded_event_metadata.get(offload_key)
+        if generations is None:
+            return
+        active_generations = deque(
+            meta for meta in generations if meta.active_residencies
+        )
+        if active_generations:
+            self._superseded_event_metadata[offload_key] = active_generations
+        else:
+            self._superseded_event_metadata.pop(offload_key)
 
     def _build_event_metadata(
         self,
@@ -362,7 +446,7 @@ class OffloadingEventsTracker:
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = self._metadata_for_store(key, event.medium)
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
@@ -408,8 +492,9 @@ class OffloadingEventsTracker:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
+        residency = (event.medium, event.ownership)
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = self._metadata_for_removal(key, residency)
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
