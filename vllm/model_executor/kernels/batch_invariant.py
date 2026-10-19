@@ -49,7 +49,7 @@ def _load_batch_invariant_kernel_library(path: str) -> None:
             "gather_replay_batch",
             "cast_indexer_logits",
             "dequant_gather_nvfp4",
-            "sparse_decode_gather",
+            "sparse_paged_indices",
             "block32_scaled_mm",
             "block32_scaled_mm_variant",
             "gather_expert_slots",
@@ -172,17 +172,15 @@ def dequant_gather_nvfp4(
     )
 
 
-def sparse_decode_gather(
-    topk: torch.Tensor,
+def sparse_paged_indices(
+    topk: torch.Tensor | None,
     token_to_req: torch.Tensor,
     is_valid: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     replay_start: torch.Tensor,
-    compressed_cache: torch.Tensor | None,
     compressed_table: torch.Tensor | None,
     compressed_block_size: int,
-    swa_cache: torch.Tensor,
     swa_table: torch.Tensor,
     swa_block_size: int,
     token_offset: int,
@@ -190,28 +188,29 @@ def sparse_decode_gather(
     window: int,
     compress_ratio: int,
     top_k: int,
-    kv: torch.Tensor,
-    indices: torch.Tensor,
-    lens: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    extra_indices: torch.Tensor | None,
+    extra_lens: torch.Tensor | None,
 ) -> None:
-    """Gather each token's ordered sparse rows into a fixed workspace.
+    """Write each token's paged SWA and compressed top-k slots for FlashMLA's
+    sparse decode kernel, ``-1`` for holes, with lengths from its position.
 
-    Rows, order, holes and lengths match what combine_topk_swa_indices makes
-    the chunked prefill gather expose, so FlashMLA's sparse prefill kernel
-    returns the same bits with shapes that depend only on ``num_tokens``.
+    Tokens ``[token_offset, token_offset + num_tokens)`` land in output rows
+    ``[0, num_tokens)``. The visible window and the compressed length follow
+    the eager prefill path, so a (request, position) gets the same lists in
+    any batch, chunk or step.
     """
     require_batch_invariant_kernel()
-    torch.ops.vllm_batch_invariant.sparse_decode_gather(
+    torch.ops.vllm_batch_invariant.sparse_paged_indices(
         topk,
         token_to_req,
         is_valid,
         query_start_loc,
         seq_lens,
         replay_start,
-        compressed_cache,
         compressed_table,
         compressed_block_size,
-        swa_cache,
         swa_table,
         swa_block_size,
         token_offset,
@@ -219,9 +218,10 @@ def sparse_decode_gather(
         window,
         compress_ratio,
         top_k,
-        kv,
-        indices,
-        lens,
+        swa_indices,
+        swa_lens,
+        extra_indices,
+        extra_lens,
     )
 
 

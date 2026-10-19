@@ -719,6 +719,153 @@ def test_v41_bi_topk_lens_by_position(seq_len, compress_ratio):
     assert lengths.tolist() == expected
 
 
+def _paged_indices_batch(requests, compress_ratio, topk_rows, gen):
+    """Metadata for (request, prefix, query_len, replay_start) rows, with
+    per-request shuffled pages; top-k rows come from ``topk_rows[request]``
+    at absolute positions."""
+    window, swa_block, top_k = 128, 32, 512
+    compressed_block = 64
+    starts, seq_lens, replay, token_to_req, topk = [0], [], [], [], []
+    swa_tables, compressed_tables = [], []
+    for i, (request, prefix, query_len, replay_start) in enumerate(requests):
+        starts.append(starts[-1] + query_len)
+        seq_lens.append(prefix + query_len)
+        replay.append(replay_start)
+        token_to_req += [i] * query_len
+        topk.append(topk_rows[request][prefix : prefix + query_len])
+        g = torch.Generator().manual_seed(1000 + request)
+        swa_tables.append(torch.randperm(1024, generator=g)[:640])
+        compressed_tables.append(torch.randperm(1024, generator=g)[:320])
+    padding = 3
+    token_to_req += [0] * padding
+    is_valid = torch.arange(len(token_to_req)) < starts[-1]
+    topk.append(torch.full((padding, top_k), -1))
+
+    def cuda_int(values):
+        return torch.as_tensor(values).to(device="cuda", dtype=torch.int32)
+
+    return dict(
+        topk=cuda_int(torch.cat(topk)) if compress_ratio else None,
+        token_to_req=cuda_int(token_to_req),
+        is_valid=is_valid.cuda(),
+        query_start_loc=cuda_int(starts),
+        seq_lens=cuda_int(seq_lens),
+        replay_start=cuda_int(replay),
+        compressed_table=(
+            cuda_int(torch.stack(compressed_tables)) if compress_ratio else None
+        ),
+        compressed_block_size=compressed_block,
+        swa_table=cuda_int(torch.stack(swa_tables)),
+        swa_block_size=swa_block,
+        window=window,
+        compress_ratio=compress_ratio,
+        top_k=top_k if compress_ratio else 0,
+    )
+
+
+def _run_paged_indices(batch, token_offset=0, num_tokens=None):
+    from vllm.model_executor.kernels.batch_invariant import sparse_paged_indices
+
+    if num_tokens is None:
+        num_tokens = batch["token_to_req"].numel() - token_offset
+    compressed = batch["compress_ratio"] > 0
+    out = torch.full((num_tokens, 640), 12345, dtype=torch.int32, device="cuda")
+    lens = torch.full((2, num_tokens), 12345, dtype=torch.int32, device="cuda")
+    sparse_paged_indices(
+        **{k: v for k, v in batch.items() if k not in ("window", "top_k")},
+        token_offset=token_offset,
+        num_tokens=num_tokens,
+        window=batch["window"],
+        top_k=batch["top_k"],
+        swa_indices=out[:, :128],
+        swa_lens=lens[0],
+        extra_indices=out[:, 128:] if compressed else None,
+        extra_lens=lens[1] if compressed else None,
+    )
+    return out, lens
+
+
+@pytest.mark.parametrize("compress_ratio", [0, 1, 2, 4])
+def test_v41_bi_sparse_paged_indices(compress_ratio):
+    """Each causal row gets the paged SWA and compressed slots the eager
+    prefill path exposes -- the window clipped by the gathered range under
+    replay, top-k cut at its position with out-of-range ids as holes -- and
+    a (request, position) gets the same lists and lengths whether it is a
+    prefill row, a chunk row or a decode / verify row of another batch."""
+    _require_bi_kernels()
+    gen = torch.Generator().manual_seed(compress_ratio)
+    lengths = [16384, 700, 129, 5]
+    topk_rows = []
+    for length in lengths:
+        # Causal ids as the indexer gives them, plus holes and ids past the
+        # request's compressed length.
+        visible = ((torch.arange(length) + 1) // max(compress_ratio, 1)).clamp(min=1)
+        rows = torch.randint(0, 1 << 30, (length, 512), generator=gen)
+        rows %= visible[:, None]
+        noise = torch.rand(length, 512, generator=gen)
+        rows[noise < 0.03] = -1
+        rows[(noise >= 0.03) & (noise < 0.05)] = -7
+        rows[(noise >= 0.05) & (noise < 0.07)] = length + 7
+        topk_rows.append(rows)
+    prefill = [(0, 0, 16384, 0), (1, 0, 700, 0), (2, 0, 129, 0), (3, 0, 5, 0)]
+    mixed = [
+        (1, 699, 1, 0),
+        (0, 9000, 6, 0),
+        (2, 64, 65, 0),
+        (0, 5000, 300, 4990),
+        (3, 2, 3, 0),
+    ]
+    results: dict[tuple[int, int], list[list]] = {}
+    for name, requests in (("prefill", prefill), ("mixed", mixed)):
+        batch = _paged_indices_batch(requests, compress_ratio, topk_rows, gen)
+        out, lens = _run_paged_indices(batch)
+        tokens = batch["token_to_req"].numel()
+        split = tokens // 3
+        head, head_lens = _run_paged_indices(batch, 0, split)
+        tail, tail_lens = _run_paged_indices(batch, split)
+        assert torch.equal(torch.cat([head, tail]), out)
+        assert torch.equal(torch.cat([head_lens, tail_lens], 1), lens)
+        out, lens = out.cpu(), lens.cpu()
+        if not compress_ratio:
+            assert (out[:, 128:] == 12345).all() and (lens[1] == 12345).all()
+        swa_table = batch["swa_table"].cpu()
+        compressed_table = batch["compressed_table"]
+        row = 0
+        for i, (request, prefix, query_len, replay_start) in enumerate(requests):
+            seq_len = prefix + query_len
+            gather = query_len + min(max(prefix - replay_start, 0), 127)
+            for pos in range(prefix, seq_len):
+                swa_start = max(pos - 127, 0, seq_len - gather)
+                swa = [
+                    int(swa_table[i, p // 32]) * 32 + p % 32
+                    for p in range(swa_start, pos + 1)
+                ]
+                assert lens[0, row] == len(swa)
+                assert out[row, : len(swa)].tolist() == swa
+                assert (out[row, len(swa) : 128] == -1).all()
+                # Slots differ by batch only through the page tables.
+                seen = [swa_start, lens[:, row].tolist()]
+                if compress_ratio:
+                    topk_len = min((pos + 1) // compress_ratio, 512)
+                    local = topk_rows[request][pos, :topk_len]
+                    ok = (local >= 0) & (local < seq_len // compress_ratio)
+                    pages = compressed_table[i].cpu()[local.clamp(0) // 64]
+                    slots = torch.where(ok, pages * 64 + local.clamp(0) % 64, -1)
+                    assert lens[1, row] == topk_len
+                    assert torch.equal(out[row, 128 : 128 + topk_len], slots.int())
+                    assert (out[row, 128 + topk_len :] == -1).all()
+                    seen.append(local.where(ok, -1).tolist())
+                if not replay_start:
+                    results.setdefault((request, pos), []).append(seen)
+                row += 1
+        assert (lens[0, row:] == 0).all() and (out[row:, :128] == -1).all()
+        if compress_ratio:
+            assert (lens[1, row:] == 0).all() and (out[row:, 128:] == -1).all()
+    shared = [seen for seen in results.values() if len(seen) > 1]
+    assert len(shared) == 1 + 6 + 65 + 3
+    assert all(seen[0] == seen[1] for seen in shared)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):

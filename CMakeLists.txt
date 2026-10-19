@@ -386,7 +386,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/batch_invariant/hc_collapse.cu"
     "csrc/batch_invariant/sparse_metadata.cu"
     "csrc/batch_invariant/cache_gather.cu"
-    "csrc/batch_invariant/sparse_decode_gather.cu"
+    "csrc/batch_invariant/sparse_paged_indices.cu"
     "csrc/batch_invariant/top_k.cu"
     "csrc/batch_invariant/silu_mul_bf16.cu"
     "csrc/batch_invariant/fused_silu_mul_per_token_group_quant.cu"

@@ -61,17 +61,17 @@ void dequant_gather_nvfp4(const torch::Tensor& cache,
                           const std::optional<torch::Tensor>& gather_lens,
                           const torch::Tensor& block_table, int64_t block_size,
                           int64_t offset, torch::Tensor& output);
-void sparse_decode_gather(
-    const torch::Tensor& topk, const torch::Tensor& token_to_req,
+void sparse_paged_indices(
+    const std::optional<torch::Tensor>& topk, const torch::Tensor& token_to_req,
     const torch::Tensor& is_valid, const torch::Tensor& query_start_loc,
     const torch::Tensor& seq_lens, const torch::Tensor& replay_start,
-    const std::optional<torch::Tensor>& compressed_cache,
     const std::optional<torch::Tensor>& compressed_table,
-    int64_t compressed_block_size, const torch::Tensor& swa_cache,
-    const torch::Tensor& swa_table, int64_t swa_block_size,
-    int64_t token_offset, int64_t num_tokens, int64_t window,
-    int64_t compress_ratio, int64_t top_k, torch::Tensor& kv,
-    torch::Tensor& indices, torch::Tensor& lens);
+    int64_t compressed_block_size, const torch::Tensor& swa_table,
+    int64_t swa_block_size, int64_t token_offset, int64_t num_tokens,
+    int64_t window, int64_t compress_ratio, int64_t top_k,
+    torch::Tensor& swa_indices, torch::Tensor& swa_lens,
+    const std::optional<torch::Tensor>& extra_indices,
+    const std::optional<torch::Tensor>& extra_lens);
 
 void expert_permute(const torch::Tensor& a, const torch::Tensor& scale,
                     const torch::Tensor& routes,
@@ -155,13 +155,13 @@ TORCH_LIBRARY(vllm_batch_invariant, ops) {
       "Tensor block_table, int block_size, int offset, Tensor(a!) output) -> "
       "()");
   ops.def(
-      "sparse_decode_gather(Tensor topk, Tensor token_to_req, Tensor "
+      "sparse_paged_indices(Tensor? topk, Tensor token_to_req, Tensor "
       "is_valid, Tensor query_start_loc, Tensor seq_lens, Tensor "
-      "replay_start, Tensor? compressed_cache, Tensor? compressed_table, "
-      "int compressed_block_size, Tensor swa_cache, Tensor swa_table, "
-      "int swa_block_size, int token_offset, int num_tokens, int window, "
-      "int compress_ratio, int top_k, Tensor(a!) kv, Tensor(b!) indices, "
-      "Tensor(c!) lens) -> ()");
+      "replay_start, Tensor? compressed_table, int compressed_block_size, "
+      "Tensor swa_table, int swa_block_size, int token_offset, "
+      "int num_tokens, int window, int compress_ratio, int top_k, "
+      "Tensor(a!) swa_indices, Tensor(b!) swa_lens, "
+      "Tensor(c!)? extra_indices, Tensor(d!)? extra_lens) -> ()");
   ops.def(
       "expert_permute(Tensor a, Tensor scale, Tensor routes, Tensor? "
       "expert_map, "
@@ -207,8 +207,8 @@ TORCH_LIBRARY_IMPL(vllm_batch_invariant, CUDA, ops) {
   ops.impl("cast_indexer_logits", &vllm::batch_invariant::cast_indexer_logits);
   ops.impl("dequant_gather_nvfp4",
            &vllm::batch_invariant::dequant_gather_nvfp4);
-  ops.impl("sparse_decode_gather",
-           &vllm::batch_invariant::sparse_decode_gather);
+  ops.impl("sparse_paged_indices",
+           &vllm::batch_invariant::sparse_paged_indices);
   ops.impl("expert_permute", &vllm::batch_invariant::expert_permute);
   ops.impl("gather_expert_slots", &vllm::batch_invariant::gather_expert_slots);
   ops.impl("ordered_topk_combine",
