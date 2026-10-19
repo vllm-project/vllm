@@ -52,7 +52,7 @@ from vllm.utils.flashinfer import (
     use_trtllm_attention,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
@@ -84,6 +84,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
+    mask_dcp_empty_shards_,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
@@ -315,59 +316,84 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
-@dataclass
-class TrtllmDCPContextParams:
-    """Metadata for the trtllm-gen context kernel over the DCP-local KV shard."""
+class TrtllmDCPContextWrapper:
+    """trtllm-gen stand-in for the native wrapper in the DCP context pass."""
 
-    block_tables: torch.Tensor
-    # DCP-local context lengths, one per prefill request.
-    seq_lens: torch.Tensor
-    cum_seq_lens_q: torch.Tensor
-    # Cumulative context block counts, as on the non-DCP trtllm prefill path.
-    cum_seq_lens_kv: torch.Tensor
-    max_q_len: int
-    max_kv_len: int
-    batch_size: int
-    sm_scale: float
-    workspace: torch.Tensor
+    # Plan state checked by FlashInferImpl.forward(), as on the native wrapper.
+    _window_left = -1
+    _logits_soft_cap = 0.0
+    _causal = False
 
-    @classmethod
-    def from_cpu(
-        cls,
+    @staticmethod
+    def fits_workspace(qo_indptr_cpu: torch.Tensor, num_qo_heads: int) -> bool:
+        # Mirrors the LSE softmax-stats carve-out in FlashInfer's trtllm-gen
+        # launcher: heads * batch * round_up(max_q_len, 256) float2s + 1 MiB.
+        batch_size = qo_indptr_cpu.shape[0] - 1
+        max_q_len = int((qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).max())
+        stats_bytes = num_qo_heads * batch_size * round_up(max_q_len, 256) * 8
+        return stats_bytes + (1 << 20) <= _get_trtllm_workspace_buffer().nbytes
+
+    def plan(
+        self,
+        *,
+        qo_indptr: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        seq_lens: torch.Tensor,
         block_tables: torch.Tensor,
-        qo_indptr_cpu: torch.Tensor,
-        context_lens_cpu: torch.Tensor,
-        page_size: int,
+        causal: bool,
         sm_scale: float,
-    ) -> "TrtllmDCPContextParams":
-        """Build from prefill-relative query offsets and DCP-local context
-        lengths on the CPU."""
-        seq_lens = context_lens_cpu.to(torch.int32)
-        cum_seq_lens_q = qo_indptr_cpu.to(torch.int32)
-        cum_seq_lens_kv = torch.zeros(
-            seq_lens.shape[0] + 1, dtype=torch.int32, device="cpu"
-        )
-        torch.cumsum(
-            (seq_lens + page_size - 1) // page_size, dim=0, out=cum_seq_lens_kv[1:]
-        )
-        max_q_len = int((cum_seq_lens_q[1:] - cum_seq_lens_q[:-1]).max())
-        max_kv_len = int(seq_lens.max())
-        if PIN_MEMORY:
-            seq_lens = seq_lens.pin_memory()
-            cum_seq_lens_q = cum_seq_lens_q.pin_memory()
-            cum_seq_lens_kv = cum_seq_lens_kv.pin_memory()
+        window_left: int,
+        logits_soft_cap: float | None,
+        **kwargs,
+    ) -> None:
+        assert not causal and window_left == -1 and not logits_soft_cap
         device = block_tables.device
-        return cls(
-            block_tables=block_tables,
-            seq_lens=seq_lens.to(device, non_blocking=True),
-            cum_seq_lens_q=cum_seq_lens_q.to(device, non_blocking=True),
-            cum_seq_lens_kv=cum_seq_lens_kv.to(device, non_blocking=True),
-            max_q_len=max_q_len,
-            max_kv_len=max_kv_len,
-            batch_size=seq_lens.shape[0],
-            sm_scale=sm_scale,
-            workspace=_get_trtllm_workspace_buffer(),
-        )
+        self._block_tables = block_tables
+        self._seq_lens = seq_lens.to(device, non_blocking=True)
+        self._cum_seq_lens_q = qo_indptr.to(device, non_blocking=True)
+        self._cum_seq_lens_kv = paged_kv_indptr.to(device, non_blocking=True)
+        self._max_q_len = int((qo_indptr[1:] - qo_indptr[:-1]).max())
+        self._max_kv_len = int(seq_lens.max())
+        self._has_empty_ctx = bool((seq_lens == 0).any())
+        self._sm_scale = sm_scale
+
+    def run(
+        self,
+        q: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        k_scale: float,
+        v_scale: float,
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert return_lse
+        q = canonicalize_singleton_dim_strides(q.contiguous())
+        # trtllm-gen writes neither the output nor the LSE of requests without
+        # local context; the combine weights them by 0, so the output must be
+        # finite and the LSE -inf.
+        out = torch.zeros_like(q) if self._has_empty_ctx else torch.empty_like(q)
+        lse = torch.empty(q.shape[:2], dtype=torch.float32, device=q.device)
+        if self._max_kv_len > 0:
+            trtllm_batch_context_with_kv_cache(
+                query=q,
+                kv_cache=kv_cache,
+                workspace_buffer=_get_trtllm_workspace_buffer(),
+                block_tables=self._block_tables,
+                seq_lens=self._seq_lens,
+                max_q_len=self._max_q_len,
+                max_kv_len=self._max_kv_len,
+                bmm1_scale=self._sm_scale * k_scale,
+                bmm2_scale=v_scale,
+                batch_size=self._seq_lens.shape[0],
+                cum_seq_lens_q=self._cum_seq_lens_q,
+                cum_seq_lens_kv=self._cum_seq_lens_kv,
+                causal=False,
+                return_lse=True,
+                lse=lse,
+                out=out,
+            )
+        if self._has_empty_ctx:
+            mask_dcp_empty_shards_(lse, self._seq_lens, self._cum_seq_lens_q)
+        return out, lse
 
 
 class BatchDCPPrefillWrapper:
@@ -376,15 +402,19 @@ class BatchDCPPrefillWrapper:
         kv_layout: str,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
+        use_trtllm_context: bool = False,
     ):
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        self._context = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
+        self._native_context = BatchPrefillWithPagedKVCacheWrapper(
+            workspace_buffer, kv_layout
+        )
+        self._trtllm_context = TrtllmDCPContextWrapper() if use_trtllm_context else None
+        # The context-pass wrapper planned for this step.
+        self._context: BatchPrefillWithPagedKVCacheWrapper | TrtllmDCPContextWrapper
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
-        # Set by plan() when the context pass uses the trtllm-gen kernel.
-        self._trtllm_ctx: TrtllmDCPContextParams | None = None
 
     def plan(
         self,
@@ -405,34 +435,36 @@ class BatchDCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
-        trtllm_context: TrtllmDCPContextParams | None = None,
+        block_tables: torch.Tensor,
     ):
-        """Plan the prefill operation with given parameters.
-
-        If `trtllm_context` is given, the context pass runs on the trtllm-gen
-        kernel and the native context wrapper is not planned.
-        """
-        self._trtllm_ctx = trtllm_context
-        if trtllm_context is None:
-            self._context.plan(
-                qo_indptr=qo_indptr_cpu,
-                paged_kv_indptr=paged_kv_indptr_cpu,
-                paged_kv_indices=paged_kv_indices,
-                paged_kv_last_page_len=paged_kv_last_page_len_cpu,
-                seq_lens=kv_lens_cpu,
-                num_qo_heads=num_qo_heads * dcp_world_size,
-                num_kv_heads=num_kv_heads,
-                head_dim_qk=head_dim,
-                page_size=page_size,
-                causal=False,  # This is context run
-                sm_scale=sm_scale,
-                window_left=window_left,
-                logits_soft_cap=logits_soft_cap,
-                q_data_type=q_data_type,
-                kv_data_type=kv_cache_dtype,
-                fixed_split_size=prefill_fixed_split_size,
-                disable_split_kv=disable_split_kv,
+        """Plan the prefill operation with given parameters."""
+        self._context = self._native_context
+        if self._trtllm_context is not None and (
+            TrtllmDCPContextWrapper.fits_workspace(
+                qo_indptr_cpu, num_qo_heads * dcp_world_size
             )
+        ):
+            self._context = self._trtllm_context
+        self._context.plan(
+            qo_indptr=qo_indptr_cpu,
+            paged_kv_indptr=paged_kv_indptr_cpu,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+            seq_lens=kv_lens_cpu,
+            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
+            causal=False,  # This is context run
+            sm_scale=sm_scale,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_cache_dtype,
+            fixed_split_size=prefill_fixed_split_size,
+            disable_split_kv=disable_split_kv,
+            block_tables=block_tables,
+        )
         self._new_tokens.plan(
             qo_indptr=qo_indptr_cpu,
             kv_indptr=qo_indptr_cpu,
@@ -447,47 +479,6 @@ class BatchDCPPrefillWrapper:
             q_data_type=q_data_type,
         )
 
-    def _run_trtllm_context(
-        self,
-        layer: torch.nn.Module,
-        q: torch.Tensor,
-        kv_cache_tuple: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        c = self._trtllm_ctx
-        assert c is not None
-        # The kernel does not write the output of requests with no local
-        # context, and the all-gather combine scales every rank's output by
-        # its weight (0 for such rows), so the output must not hold NaNs.
-        # Their LSE is masked to -inf by the combine (see run()).
-        out = torch.zeros_like(q)
-        lse = torch.empty(
-            (q.shape[0], q.shape[1]), dtype=torch.float32, device=q.device
-        )
-        if c.max_kv_len == 0:
-            # No context on this rank (e.g. the first chunk of every request).
-            return out, lse
-        trtllm_batch_context_with_kv_cache(
-            query=q,
-            kv_cache=kv_cache_tuple,
-            workspace_buffer=c.workspace,
-            block_tables=c.block_tables,
-            seq_lens=c.seq_lens,
-            max_q_len=c.max_q_len,
-            max_kv_len=c.max_kv_len,
-            # As in the native context pass: the query is not quantized here, so
-            # q_scale (loaded even for unquantized KV caches) does not apply.
-            bmm1_scale=c.sm_scale * layer._k_scale_float,
-            bmm2_scale=layer._v_scale_float,
-            batch_size=c.batch_size,
-            cum_seq_lens_q=c.cum_seq_lens_q,
-            cum_seq_lens_kv=c.cum_seq_lens_kv,
-            causal=False,
-            return_lse=True,
-            lse=lse,
-            out=out,
-        )
-        return out, lse
-
     def run(
         self,
         layer: torch.nn.Module,
@@ -500,37 +491,18 @@ class BatchDCPPrefillWrapper:
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
         )
-        seq_lens = query_start_loc = None
-        if self._trtllm_ctx is None:
-            output_context_tmp, lse_context_tmp = self._context.run(
-                prefill_query_across_dcp,
-                kv_cache_tuple,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                return_lse=True,
-            )
-        else:
-            # trtllm-gen non-causal paged context over the DCP-local KV shard.
-            # Unlike the native paged kernel, its LSE for requests with no
-            # local context is unspecified (it is derived from softmax stats
-            # the kernel never writes for them), so those rows are masked as
-            # empty shards in the combine, as on the trtllm DCP decode path.
-            output_context_tmp, lse_context_tmp = self._run_trtllm_context(
-                layer,
-                canonicalize_singleton_dim_strides(
-                    prefill_query_across_dcp.contiguous()
-                ),
-                kv_cache_tuple,
-            )
-            seq_lens = self._trtllm_ctx.seq_lens
-            query_start_loc = self._trtllm_ctx.cum_seq_lens_q
+        output_context_tmp, lse_context_tmp = self._context.run(
+            prefill_query_across_dcp,
+            kv_cache_tuple,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            return_lse=True,
+        )
         output_context, lse_context = self._dcp_combine(
             output_context_tmp,
             lse_context_tmp,
             get_dcp_group(),
             return_lse=True,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
         )
         lse_context = log2_lse_to_ln(lse_context.transpose(0, 1).contiguous())
 
@@ -1073,12 +1045,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.sm_scale = self.global_hyperparameters.sm_scale
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
-        # DCP prefill cannot use the causal trtllm-gen prefill path, but its
-        # non-causal context pass can use the trtllm-gen context kernel. As in
-        # prefill auto-selection, this needs trtllm-gen prefill to be available
-        # (and use_trtllm_attention not 0) and an unquantized KV cache. In
-        # non-causal mode the kernel supports neither sliding windows nor
-        # soft-capping.
+        # The DCP prefill context pass runs on trtllm-gen when available, with
+        # an unquantized KV cache and no sliding window or soft-capping.
         self.use_trtllm_dcp_prefill = (
             self.use_dcp
             and can_use_trtllm_attention(
@@ -1419,6 +1387,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
+                    use_trtllm_context=self.use_trtllm_dcp_prefill,
                 )
             else:
                 if self.has_sinks and (
@@ -1816,17 +1785,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    trtllm_context = None
-                    if self.use_trtllm_dcp_prefill:
-                        # seq_lens_cpu is already the DCP-local *context* length
-                        # (query tokens subtracted, sharded across DCP ranks).
-                        trtllm_context = TrtllmDCPContextParams.from_cpu(
-                            block_tables=block_table_tensor[prefill_start:],
-                            qo_indptr_cpu=qo_indptr_prefill_cpu,
-                            context_lens_cpu=seq_lens_cpu[prefill_start:],
-                            page_size=page_size,
-                            sm_scale=self.sm_scale,
-                        )
                     prefill_wrapper.plan(
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
@@ -1845,7 +1803,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_cache_dtype=self.kv_cache_dtype,
                         prefill_fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
-                        trtllm_context=trtllm_context,
+                        block_tables=block_table_tensor[prefill_start:],
                     )
                 else:
                     assert isinstance(
@@ -2349,16 +2307,12 @@ class FlashInferImpl(AttentionImpl):
                             "FlashInfer DCP prefill does not support KV-sharing layers"
                         )
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    if prefill_wrapper._trtllm_ctx is not None:
-                        assert prefill_wrapper._trtllm_ctx.sm_scale == self.scale
-                    else:
-                        context_wrapper = prefill_wrapper._context
-                        assert context_wrapper._window_left == self.window_left
-                        assert context_wrapper._logits_soft_cap == (
-                            self.logits_soft_cap or 0.0
-                        )
-                        assert context_wrapper._sm_scale == self.scale
-                        assert not context_wrapper._causal
+                    assert prefill_wrapper._context._window_left == self.window_left
+                    assert prefill_wrapper._context._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
+                    assert prefill_wrapper._context._sm_scale == self.scale
+                    assert not prefill_wrapper._context._causal
                     assert prefill_wrapper._new_tokens._window_left == self.window_left
                     assert prefill_wrapper._new_tokens._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
