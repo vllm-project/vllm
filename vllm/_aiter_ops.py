@@ -2855,6 +2855,18 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    def qk_norm_rope_shuffle_layout_supported(
+        head_size: int, kv_cache_dtype: str
+    ) -> bool:
+        """Whether the fused QK-norm+RoPE+KV-cache shuffle write fits head_size.
+
+        The AITER kernel requires x >= head_size // 32, where x is the number
+        of cache elements per 16 bytes (e.g. head_size 512 needs an fp8 cache).
+        """
+        x = 16 if kv_cache_dtype.startswith("fp8") else 8
+        return x >= head_size // 32
+
+    @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
         if type(num_tokens) is not int or num_tokens <= 0:

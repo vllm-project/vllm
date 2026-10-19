@@ -408,7 +408,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        return rocm_aiter_ops.is_enabled() and (
+            not self._use_shuffle_kv
+            or rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND

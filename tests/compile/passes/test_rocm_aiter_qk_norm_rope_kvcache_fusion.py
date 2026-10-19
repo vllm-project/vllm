@@ -694,6 +694,13 @@ def test_qk_norm_rope_kvcache_fusion(
     has_v_norm: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    # The shuffle-layout writer needs an fp8 cache for head_size 512.
+    uses_shuffle = (
+        attn_backend == AttentionBackendEnum.ROCM_ATTN or use_shuffle_kv_layout == "1"
+    )
+    expect_fusion = not uses_shuffle or (
+        rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(head_size, kv_cache_dtype)
+    )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
@@ -712,6 +719,7 @@ def test_qk_norm_rope_kvcache_fusion(
         custom_op=custom_op,
         has_v_norm=has_v_norm,
         monkeypatch=monkeypatch,
+        expect_fusion=expect_fusion,
     )
 
 

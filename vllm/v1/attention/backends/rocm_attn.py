@@ -515,7 +515,12 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # The fused write here always uses the shuffle layout.
+        return rocm_aiter_ops.is_enabled() and (
+            rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def set_interleaved_v_cache(self):
         # Decode/prefill kernels must read the interleaved V-cache the AITER

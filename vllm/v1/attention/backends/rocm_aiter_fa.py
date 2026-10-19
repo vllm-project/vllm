@@ -1626,7 +1626,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        return rocm_aiter_ops.is_enabled() and (
+            not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            or rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def do_qk_norm_rope_kvcache_update(
         self,
