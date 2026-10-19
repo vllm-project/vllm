@@ -63,22 +63,10 @@ def main() -> int:
         print("Usage: check_trust_remote_code.py <file> ...", file=sys.stderr)
         return 1
 
-    all_violations = []
-    for filepath in sys.argv[1:]:
-        all_violations.extend(check_file(filepath))
-
-    if all_violations:
-        print(
-            "❌ Hardcoded `trust_remote_code=True`.\n"
-            "   This overrides the user's --trust-remote-code setting and can\n"
-            "   execute code from a malicious model repo. Pass the user's\n"
-            "   setting through, e.g. `model_config.trust_remote_code`.\n"
-            f"   If the call is genuinely safe, add `{SUPPRESS_MARKER} (reason)`.\n"
-        )
-        for v in all_violations:
-            print(f"  {v}")
-        return 1
-    return 0
+    violations = [v for filepath in sys.argv[1:] for v in check_file(filepath)]
+    for v in violations:
+        print(v)
+    return 1 if violations else 0
 
 
 if __name__ == "__main__":
