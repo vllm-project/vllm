@@ -49,6 +49,7 @@ from .qwen3_omni_moe_thinker import (
     Qwen3OmniMoeThinkerMultiModalProcessor,
     Qwen3OmniMoeThinkerProcessingInfo,
 )
+from .utils import maybe_prefix
 
 JOINT_HEAD_WEIGHTS = "joint_head.safetensors"
 NUM_QUESTION_TYPES = 3
@@ -416,6 +417,26 @@ class ClefOmniForJointSchema(Qwen3OmniMoeThinkerForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        # The joint head looks up output embeddings; it never projects logits.
+        # Use an embedding layer so quantization dispatch and lookup agree on
+        # this table's role, while retaining its checkpoint name and layout.
+        old_head = self.language_model.lm_head
+        self.language_model.lm_head = VocabParallelEmbedding(
+            old_head.num_embeddings,
+            old_head.embedding_dim,
+            params_dtype=old_head.params_dtype,
+            org_num_embeddings=old_head.org_vocab_size,
+            padding_size=old_head.padding_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "language_model.lm_head"),
+            disable_tp=old_head.disable_tp,
+            reduce_results=old_head.reduce_results,
+            parallel_group=old_head.parallel_group,
+        )
+        if self.language_model.config.tie_word_embeddings:
+            self.language_model.lm_head.weight = (
+                self.language_model.model.embed_tokens.weight
+            )
         model_config = vllm_config.model_config
         head_config = model_config.hf_config.joint_head_config
         self.pooler = JointSchemaPooler(
@@ -432,6 +453,5 @@ class ClefOmniForJointSchema(Qwen3OmniMoeThinkerForConditionalGeneration):
         ]
 
     def _embed_lexical(self, token_ids: torch.Tensor) -> torch.Tensor:
-        # The head embeds options with the output embeddings. ParallelLMHead
-        # forbids lookups, so use the vocab-parallel embedding's.
+        # Options use the output table, not the input-token embeddings.
         return VocabParallelEmbedding.forward(self.language_model.lm_head, token_ids)
