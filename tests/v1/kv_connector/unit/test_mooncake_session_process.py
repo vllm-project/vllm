@@ -84,6 +84,13 @@ def _open_message(profile="", **topology):
     return CompressionSessionOpen(metadata, "n", profile)
 
 
+@pytest.mark.parametrize("layout_id", [0, 7])
+def test_session_open_preserves_layout_id(layout_id):
+    request = _open_message(layout_id=layout_id)
+    restored = _REQ_DEC.decode(_ENC.encode(request))
+    assert restored.metadata == request.metadata
+
+
 @pytest.fixture
 def make_service():
     def factory(sender=True, slots=2):

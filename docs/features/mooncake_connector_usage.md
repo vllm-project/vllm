@@ -106,6 +106,8 @@ Compressed P/D requires identical TP and PP sizes and a common logical
 block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
 compressed KV are unsupported and fail explicitly. No adaptive selection or
 Mooncake Store compression is implemented here.
+Sleep mode is unsupported when compression or raw aggregation is enabled;
+disabled compression retains native Mooncake's RDMA sleep support.
 The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
 `LBNHC` (`NHD`) is unsupported and rejected before pipeline initialization.
 Backend-specific K/V packing (such as B12x planes) and pooled token/state

@@ -2973,6 +2973,31 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         prefill_worker.shutdown()
 
 
+@pytest.mark.parametrize(
+    "extra_config,supported",
+    [
+        ({}, True),
+        ({"compression": {"enable-compression-pipeline": False}}, True),
+        ({"compression": {"enable-compression-pipeline": True}}, False),
+        ({"raw_aggregate": False}, True),
+        ({"raw_aggregate": {}}, False),
+        ({"raw_agg": True}, False),
+        ({"mooncake_protocol": "tcp"}, False),
+    ],
+)
+def test_sleep_requires_native_rdma_without_compression(
+    monkeypatch, extra_config, supported
+):
+    for name in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK", "MC_USE_TENT", "MC_USE_TEV1"):
+        monkeypatch.delenv(name, raising=False)
+    config = KVTransferConfig(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    assert MooncakeConnector.supports_sleep_mode(config) is supported
+
+
 def test_sleep_unregisters_and_restores_kv_caches():
     spec = FullAttentionSpec(
         block_size=maybe_update_block_size(16),

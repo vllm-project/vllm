@@ -899,6 +899,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         ):
             return False
         extra_config = kv_transfer_config.kv_connector_extra_config
+        aggregate = extra_config.get("raw_aggregate", extra_config.get("raw_agg"))
+        compression = extra_config.get("compression") or {}
+        # The compression pool and helper do not participate in sleep/wake.
+        if (aggregate is not None and aggregate is not False) or compression.get(
+            "enable-compression-pipeline", False
+        ):
+            return False
         return extra_config.get("mooncake_protocol", "rdma") == "rdma"
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
