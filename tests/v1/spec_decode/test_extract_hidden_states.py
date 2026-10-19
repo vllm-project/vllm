@@ -350,7 +350,7 @@ def test_unified_kv_cache_update_slot_mapping_list():
     attn_layer = SimpleNamespace(kv_cache=torch.empty(0), impl=impl)
     ctx = ForwardContext(
         no_compile_layers={layer_name: attn_layer},
-        attn_metadata={layer_name: None},
+        attn_metadata={},
         slot_mapping=[{layer_name: slots}],
     )
     with override_forward_context(ctx):
