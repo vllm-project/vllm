@@ -5,8 +5,12 @@ set -euo pipefail
 SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
 IMPORT_CANARY="v1/kv_connector/nixl_integration/test_nixl_imports.py"
 
-echo "=== Running NIXL import canary ==="
-python3 -m pytest -s -x "${IMPORT_CANARY}"
+# test_config_sweep.py lists the configs with --list and runs each one alone
+# with SWEEP_CONFIG=<config>; the CI step runs the canary itself.
+if [[ "${1:-}" != "--list" && -z "${SWEEP_CONFIG:-}" ]]; then
+  echo "=== Running NIXL import canary ==="
+  python3 -m pytest -s -x "${IMPORT_CANARY}"
+fi
 
 # Define test configurations
 tp_configs=(
@@ -44,15 +48,25 @@ sw_attn_configs=(
 # Select config array based on DP_EP env var
 if [[ -n "${DP_EP:-}" ]]; then
   configs=("${dp_ep_configs[@]}")
-  echo "DP_EP is set, using dp_ep_configs"
+  echo "DP_EP is set, using dp_ep_configs" >&2
 elif [[ -n "${HYBRID_SSM:-}" ]]; then
   configs=("${hybrid_ssm_configs[@]}")
-  echo "HYBRID_SSM is set, using hybrid_ssm_configs."
+  echo "HYBRID_SSM is set, using hybrid_ssm_configs." >&2
 elif [[ -n "${SW_ATTN:-}" ]]; then
   configs=("${sw_attn_configs[@]}")
-  echo "SW_ATTN is set, using sw_attn_configs."
+  echo "SW_ATTN is set, using sw_attn_configs." >&2
 else
   configs=("${tp_configs[@]}")
+fi
+if [[ -n "${WITH_SLEEP_WAKE:-}" ]]; then
+  configs+=("GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1")
+fi
+if [[ "${1:-}" == "--list" ]]; then
+  printf '%s\n' "${configs[@]}"
+  exit 0
+fi
+if [[ -n "${SWEEP_CONFIG:-}" ]]; then
+  configs=("${SWEEP_CONFIG}")
 fi
 
 run_tests() {
