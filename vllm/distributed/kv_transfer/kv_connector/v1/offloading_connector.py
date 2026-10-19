@@ -71,6 +71,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler
 
     @property
+    def external_load_alignment(self) -> int:
+        # Loads any block-aligned prefix of a hit.
+        return 1
+
+    @property
     def requires_kv_delivery(self) -> bool:
         # Runs as kv_both, but is a best-effort cache: a dropped save is just a
         # future cache miss, so opt out of the producer-role default.

@@ -5,12 +5,13 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -32,6 +33,8 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -64,8 +67,32 @@ def test_background_store_publishes_without_blocking_caller():
     underlying.close.assert_called_once_with()
 
 
+def _kv_cache_manager(
+    cached: dict, hashes_per_block: int = 1, num_blocks: int = 0
+) -> SimpleNamespace:
+    """A KV cache manager whose GPU prefix cache holds the keys of `cached`.
+
+    `num_blocks` bounds the retained blocks that no KV cache tier reports.
+    """
+    block_pool = SimpleNamespace(
+        get_cached_block=lambda block_hash, _: cached.get(block_hash),
+        hash_block_size=_BLOCK_SIZE,
+        kv_event_queue=[],
+    )
+    manager = SimpleNamespace(
+        block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
+    )
+    return SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[manager], scheduler_block_size=manager.block_size
+        ),
+        block_pool=block_pool,
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+    )
+
+
 def _make_connector():
-    return AuxOutputSchedulerConnector()
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
 
 
 @dataclass
@@ -1235,22 +1262,18 @@ def test_worker_fails_when_cached_aux_output_is_missing():
     worker.close()
 
 
-def test_store_rejects_oversized_batch_without_partial_write():
+def test_store_grows_with_a_warning_when_every_object_is_referenced():
     store = _make_store(max_bytes=6, object_nbytes=3)
-    store.put([BlockObject("retained", b"rrr")])
+    store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
+    store.put([], retain_keys=["kept"])
 
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put(
-            [
-                BlockObject("first", b"111"),
-                BlockObject("second", b"222"),
-                BlockObject("third", b"333"),
-            ]
-        )
+    with patch.object(store_module.logger, "warning") as warning:
+        store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
 
-    assert store.get_concatenated(["retained"]) == b"rrr"
+    warning.assert_called_once()
+    assert store.get_concatenated(["kept", "first", "second"]) == b"kkk111222"
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["first"])
+        store.get_concatenated(["unused"])
     store.close()
 
 
@@ -1262,7 +1285,7 @@ def test_store_lru_and_immutable_put():
     store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.close()
 
@@ -1865,3 +1888,125 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+# Two hash blocks per KV block: blocks (h0, h1) and (h2, h3).
+_HASHES = [bytes([index]) * 32 for index in range(4)]
+
+
+def _kv_event(event_type, medium: str, block_hash: bytes):
+    hashes = [maybe_convert_block_hash(block_hash)]
+    if event_type is BlockRemoved:
+        return BlockRemoved(block_hashes=hashes, medium=medium, group_idx=0)
+    return BlockStored(
+        block_hashes=hashes,
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=0,
+        lora_id=None,
+        medium=medium,
+        lora_name=None,
+        group_idx=0,
+    )
+
+
+def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    retained, released = metadata.retained_block_hashes, metadata.released_block_hashes
+    return list(retained or ()), list(released or ())
+
+
+def _finished_request_with_cached_blocks(num_blocks: int = 0):
+    cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == (_HASHES, [])
+    return cached, connector, request
+
+
+def test_connector_retains_blocks_while_a_kv_cache_tier_holds_them():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    assert connector.max_cache_hit(request) == 16
+
+    # The second block moves to the CPU tier and stays retained.
+    connector.update_kv_cache_events([_kv_event(BlockStored, "CPU", _HASHES[3])])
+    del cached[_HASHES[3]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[3])])
+    assert _kv_cache_metadata(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    # A block no tier holds is released, which ends the hit.
+    del cached[_HASHES[1]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[1])] * 2)
+    assert _kv_cache_metadata(connector) == ([], _HASHES[:2])
+    assert connector.max_cache_hit(request) == 0
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "CPU", _HASHES[3])])
+    assert _kv_cache_metadata(connector) == ([], _HASHES[2:])
+
+
+@pytest.mark.parametrize(
+    "reset,expected_generation",
+    [("reset_connector_cache", 0), ("reset", 1)],
+    ids=["cpu-tier-cleared", "prefix-cache-reset"],
+)
+def test_connector_releases_retained_blocks_on_reset(reset, expected_generation):
+    cached, connector, _ = _finished_request_with_cached_blocks()
+    cached.clear()
+    getattr(connector, reset)()
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    assert metadata.generation == expected_generation
+    assert list(metadata.released_block_hashes) == _HASHES
+
+
+def test_connector_keeps_pending_load_blocks_retained():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    connector.request_loading(request, 16)
+    cached.clear()
+    removed = [
+        _kv_event(BlockRemoved, "GPU", _HASHES[1]),
+        _kv_event(BlockRemoved, "GPU", _HASHES[3]),
+    ]
+    connector.update_kv_cache_events(removed)
+    assert _kv_cache_metadata(connector) == ([], [])
+
+    # The load is aborted, so its blocks are released.
+    connector.request_finished(request)
+    retained, released = _kv_cache_metadata(connector)
+    assert (retained, sorted(released)) == ([], _HASHES)
+
+
+def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
+    worker = _make_worker(1)
+    store = worker._store
+    keys = routed_experts_keys(_HASHES[:2], "0")
+    step = _metadata(0, [], {})
+    step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
+    _begin_step(worker, step)
+    assert all(store._references[key] == 1 for key in keys)
+
+    step = _metadata(0, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[0], 32)
+    _begin_step(worker, step)
+    assert keys[0] not in store._references
+
+    # A prefix-cache reset releases the rest in the generation that retained it.
+    step = _metadata(1, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
+    _begin_step(worker, step)
+    assert not store._references
+
+
+def test_connector_keeps_evicted_blocks_until_the_lru_is_full():
+    # A KV connector without residency events may still hold evicted blocks.
+    cached, connector, request = _finished_request_with_cached_blocks(num_blocks=1)
+    del cached[_HASHES[3]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[3])])
+    assert _kv_cache_metadata(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    # A second evicted block releases the oldest one.
+    del cached[_HASHES[1]]
+    connector.update_kv_cache_events([_kv_event(BlockRemoved, "GPU", _HASHES[1])])
+    assert _kv_cache_metadata(connector) == ([], _HASHES[2:])
+    assert connector.max_cache_hit(request) == 8
