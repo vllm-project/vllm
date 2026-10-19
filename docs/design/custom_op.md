@@ -321,7 +321,7 @@ In addition, you can also register all your `CustomOp` at one place for better m
 `vllm.v1.attention.ops.dcp` support OOT replacements. Workspaces own buffers and
 views; ops own communication, reduction and fallbacks. `workspace` may be `None`.
 CUDA preserves the existing direct kernels, eligibility controls and fallbacks;
-XPU retains its existing fallbacks. CPU, TPU and OOT default to Torch
+XPU explicitly uses its existing collectives. CPU, TPU and OOT default to Torch
 `forward_native`.
 
 Register through `vllm.general_plugins` on every worker before model construction.

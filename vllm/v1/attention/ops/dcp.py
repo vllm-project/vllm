@@ -1419,7 +1419,11 @@ class DirectDCPQGather(DirectCPCollective):
         )
         return output
 
-    forward_xpu = forward_cuda
+    def forward_xpu(self, local_query: torch.Tensor) -> torch.Tensor:
+        output = self.group.all_gather(local_query, dim=1)
+        if self.padded_num_heads is not None:
+            output = reserve_query_head_storage(output, self.padded_num_heads)
+        return output
 
 
 @CustomOp.register("direct_dcp_a2a_lse_reduce")
@@ -1511,8 +1515,22 @@ class DirectDCPA2AReduce(DirectCPCollective):
         )
         return output
 
-    # XPU retains the Triton path without inheriting CUDA-only plugin overrides.
-    forward_xpu = forward_cuda
+    def forward_xpu(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return dcp_a2a_lse_reduce(
+            partial_output,
+            partial_lse,
+            cp_group=self.group,
+            is_lse_base_on_e=is_lse_base_on_e,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
 
 
 @CustomOp.register("direct_dcp_kv_gather")
@@ -1557,7 +1575,10 @@ class DirectDCPKVGather(DirectCPCollective):
             signal_multicast_ptr,
         )
 
-    forward_xpu = forward_cuda
+    def forward_xpu(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
+        dist.all_gather_into_tensor(
+            gathered_kv, local_kv, group=self.group.device_group
+        )
 
 
 class DCPCombine(Protocol):

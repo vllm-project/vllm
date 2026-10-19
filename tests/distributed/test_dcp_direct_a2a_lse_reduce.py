@@ -244,7 +244,9 @@ def test_direct_dcp_platform_fallback(
             monkeypatch.setattr(
                 custom_op.current_platform, f"is_{name}", lambda n=name: n == platform
             )
-        op = op_cls(group)
+        # XPU must not inspect the CUDA symmetric-memory workspace.
+        workspace = SimpleNamespace() if platform == "xpu" else None
+        op = op_cls(group, workspace)
     if op_cls is dcp.DirectDCPQGather:
         result = op(torch.ones(2, 1, 2))
         expected = torch.tensor([[[1.0, 1.0], [3.0, 3.0]]] * 2)
