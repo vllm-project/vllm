@@ -272,3 +272,158 @@ class TestHYV3ExtractToolCallsStreaming:
         tc = _collect_streaming_tool_calls(results)
         assert len(tc) == 1 and tc[0]["name"] == "get_current_date"
         assert json.loads(tc[0]["arguments"]) == {}
+
+    def test_literal_tool_calls_marker_in_argument_streaming(
+        self, hy_v3_tool_parser, mock_request
+    ):
+        deltas = [
+            "Intro.",
+            "<tool_calls><tool_call>get_weather<tool_sep>",
+            "<arg_key>city</arg_key><arg_value>has <tool_calls> literal</arg_value>",
+            "</tool_call></tool_calls>",
+        ]
+        results = _simulate_streaming(hy_v3_tool_parser, deltas, mock_request)
+        assert _collect_streaming_content(results) == "Intro."
+        tc = _collect_streaming_tool_calls(results)
+        assert len(tc) == 1
+        assert tc[0]["name"] == "get_weather"
+        assert json.loads(tc[0]["arguments"]) == {"city": "has <tool_calls> literal"}
+
+    def test_control_char_in_string_argument_streaming(
+        self, hy_v3_tool_parser, mock_request
+    ):
+        deltas = [
+            "<tool_calls><tool_call>get_weather<tool_sep>",
+            "<arg_key>city</arg_key><arg_value>Bei\x08jing",
+            "</arg_value></tool_call></tool_calls>",
+        ]
+        results = _simulate_streaming(hy_v3_tool_parser, deltas, mock_request)
+        tc = _collect_streaming_tool_calls(results)
+        assert len(tc) == 1
+        assert json.loads(tc[0]["arguments"]) == {"city": "Bei\x08jing"}
+
+
+class TestHYV4ExtractorStreaming:
+    @staticmethod
+    def _make_extractor():
+        from vllm.tool_parsers.hy_v4_tool_parser import HYV4ToolExtractor
+
+        vocab = {
+            "<tool_calls>": 100,
+            "</tool_calls>": 101,
+            "<tool_call>": 102,
+            "</tool_call>": 103,
+            "<arg_key>": 104,
+            "</arg_key>": 105,
+            "<arg_value>": 106,
+            "</arg_value>": 107,
+        }
+        tools = [
+            {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            }
+        ]
+        return HYV4ToolExtractor(vocab, "", strict=True), tools
+
+    def test_guided_streaming_preserves_held_back_partial_prefix(self):
+        extractor, tools = self._make_extractor()
+        deltas = ["Result: x <", " 10 and <tool_", "name> is valid"]
+        prev_text = ""
+        emitted_content: list[str] = []
+        for idx, d in enumerate(deltas):
+            cur_text = prev_text + d
+            out = extractor.extract_tool_calls_streaming(
+                prev_text,
+                cur_text,
+                d,
+                list(range(idx)),
+                list(range(idx + 1)),
+                [idx],
+                tools,
+                guided=True,
+            )
+            if out and out["content"]:
+                emitted_content.append(out["content"])
+            prev_text = cur_text
+
+        assert "".join(emitted_content) == "".join(deltas)
+
+    def test_guided_streaming_preserves_prefix_before_split_marker(self):
+        extractor, tools = self._make_extractor()
+        deltas = [
+            "Compare a <",
+            "<tool_",
+            "calls><tool_call>get_weather",
+            "<arg_key>city</arg_key><arg_value>Paris</arg_value>",
+            "</tool_call></tool_calls>",
+        ]
+        prev_text = ""
+        emitted_content: list[str] = []
+        args_parts: list[str] = []
+        for idx, d in enumerate(deltas):
+            cur_text = prev_text + d
+            out = extractor.extract_tool_calls_streaming(
+                prev_text,
+                cur_text,
+                d,
+                list(range(idx)),
+                list(range(idx + 1)),
+                [idx],
+                tools,
+                guided=True,
+            )
+            if out:
+                if out["content"]:
+                    emitted_content.append(out["content"])
+                for tc in out["tool_calls"]:
+                    if tc["arguments"]:
+                        args_parts.append(tc["arguments"])
+            prev_text = cur_text
+
+        assert "".join(emitted_content) == "Compare a <"
+        assert json.loads("".join(args_parts)) == {"city": "Paris"}
+
+    def test_unguided_streaming_literal_marker_in_argument(self):
+        extractor, tools = self._make_extractor()
+        deltas = [
+            ("Intro.", [1]),
+            ("<tool_calls><tool_call>get_weather", [100, 102, 2]),
+            (
+                "<arg_key>city</arg_key><arg_value>has <tool_calls> inside</arg_value>",
+                [104, 3, 105, 106, 100, 4, 107],
+            ),
+            ("</tool_call></tool_calls>", [103, 101]),
+        ]
+        prev_text = ""
+        prev_ids: list[int] = []
+        emitted_content: list[str] = []
+        args_parts: list[str] = []
+        for d, d_ids in deltas:
+            cur_text = prev_text + d
+            cur_ids = prev_ids + d_ids
+            out = extractor.extract_tool_calls_streaming(
+                prev_text,
+                cur_text,
+                d,
+                prev_ids,
+                cur_ids,
+                d_ids,
+                tools,
+                guided=False,
+            )
+            if out:
+                if out["content"]:
+                    emitted_content.append(out["content"])
+                for tc in out["tool_calls"]:
+                    if tc["arguments"]:
+                        args_parts.append(tc["arguments"])
+            prev_text = cur_text
+            prev_ids = cur_ids
+
+        assert "".join(emitted_content) == "Intro."
+        assert json.loads("".join(args_parts)) == {"city": "has <tool_calls> inside"}
+
