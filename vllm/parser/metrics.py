@@ -135,8 +135,9 @@ def record_tool_parser_invocation(
 ) -> None:
     """Increment the tool-call parser invocation counter when registered.
 
-    Keep legacy API attribution and no-tool classification for exceptions.
-    Native API surfaces and surfaced failures are reported by the response counter.
+    Messages requests are converted to ChatCompletionRequest before parsing,
+    so they use request_type="chat_completions". Exceptions count as "no_tool_call";
+    the response counter reports surfaced parsing failures separately.
     """
     if _tool_call_parser_invocations is None:
         return
