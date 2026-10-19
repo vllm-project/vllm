@@ -5,11 +5,14 @@ from typing import Any
 
 from fastapi import Request
 
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.decisions.question_types import (
+    Question,
+    StructuredDecisionError,
+    build_question,
+)
+from vllm.entrypoints.openai.decisions.serving import BaseServingDecisions
+from vllm.entrypoints.openai.decisions.strategies import DecisionLimits
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.logger import init_logger
 
 from .protocol import (
     DecisionUsage,
@@ -17,10 +20,6 @@ from .protocol import (
     StructuredDecisionRequest,
     StructuredDecisionResponse,
 )
-from .question_types import Question, StructuredDecisionError, build_question
-from .strategies import DecisionLimits, ReadStrategy
-
-logger = init_logger(__name__)
 
 
 def parse_questions(
@@ -46,27 +45,13 @@ def parse_questions(
                 spec.instructions,
                 spec.criteria,
                 limits.max_options,
+                labeled=limits.labeled,
             )
         )
     return questions
 
 
-class ServingStructuredDecisions(BaseServing):
-    def __init__(
-        self,
-        models: OpenAIServingModels,
-        strategy: ReadStrategy,
-        *,
-        request_logger: RequestLogger | None = None,
-    ) -> None:
-        model_config = strategy.context.engine_client.model_config
-        super().__init__(
-            models=models, model_config=model_config, request_logger=request_logger
-        )
-        self.engine_client = strategy.context.engine_client
-        self.strategy = strategy
-        self.limits = strategy.limits()
-
+class ServingStructuredDecisions(BaseServingDecisions):
     def _media(self, request: StructuredDecisionRequest) -> dict[str, list[str]]:
         urls = {
             "image": request.images,
