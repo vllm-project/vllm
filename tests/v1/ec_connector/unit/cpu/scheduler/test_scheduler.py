@@ -22,12 +22,16 @@ class _Pos:
         self.offset = offset
         self.length = length
 
+    def get_num_embeds(self):
+        return self.length
+
 
 class _Feature:
     def __init__(self, mm_hash, length=1, identifier=None):
         self.mm_hash = mm_hash
         self.identifier = identifier if identifier is not None else mm_hash
         self.mm_position = _Pos(0, length)
+        self.modality = "image"
 
 
 class _Request:
@@ -80,7 +84,7 @@ def _make_scheduler(
 
 def _load_ids(meta) -> list[int]:
     """Transfer ids the scheduler dispatched in this step's metadata."""
-    return [transfer_id for transfer_id, _ in meta.loads.values()]
+    return [transfer_id for transfer_id, _, _ in meta.loads.values()]
 
 
 def _load_blocks(meta, mm_hash: str) -> list[int]:
@@ -90,7 +94,7 @@ def _load_blocks(meta, mm_hash: str) -> list[int]:
 
 def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
     """Pre-populate a ready cache entry backed by real blocks."""
-    s._cache.alloc(mm_hash, n_blocks)
+    s._cache.alloc(mm_hash, n_blocks, (n_blocks, _BS // s._dtype.itemsize))
     s._cache.mark_ready(mm_hash)
 
 

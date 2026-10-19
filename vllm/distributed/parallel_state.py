@@ -50,6 +50,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
 )
@@ -1376,6 +1377,10 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
+        return cpu_all_reduce_(tensor, self.cpu_group)
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -2442,6 +2447,11 @@ def get_tensor_model_parallel_world_size() -> int:
 def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
+
+
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
 
 
 def get_node_count() -> int:

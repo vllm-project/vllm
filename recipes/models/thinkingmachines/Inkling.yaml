@@ -1,0 +1,357 @@
+meta:
+  title: "TML Inkling"
+  slug: "tml-inkling"
+  provider: "Thinking Machines Lab"
+  description: "Natively multimodal 1T-parameter MoE from Thinking Machines Lab — text/image/audio in, text out, up to 1M context — with relative attention, short convolution, and shared expert sinks."
+  date_added: 2026-07-15
+  date_updated: 2026-08-04
+  tasks:
+    - multimodal
+  performance_headline: "380 tok/s/user with MTP8 (mean acceptance length 4.5) and 140 tok/s/user without MTP on 4× GB200 GPUs"
+  related_recipes: []
+  hardware:
+    gb200: verified
+    b200: verified
+    h200: verified
+    mi300x: verified
+    mi355x: verified
+
+model:
+  model_id: "thinkingmachines/Inkling-NVFP4"
+  min_vllm_version: "0.26.0"
+  nightly_required: true
+  install:
+    docker:
+    pip:
+  architecture: moe
+  parameter_count: "975B"
+  active_parameters: "41B"
+  context_length: 1048576
+  base_args:
+    - "--trust-remote-code"
+    - "--tokenizer-mode"
+    - "inkling"
+  base_env:
+    VLLM_USE_V2_MODEL_RUNNER: "1"
+
+dependencies:
+  - note: "Audio extras — only needed when serving the audio modality"
+    command: 'uv pip install "vllm[audio]"'
+    optional: true
+
+features:
+  tool_calling:
+    description: "Enable auto tool choice with the Inkling tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "inkling"
+  reasoning:
+    description: "Enable reasoning output parsing with the Inkling reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "inkling"
+  spec_decoding:
+    description: "Multi-Token Prediction (MTP) speculative decoding. Inkling ships 8 chained MTP heads, allowing up to 9 tokens per forward step; tune num_speculative_tokens for your acceptance/latency trade-off."
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":8}'
+    hardware_overrides:
+      hopper:
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":1}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: nvfp4
+    # This checkpoint falls back to on-the-fly BF16 dequantization on Hopper
+    # instead of requiring native Blackwell FP4 tensor cores.
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 651
+    description: "Weight-only NVFP4 (group size 16) on the routed MoE expert matmuls only; attention, norms, sconv, shared experts, routers, embeddings, and the layer 0-1 dense MLPs stay BF16. ~542 GB on disk. On Hopper, the MoE kernel dequantizes the NVFP4 expert weights to BF16 on the fly."
+    extra_args:
+      - "--kernel-config.enable_flashinfer_autotune=False"
+    extra_env:
+      FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
+  mxfp4:
+    model_id: "lightseekorg/Inkling-MXFP4"
+    precision: mxfp4
+    precision_hardware:
+      brand: AMD
+    vram_minimum_gb: 540
+    supported_hardware:
+      - mi300x
+      - mi325x
+      - mi355x
+    tp:
+      mi300x: 4
+      mi325x: 4
+      mi355x: 4
+    description: "Quark OCP MXFP4 checkpoint for AMD Instinct: TP4 on MI355X with native AITER MXFP4 MoE, or TP4 on MI300X/MI325X with Triton MXFP4 emulation. Full 1M context is validated on MI300X and MI355X; MI325X uses the same gfx942 path but is not yet smoke-tested."
+    hardware_overrides:
+      mi300x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_args:
+          - "--moe-backend"
+          - "auto"
+          - "--block-size"
+          - "128"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--enforce-eager"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          INKLING_GFX950_GLUON: "0"
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_args:
+          - "--moe-backend"
+          - "auto"
+          - "--block-size"
+          - "128"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--enforce-eager"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          INKLING_GFX950_GLUON: "0"
+      mi355x:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        extra_args:
+          - "--moe-backend"
+          - "aiter"
+          - "--block-size"
+          - "128"
+          - "--gpu-memory-utilization"
+          - "0.90"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          INKLING_GFX950_GLUON: "0"
+  bf16:
+    model_id: "thinkingmachines/Inkling"
+    precision: bf16
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 2400
+    description: "Full BF16 checkpoint (~1.8 TB on disk). Runs on Hopper and Blackwell."
+    extra_args:
+      - "--kernel-config.enable_flashinfer_autotune=False"
+    extra_env:
+      FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED: "1"
+
+  fp8:
+    model_id: "RedHatAI/Inkling-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 1170
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Inkling-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHat)"
+    vram_minimum_gb: 1170
+    description: "RedHatAI FP8 block quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Inkling-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 618
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  # multi_node_tp_dp leads the multi-node siblings so Hopper (where every other
+  # multi-node layout is gated below) falls back to it. Blackwell still
+  # defaults to multi_node_tp (recommendStrategy hardcodes TP-first, unaffected
+  # by this order).
+  - multi_node_tp_dp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+# H100/H200 lack the cross-node NVLink fabric that pure multi-node TP relies on
+# (every layer's all-reduce would cross the slow inter-node link). Hopper's
+# validated multi-node layout is multi_node_tp_dp — TP8 inside each node, DP
+# across nodes, EP over all ranks (the H20-validated tuning rides along in
+# strategy_overrides below) — so the sibling layouts are opted out here. tp_dp
+# itself stays ungated: the layout is valid on any fabric, and on Hopper it is
+# what the gated siblings fall back to. pd_cluster is opted out as well: its
+# pools are pinned to DEP (pool_modes below) and a DEP pool keeps TP=1 per
+# rank, so every H200 GPU would have to hold the full replicated BF16
+# dense/sconv/shared-expert stack — no runnable Hopper PD shape exists.
+strategy_hardware:
+  multi_node_tp:
+    hopper: unsupported
+  multi_node_tep:
+    hopper: unsupported
+  multi_node_dep:
+    hopper: unsupported
+  pd_cluster:
+    hopper: unsupported
+
+hardware_overrides: {}
+ 
+strategy_overrides:
+  # TP+DP+EP: the tp_dp emitter renders TP<gpus/node> × DP<nodes> (dp-local 1)
+  # from the node count; EP + hybrid LB and the H20-validated context/batch
+  # caps ride along as Hopper extra_args.
+  multi_node_tp_dp:
+    hardware_overrides:
+      hopper:
+        extra_args:
+          - "--max-model-len"
+          - "131072"
+          - "--max-num-seqs"
+          - "10"
+          - "--enable-expert-parallel"
+          - "--data-parallel-hybrid-lb"
+  # PD disaggregation only makes sense with DEP pools for Inkling — pin both
+  # prefill and decode to DEP. This does NOT touch the Strategy row: TP/TEP stay
+  # available as standalone serving strategies via compatible_strategies above.
+  pd_cluster:
+    pool_modes:
+      - dep
+    prefill:
+      parallelism: dep
+    decode:
+      parallelism: dep
+          
+          
+guide: |
+  ## Overview
+
+  TML Inkling is a natively multimodal 1T-parameter Mixture-of-Experts model from Thinking
+  Machines Lab. It accepts text, image, and audio inputs and generates text, with a context
+  length of up to 1M tokens. vLLM supports Inkling on Day 0 with full feature parity — LoRA,
+  speculative decoding (MTP), TP/DP/EP/PP parallelism, prefix caching, and disaggregated serving.
+
+  Architectural highlights:
+
+  - **Attention.** 66-layer decoder backbone — 11 full-attention layers and 55 sliding-window
+    layers — all grouped-query attention with head size 128. Inkling replaces RoPE with
+    **relative attention**: a learned relative-position term added to the pre-softmax logits.
+  - **Short convolution (sconv).** Each layer applies four window-4 sconv modules (on attention
+    keys, values, output, and MoE output). vLLM manages the sconv cache as the KV cache of a
+    virtual sliding-window layer, so prefix caching works seamlessly, and shards sconv across
+    the channel dimension (reduce-scatter / all-gather) to avoid replicating cache and compute
+    across TP ranks.
+  - **MoE with expert sinks.** 256 routed experts (top-6) plus 2 shared experts — 8 experts per
+    token. The 2 shared experts act as *expert sinks*: they participate in routing-score
+    computation but are excluded from the top-6 candidate pool.
+  - **MTP.** 8 chained MTP heads (single-layer full-attention transformers with a dense MLP,
+    all BF16) enable up to 9 tokens per forward step for speculative decoding.
+
+  ## Variants
+
+  - **NVFP4 (default):** Only the routed experts are quantized to NVFP4; shared experts and the
+    qkvr linears remain BF16. This is a mixed-precision checkpoint. Blackwell uses its native
+    FP4 tensor cores; on Hopper, the MoE kernel dequantizes the NVFP4 expert weights to BF16
+    on the fly.
+  - **BF16:** Full BF16 weights (`thinkingmachines/Inkling`). Runs on both **Hopper**
+    (H200&H20) and Blackwell, at the cost of substantially more VRAM.
+  - **MXFP4 (AMD):** `lightseekorg/Inkling-MXFP4` keeps the full 1M-token context
+    at TP4 on MI355X and MI300X. MI355X runs native AITER MXFP4 MoE; MI300X uses
+    Triton on-the-fly MXFP4 emulation.
+
+  ## Prerequisites
+
+  - **Hardware:** NVIDIA Hopper (H200/H20) or Blackwell for NVFP4 and BF16;
+    AMD MI300X, MI325X, or MI355X with TP4 for MXFP4.
+  - **vLLM:** Nightly wheels (Day-0 support just landed).
+  - **Parallelism:** 1T parameters requires multi-GPU. The featured configuration is 4x GB200
+    (`--tensor-parallel-size 4`) for the NVFP4 variant. On Hopper, NVFP4 uses TP8 on H200;
+    the BF16 variant needs multi-node.
+
+  ## Client Usage
+
+  Launch the server (NVFP4 on 4x GB200):
+  ```bash
+  export VLLM_USE_V2_MODEL_RUNNER=1
+  export FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
+
+  vllm serve thinkingmachines/Inkling-NVFP4 \
+    --tokenizer-mode inkling \
+    --reasoning-parser inkling \
+    --tool-call-parser inkling \
+    --enable-auto-tool-choice \
+    --tensor-parallel-size 4 \
+    --kernel-config.enable_flashinfer_autotune=False \
+    --trust-remote-code
+  ```
+
+  For a multi-node BF16 deployment on Hopper (H200/H20), select the
+  **Multi-Node TP + Data Parallel** strategy with **Nodes = 2** in the command
+  builder above — it renders the per-node `vllm serve` commands (TP within
+  each node, DP across nodes, EP over all ranks).
+
+  On AMD, select the **MXFP4** variant. TP4 is validated with the native
+  1M context on both GPU families.
+
+  Equivalent MI355X launch:
+  ```bash
+  export VLLM_USE_V2_MODEL_RUNNER=1
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_MOE=1
+  export INKLING_GFX950_GLUON=0
+
+  vllm serve lightseekorg/Inkling-MXFP4 \
+    --tensor-parallel-size 4 \
+    --tokenizer-mode inkling \
+    --reasoning-parser inkling \
+    --tool-call-parser inkling \
+    --enable-auto-tool-choice \
+    --moe-backend aiter \
+    --block-size 128 \
+    --trust-remote-code
+  ```
+
+  Query the server with the OpenAI SDK, including an image input:
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  response = client.chat.completions.create(
+      model="thinkingmachines/Inkling-NVFP4",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe this image."},
+              {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+          ],
+      }],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Performance
+
+  vLLM implements Inkling with a series of optimizations: sconv-aware TP sharding (each rank
+  stores only its channel shard of the sconv cache), low-latency fused reduce-scatter /
+  all-gather collectives built on FlashInfer's Lamport-protocol all-reduce, the FA4
+  sheared-bias attention kernel for relative attention, plus kernel fusion, PDL, and
+  multi-streaming. Enabling MTP speculative decoding adds further per-user throughput.
+
+  ## References
+
+  - [TML Inkling (NVFP4)](https://huggingface.co/thinkingmachines/Inkling-NVFP4)
+  - [TML Inkling (BF16)](https://huggingface.co/thinkingmachines/Inkling)
+  - [Inkling MXFP4](https://huggingface.co/lightseekorg/Inkling-MXFP4)
+  - [vLLM integration PR](https://github.com/Inferact/mlj/pull/16)

@@ -37,8 +37,10 @@ from vllm.v1.kv_cache_interface import (
 from .utils import (
     create_request,
     create_vllm_config,
+    expand_strided_descs,
     make_kv_cache_config,
     make_nixl_scheduler,
+    maybe_update_block_size,
 )
 
 
@@ -1027,7 +1029,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         kv_connector="NixlConnector",
         kv_role="kv_consumer",
     )
-    block_size = 16
+    block_size = maybe_update_block_size(16)
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
@@ -1404,46 +1406,66 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-def test_post_process_zeroes_untransferred_tail():
-    """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute."""
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "enable_permute_local_kv"),
+    [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
+)
+def test_post_process_zeroes_untransferred_tail(
+    kv_cache_layout, enable_permute_local_kv
+):
+    """Received remote sub-blocks are regrouped per head and the untransferred
+    sub-blocks of the last local block are zeroed on receive, once per block
+    although two attention groups alias the tensor."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
     block_tokens = 8  # 2 tokens per remote sub-block
+    num_kv_heads = 2  # fewer than ratio
 
     worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
-    worker.enable_permute_local_kv = False
-    attn_cache = torch.ones(6, block_tokens, 2, 4)
-    mamba_cache = torch.ones(6, 16)
-    worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
+    worker.enable_permute_local_kv = enable_permute_local_kv
+    worker.kv_cache_layout = kv_cache_layout
+    # Attention caches are [B, H, N, C]; distinct values per head and token.
+    expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
+        6, num_kv_heads, block_tokens, 4
+    )
+    # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
+    received = (
+        expected[2:4]
+        .unflatten(2, (ratio, -1))
+        .transpose(1, 2)
+        .reshape(2, num_kv_heads, block_tokens, 4)
+    )
+    if kv_cache_layout == "LBNHC":
+        attn_cache = expected.transpose(1, 2).contiguous().transpose(1, 2)
+        if enable_permute_local_kv:
+            # The remote is LBHNC: its bytes land in token-major memory.
+            attn_cache.transpose(1, 2)[2:4] = received.view(2, block_tokens, -1, 4)
+        # Otherwise token-major blocks receive the sub-blocks in token order.
+    else:
+        attn_cache = expected.clone()
+        attn_cache[2:4] = received
+    worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
-    ssm_group = MagicMock(layer_names=["mamba.0"])
-    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, ssm_group])
-    # The cached property filters mamba layers out of the permuted caches.
-    attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
-    assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
-    worker._attention_kv_caches = attn_caches
+    swa_group = MagicMock(layer_names=["swa.0"])
+    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, swa_group])
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
-    # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
+    # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
-    assert torch.all(attn_cache[2] == 1)
-    assert torch.all(attn_cache[3, :4] == 1)
-    assert torch.all(attn_cache[3, 4:] == 0)
-    # Untouched blocks and the mamba cache keep their content.
-    assert torch.all(attn_cache[4] == 1)
-    assert torch.all(mamba_cache == 1)
+    assert torch.equal(attn_cache[2], expected[2])
+    assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
+    assert torch.all(attn_cache[3, :, 4:] == 0)
+    # Untouched blocks keep their content.
+    assert torch.equal(attn_cache[4], expected[4])
 
 
 @pytest.mark.cpu_test
@@ -2180,7 +2202,8 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         )
         for block in range(count)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    local_descs = expand_strided_descs(worker.src_blocks_data)
+    assert local_descs[:, 0].tolist() == expected_addrs
 
 
 @pytest.mark.cpu_test
@@ -2263,19 +2286,21 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker.num_regions == 2 and worker.num_descs == 24
     # Kernel-granularity block lens; TP-independent for MLA hybrids.
     assert worker.block_len_per_layer == [unified_page // 3] * 2
-    # Split handles must replicate every FA descriptor (MLA isn't head-sharded).
-    assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
-    # FA descs: 2 regions x 12 kernel blocks, page stride = kernel page.
-    # Mamba descs: 2 regions x (3 conv sub-projections + 1 ssm) x 4 blocks.
-    assert worker.src_blocks_data.shape == (24 + 32, 3)
-    fa_descs = worker.src_blocks_data[:24]
+    # FA runs: one per region x 12 kernel blocks, page stride = block_stride.
+    # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
+    assert worker.src_blocks_data.shape == (2 + 8, 5)
+    fa_runs = worker.src_blocks_data[:2]
+    assert fa_runs[:, 1].tolist() == [unified_page // 3] * 2
+    assert fa_runs[:, 3].tolist() == [block_stride] * 2
+    assert fa_runs[:, 4].tolist() == [12] * 2
+    assert worker.src_blocks_data[2:, 4].tolist() == [4] * 8
     expected_addrs = [
         tensor.data_ptr() + block * block_stride
         for tensor in tensors
         for block in range(12)
     ]
+    fa_descs = expand_strided_descs(fa_runs)
     assert fa_descs[:, 0].tolist() == expected_addrs
-    assert all(size == unified_page // 3 for size in fa_descs[:, 1])
     worker.nixl_wrapper.register_memory.assert_called_once()
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,

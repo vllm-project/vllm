@@ -1390,6 +1390,57 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
+    use pb::decoding_parameters::{StringChoices, StructuredOutput};
+
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-invalid-structured-outputs",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    for (structured_output, message) in [
+        (
+            StructuredOutput::Grammar("  ".to_string()),
+            "grammar cannot be an empty string",
+        ),
+        (
+            StructuredOutput::Choice(StringChoices { choices: vec![] }),
+            "choice cannot be empty",
+        ),
+        (
+            StructuredOutput::Regex("a\0b".to_string()),
+            "must not contain a NUL character",
+        ),
+        // xgrammar would accept this schema but ignore `uniqueItems`.
+        (
+            StructuredOutput::Json(r#"{"type": "array", "uniqueItems": true}"#.to_string()),
+            "not supported by xgrammar",
+        ),
+    ] {
+        let status = client
+            .generate(pb::GenerateRequest {
+                request_id: "test-invalid-structured-outputs".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+                decoding: Some(pb::DecodingParameters {
+                    structured_output: Some(structured_output),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect_err("invalid structured outputs must be rejected before the engine");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains(message), "{}", status.message());
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_generate_yields_incremental_responses() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-stream", default_stream_output_specs()).await;
@@ -1829,6 +1880,70 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn dropping_generate_stream_aborts_before_engine_output() {
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-cancel-pending-output".to_vec(),
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            None,
+            move |dealer, _push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    submitted_tx.send(()).expect("signal submitted request");
+
+                    // A queued request produces no output before cancellation.
+                    let abort = recv_engine_message(dealer).await;
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let request_ids: Vec<String> =
+                        rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                    assert_eq!(request_ids, vec![request.request_id]);
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let stream = client
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-cancel-pending-output".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("start generation")
+        .into_inner();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+
+    drop(stream);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
+    server_task.abort();
+    result
+        .expect("disconnect must abort without waiting for engine output")
+        .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn control_abort_resolves_external_id_and_empty_is_noop() {
     let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service(b"engine-grpc-abort-active", vec![(vec![b'h' as u32], None)]).await;
@@ -1949,6 +2064,7 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(server.engine_version, "test-vllm-version");
     assert_eq!(server.effective_attention_block_size, Some(64));
     assert_eq!(server.api_version, "vllm");
+    assert_eq!(server.proto_version, pb::VERSION);
     assert_eq!(server.instance_id, "test-instance");
     assert_eq!(server.max_model_len, DEFAULT_MOCK_MAX_MODEL_LEN as u32);
     assert_eq!(server.kv_block_size, DEFAULT_MOCK_BLOCK_SIZE as u32);
