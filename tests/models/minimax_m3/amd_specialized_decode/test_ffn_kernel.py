@@ -183,8 +183,8 @@ def test_ffn_stages_match_native(weights, s):
 
 
 def test_missing_peer_times_out_and_marks_every_rank(weights):
-    """A TP=2 launch whose peer never runs: its first wait gives up, the
-    error word is set on both ranks, and the launch still completes."""
+    """A TP=2 launch whose peer never runs: its waits give up, the error word
+    is set on both ranks, and the launch still completes."""
     dev = torch.device("cuda")
     s = 1
     peer_bufs = [
@@ -200,8 +200,8 @@ def test_missing_peer_times_out_and_marks_every_rank(weights):
         failed, rank, epoch, site = (
             buf[: 4 * ffn.ERROR_WORDS].view(torch.int32).tolist()
         )
-        assert (failed, rank, epoch) == (1, 0, 0)
-        assert site == ffn.SITE_REDUCE
+        # stages that start waiting together race to report their site
+        assert (failed, rank, epoch) == (1, 0, 0) and site > 0
 
 
 @pytest.mark.parametrize("experts", [ffn.Experts.SHARED, ffn.Experts.ROUTED])
