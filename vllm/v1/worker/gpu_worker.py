@@ -1073,20 +1073,15 @@ class Worker(WorkerBase):
             and get_pp_group().is_last_rank
             and not self.model_runner.is_pooling_model
         ):
-            # MRV2 counterpart of the block above. The sampler allocates an fp32
-            # copy of the [num_reqs, vocab] logits on every step that needs
-            # logits processing. Its size follows the batch size, and the
-            # empty_cache() in capture_model() has released the block that
-            # warmup_kernels() left, so each new largest batch reserves a new,
-            # slightly bigger segment while the smaller ones stay cached.
-            # Run the sampler once at the largest batch so that one block of
-            # that size stays cached and later steps reuse it.
+            # MRV2 counterpart of the V1 warm-up above: keep the sampler's
+            # max-batch buffers (e.g. the fp32 logits copy) cached after the
+            # empty_cache() in capture_model(), so later steps reuse them
+            # instead of reserving a new, larger block at each new batch size.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
             )
-            # Random values, as in the V1 dummy sampler run: only the shape
-            # matters, and uninitialized memory may hold inf/nan.
+            # Random values: only the shape matters (as in V1's dummy sampler run).
             hidden_states = torch.rand(
                 max_num_reqs,
                 self.model_config.get_hidden_size(),
