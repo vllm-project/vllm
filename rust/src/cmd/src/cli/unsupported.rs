@@ -494,6 +494,16 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_force_include_usage: Option<Unsupported>,
 
+    /// Pad streamed chunks with a random `obfuscation` field by default, to
+    /// mitigate token-length side channels on encrypted traffic.
+    #[arg(
+        long,
+        visible_alias = "no-enable-stream-obfuscation",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_stream_obfuscation: Option<Unsupported>,
+
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
     ///

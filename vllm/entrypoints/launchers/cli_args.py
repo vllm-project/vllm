@@ -161,6 +161,12 @@ class BaseFrontendArgs:
     with read timeouts from closing the connection. Defaults to 0, which
     disables keep-alive comments entirely.
     """
+    enable_stream_obfuscation: bool = False
+    """Pad streamed `/v1/chat/completions`, `/v1/completions`, and
+    `/v1/responses` chunks with a random `obfuscation` field by default, to
+    mitigate token-length side channels on encrypted traffic. Requests can
+    override this with `stream_options.include_obfuscation`. Enable this when
+    clients stream directly from the server over untrusted networks."""
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""

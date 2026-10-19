@@ -416,6 +416,20 @@ def test_sse_keep_alive_interval_non_integer(serve_parser, value):
 
 
 @pytest.mark.parametrize(
+    "cli_args, expected",
+    [
+        ([], False),
+        (["--enable-stream-obfuscation"], True),
+        (["--no-enable-stream-obfuscation"], False),
+    ],
+)
+def test_enable_stream_obfuscation(serve_parser, cli_args, expected):
+    """Stream obfuscation is off unless explicitly enabled."""
+    args = serve_parser.parse_args(args=cli_args)
+    assert args.enable_stream_obfuscation is expected
+
+
+@pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [
         (

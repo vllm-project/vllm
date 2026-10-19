@@ -20,6 +20,10 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.entrypoints.serve.utils.sse_obfuscation import (
+    should_obfuscate,
+    with_sse_obfuscation,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -43,6 +47,21 @@ async def _convert_stream_to_sse_events(
             f"{event.model_dump_json(indent=None, by_alias=True)}\n\n"
         )
         yield event_data
+
+
+def _sse_events(
+    generator: AsyncGenerator[StreamingResponsesResponse, None],
+    raw_request: Request,
+    include_obfuscation: bool | None,
+) -> AsyncGenerator[str, None]:
+    args = getattr(raw_request.app.state, "args", None)
+    enabled = should_obfuscate(
+        include_obfuscation, getattr(args, "enable_stream_obfuscation", False)
+    )
+    # Upstream pads delta events only; other events are one-off.
+    return with_sse_obfuscation(
+        _convert_stream_to_sse_events(generator), enabled, event_suffix=".delta"
+    )
 
 
 @router.post(
@@ -73,7 +92,12 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(mode="json", by_alias=True))
 
     return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
+        content=_sse_events(
+            generator,
+            raw_request,
+            getattr(request.stream_options, "include_obfuscation", None),
+        ),
+        media_type="text/event-stream",
     )
 
 
@@ -84,6 +108,7 @@ async def retrieve_responses(
     raw_request: Request,
     starting_after: int | None = None,
     stream: bool | None = False,
+    include_obfuscation: bool | None = None,
 ):
     handler = responses(raw_request)
     if handler is None:
@@ -103,7 +128,8 @@ async def retrieve_responses(
     elif isinstance(response, ResponsesResponse):
         return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
     return StreamingResponse(
-        content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
+        content=_sse_events(response, raw_request, include_obfuscation),
+        media_type="text/event-stream",
     )
 
 
