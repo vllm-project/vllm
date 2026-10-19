@@ -145,7 +145,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         # Load request id for this token (no mask: grid is exact)
         req = tl.load(req_id_ptr + token_id)
         if HAS_REQUEST_STATE:
-            req = tl.load(request_state_ptr + req)
+            req = tl.maximum(tl.load(request_state_ptr + req), 0)
 
         # Load token indices for this tile
         ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
