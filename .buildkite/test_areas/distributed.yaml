@@ -304,6 +304,8 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Extended"
   key: distributed-dp-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -332,6 +334,8 @@ steps:
   - pytest -v -s distributed/test_engram_dp_shard.py
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ':amd: (MI355) Distributed DP Extended'
       dind: false
       automatic_shard: true
@@ -652,6 +656,8 @@ steps:
 
 - label: ":nvidia: (L4) Pipeline + Context Parallelism"
   key: pipeline-context-parallelism-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   automatic_shard: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
@@ -673,6 +679,8 @@ steps:
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI250) Pipeline + Context Parallelism"
       dind: false
       device: mi250_4
