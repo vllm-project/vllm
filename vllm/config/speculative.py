@@ -1300,18 +1300,6 @@ class SpeculativeConfig:
                 draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
                     self.target_model_config.hf_overrides
                 )
-                same_model_source = self.model == self.target_model_config.model
-                draft_revision = self.revision
-                draft_code_revision = self.code_revision
-                if same_model_source:
-                    # In-tree MTP/DSpark drafters reuse the target checkpoint.
-                    # Preserve an alternate config path and pinned revisions;
-                    # otherwise the draft silently reparses ``model`` and may
-                    # load a different (or remote-code-only) config.
-                    if draft_revision is None:
-                        draft_revision = self.target_model_config.revision
-                    if draft_code_revision is None:
-                        draft_code_revision = self.target_model_config.code_revision
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -1326,18 +1314,9 @@ class SpeculativeConfig:
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
                     dtype=self.target_model_config.dtype,
                     seed=self.target_model_config.seed,
-                    hf_config_path=(
-                        self.target_model_config.hf_config_path
-                        if same_model_source
-                        else None
-                    ),
-                    revision=draft_revision,
-                    code_revision=draft_code_revision,
-                    tokenizer_revision=(
-                        draft_revision
-                        if self.use_heterogeneous_vocab
-                        else self.target_model_config.tokenizer_revision
-                    ),
+                    revision=self.revision,
+                    code_revision=self.code_revision,
+                    tokenizer_revision=self.target_model_config.tokenizer_revision,
                     max_model_len=self.max_model_len,  # type: ignore[arg-type]
                     spec_target_max_model_len=self.target_model_config.max_model_len,
                     quantization=self.quantization,

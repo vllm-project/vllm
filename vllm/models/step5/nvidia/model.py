@@ -1157,8 +1157,8 @@ class Step5Attention(nn.Module):
             )
         )
 
-        # Non-DSA layers use the same KV layout as DSA layers because vLLM
-        # shares one raw allocation across KV cache groups.
+        # Non-DSA layers pin FlashAttention for the fused SWA decode. The DSA
+        # backend fixes the KV layout that every layer shares.
         if self.use_dsa_backend:
             attn_backend = Step5DSAAttentionBackend
         else:
@@ -1392,8 +1392,11 @@ class Step5Attention(nn.Module):
                 extra_dims,
             )
             attn_output = attn_output.view(-1, self.q_size)
+        elif kv_cache_dummy_dep is not None:
+            # The fused prepare already wrote K/V; None keys skip the cache update.
+            attn_output = self.attn(q, None, None)
         else:
-            attn_output = self.attn(q, k, v, kv_cache_dummy_dep=kv_cache_dummy_dep)
+            attn_output = self.attn(q, k, v)
         if extra_dims is None and self.use_head_wise_attn_gate:
             extra_dims, _ = self.g_proj(hidden_states)
 
@@ -2310,9 +2313,6 @@ class Step5Model(nn.Module):
 class Step5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     # Required so quantization exclude lists match fused module prefixes.
     packed_modules_mapping = STEP5_PACKED_MODULES_MAPPING
-
-    # The custom loader returns the complete loaded-parameter set.
-    _enable_weights_track_by_default = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={

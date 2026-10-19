@@ -255,26 +255,3 @@ class Step5VLConfig(PreTrainedConfig):
         if kwargs.get("architectures") is None:
             kwargs["architectures"] = list(type(self).architectures)
         super().__init__(**kwargs)
-
-
-class Step5MTPConfig(Step5Config):
-    """Configuration for a standalone Step5 MTP checkpoint.
-
-    The usual in-tree MTP path derives its draft config from ``Step5Config``
-    and changes the instance model type in memory. A separately published
-    draft checkpoint is parsed directly with ``model_type="step5_mtp"`` and
-    therefore needs a distinct registry class. Reusing ``Step5Config`` for both
-    registry keys would be unsafe because registration mutates its class-level
-    ``model_type``.
-    """
-
-    model_type = "step5_mtp"
-    architectures = ["Step5MTP"]
-
-    def __init__(self, num_nextn_predict_layers: int = 1, **kwargs: Any) -> None:
-        if kwargs.get("architectures") is None:
-            kwargs["architectures"] = list(type(self).architectures)
-        super().__init__(
-            num_nextn_predict_layers=num_nextn_predict_layers,
-            **kwargs,
-        )

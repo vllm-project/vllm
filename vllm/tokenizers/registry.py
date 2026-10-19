@@ -39,7 +39,6 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "step3p7",
     "step5",
     "step5_vl",
-    "step5_mtp",
     "unlimited-ocr",
     "unlimited_ocr",
 }

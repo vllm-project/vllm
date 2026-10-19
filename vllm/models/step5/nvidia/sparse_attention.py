@@ -794,21 +794,15 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
 
 
 class Step5SplitKVFlashAttentionBackend(FlashAttentionBackend):
-    """FlashAttention with token-major KV pages shared by Step5 DSA."""
+    """``FLASH_ATTN`` with Step5's fused SWA decode for the non-DSA layers.
 
-    @staticmethod
-    def get_name() -> str:
-        return "STEP5_FLASH_ATTN"
+    Keeps the inherited ``get_name()``: only the impl differs from the parent,
+    so these layers resolve to the registered ``FLASH_ATTN`` entry.
+    """
 
     @staticmethod
     def get_impl_cls() -> type[FlashAttentionImpl]:
         return Step5SplitKVFlashAttentionImpl
-
-    @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # DSA layers pack their region summaries beside the KV inside each
-        # block, so the layer dim must sit inside the block dim.
-        return (KVCacheLayout.BLNHC,)
 
 
 class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
@@ -825,6 +819,12 @@ class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # DSA layers pack their region summaries beside the KV inside each
+        # block, so the layer dim must sit inside the block dim.
+        return (KVCacheLayout.BLNHC,)
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
