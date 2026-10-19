@@ -56,6 +56,18 @@ _M = TypeVar("_M")
 
 logger = init_logger(__name__)
 
+# Fewer shared tokens are not worth an extra round trip before the reads.
+MIN_WARM_PREFIX_TOKENS = 128
+
+
+def common_prefix_len(prompts: Sequence[Sequence[int]]) -> int:
+    """The number of leading token ids that every prompt starts with."""
+    shortest = min(prompts, key=len)
+    for i, token_id in enumerate(shortest):
+        if any(p[i] != token_id for p in prompts):
+            return i
+    return len(shortest)
+
 
 @dataclass
 class ReadContext:
@@ -323,6 +335,44 @@ class NextTokenStrategy(ReadStrategy):
         ).token_ids
         return engine_input, list(prompt_ids or [])
 
+    async def _warm_shared_prefix(
+        self,
+        prompts: Sequence[Sequence[int]],
+        request_id: str,
+        *,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None,
+        trace_headers: Mapping[str, str] | None,
+    ) -> None:
+        """Prefill the tokens every question starts with, before the reads.
+
+        The reads share the state only through the prefix cache. Reads that
+        start together cannot reuse each other's recurrent state, so on hybrid
+        models each of them would prefill the state again. Attention-only
+        models share the blocks within a step and skip this.
+        """
+        engine_client = self.context.engine_client
+        if (
+            len(prompts) < 2
+            or not engine_client.model_config.is_hybrid
+            or not engine_client.vllm_config.cache_config.enable_prefix_caching
+        ):
+            return
+        shared = common_prefix_len(prompts)
+        if shared < MIN_WARM_PREFIX_TOKENS:
+            return
+        generator = engine_client.generate(
+            tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
+            SamplingParams(max_tokens=1, temperature=0.0),
+            f"{request_id}-prefix",
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        async for _ in generator:
+            pass
+
     async def read(
         self,
         questions: list[Question],
@@ -341,7 +391,7 @@ class NextTokenStrategy(ReadStrategy):
         read_request = self._read_request(chat_template_kwargs, cache_salt)
         image_parts = await self._image_parts((media or {}).get("image", ()))
 
-        slots, engine_inputs, params = [], [], []
+        slots, engine_inputs, params, prompts = [], [], [], []
         for q in questions:
             content: Any = self._content(state, q)
             if image_parts:
@@ -355,12 +405,21 @@ class NextTokenStrategy(ReadStrategy):
                     "these chat options end the prompt differently, so the "
                     "labels' tokens are unknown"
                 )
+            prompts.append(prompt_ids)
             slots.append(self._label_groups(q))
             engine_inputs.append(self._read_input(engine_input, prompt_ids))
             params.append(
                 self._sampling_params([i for ids in slots[-1] for i in ids], prompt_ids)
             )
 
+        await self._warm_shared_prefix(
+            prompts,
+            request_id,
+            lora_request=lora_request,
+            priority=priority,
+            cache_salt=cache_salt,
+            trace_headers=trace_headers,
+        )
         label_reads = await next_token_label_reads(
             ctx.engine_client,
             engine_inputs,
