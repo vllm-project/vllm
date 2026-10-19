@@ -82,6 +82,9 @@ pub struct CompletionRequest {
     /// The suffix that comes after a completion of inserted text
     pub suffix: Option<String>,
 
+    /// Prompt embeddings to generate from. Not supported yet.
+    pub prompt_embeds: Option<Value>,
+
     /// What sampling temperature to use, between 0 and 2
     pub temperature: Option<f32>,
 

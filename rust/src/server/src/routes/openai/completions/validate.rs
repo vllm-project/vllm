@@ -41,6 +41,10 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }
 
+    if request.prompt_embeds.is_some() {
+        bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
+    }
+
     if let Some(logprobs) = request.logprobs
         && logprobs < 0
         && logprobs != -1
@@ -177,6 +181,27 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_prompt_embeds() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": "AAAA",
+        }))
+        .expect("parse request");
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": null,
+        }))
+        .expect("parse request");
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
         );
     }
 
