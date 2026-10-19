@@ -345,6 +345,70 @@ def test_elastic_ep_scaling_sequence():
             )
 
 
+def _scale_until_done(server: RemoteOpenAIServer, new_dp_size: int) -> list[int]:
+    """POST a scale, and again on each 503 (another scale is committing),
+    until it gets 200; returns every status. A queued POST waits for the
+    running scale and then its own, so it gets twice _send_scale_command's
+    timeout."""
+    statuses: list[int] = []
+    deadline = time.monotonic() + 600
+    while True:
+        response = requests.post(
+            server.url_for("scale_elastic_ep"),
+            json={"new_data_parallel_size": new_dp_size},
+            timeout=600,
+        )
+        statuses.append(response.status_code)
+        if response.status_code != 503 or time.monotonic() > deadline:
+            assert response.status_code == 200, (
+                f"scale to {new_dp_size}: statuses {statuses}: {response.text}"
+            )
+            return statuses
+        time.sleep(1)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_elastic_ep_scale_while_scaling():
+    """A scale request during a scale, or right after a scale-down while its
+    leavers still tear down, is queued or refused with 503 and then served:
+    never 500 or 408.
+
+    Which path a run took shows in the printed statuses: [200] was queued on
+    the scale lock, [503, ..., 200] was refused while the first committed.
+    """
+    _skip_unless_nixl_ep_v2()
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        _base_serve_args(2, 4, all2all_backend="nixl_ep_v2"),
+        max_wait_seconds=1200,
+    ) as server:
+        initial_accuracy = _run_gsm8k_eval(server, "Initial")
+
+        # A second POST for the same target while 2->4 runs.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(_scale_until_done, server, 4)
+            time.sleep(10)
+            assert not first.done(), "2->4 finished before the second POST"
+            second = _scale_until_done(server, 4)
+            print(
+                f"[Elastic EP concurrent][2->4 twice] first={first.result()} "
+                f"second={second}"
+            )
+
+        # A scale-up right after the scale-down's 200: the client waits for
+        # the leavers' shutdown and Ray for their GPUs.
+        _scale_until_done(server, 2)
+        print(f"[Elastic EP concurrent][4->2->4] {_scale_until_done(server, 4)}")
+        # The current size: logs "already 4, skipping".
+        _scale_until_done(server, 4)
+
+        accuracy = _run_gsm8k_eval(server, "After concurrent scales")
+        assert accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Accuracy {accuracy:.3f} dropped more than {ACCURACY_TOL} below "
+            f"initial accuracy {initial_accuracy:.3f}"
+        )
+
+
 @multi_gpu_test(num_gpus=2)
 def test_elastic_ep_rejects_invalid_size():
     """nixl_ep_v2 refuses a size that is not whole NVLink domains or inside
