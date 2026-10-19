@@ -73,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVQuantMode,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -1551,6 +1552,95 @@ class TestNixlHandshake:
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
+    @pytest.mark.parametrize(
+        ("kv_quant_mode", "local_tp", "remote_tp", "num_kv_heads", "rejected"),
+        [
+            (KVQuantMode.NVFP4, 2, 1, 8, True),
+            (KVQuantMode.NVFP4, 1, 2, 8, True),
+            (KVQuantMode.NVFP4, 2, 2, 8, False),
+            # Both sides hold one replicated head per rank: no head split.
+            (KVQuantMode.NVFP4, 16, 8, 8, False),
+            (KVQuantMode.NONE, 2, 1, 8, False),
+        ],
+    )
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_rejects_nvfp4_kv_head_split(
+        self,
+        default_vllm_config,
+        dist_init,
+        kv_quant_mode,
+        local_tp,
+        remote_tp,
+        num_kv_heads,
+        rejected,
+    ):
+        """NVFP4 pages keep all heads' data before all heads' scales, so
+        heterogeneous-TP head splitting would silently corrupt the KV.
+        """
+        block_size = maybe_update_block_size(16)
+        vllm_config = create_vllm_config(block_size=block_size)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=1,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer0"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=max(1, num_kv_heads // local_tp),
+                        head_size=16,
+                        dtype=torch.uint8,
+                        kv_quant_mode=kv_quant_mode,
+                    ),
+                )
+            ],
+        )
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=local_tp,
+        ):
+            worker = FakeNixlConnectorWorker(
+                vllm_config,
+                "engine",
+                hand_shake_latency=0,
+                kv_cache_config=kv_cache_config,
+            )
+        worker.transfer_topo.total_num_kv_heads = num_kv_heads
+        worker.transfer_topo.local_physical_heads = max(1, num_kv_heads // local_tp)
+
+        local_len = 4096 * worker.block_size
+        remote_len = (
+            local_len
+            * max(1, num_kv_heads // remote_tp)
+            // worker.transfer_topo.local_physical_heads
+        )
+        worker.block_len_per_layer = [local_len]
+        worker.num_blocks = 1
+        worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+            kv_caches_base_addr=[0],
+            device_id=0,
+            num_blocks=1,
+            block_lens=[remote_len],
+            block_strides=[remote_len],
+            kv_cache_layout=worker.kv_cache_layout,
+            block_size=worker.block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
+        )
+
+        if rejected:
+            with pytest.raises(RuntimeError, match="NVFP4"):
+                worker.add_remote_agent(meta, remote_tp_size=remote_tp)
+        else:
+            worker.add_remote_agent(meta, remote_tp_size=remote_tp)
+
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
@@ -2193,6 +2283,7 @@ def recv_worker():
     worker._engine_by_address = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2785,6 +2876,75 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_sleep_unregisters_and_restores_kv_caches(dist_init):
+    """Sleep drops everything built on the KV cache registration; wake-up
+    registers the same memory again and publishes the new agent metadata."""
+    vllm_config = create_vllm_config()
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+    )
+    raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
+    (cache,) = dense_kv_cache_views(
+        raw, spec, 2, num_layers=1, layout=KVCacheLayout.BLHNC
+    )
+    with set_current_vllm_config(vllm_config):
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+        connector.register_kv_caches({"layer0": cache})
+    worker = connector.connector_worker
+    nixl = worker.nixl_wrapper = MagicMock(wraps=worker.nixl_wrapper)
+    worker._remote_agents["remote"] = {(0, 0): "agent"}
+    descs = list(worker._registered_descs)
+
+    connector.unregister_kv_caches()
+    connector.unregister_kv_caches()  # a discard, then a sleep
+    assert nixl.deregister_memory.call_args_list == [call(d) for d in descs]
+    assert not worker._remote_agents
+
+    nixl.get_agent_metadata.return_value = b"re-registered"
+    connector.restore_kv_caches()
+    connector.restore_kv_caches()
+    assert nixl.register_memory.call_count == len(descs)
+    payload = worker.xfer_handshake_metadata
+    agent = msgspec.msgpack.decode(payload.agent_metadata_bytes, type=NixlAgentMetadata)
+    assert agent.agent_metadata == b"re-registered"
+    connector.shutdown()
+
+
+def test_registration_generation_bumps_on_changed_payload(
+    default_vllm_config, dist_init
+):
+    """Requests tell decoders to handshake again only when the published
+    registration changed."""
+    vllm_config = create_vllm_config()
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id, make_kv_cache_config(16)
+    )
+    scheduler._nixl_handshake_listener_t = MagicMock()  # already serving
+    generations: list[int] = []
+    for i, agent in enumerate((b"old", b"old", b"new")):  # startup, same, changed
+        payload = NixlHandshakePayload(
+            compatibility_hash="h", agent_metadata_bytes=agent
+        )
+        scheduler.set_xfer_handshake_metadata({(0, 0): payload})
+        request = create_request(request_id=i, num_tokens=40, do_remote_decode=True)
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        params = scheduler.request_finished(request, ([0, 1, 2],))[1]
+        assert params is not None
+        generations.append(params["remote_registration_generation"])
+    assert generations[0] == generations[1] < generations[2]
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
@@ -3325,6 +3485,14 @@ class TestPeerReplacement:
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
+
+    def test_rehandshakes_re_registered_peer(self):
+        metadata = self._request("old")
+        metadata.reqs_to_recv["old-req"].remote.registration_generation = 1
+        self.worker.start_load_kv(metadata)
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert "old" in self.worker._handshake_futures
 
 
 def test_transfer_topology_unregister():

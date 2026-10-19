@@ -210,11 +210,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         self, e: GenerationError
     ) -> str:
         """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
+        return self.create_streaming_error_response(e)
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
