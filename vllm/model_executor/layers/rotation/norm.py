@@ -18,8 +18,7 @@ from .adapter import RotationAdapter
 class PreRotationRMSNorm(RotationAdapter, RMSNorm):
     """Apply a bound rotation immediately before RMS normalization."""
 
-    # Fused all-reduce/RMSNorm helpers read the norm parameters directly and
-    # therefore cannot preserve this adapter's pre-normalization transform.
+    # Fused helpers bypass forward(), which would skip the rotation.
     supports_fused_allreduce_rms_norm = False
 
     @classmethod
@@ -33,9 +32,7 @@ class PreRotationRMSNorm(RotationAdapter, RMSNorm):
                 f"{type(original).__name__}"
             )
 
-        # Preserve the exact module instance, parameters, buffers, selected
-        # CustomOp dispatch, and checkpoint namespace. Both classes are Python
-        # nn.Module types without an incompatible instance layout.
+        # Upgrade in place to preserve parameter names and CustomOp dispatch.
         original.__class__ = cls
         upgraded = cast(PreRotationRMSNorm, original)
         upgraded.init_rotation_adapter(
@@ -46,9 +43,7 @@ class PreRotationRMSNorm(RotationAdapter, RMSNorm):
         return upgraded
 
     def _apply_norm(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # _forward_method was selected by CustomOp during the original
-        # RMSNorm initialization. Calling it avoids recursing into this
-        # adapter's forward while retaining the platform-specific norm path.
+        # Call the original CustomOp dispatch without re-entering this adapter.
         output = self._forward_method(hidden_states, None)
         assert isinstance(output, torch.Tensor)
         return output

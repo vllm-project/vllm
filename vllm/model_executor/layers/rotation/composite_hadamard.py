@@ -27,8 +27,8 @@ from .base import RotationTransform
 class CompositeHadamardRotation(RotationTransform):
     r"""Apply ``D(hk \otimes H_P) / sqrt(N)`` or its transpose.
 
-    Here ``N = K * P`` and ``P`` is a power of two. When ``K = 1``, this
-    reduces to the standard power-of-two Hadamard transform.
+    Here ``D = diag(sign)``, ``N = K * P``, and ``P`` is a power of two.
+    The checkpoint stores the unnormalized ``hk = H_K.T``.
     """
 
     def __init__(
