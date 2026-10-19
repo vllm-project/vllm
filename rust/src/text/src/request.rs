@@ -148,6 +148,10 @@ pub struct SamplingParams {
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
+    ///
+    /// Python's `SamplingParams` names this `extra_args`, which clients of the
+    /// token generate API send.
+    #[serde(alias = "extra_args")]
     pub vllm_xargs: Option<HashMap<String, Value>>,
     /// Number of newly generated tokens to batch into each streamed output.
     /// Raises the interval above the frontend-level `--stream-interval`;
