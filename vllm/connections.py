@@ -83,16 +83,9 @@ class MediaRequestDownloadBudget:
                 raise MediaRequestDownloadSizeExceededError(
                     "Request media downloads exceed "
                     f"VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB={limit_mb:g} "
-                    f"({received} bytes received)."
+                    f"({received} bytes received, including retried attempts)."
                 )
             self.used = received
-
-    def release(self, size: int) -> None:
-        """Return bytes charged by a download whose data was discarded."""
-        if envs.VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB <= 0:
-            return
-        with self._lock:
-            self.used -= size
 
 
 def _get_media_download_limit_bytes() -> int | None:
@@ -169,20 +162,15 @@ def _read_response_bytes(
     )
     chunks: list[bytes] = []
     received_bytes = 0
-    try:
-        for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
-            received_bytes = _append_chunk(
-                chunks,
-                chunk,
-                received_bytes,
-                max_bytes,
-                media_download_limit,
-                request_budget,
-            )
-    except BaseException:
-        if request_budget is not None:
-            request_budget.release(sum(map(len, chunks)))
-        raise
+    for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
+        received_bytes = _append_chunk(
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
+        )
     return b"".join(chunks)
 
 
@@ -198,20 +186,15 @@ async def _async_read_response_bytes(
     _check_content_length(response.content_length, max_bytes, media_download_limit)
     chunks: list[bytes] = []
     received_bytes = 0
-    try:
-        async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
-            received_bytes = _append_chunk(
-                chunks,
-                chunk,
-                received_bytes,
-                max_bytes,
-                media_download_limit,
-                request_budget,
-            )
-    except BaseException:
-        if request_budget is not None:
-            request_budget.release(sum(map(len, chunks)))
-        raise
+    async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
+        received_bytes = _append_chunk(
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
+        )
     return b"".join(chunks)
 
 

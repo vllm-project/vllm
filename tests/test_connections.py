@@ -205,7 +205,7 @@ async def test_async_request_download_budget_counts_across_responses(
     assert second.content.iterated == 1
 
 
-def test_request_download_budget_releases_bytes_of_retried_response(
+def test_request_download_budget_counts_retried_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", 1)
@@ -215,17 +215,19 @@ def test_request_download_budget_releases_bytes_of_retried_response(
     body = b"a" * (3 * _ONE_MIB // 4)
     interrupted = _SyncResponse([body[: _ONE_MIB // 2], requests.ConnectionError()])
 
-    with patch.object(
-        connection, "get_response", side_effect=[interrupted, _SyncResponse([body])]
+    with (
+        patch.object(
+            connection,
+            "get_response",
+            side_effect=[interrupted, _SyncResponse([body])],
+        ),
+        pytest.raises(ValueError, match="including retried attempts"),
     ):
-        data = connection.get_bytes("http://example.com/media", request_budget=budget)
-
-    assert data == body
-    assert budget.used == len(body)
+        connection.get_bytes("http://example.com/media", request_budget=budget)
 
 
 @pytest.mark.asyncio
-async def test_async_request_download_budget_releases_bytes_of_retried_response(
+async def test_async_request_download_budget_counts_retried_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB", 1)
@@ -237,17 +239,17 @@ async def test_async_request_download_budget_releases_bytes_of_retried_response(
         [body[: _ONE_MIB // 2], aiohttp.ClientConnectionError()]
     )
 
-    with patch.object(
-        connection,
-        "get_async_response",
-        new=AsyncMock(side_effect=[interrupted, _AsyncResponse([body])]),
+    with (
+        patch.object(
+            connection,
+            "get_async_response",
+            new=AsyncMock(side_effect=[interrupted, _AsyncResponse([body])]),
+        ),
+        pytest.raises(ValueError, match="including retried attempts"),
     ):
-        data = await connection.async_get_bytes(
+        await connection.async_get_bytes(
             "http://example.com/media", request_budget=budget
         )
-
-    assert data == body
-    assert budget.used == len(body)
 
 
 def test_get_bytes_rejects_content_length_over_limit(
