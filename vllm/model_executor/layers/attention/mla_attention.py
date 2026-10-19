@@ -936,6 +936,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
+            self.impl.reserve_workspace()
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
