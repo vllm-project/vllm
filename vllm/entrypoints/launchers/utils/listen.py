@@ -58,8 +58,7 @@ def setup_listen_address(
                     "(--api-server-count > 1)."
                 )
             raise OSError(
-                f"Port {args.port} is already in use (holder: {holder}). "
-                f"{hint}"
+                f"Port {args.port} is already in use (holder: {holder}). {hint}"
             ) from e
         if e.errno == errno.EACCES:
             raise OSError(
@@ -69,9 +68,9 @@ def setup_listen_address(
             ) from e
         if e.errno == errno.ENOPROTOOPT and reuse_port:
             raise OSError(
-                f"SO_REUSEPORT is not supported on this platform. "
-                f"Cannot use --api-server-count > 1 here; use a single "
-                f"API server."
+                "SO_REUSEPORT is not supported on this platform. "
+                "Cannot use --api-server-count > 1 here; use a single "
+                "API server."
             ) from e
         raise
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: SIM117
 import argparse
 import errno
 import os
@@ -55,7 +56,6 @@ def ipv6_loopback_available() -> bool:
 @pytest.fixture
 def blocking_listener():
     """Bind+listen on an ephemeral port and yield the (host, port)."""
-
     blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -328,9 +328,9 @@ class TestPortConflictScenario:
             mock.patch(
                 f"{_MODULE}.find_process_using_port", return_value=None
             ) as find_mock,
+            pytest.raises(OSError, match="already in use") as exc_info,
         ):
-            with pytest.raises(OSError, match="already in use") as exc_info:
-                setup_listen_address(args, reuse_port=False)
+            setup_listen_address(args, reuse_port=False)
 
         assert exc_info.value.__cause__ is err
         assert "Port 8000" in str(exc_info.value)
@@ -371,9 +371,9 @@ class TestPortConflictScenario:
                 f"{_MODULE}.find_process_using_port",
                 side_effect=PermissionError("macOS SIP"),
             ),
+            pytest.raises(OSError, match="already in use") as exc_info,
         ):
-            with pytest.raises(OSError, match="already in use") as exc_info:
-                setup_listen_address(args, reuse_port=False)
+            setup_listen_address(args, reuse_port=False)
 
         msg = str(exc_info.value)
         assert "unknown process (query failed)" in msg
@@ -430,9 +430,7 @@ class TestPermissionScenario:
         err = OSError(errno.EACCES, "Permission denied")
 
         with mock.patch(f"{_MODULE}.create_server_socket", side_effect=err):
-            with pytest.raises(
-                OSError, match="Permission denied binding"
-            ) as exc_info:
+            with pytest.raises(OSError, match="Permission denied binding") as exc_info:
                 setup_listen_address(args, reuse_port=False)
 
         msg = str(exc_info.value)
