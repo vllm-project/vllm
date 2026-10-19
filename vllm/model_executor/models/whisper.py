@@ -658,13 +658,13 @@ class WhisperEncoder(nn.Module):
 
         return self.layer_norm(embeds)
 
-    def _forward_loop(
-        self, input_features: list[torch.Tensor]
-    ) -> torch.Tensor:
+    def _forward_loop(self, input_features: list[torch.Tensor]) -> torch.Tensor:
         hidden_states: list[torch.Tensor] = []
         input_is_batched = False
         for features in input_features:
-            embeds = self._conv_embed(features.unsqueeze(0) if features.ndim == 2 else features)
+            embeds = self._conv_embed(
+                features.unsqueeze(0) if features.ndim == 2 else features
+            )
             if embeds.ndim == 3:
                 embeds = embeds.squeeze(0)
             hidden_states.append(embeds)
@@ -1076,7 +1076,7 @@ class WhisperForConditionalGeneration(
 
         # Capture feature-extractor constants for the GPU-side log-mel path.
         try:
-            processor = vllm_config.model_config.get_hf_processor()
+            processor = cached_processor_from_config(vllm_config.model_config)
             extractor = processor.feature_extractor  # type: ignore[union-attr]
             assert isinstance(extractor, WhisperFeatureExtractor)
             self._fe_n_fft = extractor.n_fft
@@ -1204,7 +1204,8 @@ class WhisperForConditionalGeneration(
             # Pad / truncate to fixed n_samples.
             if waveform.numel() < n_samples:
                 waveform = torch.nn.functional.pad(
-                    waveform, (0, n_samples - waveform.numel()),
+                    waveform,
+                    (0, n_samples - waveform.numel()),
                     value=self._fe_padding_value,
                 )
             elif waveform.numel() > n_samples:
@@ -1214,9 +1215,7 @@ class WhisperForConditionalGeneration(
 
             # Optional dither.
             if self._fe_dither != 0.0:
-                waveform = waveform + (
-                    torch.randn_like(waveform) * self._fe_dither
-                )
+                waveform = waveform + (torch.randn_like(waveform) * self._fe_dither)
 
             # STFT.
             stft = torch.stft(
