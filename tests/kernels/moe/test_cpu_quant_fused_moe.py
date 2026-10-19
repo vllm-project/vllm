@@ -1114,6 +1114,40 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     )
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
+    """Test INT8 dispatch at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (3, 4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+
+    a = torch.randn(M, K, dtype=dtype) / (0.5 * K**0.5)
+    w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+
+    ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids)
+    pw1, pw2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        None,
+        is_vnni=True,
+    )
+
+    torch.testing.assert_close(ref_out, out, atol=2e-1, rtol=2e-1)
+
+
 # ===========================================================================
 # FP8 W8A8 MoE
 # ===========================================================================
