@@ -51,11 +51,39 @@ class SnapshotRuntimeIdentity(BaseModel):
     environment: tuple[tuple[str, str], ...]
 
 
+class SnapshotAttachment(BaseModel):
+    """One generated file the artifact reproduces before CRIU reopens it.
+
+    ``digest`` is the sha256 of the captured bytes, or ``"cache"`` for warm
+    state the restore never verifies: a target that already has its own is
+    left alone, and only a missing one is written back.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    path: str
+    digest: str
+    size: Annotated[int, Field(ge=0)]
+
+    @field_validator("path")
+    @classmethod
+    def _require_absolute_path(cls, value: str) -> str:
+        if not os.path.isabs(value) or os.path.normpath(value) != value:
+            raise ValueError("attachment path must be absolute and normalized")
+        return value
+
+
 class SnapshotManifest(SnapshotRuntimeIdentity):
     schema_version: Literal[1]
     boundary: Literal["post-engine-init-reloadable-state-released"]
     created_at: str
     artifact_bytes: Annotated[int, Field(ge=0)]
+    portable: Literal[True, False] = False
+    work_dir: StrictStr
+    # True if work_dir is removed when its owning run ends.
+    # Always False for in-place artifacts because work_dir is also
+    # the artifact directory.
+    cleanup_work_dir: Literal[True, False]
     model: str
     served_model_name: str
     model_revision: str
@@ -64,6 +92,7 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
     process_tree: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     cuda_holders: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     external_cache_files: tuple[tuple[str, str], ...] = ()
+    attachments: tuple[SnapshotAttachment, ...] = ()
     oracle_token_ids: Annotated[
         tuple[_OracleTokenId, ...], Field(min_length=1, max_length=1)
     ]
@@ -92,6 +121,16 @@ class SnapshotManifest(SnapshotRuntimeIdentity):
             raise ValueError("cuda_holders contains duplicate PIDs")
         if not set(self.cuda_holders).issubset(self.process_tree):
             raise ValueError("cuda_holders must be a subset of process_tree")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_work_dir(self) -> Self:
+        if not self.portable and self.cleanup_work_dir:
+            raise ValueError(
+                "an in-place artifact's work dir is the artifact itself"
+            )
+        if not os.path.isabs(self.work_dir):
+            raise ValueError("work_dir must be an absolute path")
         return self
 
 
@@ -154,6 +193,25 @@ def _is_trusted_sticky_directory(path_stat: os.stat_result) -> bool:
     )
 
 
+def _require_trusted_path_chain(path: Path, *, what: str) -> None:
+    """Reject paths whose components can be replaced by untrusted users."""
+    effective_uid = os.geteuid()
+    for component in _existing_path_chain(path):
+        component_stat = component.lstat()
+        if stat.S_ISLNK(component_stat.st_mode):
+            raise SnapshotSecurityError(f"{what} contains a symlink: {component}")
+        if component_stat.st_uid not in (0, effective_uid):
+            raise SnapshotSecurityError(
+                f"{what} has an untrusted owner: {component}"
+            )
+        if component_stat.st_mode & (
+            stat.S_IWGRP | stat.S_IWOTH
+        ) and not _is_trusted_sticky_directory(component_stat):
+            raise SnapshotSecurityError(
+                f"{what} has a group- or world-writable ancestor: {component}"
+            )
+
+
 def validate_artifact_root(path: Path, *, creating: bool) -> None:
     """Validate that an artifact path cannot be replaced by another user."""
     path = Path(os.path.abspath(path))
@@ -163,22 +221,7 @@ def validate_artifact_root(path: Path, *, creating: bool) -> None:
         raise SnapshotSecurityError(f"snapshot path does not exist: {path}")
 
     effective_uid = os.geteuid()
-    for component in _existing_path_chain(path):
-        component_stat = component.lstat()
-        if stat.S_ISLNK(component_stat.st_mode):
-            raise SnapshotSecurityError(
-                f"snapshot path contains a symlink: {component}"
-            )
-        if component_stat.st_uid not in (0, effective_uid):
-            raise SnapshotSecurityError(
-                f"snapshot path has an untrusted owner: {component}"
-            )
-        if component_stat.st_mode & (
-            stat.S_IWGRP | stat.S_IWOTH
-        ) and not _is_trusted_sticky_directory(component_stat):
-            raise SnapshotSecurityError(
-                f"snapshot path has a group- or world-writable ancestor: {component}"
-            )
+    _require_trusted_path_chain(path, what="snapshot path")
 
     if path.exists():
         path_stat = path.lstat()

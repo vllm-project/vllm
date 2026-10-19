@@ -45,9 +45,14 @@ def _child_engine_argv(
     for item in iterator:
         option, separator, _ = item.partition("=")
         option = option.replace("_", "-")
-        if len(option) > 2 and "--snapshot-dir".startswith(option):
+        if len(option) > 2 and (
+            "--snapshot-dir".startswith(option) or "--work-dir".startswith(option)
+        ):
             if not separator:
                 next(iterator, None)
+        elif len(option) > 2 and "--portable".startswith(option):
+            # A store_true flag: nothing to consume after it.
+            continue
         else:
             child_argv.append(item)
     if "--enable-sleep-mode" not in child_argv:
@@ -69,18 +74,35 @@ def create_snapshot(
     validate_artifact_root(target, creating=True)
     target.parent.mkdir(mode=0o700, parents=False, exist_ok=True)
     validate_artifact_root(target.parent, creating=False)
-    target.mkdir(mode=0o700)
-    validate_artifact_root(target, creating=False)
     published = False
     root_pid: int | None = None
+    work_dir: Path | None = None
+    cleanup_work_dir = False
+    portable = bool(getattr(args, "portable", False))
+    target.mkdir(mode=0o700)
     try:
+        validate_artifact_root(target, creating=False)
+        work_dir, cleanup_work_dir = toolset.create_work_dir(
+            getattr(args, "work_dir", None),
+            target,
+            portable=portable,
+        )
         child_argv = _child_engine_argv(args, engine_argv)
-        root_pid = toolset.launch_child(target, child_argv)
-        oracle = toolset.wait_ready(target, root_pid)
-        inventory = toolset.inventory(root_pid, target)
-        toolset.dump(target, inventory)
+        root_pid = toolset.launch_child(work_dir, child_argv)
+        oracle = toolset.wait_ready(work_dir, root_pid)
+        inventory = toolset.inventory(root_pid, target, work_dir, portable=portable)
+        attachments = toolset.dump(target, work_dir, inventory, portable=portable)
         toolset.verify_dead(inventory)
-        manifest = toolset.make_manifest(args, child_argv, inventory, oracle, target)
+        manifest = toolset.make_manifest(
+            args,
+            child_argv,
+            inventory,
+            oracle,
+            target,
+            attachments,
+            work_dir=work_dir,
+            cleanup_work_dir=cleanup_work_dir,
+        )
         toolset.publish(target, manifest)
         published = True
     except BaseException:
@@ -91,6 +113,8 @@ def create_snapshot(
         # Runs even when abort_create raised, so no partial artifact is left.
         if not published and target.exists():
             shutil.rmtree(target)
+        if work_dir is not None and cleanup_work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def restore_snapshot(
@@ -100,12 +124,24 @@ def restore_snapshot(
     toolset = tools or LocalSnapshotTools()
     toolset.preflight("restore", artifact)
     manifest = read_manifest(artifact)
+    requested_portable = bool(getattr(args, "portable", False))
+    if requested_portable != manifest.portable:
+        raise SnapshotRestoreError(
+            "snapshot restore requires --portable to match the artifact: "
+            f"artifact is {'portable' if manifest.portable else 'in place'}, "
+            f"restore requested "
+            f"{'portable' if requested_portable else 'in place'}"
+        )
     validate_identity(manifest, toolset.current_identity(manifest.gpu_uuid))
 
+    # The manifest is the only source for the work directory: the barrier
+    # paths are frozen into the captured argv, so restore takes no --work-dir.
+    work_dir = Path(manifest.work_dir)
     root_pid: int | None = None
     try:
         root_pid = toolset.restore(artifact, manifest)
-        toolset.release(artifact, args.host, args.port)
+        # The tree is still waiting at the barrier.
+        toolset.release(work_dir, args.host, args.port)
         toolset.wait_listener(root_pid, args.host, args.port)
         actual = toolset.request_oracle(args.host, args.port, manifest)
         expected = Oracle(
@@ -130,3 +166,9 @@ def restore_snapshot(
         if isinstance(error, SnapshotRestoreError):
             raise
         raise SnapshotRestoreError(str(error)) from error
+    finally:
+        # Like a create, a restore removes a work directory it drew no
+        # record for keeping; the tree it leaves behind holds open files
+        # there, so their bytes simply live on as unlinked inodes.
+        if manifest.cleanup_work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
