@@ -464,7 +464,7 @@ class ResponsesRequest(OpenAIBaseModel):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=self.max_output_tokens or 0,
+            max_output_tokens=self.max_output_tokens,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
