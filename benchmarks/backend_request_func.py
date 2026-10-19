@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from typing import Any
 
 import aiohttp
 import huggingface_hub.constants
@@ -363,6 +364,23 @@ async def async_request_openai_completions(
     return output
 
 
+def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    if (
+        delta.get("content")
+        or delta.get("reasoning")
+        or delta.get("tool_calls")
+        or delta.get("function_call")
+    ):
+        return True
+    # A generated token can decode to an empty string, e.g. a special token
+    # under skip_special_tokens. Those chunks carry `content` and no `role`.
+    # The opening metadata chunk carries `role`.
+    return delta.get("content") == "" and "role" not in delta
+
+
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     pbar: tqdm | None = None,
@@ -439,7 +457,9 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
-                            if choices := data.get("choices"):
+                            if (
+                                choices := data.get("choices")
+                            ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
                                 # First token
                                 if not first_chunk_received:
