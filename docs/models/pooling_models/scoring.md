@@ -455,6 +455,8 @@ Score templates are supported for **cross-encoder** models only. If you are usin
 
 Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/online_serving/README.md#chat-template)).
 
+For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
+
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
 - **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
@@ -463,6 +465,31 @@ Like chat templates, the score template receives a `messages` list. For scoring,
 This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
 
 Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja)
+
+#### Templates declared by Sentence Transformers checkpoints
+
+vLLM does not apply a checkpoint's chat template by default, since many rerankers inherit an unrelated template from their base LLM. The exception is a Sentence Transformers (v5.4+) `CrossEncoder` with a single `sequence-classification` Transformer module whose `sentence_bert_config.json` declares the `message` modality. Sentence Transformers formats the pairs of such checkpoints as `query`/`document` messages, so vLLM does the same with the saved template:
+
+```json
+{
+    "transformer_task": "sequence-classification",
+    "modality_config": {
+        "text": {"method": "forward", "method_output_name": "logits"},
+        "message": {"method": "forward", "method_output_name": "logits", "format": "flat"}
+    },
+    "module_output_name": "scores",
+    "processing_kwargs": {"chat_template": {"add_generation_prompt": true}}
+}
+```
+
+- The default chat template is used, unless `processing_kwargs.chat_template.chat_template` names another template saved with the tokenizer (e.g. `additional_chat_templates/score.jinja` for `"score"`).
+- The other `processing_kwargs.chat_template` settings, such as `add_generation_prompt`, are passed to the template; the request's `chat_template_kwargs` override them.
+- Message contents are passed as strings, as with `--chat-template`.
+- vLLM does not restore the template suffix after truncation (`restore_suffix`). Use `max_tokens_per_doc` rather than `truncate_prompt_tokens` to truncate long documents.
+- `--chat-template` (or the `chat_template` argument of `LLM.score`) takes precedence over the saved template and its settings.
+- Models with a built-in score template keep using it.
+
+The template in use is logged at startup.
 
 ### Enable/disable activation
 

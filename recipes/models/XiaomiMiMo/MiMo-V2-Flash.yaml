@@ -1,0 +1,179 @@
+meta:
+  title: "MiMo-V2-Flash"
+  slug: "mimo-v2-flash"
+  provider: "MiMo (Xiaomi)"
+  description: "Xiaomi's MoE reasoning model (309B total / 15B active) with hybrid attention and MTP for fast agentic workflows"
+  date_added: 2025-12-20
+  date_updated: 2026-10-08
+  tasks:
+    - text
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "XiaomiMiMo/MiMo-V2-Flash"
+  min_vllm_version: "0.20.0"
+  architecture: moe
+  parameter_count: "309B"
+  active_parameters: "15B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--generation-config"
+    - "vllm"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "MiMo tool-call parser"
+    args:
+      - "--tool-call-parser"
+      - "mimo"
+  reasoning:
+    description: "Qwen3 reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 371
+    description: "Native FP8 weights; 4x H200 recommended with TP4"
+    extra_args:
+      - "--tensor-parallel-size"
+      - "4"
+      - "--gpu-memory-utilization"
+      - "0.9"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    # AITER is disabled for MiMo-V2-Flash (regression when enabled).
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "0"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [MiMo-V2-Flash](https://huggingface.co/XiaomiMiMo/MiMo-V2-Flash) is a MoE language model
+  with 309B total parameters and 15B active. Designed for high-speed reasoning and agentic
+  workflows, it features hybrid attention and Multi-Token Prediction (MTP) to reduce
+  inference cost.
+
+  ## Prerequisites
+
+  - Hardware: 4x H200 (TP4) or equivalent aggregate VRAM (~320 GB with FP8)
+  - vLLM >= 0.20.0
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm MI300X/MI325X/MI355X)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Launch commands
+
+  Basic TP4:
+
+  ```bash
+  vllm serve XiaomiMiMo/MiMo-V2-Flash \
+    --host 0.0.0.0 --port 9001 --seed 1024 \
+    --served-model-name mimo_v2_flash \
+    --tensor-parallel-size 4 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --generation-config vllm
+  ```
+
+  With tool calling + reasoning:
+
+  ```bash
+  vllm serve XiaomiMiMo/MiMo-V2-Flash \
+    --tensor-parallel-size 4 --trust-remote-code --gpu-memory-utilization 0.9 \
+    --tool-call-parser mimo \
+    --reasoning-parser qwen3 \
+    --generation-config vllm \
+    --served-model-name mimo_v2_flash
+  ```
+
+  DP + TP + EP:
+
+  ```bash
+  vllm serve XiaomiMiMo/MiMo-V2-Flash \
+    --data-parallel-size 2 \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --generation-config vllm \
+    --served-model-name mimo_v2_flash
+  ```
+
+  AMD:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=0
+  vllm serve XiaomiMiMo/MiMo-V2-Flash --tensor-parallel-size 4 \
+    --trust-remote-code --gpu-memory-utilization 0.9 --generation-config vllm
+  ```
+
+  Tunable flags:
+  - `--max-model-len=65536` works well; max is 128K.
+  - `--max-num-batched-tokens=32768` for prompt-heavy; 16K/8K for lower latency.
+  - `--gpu-memory-utilization=0.95` to maximize KV cache.
+
+  ## Client Usage
+
+  ```bash
+  curl -X POST http://localhost:9001/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "mimo_v2_flash",
+      "messages": [{"role": "user", "content": "Hello MiMo!"}],
+      "chat_template_kwargs": {"enable_thinking": true}
+    }'
+  ```
+
+  Set `"enable_thinking": false` (or omit the kwargs) to disable thinking mode.
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model XiaomiMiMo/MiMo-V2-Flash \
+    --dataset-name random --random-input-len 8000 --random-output-len 1000 \
+    --request-rate 3 --num-prompts 1800 --ignore-eos
+  ```
+
+  ## Accuracy (GSM8K)
+
+  Reported 5-shot `exact_match`: flexible 0.9128, strict 0.9075.
+
+  ## References
+
+  - [MiMo-V2-Flash on Hugging Face](https://huggingface.co/XiaomiMiMo/MiMo-V2-Flash)

@@ -38,6 +38,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1154,6 +1155,7 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.reject_new_requests = False
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1346,6 +1348,16 @@ class EngineCoreProc(EngineCore):
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
                 )
+            if vllm_config.parallel_config.enable_elastic_ep:
+                ready_msg["coord_store_port"] = (
+                    vllm_config.parallel_config._coord_store_port
+                )
+                ready_msg["elastic_ep_max_dp_size"] = (
+                    vllm_config.parallel_config.elastic_ep_max_dp_size
+                )
+                ready_msg["num_redundant_experts"] = (
+                    vllm_config.parallel_config.eplb_config.num_redundant_experts
+                )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
@@ -1376,14 +1388,37 @@ class EngineCoreProc(EngineCore):
                 f"minutes"
             )
         init_bytes = handshake_socket.recv()
-        init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(
-            init_bytes, type=EngineHandshakeMetadata
-        )
+        num_redundant_experts: int | None = None
+        if (
+            envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+            and parallel_config is not None
+            and parallel_config.data_parallel_external_lb
+        ):
+            from vllm.distributed.elastic_ep.external_elastic_ep import (
+                ExternalElasticEPScaleUpHandshakeMetadata,
+            )
+
+            scale_up_message = msgspec.msgpack.decode(
+                init_bytes, type=ExternalElasticEPScaleUpHandshakeMetadata
+            )
+            init_message = scale_up_message.engine_metadata
+            num_redundant_experts = scale_up_message.num_redundant_experts
+            parallel_config.elastic_ep_max_dp_size = (
+                scale_up_message.elastic_ep_max_dp_size
+            )
+        else:
+            init_message = msgspec.msgpack.decode(
+                init_bytes, type=EngineHandshakeMetadata
+            )
         logger.debug("Received init message: %s", init_message)
 
         if parallel_config is not None:
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
+            if num_redundant_experts is not None:
+                parallel_config.eplb_config.num_redundant_experts = (
+                    num_redundant_experts
+                )
 
         return init_message.addresses
 
@@ -1679,7 +1714,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1714,6 +1749,28 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        # KV cleanup markers and inputs to open streaming sessions are not new work.
+        if (
+            not self.reject_new_requests
+            or request.abort_immediately
+            or self.scheduler.has_request(request.request_id)
+        ):
+            return False
+        error = RequestError(
+            code="engine_paused",
+            message="Generation is paused. Please retry after it resumes.",
+            retryable=True,
+        )
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.ERROR, error
+        )
+        if request.kv_transfer_params:
+            # Let the KV connector free any remote blocks held for it.
+            request.abort_immediately = True
+            self.add_request(request)
         return True
 
     def _reject_utility_in_shutdown(
@@ -1826,6 +1883,9 @@ class EngineCoreProc(EngineCore):
                 if self.vllm_config.weight_transfer_config is not None
                 else False
             ),
+            coord_store_port=parallel_config._coord_store_port,
+            coordinator_input_address=self.addresses.coordinator_input,
+            coordinator_output_address=self.addresses.coordinator_output,
         )
 
     def process_input_sockets(
@@ -2102,6 +2162,20 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
+        new requests with a retryable error until resume, rather than queue
+        them. Other pauses (e.g. sleep) leave this policy unchanged."""
+        future = self.pause_scheduler(mode, clear_cache)
+        self.reject_new_requests = mode != "keep"
+        return future
+
+    def resume_scheduler(self) -> None:
+        self.reject_new_requests = False
+        super().resume_scheduler()
+
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
         return ``None`` synchronously; False if the pause is still pending
@@ -2110,10 +2184,14 @@ class EngineCoreProc(EngineCore):
         return not self.has_work()
 
     def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+        self,
+        req_ids: list[str],
+        client_index: int,
+        finish_reason: FinishReason,
+        error: RequestError | None = None,
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
@@ -2233,15 +2311,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
+            if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
+                # Engines alone start waves: have the coordinator wake the others.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
@@ -2342,6 +2419,13 @@ class DPEngineCoreProc(EngineCoreProc):
                 if state.is_complete():
                     if state.worker_type == "removing":
                         raise SystemExit
+                    if (
+                        state.worker_type == "new"
+                        and self.vllm_config.parallel_config.data_parallel_external_lb
+                    ):
+                        # An independently launched rank has no external utility
+                        # caller to join the post-commit resume barrier.
+                        self.resume_scheduler()
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
                 elif not state.commit_requested and state.is_ready_for_switch():
@@ -2512,12 +2596,10 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((0, outputs))
         else:
             encoder = MsgpackEncoder()
-            with (
-                zmq.Context() as ctx,
-                make_zmq_socket(
-                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
-                ) as socket,
-            ):
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+            ) as socket:
                 socket.send_multipart(encoder.encode(outputs))
 
     def _eep_scale_up_before_kv_init(self):
