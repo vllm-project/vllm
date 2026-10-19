@@ -29,7 +29,7 @@ class ModelRequestData(NamedTuple):
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
-    sampling_params: list[SamplingParams] | None = None
+    sampling_params: SamplingParams | list[SamplingParams] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -1410,16 +1410,13 @@ def run_nemotron_parse_35(questions: list[str], modality: str) -> ModelRequestDa
         "<pad></s><s><predict_bbox><predict_classes>"
         "<output_markdown><predict_text_in_pic>"
     )
-    sampling_params = [
-        SamplingParams(
-            temperature=0,
-            top_k=1,
-            repetition_penalty=1.1,
-            max_tokens=8744,
-            skip_special_tokens=False,
-        )
-        for _ in questions
-    ]
+    sampling_params = SamplingParams(
+        temperature=0,
+        top_k=1,
+        repetition_penalty=1.1,
+        max_tokens=8744,
+        skip_special_tokens=False,
+    )
     return ModelRequestData(
         engine_args=engine_args,
         prompts=[prompt for _ in questions],
