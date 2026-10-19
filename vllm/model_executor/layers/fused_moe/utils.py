@@ -56,6 +56,7 @@ def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
+    moe_backend: str | None = None,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -63,6 +64,7 @@ def resolve_layer_fused_shared_expert(
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
+        moe_backend: MoE backend that runs the fused shared expert.
 
     Returns:
         Whether AITER fused shared experts are enabled.
@@ -79,6 +81,7 @@ def resolve_layer_fused_shared_expert(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
+            moe_backend=moe_backend,
         )
         if fse_requested
         else (True, None)
