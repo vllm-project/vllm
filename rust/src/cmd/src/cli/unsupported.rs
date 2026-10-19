@@ -298,6 +298,15 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_fault_tolerance: Option<Unsupported>,
 
+    /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
+    #[arg(
+        long,
+        visible_alias = "no-enable-elastic-ep",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_elastic_ep: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
