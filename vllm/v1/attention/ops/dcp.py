@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
     kernel_launcher,
@@ -29,6 +30,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
+    DirectCPCollective,
     DirectCPWorkspace,
     direct_cp_enabled,
     direct_cp_multicast_enabled,
@@ -538,9 +540,7 @@ def _lse_weighted_combine(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """CPU reference implementation for LSE-weighted combination.
-
-    This is a pure PyTorch implementation used for testing and validation.
+    """Pure PyTorch LSE-weighted combination used by native DCP and references.
 
     Args:
         outputs: Partial attention outputs [N, B, H, D]
@@ -561,7 +561,7 @@ def _lse_weighted_combine(
     # Handle NaN and inf in LSEs
     lses = torch.where(
         torch.isnan(lses) | torch.isinf(lses),
-        torch.tensor(float("-inf"), device=lses.device, dtype=lses.dtype),
+        float("-inf"),
         lses,
     )
 
@@ -1091,39 +1091,6 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
             signal_shape, torch.int32
         )
 
-    def lse_reduce(
-        self,
-        partial_output: torch.Tensor,
-        partial_lse: torch.Tensor,
-        is_lse_base_on_e: bool,
-        seq_lens: torch.Tensor | None = None,
-        query_start_loc: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        ubatch = dbo_current_ubatch_id()
-        num_tokens = partial_output.shape[0]
-        output = partial_output.new_empty(
-            (num_tokens, self.heads_per_rank, self.head_dim)
-        )
-        torch.ops._C.direct_dcp_a2a_lse_reduce(
-            partial_output,
-            partial_lse,
-            seq_lens,
-            query_start_loc,
-            self.peer_output_ptrs[ubatch],
-            self.peer_lse_ptrs[ubatch],
-            self.peer_signal_ptrs[ubatch],
-            self.received_output[ubatch],
-            self.received_lse[ubatch],
-            self.received_signal[ubatch],
-            self.epoch[ubatch : ubatch + 1],
-            output,
-            self.world_size,
-            self.rank,
-            self.max_num_tokens,
-            is_lse_base_on_e,
-        )
-        return output
-
 
 @functools.cache
 def get_direct_dcp_a2a_workspace(
@@ -1245,8 +1212,7 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
         self.completion = self.received_signal.new_zeros((num_ubatches, 1))
         torch.accelerator.synchronize()
 
-    def gather(self, local_query: torch.Tensor) -> torch.Tensor:
-        ubatch = dbo_current_ubatch_id()
+    def query_output(self, local_query: torch.Tensor, ubatch: int) -> torch.Tensor:
         if not 0 <= ubatch < self.num_ubatches:
             raise ValueError(
                 f"DCP q-gather ubatch {ubatch} exceeds {self.num_ubatches} slots"
@@ -1266,20 +1232,6 @@ class DirectDCPQGatherWorkspace(DirectCPWorkspace):
                 self.head_dim,
                 1,
             ),
-        )
-        query_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        torch.ops._C.direct_dcp_q_gather(
-            local_query,
-            output,
-            self.received_signal[ubatch],
-            self.completion[ubatch],
-            self.epoch[ubatch : ubatch + 1],
-            self.world_size,
-            self.rank,
-            self.max_num_tokens,
-            self.padded_num_heads,
-            query_multicast_ptr,
-            signal_multicast_ptr,
         )
         return output
 
@@ -1381,27 +1333,6 @@ class DirectDCPKVGatherWorkspace(DirectCPWorkspace):
         self.completion = self.received_signal.new_zeros((num_ubatches, 2))
         torch.accelerator.synchronize()
 
-    def gather(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
-        ubatch = dbo_current_ubatch_id()
-        if not 0 <= ubatch < self.num_ubatches:
-            raise ValueError(
-                f"DCP kv-gather ubatch {ubatch} exceeds {self.num_ubatches} slots"
-            )
-        kv_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
-        torch.ops._C.direct_dcp_kv_gather(
-            local_kv,
-            self.received_kv[ubatch],
-            self.received_signal[ubatch],
-            self.completion[ubatch],
-            self.epoch[ubatch : ubatch + 1],
-            gathered_kv,
-            self.world_size,
-            self.rank,
-            self.max_gathered_tokens,
-            kv_multicast_ptr,
-            signal_multicast_ptr,
-        )
-
 
 @functools.cache
 def get_direct_dcp_kv_gather_workspace(
@@ -1432,6 +1363,222 @@ def get_direct_dcp_kv_gather_workspace(
 
 
 # MLA DCP backend selection
+
+
+@CustomOp.register("direct_dcp_q_gather")
+class DirectDCPQGather(DirectCPCollective):
+    def __init__(
+        self,
+        group: GroupCoordinator,
+        workspace: DirectDCPQGatherWorkspace | None = None,
+        padded_num_heads: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.group = group
+        self.workspace = workspace
+        self.padded_num_heads = padded_num_heads
+
+    def forward_native(self, local_query: torch.Tensor) -> torch.Tensor:
+        gathered = local_query.new_empty((self.group.world_size, *local_query.shape))
+        dist.all_gather_into_tensor(
+            gathered.flatten(0, 1),
+            local_query.contiguous(),
+            group=self.group.device_group,
+        )
+        output = gathered.movedim(0, 1).reshape(
+            local_query.shape[0],
+            self.group.world_size * local_query.shape[1],
+            *local_query.shape[2:],
+        )
+        if self.padded_num_heads is not None:
+            output = reserve_query_head_storage(output, self.padded_num_heads)
+        return output
+
+    def forward_cuda(self, local_query: torch.Tensor) -> torch.Tensor:
+        workspace = self.workspace
+        if workspace is None or local_query.shape[0] > workspace.max_num_tokens:
+            output = self.group.all_gather(local_query, dim=1)
+            if self.padded_num_heads is not None:
+                output = reserve_query_head_storage(output, self.padded_num_heads)
+            return output
+        ubatch = dbo_current_ubatch_id()
+        output = workspace.query_output(local_query, ubatch)
+        query_multicast_ptr, signal_multicast_ptr = workspace.multicast_ptrs[ubatch]
+        torch.ops._C.direct_dcp_q_gather(
+            local_query,
+            output,
+            workspace.received_signal[ubatch],
+            workspace.completion[ubatch],
+            workspace.epoch[ubatch : ubatch + 1],
+            workspace.world_size,
+            workspace.rank,
+            workspace.max_num_tokens,
+            workspace.padded_num_heads,
+            query_multicast_ptr,
+            signal_multicast_ptr,
+        )
+        return output
+
+    def forward_xpu(self, local_query: torch.Tensor) -> torch.Tensor:
+        output = self.group.all_gather(local_query, dim=1)
+        if self.padded_num_heads is not None:
+            output = reserve_query_head_storage(output, self.padded_num_heads)
+        return output
+
+
+@CustomOp.register("direct_dcp_a2a_lse_reduce")
+class DirectDCPA2AReduce(DirectCPCollective):
+    def __init__(
+        self,
+        group: GroupCoordinator,
+        workspace: DirectDCPA2AWorkspace | None = None,
+    ) -> None:
+        super().__init__()
+        self.group = group
+        self.workspace = workspace
+
+    def forward_native(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        num_tokens, num_heads, head_dim = partial_output.shape
+        world_size = self.group.world_size
+        if world_size == 1:
+            return partial_output
+        if num_heads % world_size != 0:
+            raise ValueError(
+                f"H={num_heads} must be divisible by DCP world size {world_size}."
+            )
+        heads_per_rank = num_heads // world_size
+        lse = partial_lse.to(dtype=torch.float32, copy=True)
+        mask_dcp_empty_shards_(lse, seq_lens, query_start_loc)
+        send_buffer = (
+            torch.cat((partial_output.float(), lse.unsqueeze(-1)), dim=-1)
+            .reshape(num_tokens, world_size, heads_per_rank, head_dim + 1)
+            .movedim(1, 0)
+            .contiguous()
+        )
+        recv_buffer = torch.empty_like(send_buffer)
+        dist.all_to_all_single(recv_buffer, send_buffer, group=self.group.device_group)
+        output = _lse_weighted_combine(
+            recv_buffer[..., :head_dim],
+            recv_buffer[..., head_dim],
+            is_lse_base_on_e=is_lse_base_on_e,
+        )
+        assert isinstance(output, torch.Tensor), "DCP combine must return its output"
+        return output.to(dtype=partial_output.dtype)
+
+    def forward_cuda(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        workspace = self.workspace
+        if workspace is None or partial_output.shape[0] > workspace.max_num_tokens:
+            return dcp_a2a_lse_reduce(
+                partial_output,
+                partial_lse,
+                cp_group=self.group,
+                is_lse_base_on_e=is_lse_base_on_e,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+            )
+        ubatch = dbo_current_ubatch_id()
+        num_tokens = partial_output.shape[0]
+        output = partial_output.new_empty(
+            (num_tokens, workspace.heads_per_rank, workspace.head_dim)
+        )
+        torch.ops._C.direct_dcp_a2a_lse_reduce(
+            partial_output,
+            partial_lse,
+            seq_lens,
+            query_start_loc,
+            workspace.peer_output_ptrs[ubatch],
+            workspace.peer_lse_ptrs[ubatch],
+            workspace.peer_signal_ptrs[ubatch],
+            workspace.received_output[ubatch],
+            workspace.received_lse[ubatch],
+            workspace.received_signal[ubatch],
+            workspace.epoch[ubatch : ubatch + 1],
+            output,
+            workspace.world_size,
+            workspace.rank,
+            workspace.max_num_tokens,
+            is_lse_base_on_e,
+        )
+        return output
+
+    def forward_xpu(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return dcp_a2a_lse_reduce(
+            partial_output,
+            partial_lse,
+            cp_group=self.group,
+            is_lse_base_on_e=is_lse_base_on_e,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+
+
+@CustomOp.register("direct_dcp_kv_gather")
+class DirectDCPKVGather(DirectCPCollective):
+    def __init__(
+        self,
+        group: GroupCoordinator,
+        workspace: DirectDCPKVGatherWorkspace | None = None,
+    ) -> None:
+        super().__init__()
+        self.group = group
+        self.workspace = workspace
+
+    def forward_native(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
+        dist.all_gather_into_tensor(
+            gathered_kv, local_kv.contiguous(), group=self.group.device_group
+        )
+
+    def forward_cuda(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
+        workspace = self.workspace
+        if workspace is None:
+            return dist.all_gather_into_tensor(
+                gathered_kv, local_kv, group=self.group.device_group
+            )
+        ubatch = dbo_current_ubatch_id()
+        if not 0 <= ubatch < workspace.num_ubatches:
+            raise ValueError(
+                f"DCP kv-gather ubatch {ubatch} exceeds {workspace.num_ubatches} slots"
+            )
+        kv_multicast_ptr, signal_multicast_ptr = workspace.multicast_ptrs[ubatch]
+        torch.ops._C.direct_dcp_kv_gather(
+            local_kv,
+            workspace.received_kv[ubatch],
+            workspace.received_signal[ubatch],
+            workspace.completion[ubatch],
+            workspace.epoch[ubatch : ubatch + 1],
+            gathered_kv,
+            workspace.world_size,
+            workspace.rank,
+            workspace.max_gathered_tokens,
+            kv_multicast_ptr,
+            signal_multicast_ptr,
+        )
+
+    def forward_xpu(self, gathered_kv: torch.Tensor, local_kv: torch.Tensor) -> None:
+        dist.all_gather_into_tensor(
+            gathered_kv, local_kv, group=self.group.device_group
+        )
 
 
 class DCPCombine(Protocol):
@@ -1504,9 +1651,8 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> DCPCombine:
-        direct_workspace = None
         if self.use_a2a:
-            direct_workspace = get_direct_dcp_a2a_workspace(
+            workspace = get_direct_dcp_a2a_workspace(
                 self.group,
                 self.device,
                 self.max_num_tokens,
@@ -1515,54 +1661,17 @@ class MLADCPManager:
                 dtype,
                 self.num_ubatches,
             )
-        if direct_workspace is not None:
-            logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
+            if workspace is not None:
+                logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
             return functools.partial(
-                self._direct_workspace_combine,
-                direct_workspace,
+                DirectDCPA2AReduce(self.group, workspace).forward,
                 is_lse_base_on_e=is_lse_base_on_e,
             )
 
-        combine_fn = (
-            dcp_a2a_lse_reduce
-            if self.use_a2a
-            else cp_lse_ag_out_ar
-            if use_pcp
-            else cp_lse_ag_out_rs
-        )
         return functools.partial(
-            combine_fn,
+            cp_lse_ag_out_ar if use_pcp else cp_lse_ag_out_rs,
             cp_group=self.group,
             is_lse_base_on_e=is_lse_base_on_e,
-        )
-
-    def _direct_workspace_combine(
-        self,
-        direct_workspace: DirectDCPA2AWorkspace,
-        partial_output: torch.Tensor,
-        partial_lse: torch.Tensor,
-        is_lse_base_on_e: bool,
-        seq_lens: torch.Tensor | None = None,
-        query_start_loc: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Forced MQA path pass all batch tokens (including prefill) into combine,
-        # which may exceed the direct symmetric-memory workspace. Fall back to
-        # the nccl a2a combine for those cases.
-        if partial_output.shape[0] <= direct_workspace.max_num_tokens:
-            return direct_workspace.lse_reduce(
-                partial_output,
-                partial_lse,
-                is_lse_base_on_e,
-                seq_lens,
-                query_start_loc,
-            )
-        return dcp_a2a_lse_reduce(
-            partial_output,
-            partial_lse,
-            cp_group=self.group,
-            is_lse_base_on_e=is_lse_base_on_e,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
         )
 
     def _init_query_gather(
@@ -1571,7 +1680,7 @@ class MLADCPManager:
         head_dim: int,
         dtype: torch.dtype,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
-        direct_workspace = get_direct_dcp_q_gather_workspace(
+        workspace = get_direct_dcp_q_gather_workspace(
             self.group,
             self.device,
             self.max_num_tokens,
@@ -1581,31 +1690,9 @@ class MLADCPManager:
             self.num_ubatches,
             self.padded_num_heads,
         )
-        if direct_workspace is not None:
+        if workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP query gather for MLA.")
-            return functools.partial(
-                self._direct_workspace_query_gather,
-                direct_workspace,
-            )
-        return self._gather_query
-
-    def _gather_query(self, query: torch.Tensor) -> torch.Tensor:
-        query = self.group.all_gather(query, dim=1)
-        if self.padded_num_heads is not None:
-            query = reserve_query_head_storage(query, self.padded_num_heads)
-        return query
-
-    def _direct_workspace_query_gather(
-        self,
-        direct_workspace: DirectDCPQGatherWorkspace,
-        query: torch.Tensor,
-    ) -> torch.Tensor:
-        # Forced MQA path can be taken for long sparse MLA prefills, whose batch size
-        # may exceed the direct symmetric-memory workspace. Fall back to allgather
-        # for those cases.
-        if query.shape[0] <= direct_workspace.max_num_tokens:
-            return direct_workspace.gather(query)
-        return self._gather_query(query)
+        return DirectDCPQGather(self.group, workspace, self.padded_num_heads).forward
 
     def init_kv_gather(
         self,
@@ -1634,12 +1721,7 @@ class MLADCPManager:
             logger.info_once(
                 "Using direct symmetric-memory DCP chunked-context KV gather for MLA."
             )
-            self._kv_gather = direct_workspace.gather
-        else:
-            self._kv_gather = functools.partial(
-                torch.distributed.all_gather_into_tensor,
-                group=self.group.device_group,
-            )
+        self._kv_gather = DirectDCPKVGather(self.group, direct_workspace).forward
 
     def kv_gather(
         self,

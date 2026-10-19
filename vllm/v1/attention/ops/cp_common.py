@@ -11,6 +11,7 @@ import torch
 
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -85,6 +86,15 @@ def direct_cp_multicast_enabled(
     return direct_cp_enabled(
         group, dtype, use_direct, supported_dtypes
     ) and _symm_mem_spans_group(group)
+
+
+class DirectCPCollective(CustomOp):
+    """Preserve collective CUDA dispatch under Inductor's global custom-op default."""
+
+    @staticmethod
+    def default_on() -> bool:
+        CustomOp.default_on()  # Validate the global all/none mode.
+        return True
 
 
 class DirectCPWorkspace:

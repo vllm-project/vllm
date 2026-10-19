@@ -590,6 +590,24 @@ steps:
       commands:
       - pytest -v -s tests/distributed/test_mnnvl_alltoall.py::test_args_dispatch_combine
 
+- label: ":nvidia: (B200) Direct DCP Collectives"
+  key: direct-dcp-collectives-4xb200
+  device: b200-k8s
+  optional: true
+  num_devices: 4
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+    - .buildkite/test_areas/distributed.yaml
+    - vllm/v1/attention/ops/dcp.py
+    - vllm/v1/attention/ops/cp_common.py
+    - vllm/envs.py
+    - vllm/model_executor/custom_op.py
+    - csrc/attention/dcp_utils/
+    - tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+  commands:
+    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
   timeout_in_minutes: 20
