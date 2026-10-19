@@ -7,7 +7,16 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    NamedTuple,
+    NewType,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -698,6 +707,33 @@ class DevicePointerGroupInfo(NamedTuple):
     skip: int
     n_chunks: int
     dev_ptr_offset: int
+
+
+@runtime_checkable
+class IOCompletion(Protocol):
+    """Completion handle for an async I/O operation.
+
+    `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
+    backends can use `StreamCompletion` instead, avoiding a thread.
+    """
+
+    def done(self) -> bool: ...
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+class StreamCompletion:
+    """IOCompletion backed by a CUDA event — no host thread required."""
+
+    __slots__ = ("_event",)
+
+    def __init__(self, event: torch.Event):
+        self._event = event
+
+    def done(self) -> bool:
+        return self._event.query()
+
+    def result(self, timeout: float | None = None) -> None:
+        self._event.synchronize()
 
 
 @dataclass
