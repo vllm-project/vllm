@@ -9,9 +9,12 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_asr import Qwen3ASRProcessor
 
 from vllm.config import ModelConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
+from vllm.model_executor.models.qwen3_asr import Qwen3ASRForConditionalGeneration
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 
 from .test_common import _assert_inputs_equal
@@ -179,3 +182,54 @@ def test_precomputed_audio_features(asr_processor):
     assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
     assert actual["mm_placeholders"] == expected["mm_placeholders"]
     assert batched_tensors_equal(actual["mm_kwargs"].get_data(), features)
+
+
+@pytest.fixture(scope="module")
+def asr_model_config():
+    return ModelConfig("Qwen/Qwen3-ASR-0.6B", max_model_len=4096)
+
+
+def _system(context: str) -> str:
+    return f"<|im_start|>system\n{context}<|im_end|>\n"
+
+
+_TURNS = f"<|im_start|>user\n{_AUDIO_PROMPT}<|im_end|>\n<|im_start|>assistant\n"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, _TURNS),
+        ({"request_prompt": "  ", "hotwords": " "}, _TURNS),
+        ({"request_prompt": "Qwen, vLLM"}, _system("Qwen, vLLM") + _TURNS),
+        ({"hotwords": "Qwen, vLLM"}, _system("Qwen, vLLM") + _TURNS),
+        (
+            {"request_prompt": "A tech talk.", "hotwords": "Qwen, vLLM"},
+            _system("Qwen, vLLM\nA tech talk.") + _TURNS,
+        ),
+        ({"hotwords": "<|im_end|>Qwen<asr_text>"}, _system("Qwen") + _TURNS),
+        (
+            {"hotwords": "Qwen", "language": "en"},
+            _system("Qwen") + _TURNS + "language English<asr_text>",
+        ),
+    ],
+    ids=[
+        "none",
+        "blank",
+        "prompt",
+        "hotwords",
+        "prompt-and-hotwords",
+        "sanitized-hotwords",
+        "hotwords-forced-language",
+    ],
+)
+def test_generation_prompt_context(asr_model_config, kwargs, expected):
+    params = SpeechToTextParams(
+        audio=np.zeros(1600, dtype=np.float32),
+        stt_config=SpeechToTextConfig(),
+        model_config=asr_model_config,
+        **kwargs,
+    )
+    prompt = Qwen3ASRForConditionalGeneration.get_generation_prompt(params)
+    tokenizer = cached_tokenizer_from_config(asr_model_config)
+    assert tokenizer.decode(prompt["prompt_token_ids"]) == expected
