@@ -5,7 +5,7 @@ Replacement for lm-eval-harness with better performance and control.
 
 Usage:
 pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt
+    --config-list-file=configs/models-small.yaml
 """
 
 import shlex
