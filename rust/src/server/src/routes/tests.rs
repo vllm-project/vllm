@@ -809,6 +809,8 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
+        ("POST", "/scale_elastic_ep"),
+        ("POST", "/is_scaling_elastic_ep"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }

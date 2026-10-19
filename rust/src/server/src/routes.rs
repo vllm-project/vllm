@@ -147,6 +147,9 @@ fn build_router_with_options(
         // TODO: implement the decisions APIs.
         .route("/v1/decisions", post(not_supported))
         .route("/v1/systemone", post(not_supported))
+        // TODO: implement elastic EP scaling.
+        .route("/scale_elastic_ep", post(not_supported))
+        .route("/is_scaling_elastic_ep", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
