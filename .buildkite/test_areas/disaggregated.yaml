@@ -4,6 +4,8 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Distributed NixlConnector PD accuracy"
   key: distributed-nixlconnector-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -33,6 +35,8 @@ steps:
 
 - label: ":nvidia: (L4) Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -69,6 +73,8 @@ steps:
 
 - label: ":nvidia: (L4) Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -99,6 +105,8 @@ steps:
 
 - label: ":nvidia: (L4) DP EP Distributed NixlConnector PD accuracy"
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -127,6 +135,8 @@ steps:
 
 - label: ":nvidia: (L4) CrossLayer KV layout Distributed NixlConnector PD accuracy"
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -155,6 +165,8 @@ steps:
 
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD accuracy"
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   device: l4
