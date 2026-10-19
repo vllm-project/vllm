@@ -335,6 +335,7 @@ class RoutingSimulatorRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
+        kernel_routing_method_type: RoutingMethodType,
         eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
@@ -343,6 +344,7 @@ class RoutingSimulatorRouter(BaseRouter):
             eplb_state=eplb_state,
         )
 
+        self._kernel_routing_method_type = kernel_routing_method_type
         strategy_name = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         self._strategy = RoutingSimulator.get_strategy(strategy_name)
         logger.warning_once(
@@ -355,6 +357,10 @@ class RoutingSimulatorRouter(BaseRouter):
     @property
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.Simulated
+
+    @property
+    def kernel_routing_method_type(self) -> RoutingMethodType:
+        return self._kernel_routing_method_type
 
     @property
     def supports_monolithic_kernels(self) -> bool:
