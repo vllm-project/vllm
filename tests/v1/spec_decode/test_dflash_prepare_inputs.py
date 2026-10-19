@@ -131,7 +131,6 @@ def _run_prepare(
         draft._prepare_graph_replay = lambda *args: None
         draft._prepare_eplb_forward = lambda *args: None
         draft.supports_decode_metadata_update = True
-        draft.enable_adaptive_verification = False
         draft.draft_tokens = torch.full(
             (max_num_reqs, num_speculative_steps), -1, dtype=torch.int64, device=device
         )
