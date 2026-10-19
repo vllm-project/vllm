@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
 from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
 from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import aux_stream
 
 HIDDEN = 64
 INTER = 64
@@ -193,7 +194,10 @@ def test_shared_expert_route_appended(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 @pytest.mark.parametrize("hash_routing", [False, True])
 @pytest.mark.parametrize("num_tokens", [1, 37])
-def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_tokens):
+@pytest.mark.parametrize("shared_stream", [False, True])
+def test_mega_moe_routing_matches_reference(
+    monkeypatch, hash_routing, num_tokens, shared_stream
+):
     num_experts, top_k, vocab = 16, 4, 64
     scaling = 2.5
     device = "cuda"
@@ -232,6 +236,10 @@ def test_mega_moe_routing_matches_reference(monkeypatch, hash_routing, num_token
     moe.gate = Gate()
     moe.experts = experts
     moe.shared_experts = lambda x: 3 * x
+    moe.shared_experts_stream = aux_stream() if shared_stream else None
+    moe.shared_experts_events = (
+        (torch.cuda.Event(), torch.cuda.Event()) if shared_stream else None
+    )
     moe.scoring_func = "sqrtsoftplus"
     moe.n_activated_experts = top_k
     moe.renormalize = True

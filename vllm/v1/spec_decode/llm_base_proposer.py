@@ -255,7 +255,7 @@ class SpecDecodeBaseProposer:
             with_numpy=True,
         )
         self._enable_probabilistic_draft_probs = (
-            self.speculative_config.rejection_sample_method == "standard"
+            self.speculative_config.rejection_sample_method in ("standard", "fly")
             and self.speculative_config.draft_sample_method == "probabilistic"
         )
         self._last_draft_probs: torch.Tensor | None = None
@@ -1330,10 +1330,13 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for name in draft_attn_layer_names:
+            all_attn_layers[name].is_draft_layer = True
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
-            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            for name in draft_attn_layer_names
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
