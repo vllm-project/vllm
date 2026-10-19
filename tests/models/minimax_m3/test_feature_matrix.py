@@ -101,6 +101,7 @@ ANSWER_SCHEMA = {
 @dataclass(frozen=True)
 class Instance:
     tp: int = 1
+    pp: int = 1
     dp: int = 1
     ep: bool = False
     image: bool = False
@@ -109,7 +110,7 @@ class Instance:
 
     @property
     def num_gpus(self) -> int:
-        return self.tp * self.dp
+        return self.tp * self.pp * self.dp
 
     def args(self, draft: str) -> list[str]:
         spec = {"method": "dspark", "model": draft, "num_speculative_tokens": 3}
@@ -119,6 +120,8 @@ class Instance:
             "--speculative-config",
             json.dumps(spec),
         ]
+        if self.pp > 1:
+            args += ["--pipeline-parallel-size", str(self.pp)]
         if self.dp > 1:
             args += ["--data-parallel-size", str(self.dp)]
         if self.ep:
@@ -162,6 +165,7 @@ DEPLOYMENTS = {
             extra_args=("--all2all-backend", "flashinfer_nvlink_one_sided"),
         )
     ),
+    "pp2-dep2": Deployment(Instance(pp=2, dp=2, ep=True)),
     "simple-offload-tp2-ep": Deployment(
         Instance(tp=2, ep=True, kv_config=SIMPLE_OFFLOAD), offload=True
     ),
@@ -261,6 +265,9 @@ def _serve(
         next_gpu = 0
         for instance in deployment.instances:
             env = {}
+            if instance.pp > 1:
+                # Until #54710 is fixed, every PP stage needs a dense layer.
+                env["VLLM_PP_LAYER_PARTITION"] = "2,4"
             if deployment.offload:
                 # Enables /reset_prefix_cache.
                 env["VLLM_SERVER_DEV_MODE"] = "1"
