@@ -243,6 +243,8 @@ def set_dummy_context(
     num_kv_blocks: int,
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
+    mamba_group_ids: Sequence[int] = (),
+    decode_query_len: int | None = None,
 ) -> None:
     """Give each dummy request context_len of context, for profiling step cost
     and for DCP FULL cudagraph capture."""
@@ -252,25 +254,50 @@ def set_dummy_context(
         # Attention-free models have no KV context to fabricate.
         return
     num_reqs = input_batch.num_reqs
-    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
-    context_len = max(min(context_len, max_model_len - query_len), 0)
-    if not context_len:
-        return
+    query_lens = input_batch.max_query_len or input_batch.num_scheduled_tokens
+    if mamba_group_ids and decode_query_len is not None:
+        prefills = input_batch.num_scheduled_tokens > decode_query_len
+        input_batch.is_prefilling_np[:] = prefills
+        input_batch.has_prefill = bool(prefills.any())
+        input_batch.decode_graph_eligible = not input_batch.has_prefill
+        input_batch.prefill_len_np[:] = np.where(
+            prefills, input_batch.num_scheduled_tokens, 0
+        )
+        input_batch.num_draft_tokens_per_req = np.where(
+            prefills, 0, input_batch.num_scheduled_tokens - 1
+        ).astype(np.int32)
+        input_batch.num_draft_tokens = int(input_batch.num_draft_tokens_per_req.sum())
+    context_lens = np.minimum(context_len, max_model_len - query_lens).clip(min=0)
+    context_lens = np.where(input_batch.is_prefilling_np, 0, context_lens)
+    context_tensor = torch.from_numpy(context_lens)
 
     # Decode-like shape: each request continues after context_len
     # already-computed tokens.
-    input_batch.seq_lens += context_len
-    input_batch.seq_lens_cpu_upper_bound += context_len
-    input_batch.num_computed_tokens_np.fill(context_len)
-    input_batch.num_computed_prefill_tokens_np.fill(context_len)
+    input_batch.seq_lens += context_tensor.to(input_batch.seq_lens.device)
+    input_batch.seq_lens_cpu_upper_bound += context_tensor
+    input_batch.num_computed_tokens_np[:] = context_lens
+    input_batch.num_computed_prefill_tokens_np[:] = context_lens
     local_pos = np.arange(input_batch.num_tokens, dtype=np.int64) - np.repeat(
         input_batch.query_start_loc_np[:-1], input_batch.num_scheduled_tokens
     )
-    input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
+    positions = local_pos + np.repeat(context_lens, input_batch.num_scheduled_tokens)
+    input_batch.positions.copy_(torch.from_numpy(positions))
 
-    seq_len = context_len + query_len
-    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
+    seq_len = int(input_batch.seq_lens_cpu_upper_bound.max())
+    for group_id, (block_table, block_size) in enumerate(
+        zip(input_block_tables, block_tables.block_sizes)
+    ):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
+        first_block = 0
+        if group_id in mamba_group_ids:
+            # Verification selects an accepted state and writes one state per query.
+            num_blocks = min(
+                num_blocks + int(input_batch.num_scheduled_tokens.max()) - 1,
+                block_table.shape[1],
+            )
+            first_block = 1
+            if num_kv_blocks <= 1:
+                raise ValueError("Dummy Mamba context requires a non-null state block")
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
         block_ids = (
@@ -279,7 +306,8 @@ def set_dummy_context(
                 dtype=block_table.dtype,
                 device=block_table.device,
             )
-            % num_kv_blocks
+            % (num_kv_blocks - first_block)
+            + first_block
         )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
