@@ -293,6 +293,8 @@ class LLM(
                 "'examples/features/data_parallel/data_parallel_offline.py'."
             )
 
+        metadata_source = kwargs.pop("_metadata_source", None)
+        metadata_source_identity = kwargs.pop("_metadata_source_identity", None)
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -335,6 +337,12 @@ class LLM(
             spec_tokens=spec_tokens,
             **kwargs,
         )
+        if (
+            metadata_source is not None
+            and engine_args._metadata_source_identity == metadata_source_identity
+        ):
+            # Preserve provenance only when the resolved arguments are unchanged.
+            engine_args._metadata_source = metadata_source
 
         configure_logging_if_needed(engine_args.create_logging_config())
         log_non_default_args(engine_args)

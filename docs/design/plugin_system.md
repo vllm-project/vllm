@@ -55,6 +55,71 @@ Every plugin has three parts:
 
 - **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
 
+## Model metadata providers
+
+A general plugin can register a `MetadataProvider` from `vllm.plugins.model_metadata` to make non-weight files available before vLLM reads them. This includes model configs, tokenizer files, processor configs, and remote code. Providers must not download weights or rewrite model and tokenizer paths; native resolution and model loaders keep their existing responsibilities.
+
+There are two phases at three call sites, all immediately after `load_general_plugins()`:
+
+| Call site | Phase | Timing |
+| --- | --- | --- |
+| `EngineArgs.__post_init__` | `prepare_source(source)` | Before offline `get_model_path()` resolution |
+| `EngineCore.__init__` | `prepare_consumer(source, model=..., tokenizer=...)` | Before executor construction |
+| `WorkerWrapperBase.init_worker` | `prepare_consumer(source, model=..., tokenizer=...)` | Before worker class resolution and construction, and thus before `init_device()` |
+
+`MetadataSource` is a frozen dataclass containing the model and tokenizer values passed to an `EngineArgs` instance, their requested revisions, `code_revision`, the Hugging Face cache root, and the offline and ModelScope settings. The cache root is `huggingface_hub.constants.HF_HUB_CACHE` at source preparation time, not the weight loader's download directory. Unspecified tokenizer and revision values remain `None`.
+
+The inputs are not necessarily repo IDs: `LLM.from_engine_args()` and the default `EngineArgs` instances used for argument logging can receive already-resolved local paths. `LLM.from_engine_args()` retains the original source only if the model, tokenizer, and revisions are unchanged since `EngineArgs` construction. Providers must make `prepare_source` a no-op for local paths and already-prepared inputs, including repeated calls.
+
+The source phase may populate the cache, but vLLM still resolves the model normally afterward. vLLM retains the original source in `ModelConfig.metadata_source` and serializes it with the config to other processes. This field does not affect the computation graph hash; the provider itself is never stored in the config.
+
+`prepare_consumer` receives the source together with `ModelConfig.model` and `ModelConfig.tokenizer`. For Hub inputs, offline mode passes local snapshot paths, while online mode retains repo IDs. Prepare any resolved snapshot path at that exact location on each process's filesystem, using the commit in the path rather than re-resolving a branch that might have moved.
+
+Providers should first check whether the required metadata is already available locally and return immediately if it is. This avoids failing Core or Worker initialization when frontend preparation succeeded but the metadata service is now unreachable. Providers must handle repeated calls safely and return without work for sources they do not support. Without a registered provider, both phases are no-ops and the source field remains `None`.
+
+Failure handling differs by phase:
+
+- A source exception is logged as a warning with the model and revision. Native resolution continues, preserving its usual diagnostics.
+- A consumer exception stops initialization. `MetadataUnavailable` propagates unchanged; other exceptions are wrapped in `MetadataUnavailable` with their original cause. vLLM does not probe native metadata or attempt fallback after a consumer failure.
+
+For example, a plugin can expose the following `register` function through its `vllm.general_plugins` entry point. The plugin-defined helpers implement the no-op and local-readiness checks above and must only prepare metadata:
+
+```python
+from vllm.plugins.model_metadata import (
+    MetadataSource,
+    register_model_metadata_provider,
+)
+
+from .cache import prepare_resolved_files, prepare_source_files
+
+
+class CacheMetadataProvider:
+    def prepare_source(self, source: MetadataSource) -> None:
+        prepare_source_files(source)
+
+    def prepare_consumer(
+        self, source: MetadataSource, *, model: str, tokenizer: str
+    ) -> None:
+        prepare_resolved_files(source, model=model, tokenizer=tokenizer)
+
+
+_provider = CacheMetadataProvider()
+
+
+def register() -> None:
+    register_model_metadata_provider(_provider)
+```
+
+Only one provider can be registered per process. Re-registering the same object is a no-op; registering a different object raises `RuntimeError`. If two plugins each register their own provider, the second registration raises during `load_general_plugins()` and startup fails. Both preparation methods must be callable, otherwise registration raises `TypeError`. The registry is process-local: an EngineCore or worker started with `spawn` begins with no provider and relies on its own `load_general_plugins()` call to register one again.
+
+Direct `ModelConfig(...)` construction that bypasses `EngineArgs` does not run the source phase. Neither the source nor the consumer phase covers:
+
+- Independent repositories selected with `--hf-config-path`.
+- Speculative draft models.
+- Speculators-format checkpoints, where `create_engine_config()` replaces the model and tokenizer with the verifier model after the source phase.
+
+This interface does not change the Run:AI path, remote-code loading rules, or weight loading.
+
 ## Guidelines for Writing Plugins
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
