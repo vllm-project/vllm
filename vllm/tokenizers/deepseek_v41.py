@@ -17,9 +17,19 @@ from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
 
+def _reject_image_placeholder(text: Any) -> None:
+    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
+        raise ValueError(
+            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
+            "provide images as image content parts."
+        )
+
+
 def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
+    # vLLM additions to the reference: Responses API part types, image_pil,
+    # and ValueError (400) instead of the reference's asserts.
     result = [dict(message) for message in copy.deepcopy(messages)]
     image_idx = 0
     for message in result:
@@ -29,12 +39,16 @@ def _normalize_messages(
             raise ValueError(f"Invalid role: {role}")
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
+        _reject_image_placeholder(message.get("reasoning_content"))
         content = message.get("content")
-        if isinstance(content, list):
+        if isinstance(content, str):
+            _reject_image_placeholder(content)
+        elif isinstance(content, list):
             parts = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
+                    _reject_image_placeholder(block.get("text"))
                     parts.append(block.get("text", ""))
                 elif part_type in ("image_url", "input_image", "image_pil"):
                     parts.append(IMAGE_PLACEHOLDER)
