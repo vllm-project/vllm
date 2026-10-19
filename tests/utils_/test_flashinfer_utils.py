@@ -3,6 +3,7 @@
 import importlib.util
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,21 @@ import vllm.utils.flashinfer as fi
 def _make_exe(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(mode=0o755)
+
+
+@pytest.mark.parametrize("has_legacy_class", [False, True])
+def test_one_sided_requires_legacy_class(monkeypatch, has_legacy_class):
+    """The functional API alone cannot back vLLM's legacy all2all manager."""
+    module = SimpleNamespace(moe_a2a_get_workspace_size_per_rank=lambda: 0)
+    if has_legacy_class:
+        module.MoeAlltoAll = object
+    monkeypatch.setattr(fi, "has_flashinfer_comm", lambda: True)
+    monkeypatch.setattr(fi, "_get_submodule", lambda name: module)
+    fi.has_flashinfer_nvlink_one_sided.cache_clear()
+    try:
+        assert fi.has_flashinfer_nvlink_one_sided() is has_legacy_class
+    finally:
+        fi.has_flashinfer_nvlink_one_sided.cache_clear()
 
 
 @pytest.fixture
