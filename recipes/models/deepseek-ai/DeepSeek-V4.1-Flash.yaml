@@ -1183,7 +1183,7 @@ guide: |
       ROLE_ARGS=("${PD_ARGS[@]}" "${PREFILL_ARGS[@]}"
         --data-parallel-size-local 2 --data-parallel-address "$ENGINE_IP"
         --data-parallel-rpc-port "$rpc_port" --kv-events-config "$events")
-      SIDECAR_ARGS=(--disaggregation-mode prefill)
+      SIDECAR_ARGS=(--disaggregation-mode prefill --component prefill)
       deadline=9000 ;;
     decode)
       export VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4
