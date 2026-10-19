@@ -33,6 +33,7 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
     "inc",
+    "inc_mxfp4",
     "mxfp4",
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
@@ -141,7 +142,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .humming import HummingConfig
-    from .inc import INCConfig
+    from .inc import INCConfig, INCMxFp4Config
     from .modelopt import (
         ModelOptFp8Config,
         ModelOptMixedPrecisionConfig,
@@ -164,6 +165,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
+        "inc_mxfp4": INCMxFp4Config,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
