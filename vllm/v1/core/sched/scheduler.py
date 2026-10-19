@@ -655,6 +655,7 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        num_scheduled_encoder_inputs = 0
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
@@ -893,11 +894,8 @@ class Scheduler(SchedulerInterface):
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
                                 if iteration_details is not None:
-                                    iteration_details.num_encoder_inputs -= len(
+                                    num_scheduled_encoder_inputs -= len(
                                         preempted_encoder_inputs
-                                    )
-                                    iteration_details.num_encoder_output_tokens -= (
-                                        num_embeds_to_restore
                                     )
                     else:
                         preempted_req = self.running.pop()
@@ -948,12 +946,7 @@ class Scheduler(SchedulerInterface):
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                 if iteration_details is not None:
-                    iteration_details.num_encoder_inputs += len(
-                        encoder_inputs_to_schedule
-                    )
-                    iteration_details.num_encoder_output_tokens += (
-                        encoder_compute_budget - new_encoder_compute_budget
-                    )
+                    num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                 encoder_compute_budget = new_encoder_compute_budget
             if encoder_inputs_to_schedule or external_load_encoder_input:
                 self._allocate_encoder_inputs(
@@ -1472,12 +1465,7 @@ class Scheduler(SchedulerInterface):
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                     if iteration_details is not None:
-                        iteration_details.num_encoder_inputs += len(
-                            encoder_inputs_to_schedule
-                        )
-                        iteration_details.num_encoder_output_tokens += (
-                            encoder_compute_budget - new_encoder_compute_budget
-                        )
+                        num_scheduled_encoder_inputs += len(encoder_inputs_to_schedule)
                     encoder_compute_budget = new_encoder_compute_budget
                 if encoder_inputs_to_schedule or external_load_encoder_input:
                     self._allocate_encoder_inputs(
@@ -1556,11 +1544,17 @@ class Scheduler(SchedulerInterface):
             )
 
         if iteration_details is not None:
+            # Decode requests are counted in _make_cached_request_data()
+            # Other scheduled requests - including new requests - are prefill
             iteration_details.num_prefill_requests = (
                 len(num_scheduled_tokens) - iteration_details.num_decode_requests
             )
             iteration_details.num_prefill_tokens = (
                 total_num_scheduled_tokens - iteration_details.num_decode_tokens
+            )
+            iteration_details.num_encoder_inputs = num_scheduled_encoder_inputs
+            iteration_details.num_encoder_output_tokens = (
+                self.max_num_encoder_input_tokens - encoder_compute_budget
             )
 
         # Record the request ids that were scheduled in this step (MRV1-only).
@@ -1856,6 +1850,7 @@ class Scheduler(SchedulerInterface):
                 req.num_output_tokens + req.num_output_placeholders
             )
             if iteration_details is not None and not is_prefill:
+                # Count decode requests here; all other scheduled reqs are prefills
                 iteration_details.num_decode_requests += 1
                 iteration_details.num_decode_tokens += num_scheduled_tokens[req_id]
             if prefill_req_ids is not None and is_prefill:
