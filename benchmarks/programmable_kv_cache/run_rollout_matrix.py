@@ -237,6 +237,12 @@ def main():
     parser.add_argument("--profile-delay-iterations", type=int, default=128)
     parser.add_argument("--profile-iterations", type=int, default=32)
     parser.add_argument("--prediction-seconds", type=float, default=0.25)
+    parser.add_argument(
+        "--prediction-mode", choices=("fixed", "adaptive"), default="adaptive"
+    )
+    parser.add_argument("--movement-min-pause-seconds", type=float, default=0.5)
+    parser.add_argument("--prefetch-on-admission", action="store_true")
+    parser.add_argument("--movement-pressure-only", action="store_true")
     parser.add_argument("--oracle", action="store_true")
     parser.add_argument("--policy-components", default="retention,movement,quota")
     parser.add_argument("--policy-max-wait-seconds", type=float, default=30)
@@ -268,6 +274,16 @@ def main():
         parser.error("cache-gib must be positive")
     if not components <= {"retention", "movement", "quota"}:
         parser.error("Unknown policy component")
+    if (
+        not math.isfinite(args.movement_min_pause_seconds)
+        or args.movement_min_pause_seconds < 0
+    ):
+        parser.error("movement-min-pause-seconds must be nonnegative and finite")
+    if (
+        not math.isfinite(args.prediction_seconds)
+        or not 0 < args.prediction_seconds <= 300
+    ):
+        parser.error("prediction-seconds must be in (0, 300]")
     for name in ("policy_max_wait_seconds", "quota_aging_seconds"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
@@ -474,7 +490,14 @@ def main():
                         {
                             "name": "movement",
                             "implementation": "tool_wait",
-                            "options": {"min_pressure": 0.6},
+                            "options": {
+                                "min_pressure": 0.6,
+                                "min_pause_seconds": args.movement_min_pause_seconds,
+                                "prefetch_on_admission": args.prefetch_on_admission,
+                                "consider_pause_duration": (
+                                    not args.movement_pressure_only
+                                ),
+                            },
                         },
                         {
                             "name": "quota",
@@ -667,9 +690,24 @@ def main():
                         str(args.concurrency),
                         "--prediction-seconds",
                         str(args.prediction_seconds),
+                        "--prediction-mode",
+                        args.prediction_mode,
                     ]
                     if args.oracle:
                         command.append("--oracle")
+                    if args.prefetch_on_admission:
+                        command.extend(
+                            [
+                                "--control-timeout",
+                                str(
+                                    args.policy_max_wait_seconds
+                                    + max(
+                                        args.prediction_seconds, args.replay_pause_floor
+                                    )
+                                    + 30
+                                ),
+                            ]
+                        )
                     if args.profile:
                         command.append("--trace-control-rpc")
                     if args.replay_pause_floor:
@@ -829,6 +867,8 @@ def main():
                         str(args.max_context),
                         "--prediction-seconds",
                         str(args.prediction_seconds),
+                        "--prediction-mode",
+                        args.prediction_mode,
                     ]
                     for key in (
                         "prompts",
@@ -843,6 +883,17 @@ def main():
                     ):
                         command.extend(
                             ["--" + key.replace("_", "-"), str(trace["config"][key])]
+                        )
+                    if args.prefetch_on_admission:
+                        command.extend(
+                            [
+                                "--control-timeout",
+                                str(
+                                    args.policy_max_wait_seconds
+                                    + args.prediction_seconds
+                                    + 30
+                                ),
+                            ]
                         )
                     record["commands"].append(command)
                     with (args.output_dir / f"{arm}-live.log").open("w") as log:

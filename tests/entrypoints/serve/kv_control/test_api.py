@@ -14,7 +14,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from benchmarks.programmable_kv_cache.rollout import RolloutClient
+from benchmarks.programmable_kv_cache.rollout import (
+    RolloutClient,
+    ToolDurationEstimator,
+)
 from vllm.config import KVControlConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -27,6 +30,18 @@ from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import SessionPrefixIndex
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_tool_estimates_learn_completed_batches_without_future_samples():
+    estimator = ToolDurationEstimator(0.25, max_batches=2)
+    assert estimator.predict(("lookup",)) == 0.25
+    estimator.observe(("lookup",), 0.01)
+    assert estimator.predict(("lookup",)) == 0.01
+    assert estimator.predict(("calculate",)) == 0.25
+    estimator.observe(("calculate", "lookup"), 0.03)
+    assert estimator.predict(("lookup", "calculate")) == 0.03
+    estimator.observe(("slow",), 2)
+    assert estimator.predict(("lookup",)) == 0.25
 
 
 @pytest_asyncio.fixture
@@ -256,6 +271,31 @@ async def test_duplicate_pause_keeps_a_resume_event_for_every_control_task(
     await client.pause("r")
     await asyncio.wait_for(client.drain("r"), 5)
     assert not client.background and not client.preparations
+
+
+@pytest.mark.asyncio
+async def test_pause_prediction_reaches_policy_before_store_completion(
+    monkeypatch, rollout_client
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+    signals = []
+
+    async def action(kind, payload, **kwargs):
+        signals.append(payload)
+        if payload["signal"] == "tool_wait":
+            entered.set()
+            await release.wait()
+        return {"status": "completed", "derived_operations": []}
+
+    client = await rollout_client("policy")
+    monkeypatch.setattr(client, "action", action)
+    client.targets["r"] = {"session_id": "s", "continuation_id": "turn-0"}
+    await client.pause("r", 5)
+    await asyncio.wait_for(entered.wait(), 1)
+    assert 0 < signals[0]["resume_after_seconds"] <= 5
+    release.set()
+    await client.drain("r")
+    assert [s["signal"] for s in signals] == ["tool_wait", "resume"]
 
 
 @pytest.mark.asyncio

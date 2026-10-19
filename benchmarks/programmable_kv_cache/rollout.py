@@ -8,6 +8,7 @@ import json
 import math
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import suppress
 from typing import Any
 
@@ -16,14 +17,49 @@ import httpx
 from benchmarks.programmable_kv_cache.client import ACTIVE, envelope
 
 
+class ToolDurationEstimator:
+    """Estimate a tool batch using only previously completed batches."""
+
+    def __init__(self, initial_seconds: float, max_batches: int = 64):
+        if not math.isfinite(initial_seconds) or initial_seconds <= 0:
+            raise ValueError("Initial tool duration must be positive and finite")
+        if max_batches < 1:
+            raise ValueError("Tool batch history must be positive")
+        self.initial_seconds = initial_seconds
+        self.max_batches = max_batches
+        self.history: OrderedDict[tuple[str, ...], float] = OrderedDict()
+
+    def predict(self, tools: tuple[str, ...]) -> float:
+        return self.history.get(tuple(sorted(tools)), self.initial_seconds)
+
+    def observe(self, tools: tuple[str, ...], seconds: float) -> None:
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("Observed tool duration must be nonnegative and finite")
+        key = tuple(sorted(tools))
+        previous = self.history.get(key, seconds)
+        self.history[key] = max(0.001, 0.75 * previous + 0.25 * seconds)
+        self.history.move_to_end(key)
+        while len(self.history) > self.max_batches:
+            self.history.popitem(last=False)
+
+
 class RolloutClient:
     def __init__(
-        self, base_url: str, mode: str, *, seed: int = 0, trace_rpc: bool = False
+        self,
+        base_url: str,
+        mode: str,
+        *,
+        seed: int = 0,
+        trace_rpc: bool = False,
+        control_timeout: float = 30,
     ):
         self.http = httpx.AsyncClient(
             base_url=base_url, timeout=600, limits=httpx.Limits(max_connections=256)
         )
         self.mode = mode
+        if not math.isfinite(control_timeout) or control_timeout <= 0:
+            raise ValueError("Control timeout must be positive and finite")
+        self.control_timeout = control_timeout
         self.seed = seed
         self.run_id = uuid.uuid4().hex
         self.rows: list[dict[str, Any]] = []
@@ -110,12 +146,14 @@ class RolloutClient:
         message_id: str,
         action_id: str = "action",
         *,
-        timeout: float = 30,
+        timeout: float | None = None,
         acknowledge: bool = True,
         initial: dict | None = None,
         await_registration: bool = False,
     ) -> dict:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + (
+            self.control_timeout if timeout is None else timeout
+        )
         registration_delay = 0.01
         while time.monotonic() < deadline:
             try:
@@ -142,7 +180,10 @@ class RolloutClient:
             if result["status"] not in ACTIVE:
                 children = [
                     await self.wait(
-                        child["message_id"], child["action_id"], acknowledge=False
+                        child["message_id"],
+                        child["action_id"],
+                        acknowledge=False,
+                        timeout=max(0, deadline - time.monotonic()),
                     )
                     for child in result.get("derived_operations", [])
                 ]
@@ -425,9 +466,21 @@ class RolloutClient:
                 }
             if self.mode == "policy":
                 result = await self.action(
-                    "signal", {"target": target, "signal": "tool_wait"}, version="1"
+                    "signal",
+                    {
+                        "target": target,
+                        "signal": "tool_wait",
+                        "resume_after_seconds": max(
+                            0.001, predicted_at - time.monotonic()
+                        ),
+                    },
+                    version="1",
                 )
                 if not result.get("derived_operations"):
+                    await resumed.wait()
+                    await self.action(
+                        "signal", {"target": target, "signal": "resume"}, version="1"
+                    )
                     return
                 if resumed.is_set():
                     await self.action(

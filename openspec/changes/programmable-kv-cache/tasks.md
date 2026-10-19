@@ -131,3 +131,15 @@ Repeated cache-fit/pressure, remaining ablations and external models stay incomp
 - [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
 - [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
 - [x] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.
+
+## 12. Application timing and live admission, 2026-10-19
+
+Resumed by the user's request to analyze experiment evidence and improve core
+performance. The previous requested stop boundary is superseded for this work.
+
+- [x] 12.1 Audit raw pause, control, transfer and queue data; document the optimization and behavioral test contracts.
+- [x] 12.2 Use application pause estimates to suppress unamortized round trips and verify resume/cleanup behavior.
+- [x] 12.3 Revalidate quota capacity across admissions within one observation interval; preserve bounded waiting and shared-prefix behavior.
+- [x] 12.6 Couple optional preparation with selected-session admission, verifying publication, failure fallback and cancellation.
+- [ ] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
+- [ ] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.

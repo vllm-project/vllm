@@ -154,9 +154,10 @@ def quota_scheduler(
     async_scheduling=False,
     interval=10,
     max_policy_requests=4096,
+    max_num_seqs=1,
 ):
     scheduler = create_scheduler(
-        max_num_seqs=1,
+        max_num_seqs=max_num_seqs,
         max_num_batched_tokens=64,
         num_blocks=9,
         enable_prefix_caching=True,
@@ -283,6 +284,76 @@ def test_quota_can_borrow_idle_capacity_for_a_first_long_request():
     policy.reserve_running_growth = True
     output = scheduler.schedule()
     assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+
+
+def test_quota_does_not_spend_the_same_growth_budget_on_two_admissions():
+    scheduler, _, _ = quota_scheduler(max_num_seqs=2)
+    runtime = scheduler.kv_policy_runtime
+    runtime.settings.policy_decode_lookahead_tokens = 64
+    policy = runtime.policies["quota"]
+    policy.borrow_idle_capacity = True
+    policy.reserve_running_growth = True
+    for request in scheduler.requests.values():
+        request.max_tokens = 64
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+    assert [r.request_id for r in scheduler.waiting] == ["b"]
+    scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+    assert scheduler.requests["b"].num_preemptions == 0
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_selected_session_prepares_cache_before_admission_and_falls_back(success):
+    from vllm.v1.kv_hints.native import ContentSpan
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+    from vllm.v1.kv_hints.transfers import KVTransferOperations
+
+    from .test_prefix_caching import QueuedControlTransfers, submit_movement
+
+    scheduler, controller, _ = quota_scheduler()
+    runtime = scheduler.kv_policy_runtime
+    runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
+    adapter = QueuedControlTransfers()
+    controller.executor.transfers = KVTransferOperations(
+        scheduler.kv_cache_manager,
+        controller.registry,
+        controller.index.namespace,
+        (adapter,),
+    )
+    request = scheduler.requests["a"]
+    controller.index.associate(
+        "a",
+        "c",
+        (ContentSpan(request.block_hashes[0].hex(), 0, 0, 16),),
+        expected_revision=0,
+    )
+    parent = submit_movement(
+        controller,
+        "predicted",
+        "signal",
+        {
+            "target": {"kind": "session", "session_id": "a", "continuation_id": "c"},
+            "signal": "resume_prediction",
+            "resume_after_seconds": 10,
+        },
+    )
+    assert not adapter.jobs
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+    assert len(adapter.jobs) == 1
+    scheduler.finish_requests("b", RequestStatus.FINISHED_ABORTED)
+    adapter.finish(success=success)
+    controller.executor.progress()
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+    assert output.num_scheduled_tokens["a"] == (16 if success else 32)
+    assert not runtime.has_pending
+    reference = parent.derived_operations[0]
+    assert controller.registry.get(
+        reference.message_id, reference.action_id
+    ).status.terminal
 
 
 def test_quota_observation_overflow_falls_back_to_scheduler_order():

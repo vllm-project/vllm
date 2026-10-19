@@ -77,6 +77,7 @@ class PolicySignal:
     target: Target
     owner_id: str
     request_id: str | None
+    owners: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class PolicyProposal:
     action: PolicyAction
     not_before: float = 0.0
     content_keys: frozenset[tuple[int, str]] = frozenset()
+    wait_for_admission: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ class RequestGuidance:
     admit: bool = True
     score: float = 0.0
     reason: str = ""
+    reserve_running_growth: bool = False
 
 
 class KVPolicy:
@@ -183,6 +186,9 @@ class ToolWaitPolicy(KVPolicy):
         lead_seconds: float = 0.1,
         min_pressure: float = 0.0,
         max_stored_blocks: int = 16384,
+        min_pause_seconds: float = 0.5,
+        prefetch_on_admission: bool = False,
+        consider_pause_duration: bool = True,
     ):
         if tier not in ("cpu", "mooncake"):
             raise ValueError("Movement policy requires CPU or Mooncake")
@@ -193,6 +199,12 @@ class ToolWaitPolicy(KVPolicy):
         self.tier = tier
         self.lead_seconds = lead_seconds
         self.min_pressure = min_pressure
+        if not math.isfinite(min_pause_seconds) or min_pause_seconds < 0:
+            raise ValueError("min_pause_seconds must be nonnegative and finite")
+        self.min_pause_seconds = min_pause_seconds
+        self.prefetch_on_admission = prefetch_on_admission
+        self.uses_scheduler_guidance = prefetch_on_admission
+        self.consider_pause_duration = consider_pause_duration
         if type(max_stored_blocks) is not int or max_stored_blocks < 1:
             raise ValueError("max_stored_blocks must be positive")
         self.max_stored_blocks = max_stored_blocks
@@ -202,6 +214,9 @@ class ToolWaitPolicy(KVPolicy):
         self._known_stored: OrderedDict[tuple[str, ContentSpan], None] = OrderedDict()
         self._stored_blocks = 0
         self._copy_seconds_per_byte: float | None = None
+        self._store_seconds = 0.0
+        self._load_seconds = 0.0
+        self._kept: OrderedDict[str, tuple[str, ...]] = OrderedDict()
 
     def on_result(
         self,
@@ -224,8 +239,15 @@ class ToolWaitPolicy(KVPolicy):
             self._copy_seconds_per_byte = (
                 observed if previous is None else 0.75 * previous + 0.25 * observed
             )
+            self._load_seconds = max(
+                elapsed_seconds, 0.75 * self._load_seconds + 0.25 * elapsed_seconds
+            )
         if not isinstance(action, MoveTo) or result.namespace is None:
             return
+        if result.transferred_bytes and "cold_copy_stored" in result.completed_steps:
+            self._store_seconds = max(
+                elapsed_seconds, 0.75 * self._store_seconds + 0.25 * elapsed_seconds
+            )
         intended = tuple(
             ContentSpan(o.block_hash, o.group_id, o.start_token, o.end_token)
             for o in result.target_outcomes
@@ -275,6 +297,9 @@ class ToolWaitPolicy(KVPolicy):
             if set(owners).intersection(entry[1]):
                 del self._stored[key]
                 self._stored_blocks -= len(entry[0].blocks)
+        for key, kept_owners in tuple(self._kept.items()):
+            if set(owners).intersection(kept_owners):
+                del self._kept[key]
 
     def on_signal(
         self, signal: PolicySignal, view: CacheObservation
@@ -284,8 +309,20 @@ class ToolWaitPolicy(KVPolicy):
             projected = view.referenced_blocks + sum(
                 max(0, r.estimated_blocks - r.held_blocks) for r in view.requests
             )
-            if projected < self.min_pressure * view.total_blocks:
+            pause = payload.resume_after_seconds
+            worthwhile = (
+                not self.consider_pause_duration
+                or pause is None
+                or pause
+                > max(self.min_pause_seconds, self._store_seconds + self._load_seconds)
+            )
+            if not worthwhile or projected < self.min_pressure * view.total_blocks:
+                self._kept[signal.owner_id] = signal.owners
+                self._kept.move_to_end(signal.owner_id)
+                while len(self._kept) > self.max_stored_blocks:
+                    self._kept.popitem(last=False)
                 return PolicyDecision()
+            self._kept.pop(signal.owner_id, None)
             return PolicyDecision(
                 (
                     PolicyProposal(
@@ -297,6 +334,8 @@ class ToolWaitPolicy(KVPolicy):
                     ),
                 )
             )
+        if signal.owner_id in self._kept:
+            return PolicyDecision()
         stored = self._stored.get(signal.owner_id)
         load_target = signal.target if stored is None else stored[0]
         lead = self.lead_seconds
@@ -310,7 +349,8 @@ class ToolWaitPolicy(KVPolicy):
                             load_target,
                             CacheLocation(self.tier),
                             CacheLocation("gpu"),
-                        )
+                        ),
+                        wait_for_admission=self.prefetch_on_admission,
                     ),
                 )
             )
@@ -327,6 +367,7 @@ class ToolWaitPolicy(KVPolicy):
                             CacheLocation("gpu"),
                         ),
                         view.now + max(0.0, payload.resume_after_seconds - lead),
+                        wait_for_admission=self.prefetch_on_admission,
                     ),
                 )
             )
@@ -441,6 +482,7 @@ class QuotaPolicy(KVPolicy):
                     admit,
                     score,
                     "" if admit else "Session quota",
+                    self.reserve_running_growth,
                 )
             )
         return tuple(result)
@@ -500,6 +542,7 @@ class KVPlanComposer:
                     previous.admit and proposal.admit,
                     previous.score + proposal.score,
                     previous.reason or proposal.reason,
+                    previous.reserve_running_growth or proposal.reserve_running_growth,
                 )
             )
         return tuple(merged.values())

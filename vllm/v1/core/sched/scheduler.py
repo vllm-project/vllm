@@ -946,6 +946,12 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
+                if policy_runtime is not None and not policy_runtime.before_admission(
+                    request
+                ):
+                    skip_request(request_queue)
+                    continue
+
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0

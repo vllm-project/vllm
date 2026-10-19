@@ -21,7 +21,10 @@ import pyarrow.parquet as pq
 from prometheus_client.parser import text_string_to_metric_families
 
 from benchmarks.programmable_kv_cache.client import answer_number
-from benchmarks.programmable_kv_cache.rollout import RolloutClient
+from benchmarks.programmable_kv_cache.rollout import (
+    RolloutClient,
+    ToolDurationEstimator,
+)
 from benchmarks.programmable_kv_cache.run_rollout_matrix import (
     dataset_identity,
     source_hashes,
@@ -349,10 +352,33 @@ async def live(args, client, report):
                 stop_reason="completed",
             )
 
+    estimator = ToolDurationEstimator(args.prediction_seconds)
+
     class ControlledToolLoop(ToolAgentLoop):
         async def _handle_processing_tools_state(self, agent_data):
-            await client.pause(agent_data.request_id, args.prediction_seconds)
-            return await super()._handle_processing_tools_state(agent_data)
+            names = tuple(
+                call.name for call in agent_data.tool_calls[: self.max_parallel_calls]
+            )
+            predicted = (
+                estimator.predict(names)
+                if args.prediction_mode == "adaptive"
+                else args.prediction_seconds
+            )
+            await client.pause(agent_data.request_id, predicted)
+            started = time.monotonic()
+            state = await super()._handle_processing_tools_state(agent_data)
+            elapsed = time.monotonic() - started
+            estimator.observe(names, elapsed)
+            report["tool_waits"].append(
+                {
+                    "request_id": agent_data.request_id,
+                    "turn": client.turns[agent_data.request_id] - 1,
+                    "tools": names,
+                    "predicted_seconds": predicted,
+                    "actual_seconds": elapsed,
+                }
+            )
+            return state
 
     manager = HTTPServerClient(config)
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -454,6 +480,11 @@ async def replay(args, client, report):
     for row in trace["requests"]:
         trajectories.setdefault(row["request_id"], []).append(row)
     semaphore = asyncio.Semaphore(args.concurrency)
+    estimator = ToolDurationEstimator(args.prediction_seconds)
+    tool_names = {
+        (row["request_id"], row["turn"]): tuple(row["tools"])
+        for row in trace.get("tool_waits", [])
+    }
 
     async def episode(identifier, rows):
         rows.sort(key=lambda r: r["turn"])
@@ -466,10 +497,28 @@ async def replay(args, client, report):
                         args.replay_pause_floor,
                         row["started"] - rows[turn - 1]["finished"],
                     )
-                    await client.pause(
-                        identifier, pause if args.oracle else args.prediction_seconds
+                    names = tool_names.get((identifier, turn - 1), ("recorded_tool",))
+                    predicted = (
+                        pause
+                        if args.oracle
+                        else estimator.predict(names)
+                        if args.prediction_mode == "adaptive"
+                        else args.prediction_seconds
                     )
+                    await client.pause(identifier, predicted)
+                    pause_started = time.monotonic()
                     await asyncio.sleep(pause)
+                    elapsed = time.monotonic() - pause_started
+                    estimator.observe(names, elapsed)
+                    report["tool_waits"].append(
+                        {
+                            "request_id": identifier,
+                            "turn": turn - 1,
+                            "tools": names,
+                            "predicted_seconds": predicted,
+                            "actual_seconds": elapsed,
+                        }
+                    )
                 generated = await client.generate(
                     identifier,
                     row["prompt_ids"],
@@ -504,7 +553,11 @@ async def replay(args, client, report):
 
 async def run(args):
     client = RolloutClient(
-        args.base_url, args.mode, seed=args.seed, trace_rpc=args.trace_control_rpc
+        args.base_url,
+        args.mode,
+        seed=args.seed,
+        trace_rpc=args.trace_control_rpc,
+        control_timeout=args.control_timeout,
     )
     report = {
         "clock": {"wall_time": time.time(), "monotonic": time.perf_counter()},
@@ -516,6 +569,7 @@ async def run(args):
         "control_rpc": client.rpc_stats,
         "control_rpc_requests": client.rpc_rows,
         "episodes": [],
+        "tool_waits": [],
         "passed": False,
         "source_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
@@ -617,6 +671,9 @@ def main():
     parser.add_argument("--tool-delay", type=float, default=0)
     parser.add_argument("--prediction-seconds", type=float, default=0.25)
     parser.add_argument(
+        "--prediction-mode", choices=("fixed", "adaptive"), default="adaptive"
+    )
+    parser.add_argument(
         "--replay-pause-floor",
         type=float,
         default=0,
@@ -630,6 +687,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--trace-control-rpc", action="store_true")
+    parser.add_argument("--control-timeout", type=float, default=30)
     args = parser.parse_args()
     if not 0 <= args.replay_pause_floor <= 60:
         parser.error("replay-pause-floor must be between zero and 60 seconds")

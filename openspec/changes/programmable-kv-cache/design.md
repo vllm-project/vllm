@@ -323,6 +323,46 @@ Remaining concrete design discussion:
 
 ## Follow-up work
 
+### Application timing and admission budgets, 2026-10-19
+
+The fixed-work trace has 664 pauses, all below 54 ms (median 10.6 ms).
+The composed diagnostic nevertheless writes 370.5 GB and loads 262.2 GB;
+its client submits no resume predictions because it waits for stores first.
+The separately tuned quota run improves throughput by 45.6% in one run.
+These observations motivate two independent changes and separate ablations:
+
+- Include the remaining application pause estimate in the initial tool-wait
+  signal. The movement policy skips a round trip when the pause does not exceed
+  a configurable minimum or its observed store-plus-load duration. A skipped
+  store also suppresses the associated speculative load. Missing estimates keep
+  the previous pressure-only behavior; explicit COPY/MOVE remain unchanged.
+  This is a transfer-amortization heuristic, not a measured recompute cost model.
+- Recheck live free capacity and running growth on each quota admission.
+  Several requests admitted in one scheduling iteration must not each spend the
+  same observation's free capacity. Policy scores remain interval-cached, the
+  scheduler owns admission, and its finite fairness bypass remains in force.
+- Optional admission-coupled COPY proposals wait while foreground requests are
+  queued. When the scheduler selects a matching session/content prefix, its
+  runtime starts the preparation before cache lookup and waits for terminal
+  publication. Other sessions can continue. A failed load falls back to normal
+  lookup/recomputation; explicit commands keep their independent execution.
+  Forecast-only requests can still prepare early when there is no queued demand.
+  Benchmark result collection budgets include the configured admission wait and
+  forecast horizon in this mode, since intentional queue time is observable.
+- Estimate live tool batches from prior completed batches of the same tool
+  names. Replay without tool names uses a labeled aggregate estimator; fixed and
+  oracle variants remain selectable, and every prediction/actual pair is saved.
+
+Tests extend the existing prefix, scheduler and HTTP suites. Their contracts are
+respectively signal-to-transfer behavior, admission-to-KV capacity behavior, and
+pause-to-control ordering. Guard short-pause round trips, repeated spending of
+one capacity observation, stale predictions and missing result collection with
+small in-process behavioral tests before real full-workload timing.
+
+Use the same 256 trajectories at utilization 0.5 for native, quota and composed
+comparisons. Preserve all timing, control and per-family results; repeat runs,
+and label long-pause perturbations and oracle estimates separately.
+
 `integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.
 The supplied diagram's future KVCR G1 path requires its own agreed integration and is not represented as current support.

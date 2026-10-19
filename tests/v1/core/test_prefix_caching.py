@@ -6518,9 +6518,14 @@ class QueuedControlTransfers:
         result, self.completions = tuple(self.completions), []
         return result
 
-    def finish(self, success=True):
+    def finish(self, success=True, *, bytes_transferred=0):
         self.completions.extend(
-            KVTransferCompletion(job.transfer_id, job.generation, success)
+            KVTransferCompletion(
+                job.transfer_id,
+                job.generation,
+                success,
+                bytes_transferred=bytes_transferred,
+            )
             for job in self.jobs
         )
         self.jobs.clear()
@@ -6941,6 +6946,105 @@ def test_policy_predictions_capture_scope_and_do_not_retarget_new_growth():
     adapter.finish()
     controller.executor.progress()
     assert derived_results(controller, parent)[0].affected_blocks == 1
+
+
+def test_short_tool_pause_preserves_resident_content_without_a_round_trip():
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    install_movement_policies(manager, controller, "movement")
+    for signal, seconds in [
+        ("tool_wait", 0.01),
+        ("resume_prediction", 0.005),
+        ("resume", None),
+    ]:
+        payload = {"target": target, "signal": signal}
+        if seconds is not None:
+            payload["resume_after_seconds"] = seconds
+        result = submit_movement(controller, signal, "signal", payload)
+        assert result.status == OperationStatus.COMPLETED
+        assert not result.derived_operations
+    assert not adapter.jobs
+    assert manager.get_computed_blocks(request)[1] == 4
+    result = submit_movement(
+        controller,
+        "long-pause",
+        "signal",
+        {"target": target, "signal": "tool_wait", "resume_after_seconds": 10},
+    )
+    assert len(derived_results(controller, result)) == 1
+    assert len(adapter.jobs) == 1
+
+
+def test_tool_pause_must_amortize_observed_store_time():
+    manager, request, controller, adapter, target = make_movement_controller()
+    assert manager.allocate_slots(request, 4) is not None
+    manager.cache_blocks(request, 4)
+    manager.free(request)
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    submit_movement(
+        controller,
+        "store",
+        "signal",
+        {"target": target, "signal": "tool_wait", "resume_after_seconds": 10},
+    )
+    now[0] = 2
+    adapter.finish(bytes_transferred=16)
+    controller.executor.progress()
+    runtime.before_acknowledge()
+    adapter.jobs.clear()
+    result = submit_movement(
+        controller,
+        "shorter-than-store",
+        "signal",
+        {"target": target, "signal": "tool_wait", "resume_after_seconds": 1},
+    )
+    assert result.status == OperationStatus.COMPLETED
+    assert not result.derived_operations and not adapter.jobs
+
+
+def test_queued_admission_preparation_releases_scope_when_session_finishes():
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["movement"] = ToolWaitPolicy(prefetch_on_admission=True)
+    runtime.requests = lambda: (request,)
+    submit_movement(
+        controller,
+        "associate",
+        "associate",
+        {
+            "session_id": "s",
+            "continuation_id": "c",
+            "expected_revision": 0,
+            "target": target,
+        },
+    )
+    parent = submit_movement(
+        controller,
+        "prepare",
+        "signal",
+        {
+            "target": {"kind": "session", "session_id": "s", "continuation_id": "c"},
+            "signal": "resume",
+        },
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.QUEUED
+    assert not adapter.jobs
+    submit_movement(
+        controller,
+        "finish",
+        "finish_task",
+        {
+            "session_id": "s",
+            "expected_revision": controller.index.session_revision("s"),
+        },
+    )
+    assert derived_results(controller, parent)[0].status == OperationStatus.CANCELLED
+    assert not runtime.has_pending and not adapter.jobs
+    assert manager.block_pool.get_num_free_blocks() == 3
 
 
 def test_resume_joins_a_running_prediction_without_cancelling_its_publication():

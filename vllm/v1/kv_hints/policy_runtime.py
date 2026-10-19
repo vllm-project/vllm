@@ -358,11 +358,70 @@ class KVPolicyRuntime:
         ):
             return True
         guidance = self._guidance.get(request.request_id)
-        return guidance.admit if guidance is not None else True
+        if guidance is None:
+            return True
+        if not guidance.admit or not guidance.reserve_running_growth:
+            return guidance.admit
+        growth = 0
+        for running in self.requests():
+            if running.status != RequestStatus.RUNNING:
+                continue
+            remaining = max(0, running.max_tokens - running.num_output_tokens)
+            tokens = min(
+                self.manager.max_model_len,
+                running.num_tokens
+                + min(remaining, self.settings.policy_decode_lookahead_tokens),
+            )
+            growth += sum(
+                group.get_num_blocks_to_allocate(
+                    running.request_id,
+                    tokens,
+                    (),
+                    running.num_computed_tokens,
+                    running.num_computed_tokens,
+                    tokens,
+                    apply_admission_cap=True,
+                )
+                for group in self.manager.coordinator.single_type_managers
+                if group.block_pool is self.manager.block_pool
+            )
+        additional = max(0, observed.estimated_blocks - observed.held_blocks)
+        return additional <= max(
+            0, self.manager.block_pool.get_num_free_blocks() - growth
+        )
 
     def _waiting_seconds(self, request: RequestDemand) -> float:
         assert self._view is not None
         return request.waiting_seconds + max(0.0, self.clock() - self._view.now)
+
+    def before_admission(self, request: Request) -> bool:
+        """Start a selected session's preparation and await its publication."""
+        if request.session_id is None or not (self._pending or self._running):
+            return True
+        hashes = {block_hash.hex() for block_hash in request.block_hashes}
+
+        def matches(work: _Work) -> bool:
+            return (
+                work.proposal.wait_for_admission
+                and request.session_id in work.owners
+                and isinstance(work.proposal.action, CopyTo)
+                and work.proposal.action.dst.tier == "gpu"
+                and any(key[1] in hashes for key in work.proposal.content_keys)
+            )
+
+        if not any(
+            matches(w) for w in (*self._pending.values(), *self._running.values())
+        ):
+            return True
+        self.tick(
+            force=True,
+            admission_operations=frozenset(
+                w.operation.operation_id for w in self._pending.values() if matches(w)
+            ),
+        )
+        return not any(
+            matches(w) for w in (*self._pending.values(), *self._running.values())
+        )
 
     def on_signal(
         self, operation: OperationResult, payload: SignalPayload, request_id: str | None
@@ -409,7 +468,7 @@ class KVPolicyRuntime:
         for name, policy in consumers:
             owner = f"policy:{name}:{identity}"
             decision = policy.on_signal(
-                PolicySignal(payload, payload.target, owner, binding), view
+                PolicySignal(payload, payload.target, owner, binding, owners), view
             )
             if decision is None:
                 continue
@@ -431,6 +490,13 @@ class KVPolicyRuntime:
                     proposal.not_before
                 ):
                     raise ControlError("invalid_payload", "Invalid policy proposal")
+                if proposal.wait_for_admission and not (
+                    isinstance(proposal.action, CopyTo)
+                    and proposal.action.dst.tier == "gpu"
+                ):
+                    raise ControlError(
+                        "invalid_payload", "Admission preparation requires a GPU COPY"
+                    )
                 if (
                     proposal.not_before - view.now
                     > self.settings.max_policy_delay_seconds
@@ -696,7 +762,12 @@ class KVPolicyRuntime:
         for policy in self.policies.values():
             policy.cleanup(owners)
 
-    def tick(self, *, force: bool = False) -> None:
+    def tick(
+        self,
+        *,
+        force: bool = False,
+        admission_operations: frozenset[int] = frozenset(),
+    ) -> None:
         now = self.clock()
         if not force and now - self._last_tick < self.settings.policy_interval_seconds:
             return
@@ -706,7 +777,20 @@ class KVPolicyRuntime:
         for work in tuple(self._pending.values()):
             if work.generation != self._generation():
                 self._cancel(work, "Cache reset invalidated the policy plan")
-        ready = [w for w in self._pending.values() if w.proposal.not_before <= now]
+        ready = [
+            w
+            for w in self._pending.values()
+            if w.proposal.not_before <= now
+            or w.operation.operation_id in admission_operations
+        ]
+        queued_demand = (
+            any(
+                not r.is_finished() and r.status != RequestStatus.RUNNING
+                for r in self.requests()
+            )
+            if any(w.proposal.wait_for_admission for w in ready)
+            else False
+        )
         copies: dict[int, list[_Work]] = {}
         for candidate in (*self._pending.values(), *self._running.values()):
             if (
@@ -722,6 +806,18 @@ class KVPolicyRuntime:
             if executed >= self.settings.max_policy_actions_per_step:
                 break
             action = work.proposal.action
+            if (
+                work.proposal.wait_for_admission
+                and work.owners
+                and queued_demand
+                and work.operation.operation_id not in admission_operations
+            ):
+                registry.update(
+                    work.operation,
+                    OperationStatus.QUEUED,
+                    reason="Awaiting session admission under queued demand",
+                )
+                continue
             if isinstance(action, SetPriority) and action.value is not None:
                 origin = work.operation.origin
                 assert origin is not None

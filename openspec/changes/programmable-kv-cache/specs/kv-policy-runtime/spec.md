@@ -83,3 +83,46 @@ Stored-target hints SHALL remain bounded and shall not assert current backend re
 
 - **WHEN** both proposals request the same compatible COPY
 - **THEN** the callers share in-flight work without cancelling the original publication
+
+### Requirement: Account for application pause duration
+
+The reference movement policy SHALL consider an optional pause estimate on the
+initial tool-wait signal before proposing a store. It SHALL avoid speculative
+store/load round trips whose estimated duration exceeds the application pause.
+Skipped movement state SHALL be bounded and released with its logical owners.
+Explicit movement commands SHALL keep their original meaning.
+
+#### Scenario: Short tool under cache pressure
+
+- **WHEN** a predicted tool wait is shorter than the configured minimum pause
+- **THEN** pressure alone does not cause a store followed by a speculative load
+
+### Requirement: Revalidate admission headroom
+
+Quota guidance that reserves running growth SHALL check current physical free
+capacity before each admission, including growth of requests admitted since the
+last policy observation. The finite waiting fallback SHALL remain available.
+
+#### Scenario: Two requests fit individually but not together
+
+- **WHEN** two candidates each fit one observation's available capacity
+- **THEN** admitting the first does not permit the second to spend the same
+  capacity reserved for the first request's growth
+
+### Requirement: Coordinate optional prefetch with admission
+
+Admission-coupled policy COPY proposals SHALL wait under queued foreground
+demand until the scheduler selects a session needing their content. The request
+SHALL wait for terminal publication or fall back after a failed preparation.
+Preparation SHALL retain its original bounded scope and cancellation semantics.
+
+#### Scenario: Forecast arrives well before admission
+
+- **WHEN** a session predicts readiness but other requests still occupy the queue
+- **THEN** its admission-coupled preparation does not occupy GPU capacity early
+  merely because the tool is ready
+
+#### Scenario: Preparation fails
+
+- **WHEN** the selected request's preparation terminates with missing content
+- **THEN** the request proceeds through ordinary lookup and recomputation
