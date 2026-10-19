@@ -152,10 +152,13 @@ def test_manual_norm_fusion_fp8_static_with_linear(
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_residual", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7, 32])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Dynamic block quant CUDA/ROCm only"
 )
-def test_manual_norm_fusion_fp8_dynamic_128(dtype: torch.dtype, has_residual: bool):
+def test_manual_norm_fusion_fp8_dynamic_128(
+    dtype: torch.dtype, has_residual: bool, num_tokens: int
+):
     """Test kFp8Dynamic128Sym norm fusion path and verify residual preservation."""
     if (RMSNorm, kFp8Dynamic128Sym) not in _FUSED_NORM_QUANT:
         pytest.skip("kFp8Dynamic128Sym norm fusion not available")
@@ -163,7 +166,7 @@ def test_manual_norm_fusion_fp8_dynamic_128(dtype: torch.dtype, has_residual: bo
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
 
-    num_tokens, hidden_size, group_size = 32, 256, 128
+    hidden_size, group_size = 256, 128
     x = torch.randn(num_tokens, hidden_size)
     res_unfused = torch.randn(num_tokens, hidden_size) if has_residual else None
     res_fused = res_unfused.clone() if res_unfused is not None else None
@@ -191,6 +194,9 @@ def test_manual_norm_fusion_fp8_dynamic_128(dtype: torch.dtype, has_residual: bo
 
         assert isinstance(result_fused, QuantizedActivation)
         expected_num_groups = hidden_size // group_size
+        tma_aligned_m = (num_tokens + 3) // 4 * 4
+        assert result_fused.scale.shape == (num_tokens, expected_num_groups)
+        assert result_fused.scale.stride() == (1, tma_aligned_m)
         dequant_data = result_fused.data.to(dtype).view(
             num_tokens, expected_num_groups, group_size
         )
@@ -200,3 +206,25 @@ def test_manual_norm_fusion_fp8_dynamic_128(dtype: torch.dtype, has_residual: bo
             .to(dtype)
         )
         torch.testing.assert_close(dequant_result, result_unfused, atol=5e-2, rtol=5e-2)
+
+
+def test_rocm_aiter_deferral_guard(monkeypatch):
+    """Verify dynamic FP8 norm+quant fusion defers when ROCm AITER is enabled."""
+    import vllm._aiter_ops as aiter_mod
+    import vllm.model_executor.layers.fusion.fused_norm_quant as fnq
+
+    monkeypatch.setattr(fnq.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        aiter_mod.rocm_aiter_ops, "is_enabled", classmethod(lambda cls: True)
+    )
+    monkeypatch.setattr(
+        aiter_mod.rocm_aiter_ops,
+        "is_rdna_aiter_enabled",
+        classmethod(lambda cls: False),
+    )
+    assert fnq._should_defer_to_rocm_aiter_rms_fusion() is True
+
+    monkeypatch.setattr(
+        aiter_mod.rocm_aiter_ops, "is_enabled", classmethod(lambda cls: False)
+    )
+    assert fnq._should_defer_to_rocm_aiter_rms_fusion() is False

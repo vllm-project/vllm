@@ -75,6 +75,17 @@ def _should_defer_to_allreduce_rms_fusion(residual: torch.Tensor | None) -> bool
         return False
 
 
+def _should_defer_to_rocm_aiter_rms_fusion() -> bool:
+    """Defer manual norm+quant fusion on ROCm when AITER fusion applies."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return bool(
+        rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled()
+    )
+
+
 def _rms_norm_common_supported(
     norm_fn: torch.nn.Module,
     x: torch.Tensor,
@@ -177,6 +188,18 @@ def _rms_norm_fp8_dynamic_token(
     return qa if residual is None else (qa, residual)
 
 
+def _rms_norm_fp8_dynamic_token_supported(
+    norm_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+    residual: torch.Tensor | None,
+) -> bool:
+    return (
+        _rms_norm_common_supported(norm_fn, x, residual)
+        and not _should_defer_to_rocm_aiter_rms_fusion()
+    )
+
+
 def _rms_norm_fp8_dynamic_block_supported(
     group_size: int,
 ) -> Callable[[torch.nn.Module, torch.Tensor, LinearBase, torch.Tensor | None], bool]:
@@ -188,6 +211,7 @@ def _rms_norm_fp8_dynamic_block_supported(
     ) -> bool:
         return (
             _rms_norm_common_supported(norm_fn, x, residual)
+            and not _should_defer_to_rocm_aiter_rms_fusion()
             and x.ndim in (2, 3)
             and x.shape[-1] % group_size == 0
         )
@@ -207,10 +231,16 @@ def _rms_norm_fp8_dynamic_block(
     d = x.shape[-1]
     num_tokens = x.numel() // d
     num_groups = d // group_size
+    tma_aligned_m = round_up(num_tokens, 4)
 
     result = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
-    scales = torch.empty(
-        (num_tokens, num_groups), dtype=torch.float32, device=x.device
+    # Column-major, TMA-aligned (16-byte / 4-float) scale layout required by
+    # sm90 block-scaled FP8 GEMM consumers (FlashInfer swapAB and DeepGEMM).
+    scales = torch.empty_strided(
+        (num_tokens, num_groups),
+        (1, tma_aligned_m),
+        dtype=torch.float32,
+        device=x.device,
     )
 
     torch.ops._C.rms_norm_per_block_quant(
@@ -222,12 +252,20 @@ def _rms_norm_fp8_dynamic_block(
         None,
         residual,
         group_size,
-        False,
+        True,
     )
 
+    scale_out = (
+        scales
+        if x.ndim == 2
+        else scales.as_strided(
+            x.shape[:-1] + (num_groups,),
+            (x.shape[1], 1, tma_aligned_m),
+        )
+    )
     qa = QuantizedActivation(
         data=result,
-        scale=scales.view(x.shape[:-1] + (num_groups,)),
+        scale=scale_out,
         orig_dtype=x.dtype,
         orig_shape=x.shape,
         quant_key=quant_key,
@@ -342,9 +380,7 @@ _FUSED_NORM_QUANT_SUPPORT: dict[
     Callable[[torch.nn.Module, torch.Tensor, LinearBase, torch.Tensor | None], bool],
 ] = {
     (RMSNorm, kFp8StaticTensorSym): _rms_norm_fp8_static_supported,
-    (RMSNorm, kFp8DynamicTokenSym): lambda norm_fn, x, linear, residual: (
-        _rms_norm_common_supported(norm_fn, x, residual)
-    ),
+    (RMSNorm, kFp8DynamicTokenSym): _rms_norm_fp8_dynamic_token_supported,
 }
 
 if current_platform.is_cuda_alike() and hasattr(
