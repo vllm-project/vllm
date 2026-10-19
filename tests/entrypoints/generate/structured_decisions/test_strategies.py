@@ -80,8 +80,14 @@ TRACE_HEADERS = {
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
-def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
-    return SimpleNamespace(architecture=architecture, logprobs_mode=logprobs_mode)
+def model(
+    architecture: str, logprobs_mode: str = "raw_logprobs", multimodal: bool = False
+) -> Any:
+    return SimpleNamespace(
+        architecture=architecture,
+        logprobs_mode=logprobs_mode,
+        supports_multimodal_inputs=multimodal,
+    )
 
 
 def test_strategy_selection():
@@ -97,12 +103,13 @@ def test_strategy_selection():
     )
     lfm = "Lfm2VlForConditionalGeneration"
     assert select_read_strategy(model(lfm), generate) is LiquidStrategy
-    for gemma4 in (
+    for arch in (
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
         "Gemma4UnifiedForConditionalGeneration",
+        "Qwen3VLForConditionalGeneration",
     ):
-        assert select_read_strategy(model(gemma4), generate) is NextTokenStrategy
+        assert select_read_strategy(model(arch), generate) is NextTokenStrategy
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -199,6 +206,19 @@ def test_decisions_state_initializes(qwen):
     assert isinstance(state.openai_serving_decisions, OpenAIServingDecisions)
 
 
+@pytest.mark.parametrize("multimodal", [True, False])
+def test_next_token_takes_images_when_the_model_does(qwen, multimodal):
+    tokenizer, _ = qwen
+    engine = SimpleNamespace(
+        model_config=model("Qwen3_5ForConditionalGeneration", multimodal=multimodal)
+    )
+    renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    )
+    strategy = NextTokenStrategy(ReadContext(engine, renderer, None, "auto", {}))
+    assert strategy.modalities == (frozenset({"image"}) if multimodal else frozenset())
+
+
 def test_unsupported_decisions_state_does_not_block_startup():
     engine = SimpleNamespace(model_config=model("Qwen3ForCausalLM", "raw_logits"))
     state = State()
@@ -231,23 +251,34 @@ def test_labels_start_the_reply(qwen):
 
 
 @pytest.mark.parametrize(
-    "model_name,reply_start",
+    "model_name,architecture,reply_start",
     [
         # E2B and E4B: the reply starts right after the model turn.
-        ("google/gemma-4-E2B-it", "<|turn>model\n"),
+        ("google/gemma-4-E2B-it", "Gemma4ForConditionalGeneration", "<|turn>model\n"),
         # 12B, 26B and 31B: the template closes an empty thought first.
-        ("google/gemma-4-12B-it", "<|turn>model\n<|channel>thought\n<channel|>"),
+        (
+            "google/gemma-4-12B-it",
+            "Gemma4UnifiedForConditionalGeneration",
+            "<|turn>model\n<|channel>thought\n<channel|>",
+        ),
+        (
+            "Qwen/Qwen3-VL-4B-Instruct",
+            "Qwen3VLForConditionalGeneration",
+            "<|im_start|>assistant\n",
+        ),
     ],
 )
-def test_gemma4_labels_start_the_reply(model_name, reply_start):
+def test_multimodal_labels_start_the_reply(model_name, architecture, reply_start):
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(model_name)
+    engine = SimpleNamespace(model_config=model(architecture, multimodal=True))
     renderer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
-    context = ReadContext(None, SimpleNamespace(renderer=renderer), None, "auto", {})
+    context = ReadContext(engine, SimpleNamespace(renderer=renderer), None, "auto", {})
     # Construction fails unless every label is one token at the reply's start.
     strategy = NextTokenStrategy(context)
     assert tokenizer.decode(strategy._generation_prompt()).endswith(reply_start)
+    assert strategy.modalities == frozenset({"image"})
 
 
 @pytest.fixture
@@ -864,7 +895,9 @@ def decision_server(qwen):
     tokenizer, _ = qwen
 
     class Engine:
-        model_config = SimpleNamespace(is_encoder_decoder=False)
+        model_config = SimpleNamespace(
+            is_encoder_decoder=False, supports_multimodal_inputs=False
+        )
         renderer = input_processor = None
         errored = False
         failure = None
