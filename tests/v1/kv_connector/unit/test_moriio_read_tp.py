@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .test_moriio_hetero_tp_write import (
     DECODE_BLOCKS,
+    MIXED_HEAD_SCENARIOS,
     MODELS,
     NUM_BLOCKS,
     PREFILL_BLOCKS,
@@ -264,7 +265,11 @@ def test_equal_tp_read_lands_every_byte(model, hma, tp, layouts):
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
 @pytest.mark.parametrize(
     ("model", "producer_tp", "consumer_tp", "hma"),
-    [scenario for scenario in SCENARIOS if scenario[1] != scenario[2]],
+    [
+        scenario
+        for scenario in SCENARIOS + MIXED_HEAD_SCENARIOS
+        if scenario[1] != scenario[2]
+    ],
 )
 def test_hetero_tp_read_lands_every_shard(
     model, producer_tp, consumer_tp, hma, layouts

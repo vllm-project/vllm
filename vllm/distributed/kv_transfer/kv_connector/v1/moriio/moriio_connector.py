@@ -102,6 +102,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -3482,6 +3483,17 @@ class MoRIIOConnectorWorker:
             flexible=flexible,
         )
 
+    def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
+        """KV heads of a layer across all TP ranks.
+
+        Layers may differ (e.g. Gemma4 sliding vs full attention), and the
+        model-wide count is their maximum. Without a layer: the model-wide count.
+        """
+        arch = getattr(self.model_config, "model_arch_config", None)
+        if layer_name is None or arch is None or arch.per_layer_overrides is None:
+            return self.model_config.get_total_num_kv_heads()
+        return arch[extract_layer_index(layer_name)].total_num_kv_heads
+
     def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
         return compute_write_tp_mapping(
@@ -3493,19 +3505,24 @@ class MoRIIOConnectorWorker:
             self._has_mamba,
         )
 
-    def _read_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOReadTPMapping:
+    def _read_tp_mapping(
+        self, remote_tp_size: int | None, layer_name: str | None = None
+    ) -> MoRIIOReadTPMapping:
         """Prefill ranks this decode rank reads, and what it takes from each."""
         return compute_read_tp_mapping(
             self.tp_rank,
             remote_tp_size or self.world_size,
             self.world_size,
-            1 if self.use_mla else self.model_config.get_total_num_kv_heads(),
+            1 if self.use_mla else self._layer_total_num_kv_heads(layer_name),
             self.use_mla,
             self._has_mamba,
         )
 
     def _read_plan(
-        self, remote_tp_size: int, chosen_tp: int | None
+        self,
+        remote_tp_size: int,
+        chosen_tp: int | None,
+        layer_name: str | None = None,
     ) -> tuple[list[tuple[int, ReadSource | None]], tuple[int, ...]]:
         """(sources, holders) of one request's READ.
 
@@ -3513,7 +3530,8 @@ class MoRIIOConnectorWorker:
         (None: the whole shard, equal TP). ``holders`` are the prefill TP ranks
         to release, which in fan-in include ranks whose identical copy is not
         read. ``chosen_tp`` replaces the source when every holder has the same
-        copy (the flexible mirror's round-robin pick).
+        copy (the flexible mirror's round-robin pick). Sources depend on the
+        layer's KV-head count; holders do not.
         """
         if remote_tp_size == self.world_size:
             eff_tp = (
@@ -3522,7 +3540,7 @@ class MoRIIOConnectorWorker:
                 else self._remote_tp_rank(remote_tp_size)
             )
             return [(eff_tp, None)], (eff_tp,)
-        mapping = self._read_tp_mapping(remote_tp_size)
+        mapping = self._read_tp_mapping(remote_tp_size, layer_name)
         sources: list[tuple[int, ReadSource | None]] = [
             (source.tp_rank, source) for source in mapping.sources
         ]
@@ -3536,8 +3554,14 @@ class MoRIIOConnectorWorker:
         return sources, mapping.holder_tp_ranks
 
     def _read_handshake_tp_ranks(self, remote_tp_size: int) -> tuple[int, ...]:
-        """Prefill TP ranks a heterogeneous-TP READ opens sessions to."""
-        return self._read_tp_mapping(remote_tp_size).source_tp_ranks
+        """Prefill TP ranks a heterogeneous-TP READ opens sessions to: the
+        sources of every layer."""
+        ranks = set(self._read_tp_mapping(remote_tp_size).source_tp_ranks)
+        for layer_name in self.kv_caches:
+            if not self._is_mamba_layer(layer_name):
+                mapping = self._read_tp_mapping(remote_tp_size, layer_name)
+                ranks.update(mapping.source_tp_ranks)
+        return tuple(sorted(ranks))
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
         # Raises before any write is queued for a TP pair the mapping rejects.
@@ -3673,7 +3697,7 @@ class MoRIIOConnectorWorker:
                 if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=self._layer_total_num_kv_heads(layer_name),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
         local, remote, sizes = compute_block_transfer_offsets(
@@ -3836,7 +3860,9 @@ class MoRIIOConnectorWorker:
         else:
             whole_shard = source is None or (
                 same_layout
-                and self._read_tp_mapping(remote_tp_size).copies_whole_block(source)
+                and self._read_tp_mapping(
+                    remote_tp_size, layer_name
+                ).copies_whole_block(source)
             )
         if source is not None:
             self._check_peer_block_size(layer_name, remote_moriio_meta)
@@ -4155,18 +4181,22 @@ class MoRIIOConnectorWorker:
             local_attn = remote_attn = []
 
         per_tp_sessions = flexible or int(remote_tp_size) != self.world_size
-        reads = []
-        for tp_rank, source in sources:
-            if per_tp_sessions:
-                remote_dp_engine_id = self.get_engine_name_with_dp_tp(
-                    dst_engine_id, int(remote_dp_rank), tp_rank
-                )
-            else:
-                remote_dp_engine_id = self.get_engine_name_with_dp(
-                    dst_engine_id, int(remote_dp_rank)
-                )
-            sessions, remote_moriio_meta = self._get_built_session(remote_dp_engine_id)
-            reads.append((source, sessions, remote_moriio_meta, remote_dp_engine_id))
+        built: dict[int, tuple[list, MoRIIOAgentMetadata, str]] = {}
+
+        def reads(layer_sources):
+            # (source, sessions, peer metadata, engine id) per source rank.
+            for tp_rank, source in layer_sources:
+                if tp_rank not in built:
+                    if per_tp_sessions:
+                        engine_id = self.get_engine_name_with_dp_tp(
+                            dst_engine_id, int(remote_dp_rank), tp_rank
+                        )
+                    else:
+                        engine_id = self.get_engine_name_with_dp(
+                            dst_engine_id, int(remote_dp_rank)
+                        )
+                    built[tp_rank] = (*self._get_built_session(engine_id), engine_id)
+                yield (source, *built[tp_rank])
 
         # SQ-full backpressure deadline, shared across this request's layers.
         _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
@@ -4196,7 +4226,7 @@ class MoRIIOConnectorWorker:
                         "the mamba KV-cache group is absent from the transfer "
                         "block-id tuple"
                     )
-                for source, sessions, remote_moriio_meta, _ in reads:
+                for source, sessions, remote_moriio_meta, _ in reads(sources):
                     statuses.extend(
                         self._post_mamba_reads(
                             layer_name,
@@ -4219,7 +4249,12 @@ class MoRIIOConnectorWorker:
                     group_idx = self.layer_to_group[layer_name]
                     local_layer_blocks = local_block_ids[group_idx]
                     remote_layer_blocks = remote_block_ids[group_idx]
-                for source, sessions, remote_moriio_meta, remote_dp_engine_id in reads:
+                layer_sources = self._read_plan(
+                    int(remote_tp_size), chosen_tp, layer_name
+                )[0]
+                for source, sessions, remote_moriio_meta, remote_dp_engine_id in reads(
+                    layer_sources
+                ):
                     if source is not None and source.target.num_heads == 0:
                         # Another prefill rank holds the same heads and is read.
                         continue
