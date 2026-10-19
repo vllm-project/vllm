@@ -651,6 +651,103 @@ guide: |
   - **Frontend:** the Dynamo frontend runs with `--router-mode least-loaded --router-session-affinity-ttl-secs 900`, so each conversation sticks to one worker and reuses its prefix cache. The Rust frontend is selected with `VLLM_USE_RUST_FRONTEND=1`, with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600` and `DYN_TOKENIZER_CACHE_BYTES=8589934592`. AgentX sends the conversation ID as the Dynamo session ID.
   - **Mooncake master:** `--default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, 128GB global segment, 4GB local buffer, RDMA over `mlx5_0..mlx5_3`.
 
+  ## GB300: InferenceX AgentX disaggregated (xPyD, TP8 + DCP8 prefill and decode)
+
+  The GB300 AgentX disaggregated lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-gb300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#4047](https://github.com/SemiAnalysisAI/InferenceX/pull/4047)) runs Dynamo + vLLM with several prefill and decode workers. Prefill and decode workers are both TP8 + DCP8 across two 4-GPU GB300 trays; prefill workers also use EP8 with MegaMoE, and decode workers use no expert parallelism. KV moves over NIXL, and all workers share an RDMA Mooncake store. Image `vllm/vllm-openai:nightly-1b2a666391f2a24228a1436b64d547c34cc6b6ce`, Dynamo `ffbbaaa6c44370e798687881317535ac17d66a76`.
+
+  | Clients | Prefill workers | Decode workers | GPUs | Decode `--max-num-seqs` |
+  |---:|---:|---:|---:|---:|
+  | 40 | 1 | 4 | 40 | 2 |
+  | 48 | 1 | 3 | 32 | 4 |
+  | 48 | 1 | 2 | 24 | 8 |
+  | 176 | 2 | 5 | 56 | 16 |
+  | 176 | 2 | 3 | 40 | 24 |
+  | 176-240 | 2 | 3 | 40 | 128 |
+
+  Prefill workers always use `--max-num-seqs 64`.
+
+  ### Services
+
+  Start etcd, NATS and a Mooncake master once:
+
+  ```bash
+  etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+  printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+  mooncake_master --enable_http_metadata_server=true \
+    --default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10
+  ```
+
+  The workers' Mooncake store uses P2P handshake metadata, RDMA over the node's NICs, a 160GB global segment and a 4GB local buffer, with offload disabled.
+
+  ### Environment (every worker)
+
+  ```bash
+  export VLLM_USE_DIRECT_DCP_A2A=1 VLLM_USE_DIRECT_DCP_Q_GATHER=1 VLLM_USE_DIRECT_DCP_KV_GATHER=1
+  export VLLM_ALLREDUCE_USE_FLASHINFER=1 VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0 VLLM_USE_NCCL_SYMM_MEM=0
+  export NCCL_CUMEM_ENABLE=1 NCCL_MNNVL_ENABLE=1 NCCL_NVLS_ENABLE=1 NCCL_P2P_LEVEL=NVL
+  export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_RUST_FRONTEND=1 VLLM_SSM_CONV_STATE_LAYOUT=DS
+  export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0
+  export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576 MC_MAX_MR_SIZE=4294967296 MC_ENABLE_DEST_DEVICE_AFFINITY=1
+  export VLLM_CONNECTOR_PREFETCH_DEPTH=8 VLLM_CONNECTOR_PREFETCH_KV_CAP=0.65
+  export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n UCX_RCACHE_MAX_UNRELEASED=1024 UCX_TCP_AF_PRIO=inet
+  export DYN_REQUEST_PLANE=tcp
+  ```
+
+  Set `VLLM_ENABLE_GEMM_RS=1` on prefill workers and `VLLM_ENABLE_GEMM_RS=0` on decode workers. Loading the 2.8T checkpoint across trays takes a while, so raise `VLLM_ENGINE_READY_TIMEOUT_S`, `VLLM_RPC_TIMEOUT` and `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` well above their defaults.
+
+  ### Workers
+
+  Each worker spans two trays. Run the command on both trays with the same `--master-addr` (the first tray's address), `--nnodes 2` and `--node-rank 0` or `1`.
+
+  Prefill:
+
+  ```bash
+  python3 -m dynamo.vllm --model moonshotai/Kimi-K3 --served-model-name moonshotai/Kimi-K3 \
+    --disaggregation-mode prefill --request-plane tcp \
+    --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip> --device-ids 0,1,2,3 \
+    --tensor-parallel-size 8 --decode-context-parallel-size 8 --dcp-comm-backend a2a \
+    --enable-expert-parallel --moe-backend deep_gemm_mega_moe \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true,"trtllm_ragged_backend":"cute-dsl"}' \
+    --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
+    --enable-prefix-caching --prefix-match-unit 128 \
+    --gpu-memory-utilization 0.92 --max-num-seqs 64 --max-cudagraph-capture-size 512 \
+    --enable-cumem-allocator --enable-flashinfer-autotune \
+    --load-format fastsafetensors --stream-interval 10 --language-model-only --trust-remote-code \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}' \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
+  ```
+
+  Decode (set `--max-num-seqs` from the table):
+
+  ```bash
+  python3 -m dynamo.vllm --model moonshotai/Kimi-K3 --served-model-name moonshotai/Kimi-K3 \
+    --disaggregation-mode decode --request-plane tcp \
+    --nnodes 2 --node-rank <0|1> --master-addr <first-tray-ip> --device-ids 0,1,2,3 \
+    --tensor-parallel-size 8 --decode-context-parallel-size 8 --dcp-comm-backend a2a \
+    --attention-backend TOKENSPEED_MLA \
+    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true,"tokenspeed_mla_min_split_kv":8}' \
+    --speculative-config '{"model":"Inferact/Kimi-K3-DSpark","attention_backend":"TOKENSPEED_MLA","method":"dspark","num_speculative_tokens":4,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16 \
+    --enable-prefix-caching --prefix-match-unit 128 \
+    --gpu-memory-utilization 0.92 --max-num-seqs <S> --max-cudagraph-capture-size 512 \
+    --enable-cumem-allocator --enable-flashinfer-autotune \
+    --load-format fastsafetensors --stream-interval 10 --language-model-only --trust-remote-code \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
+  ```
+
+  Add `--enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3` for tool calling and reasoning output.
+
+  ### Frontend
+
+  ```bash
+  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592
+  python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 900
+  ```
+
+  Session affinity keeps each conversation on one worker so it reuses that worker's prefix cache; send the conversation ID as the Dynamo session ID.
+
   ## AMD MI355X: InferenceX AgentX alignment
 
   The MI355X single-node TP8 command follows the [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) agentic-coding (AgentX) lane `kimik3-fp4-mi355x-vllm-agentic-mtp` as of [InferenceX PR #4215](https://github.com/SemiAnalysisAI/InferenceX/pull/4215) at branch revision [`6e72cbc`](https://github.com/SemiAnalysisAI/InferenceX/tree/6e72cbc11234e624d66b8fc5eaddac50068db15c): the entry in [`configs/amd-master.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/6e72cbc11234e624d66b8fc5eaddac50068db15c/inferencex-e2e/configs/amd-master.yaml) and its [lane recipe](https://github.com/SemiAnalysisAI/InferenceX/blob/6e72cbc11234e624d66b8fc5eaddac50068db15c/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/kimik3/vllm/mi355x-fp4-mtp/agentic.yaml). The lane is a benchmark configuration: text-only, TP8 on one MI355X node, with the tool-call and reasoning parsers on.
