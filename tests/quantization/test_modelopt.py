@@ -790,12 +790,39 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         moe = ModelOptNvFp4FusedMoE(config, MagicMock())
 
     assert moe.use_a16 is expected_use_a16
+    assert moe.ignored_weight_suffixes == (("input_scale",) if expected_use_a16 else ())
     _, kwargs = mock_select.call_args
     assert kwargs["weight_key"] is kNvfp4Static
     if act_key_is_none:
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+@pytest.mark.parametrize("ignored", [(), ("input_scale",)])
+def test_routed_experts_skip_weights_the_quant_method_ignores(ignored):
+    """A checkpoint weight without a parameter is skipped only when the quant
+    method lists its suffix, e.g. a W4A16 NVFP4 input scale that processing
+    dropped and a layerwise reload sends again."""
+    layer = torch.nn.Module()
+    layer.layer_name = "model.layers.0.mlp.experts"
+    layer.quant_method = SimpleNamespace(ignored_weight_suffixes=ignored)
+    layer.get_expert_mapping = lambda **kwargs: (
+        RoutedExperts.build_expert_params_mapping(
+            "gate_proj",
+            "down_proj",
+            "up_proj",
+            num_experts=2,
+            routed_experts_prefix="",
+            **kwargs,
+        )
+    )
+    weights = [("1.down_proj.input_scale", torch.ones(()))]
+    if ignored:
+        assert list(RoutedExperts.load_weights(layer, weights)) == []
+    else:
+        with pytest.raises(AttributeError, match="w2_input_scale"):
+            list(RoutedExperts.load_weights(layer, weights))
 
 
 @pytest.mark.parametrize("quantization", ["modelopt_fp4", "modelopt_mixed"])

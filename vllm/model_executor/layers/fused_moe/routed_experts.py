@@ -1046,14 +1046,7 @@ class RoutedExperts(PluggableLayer):
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
                         continue
-                    quant_config = self.quant_method.moe_quant_config
-                    if (
-                        param_name.endswith("input_scale")
-                        and quant_config is not None
-                        and quant_config.use_nvfp4_w4a16
-                    ):
-                        # Dropped after processing; a deprecated checkpoint's
-                        # copy arriving later (layerwise reload) is ignored.
+                    if param_name.endswith(self.quant_method.ignored_weight_suffixes):
                         continue
                     raise AttributeError(
                         f"Layer {self.layer_name} has no parameter {param_name!r} "

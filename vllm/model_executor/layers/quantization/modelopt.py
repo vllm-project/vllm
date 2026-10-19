@@ -1039,6 +1039,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w13_input_scale.weight_loader_numel = 0
             w2_input_scale.weight_loader_numel = 0
 
+    @property
+    def ignored_weight_suffixes(self) -> tuple[str, ...]:
+        # W4A16 drops the (deprecated) input scales after processing; a
+        # layerwise reload may send them again.
+        return ("input_scale",) if self.use_a16 else ()
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
