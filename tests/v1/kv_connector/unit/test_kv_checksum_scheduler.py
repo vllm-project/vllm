@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlConnector
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -674,6 +675,71 @@ def test_load_from_a_cache_tier_is_not_checksummed(monkeypatch):
     output = consumer.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert output.kv_checksum_scheduled is None
+
+
+@pytest.mark.parametrize("corrupt", [None, "bit", "other_prefix"])
+@pytest.mark.parametrize("covered", [True, False])
+def test_offloaded_kv_load_is_checked_against_its_checksums(
+    monkeypatch, corrupt, covered
+):
+    """A load of offloaded KV is checked against the checksums offloaded
+    with it: an intact load verifies; a flipped bit, or intact values stored
+    for the same positions of another prefix, fail and are handed to the
+    connector with the mismatching blocks. Groups no checksums are offloaded
+    for are not checked."""
+    num_hit_tokens = 2 * BLOCK_SIZE
+    monkeypatch.setattr(
+        NixlConnector,
+        "get_kv_checksum_sources",
+        lambda self, request: frozenset({CacheHitSource.HOST}),
+    )
+    engine = _Engine("kv_consumer")
+    connector = engine.scheduler.connector
+    monkeypatch.setattr(
+        connector,
+        "get_num_new_matched_tokens",
+        lambda request, num_computed_tokens: (num_hit_tokens, True),
+    )
+    monkeypatch.setattr(
+        connector,
+        "get_external_cache_hit_sources",
+        lambda request, num_tokens: {CacheHitSource.HOST: num_tokens},
+    )
+    failures = []
+    monkeypatch.setattr(
+        connector,
+        "on_kv_checksum_failure",
+        lambda request, mismatches: failures.append((request, mismatches)),
+    )
+    for worker in engine.workers:
+        worker.init_block_checksums([0] if covered else [])
+
+    request = create_request(1, NUM_TOKENS)
+    engine.scheduler.add_request(request)
+    output = engine.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduled = output.kv_checksum_scheduled
+    assert scheduled is not None
+    start, block_ids = scheduled.reqs_to_load[request.request_id].groups[0]
+    assert (start, len(block_ids)) == (0, 2)
+    # The tier's copy of the KV and of the checksums stored with it.
+    for kv in engine.kv.values():
+        kv[block_ids] = torch.randint_like(kv[block_ids], 256)
+    if covered:
+        stored_for = (
+            create_request(2, NUM_TOKENS) if corrupt == "other_prefix" else request
+        )
+        block_hashes = stored_for.block_hashes[start : start + len(block_ids)]
+        for worker in engine.workers:
+            worker.save_block_checksums([(0, start, block_ids, block_hashes)])
+    if corrupt == "bit":
+        engine.kv[LAYERS[1]][block_ids[-1], 0, 0, 0] ^= 1
+
+    engine_outputs = engine.finish_step(output, {request.request_id})
+    failed = corrupt is not None and covered
+    bad = [1] if corrupt == "bit" else [0, 1]
+    assert _error_ids(engine_outputs) == ({request.request_id} if failed else set())
+    assert failures == ([(request, {0: bad})] if failed else [])
 
 
 def test_requests_without_pd_params_are_not_checksummed():

@@ -49,6 +49,7 @@ unsigned; other Mamba layers have one slice per TP shard, which only
 producers and consumers of equal TP sizes can compare.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -88,6 +89,9 @@ class KVChecksumScheduled:
     reqs_to_send: dict[str, KVChecksumBlocks] = field(default_factory=dict)
     # Scheduled to be checksummed once the KV load started this step finishes.
     reqs_to_recv: dict[str, KVChecksumBlocks] = field(default_factory=dict)
+    # Loads of offloaded KV started this step, checked once they finish against
+    # the checksums offloaded with the KV (``KVChecksumWorker.init_block_checksums``).
+    reqs_to_load: dict[str, KVChecksumBlocks] = field(default_factory=dict)
 
 
 @dataclass
@@ -100,6 +104,9 @@ class KVChecksumGroup:
     replica_keys: list[ReplicaKey]
     # ``(num_positions, len(replica_keys))`` uint64 partial checksums.
     values: np.ndarray
+    # For a load of offloaded KV, ``(num_positions,)`` uint64 checksums offloaded
+    # with the KV: each row's partial checksums, summed when the KV was offloaded.
+    stored: np.ndarray | None = None
 
 
 @dataclass
@@ -138,3 +145,13 @@ def kv_checksum_enabled(vllm_config: "VllmConfig") -> bool:
     not support them."""
     kv_transfer_config = vllm_config.kv_transfer_config
     return kv_transfer_config is not None and kv_transfer_config.enable_kv_checksum
+
+
+def block_checksum_tags(block_hashes: Sequence[bytes], fingerprint: int) -> np.ndarray:
+    """The uint64 each block's offloaded checksum is XORed with, so that it
+    only matches the block it was stored for: its block hash and its group's
+    layers (``KVChecksumRecord.fingerprints``). Another TP or PP shard's KV
+    already checksums differently, as each worker weighs its own heads and
+    layers."""
+    tags = [int.from_bytes(h[:8], "little") for h in block_hashes]
+    return np.array(tags, dtype=np.uint64) ^ np.uint64(fingerprint)

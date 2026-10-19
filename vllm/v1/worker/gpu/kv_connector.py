@@ -80,12 +80,14 @@ class ActiveKVConnector(KVConnector):
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
-        # Register kv caches with KV Connector if applicable.
-        self.kv_connector.register_kv_caches(kv_caches_dict)
-        self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
         self.kv_checksum_worker = create_kv_checksum_worker(
             vllm_config, kv_cache_config, kv_caches_dict
         )
+        if self.kv_checksum_worker is not None:
+            self.kv_connector.set_kv_checksum_worker(self.kv_checksum_worker)
+        # Register kv caches with KV Connector if applicable.
+        self.kv_connector.register_kv_caches(kv_caches_dict)
+        self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._output_copy_stream = output_copy_stream

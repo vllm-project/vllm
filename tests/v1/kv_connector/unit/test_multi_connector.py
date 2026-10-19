@@ -259,6 +259,25 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+def test_kv_checksum_sources_are_the_selected_connectors(mc: MultiConnector):
+    """A load is checked against stored checksums only if the connector that
+    serves it stores them: another one may report the same cache tier."""
+    request = MagicMock(request_id="request")
+    mc._connectors[0].get_kv_checksum_sources.return_value = frozenset(
+        {CacheHitSource.HOST}
+    )
+    mc._connectors[1].get_kv_checksum_sources.return_value = frozenset()
+
+    mc._requests_to_connector[request.request_id] = 1
+    assert mc.get_kv_checksum_sources(request) == frozenset()
+    mc._requests_to_connector[request.request_id] = 0
+    assert mc.get_kv_checksum_sources(request) == {CacheHitSource.HOST}
+
+    mc.on_kv_checksum_failure(request, {0: [1]})
+    mc._connectors[0].on_kv_checksum_failure.assert_called_once_with(request, {0: [1]})
+    mc._connectors[1].on_kv_checksum_failure.assert_not_called()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""

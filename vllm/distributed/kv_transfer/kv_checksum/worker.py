@@ -14,7 +14,7 @@ memory with the step's other outputs, on its output copy stream (see
 
 import hashlib
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from math import prod
 from typing import TYPE_CHECKING
@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumRecord,
     KVChecksumScheduled,
     ReplicaKey,
+    block_checksum_tags,
     kv_checksum_enabled,
 )
 from vllm.distributed.kv_transfer.kv_checksum.kernels import layers_checksum
@@ -520,10 +521,17 @@ class PendingKVChecksums:
         self._received = received
         self._req_ids: list[str] = []
         # (group id, segments, replica keys, [rows, len(replica keys)] int64
-        # values) per checksum pass of a group: the loads and the sends of one
-        # step are separate passes over the same groups.
+        # values, [rows] int64 offloaded checksums or None) per checksum pass
+        # of a group: the loads and the sends of one step are separate passes
+        # over the same groups.
         self._groups: list[
-            tuple[int, list[tuple[str, int, int]], list[ReplicaKey], torch.Tensor]
+            tuple[
+                int,
+                list[tuple[str, int, int]],
+                list[ReplicaKey],
+                torch.Tensor,
+                torch.Tensor | None,
+            ]
         ] = []
 
     def __bool__(self) -> bool:
@@ -538,8 +546,9 @@ class PendingKVChecksums:
         segments: list[tuple[str, int, int]],
         replica_keys: list[ReplicaKey],
         values: torch.Tensor,
+        stored: torch.Tensor | None = None,
     ) -> None:
-        self._groups.append((group_id, segments, replica_keys, values))
+        self._groups.append((group_id, segments, replica_keys, values, stored))
 
     def enqueue_async_cpu_copy(self) -> KVChecksumRecord:
         """Enqueue the asynchronous D2H copy; call on the output copy stream,
@@ -547,13 +556,26 @@ class PendingKVChecksums:
         checksums: dict[str, dict[int, KVChecksumGroup]] = {
             req_id: {} for req_id in self._req_ids
         }
-        for group_id, segments, replica_keys, device_values in self._groups:
+        for (
+            group_id,
+            segments,
+            replica_keys,
+            device_values,
+            device_stored,
+        ) in self._groups:
             values = device_values.to("cpu", non_blocking=True).numpy()
             values = values.view(np.uint64)
+            stored = None
+            if device_stored is not None:
+                stored = device_stored.to("cpu", non_blocking=True).numpy()
+                stored = stored.view(np.uint64)
             row = 0
             for req_id, start, num_rows in segments:
                 checksums[req_id][group_id] = KVChecksumGroup(
-                    start, replica_keys, values[row : row + num_rows]
+                    start,
+                    replica_keys,
+                    values[row : row + num_rows],
+                    None if stored is None else stored[row : row + num_rows],
                 )
                 row += num_rows
         return KVChecksumRecord(
@@ -571,6 +593,8 @@ class KVChecksumWorker:
     Requests to send are checksummed in the step that finishes their KV.
     Requests to receive are checksummed in the step whose transfer results
     report their load finished, before any later step can write their blocks.
+    A connector that offloads KV and loads it back can offload checksums with
+    it (``init_block_checksums``), which the loads are checked against.
     """
 
     def __init__(
@@ -633,14 +657,89 @@ class KVChecksumWorker:
             for launch in plan.launches:
                 launch.warm_up(len(plan.replica_keys))
         self._skipped_groups = frozenset(skipped_groups)
+        self._num_blocks = kv_cache_config.num_blocks
+        self._device = next(iter(kv_caches.values())).device
+        self._block_checksums: torch.Tensor | None = None
+        self._block_checksum_plans: dict[int, _GroupPlan] = {}
         self._reqs_to_send: dict[str, KVChecksumBlocks] = {}
         self._reqs_to_recv: dict[str, KVChecksumBlocks] = {}
+        self._reqs_to_load: dict[str, KVChecksumBlocks] = {}
+
+    def init_block_checksums(self, group_ids: Iterable[int]) -> torch.Tensor:
+        """Set up the per-block checksums a connector offloads with the KV of
+        ``group_ids``, so that loading the KV back can be checked.
+
+        The connector moves a block's entry wherever it moves the block's KV:
+        when offloading, after ``save_block_checksums`` wrote it (on the
+        current stream); when loading back, before it reports the load
+        finished.
+
+        Returns:
+            A ``(num_blocks,)`` int64 device tensor holding, per block, the
+            sum of this worker's partial checksums. Repeated calls return the
+            same tensor.
+
+        """
+        self._block_checksum_plans.update(
+            (group_id, self._recv_plans[group_id])
+            for group_id in group_ids
+            if group_id in self._recv_plans
+        )
+        if self._block_checksums is None:
+            self._block_checksums = torch.zeros(
+                self._num_blocks, dtype=torch.int64, device=self._device
+            )
+        return self._block_checksums
+
+    def save_block_checksums(
+        self, runs: Iterable[tuple[int, int, Sequence[int], Sequence[bytes]]]
+    ) -> None:
+        """Write the checksums of full blocks a connector is about to offload
+        into the ``init_block_checksums`` tensor, each XORed with its
+        ``block_checksum_tags``.
+
+        Queued on the current stream: call it after the forward that wrote the
+        blocks and before the connector reads them.
+
+        Args:
+            runs: ``(group id, position of the first block, block ids at
+                consecutive positions from there, their block hashes)``. A
+                block's hash is the request's block hash at its last token.
+
+        """
+        assert self._block_checksums is not None
+        batches: dict[int, _GroupBatch] = defaultdict(_GroupBatch)
+        tags: dict[int, list[np.ndarray]] = defaultdict(list)
+        for group_id, start, block_ids, block_hashes in runs:
+            if group_id not in self._block_checksum_plans or not block_ids:
+                continue
+            assert len(block_hashes) == len(block_ids)
+            tags[group_id].append(
+                block_checksum_tags(block_hashes, self._fingerprints[group_id])
+            )
+            batch = batches[group_id]
+            batch.segments.append(("", start, len(block_ids)))
+            batch.block_ids.extend(block_ids)
+            batch.num_tokens.append(
+                (start + len(block_ids)) * self._block_sizes[group_id]
+            )
+        for group_id, _, block_ids, values in self._checksum(
+            batches, self._block_checksum_plans
+        ):
+            group_tags = np.concatenate(tags[group_id]).view(np.int64)
+            host_tags = torch.empty(
+                len(group_tags), dtype=torch.int64, pin_memory=PIN_MEMORY
+            )
+            host_tags.numpy()[:] = group_tags
+            device_tags = host_tags.to(values.device, non_blocking=True)
+            self._block_checksums[block_ids] = values.sum(dim=1) ^ device_tags
 
     def bind(self, scheduled: KVChecksumScheduled | None) -> None:
         """Take the requests the scheduler set for checksumming this step."""
         self._reqs_to_send = scheduled.reqs_to_send if scheduled is not None else {}
         if scheduled is not None:
             self._reqs_to_recv.update(scheduled.reqs_to_recv)
+            self._reqs_to_load.update(scheduled.reqs_to_load)
 
     def post_forward(
         self,
@@ -663,12 +762,16 @@ class KVChecksumWorker:
         """
         for req_id in finished_req_ids:
             self._reqs_to_recv.pop(req_id, None)
-        loaded = {
-            req_id: blocks
-            for req_id in transfer_results.finished_recving
-            if (blocks := self._reqs_to_recv.pop(req_id, None)) is not None
-            and req_id not in transfer_results.failed_recving
-        }
+            self._reqs_to_load.pop(req_id, None)
+        loaded, offload_loads = (
+            {
+                req_id: blocks
+                for req_id in transfer_results.finished_recving
+                if (blocks := reqs.pop(req_id, None)) is not None
+                and req_id not in transfer_results.failed_recving
+            }
+            for reqs in (self._reqs_to_recv, self._reqs_to_load)
+        )
 
         pending = PendingKVChecksums(
             self.pp_rank,
@@ -680,6 +783,7 @@ class KVChecksumWorker:
             transfer_results.kv_checksums if self.pp_rank == self.tp_rank == 0 else {},
         )
         self._compute(loaded, pending, self._recv_plans)
+        self._compute(offload_loads, pending, self._block_checksum_plans, stored=True)
         self._compute(self._reqs_to_send, pending, self._send_plans)
         self._reqs_to_send = {}
         return pending or None
@@ -689,8 +793,10 @@ class KVChecksumWorker:
         reqs: dict[str, KVChecksumBlocks],
         output: PendingKVChecksums,
         plans: dict[int, _GroupPlan],
+        stored: bool = False,
     ) -> None:
-        """Checksum the blocks of ``reqs`` into ``output``, as ``plans`` say."""
+        """Checksum the blocks of ``reqs`` into ``output``, as ``plans`` say,
+        with the checksums offloaded with them if ``stored``."""
         output.add_requests(reqs)
         batches: dict[int, _GroupBatch] = defaultdict(_GroupBatch)
         for req_id, blocks in reqs.items():
@@ -701,8 +807,31 @@ class KVChecksumWorker:
                 batch.segments.append((req_id, start, len(block_ids)))
                 batch.block_ids.extend(block_ids)
                 batch.num_tokens.append(blocks.num_tokens)
+        for group_id, batch, block_ids, values in self._checksum(batches, plans):
+            stored_values = None
+            if stored:
+                assert self._block_checksums is not None
+                stored_values = self._block_checksums[block_ids]
+            output.add_group(
+                group_id,
+                batch.segments,
+                plans[group_id].replica_keys,
+                values,
+                stored_values,
+            )
+
+    def _checksum(
+        self, batches: dict[int, _GroupBatch], plans: dict[int, _GroupPlan]
+    ) -> list[tuple[int, _GroupBatch, torch.Tensor, torch.Tensor]]:
+        """Checksum the rows of each group's batch, as ``plans`` say.
+
+        Returns:
+            Per group: its id, its batch, the batch's block ids on the device
+            and the ``[rows, len(replica keys)]`` int64 checksums.
+
+        """
         if not batches:
-            return
+            return []
         groups = [
             (group_id, batch, plans[group_id]) for group_id, batch in batches.items()
         ]
@@ -722,6 +851,7 @@ class KVChecksumWorker:
             host[:, column : column + rows.shape[1]] = rows
         device_rows = host_tensor.to(device, non_blocking=True)
 
+        results = []
         for (group_id, batch, plan), column in zip(groups, columns):
             num_rows = len(batch.block_ids)
             block_ids, first_tokens, valid_tokens = device_rows[
@@ -732,7 +862,8 @@ class KVChecksumWorker:
             )
             for launch in plan.launches:
                 launch.accumulate(block_ids, first_tokens, valid_tokens, values)
-            output.add_group(group_id, batch.segments, plan.replica_keys, values)
+            results.append((group_id, batch, block_ids, values))
+        return results
 
 
 def create_kv_checksum_worker(

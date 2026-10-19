@@ -11,6 +11,10 @@ for the proxy to forward to the consumer with the request, and are given to
 the connector (``SchedulerOutput.kv_checksums_to_send``) for connectors that
 send them in their own messages. A consumer uses the checksums in its
 request's kv_transfer_params, or those its connector received with the load.
+
+A load of offloaded KV, whose connector offloaded checksums with the KV, is
+checked once it finishes against those checksums instead: each worker's
+checksums against the ones it offloaded (``KVChecksumWorker.init_block_checksums``).
 """
 
 from collections.abc import Sequence
@@ -27,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumRecord,
     KVChecksumScheduled,
     ReplicaKey,
+    block_checksum_tags,
     kv_checksum_enabled,
     num_valid_tokens,
 )
@@ -138,7 +143,10 @@ class _Pending:
     """A request whose checksums are being collected from the workers."""
 
     blocks: KVChecksumBlocks
-    # The producer's checksums; only for a load.
+    # For a load of offloaded KV, its request: the load is checked against the
+    # checksums offloaded with the KV (``KVChecksumGroup.stored``), not a producer's.
+    offload_request: "Request | None" = None
+    # The producer's checksums; only for a load from a producer.
     expected: KVChecksumPayload | None = None
     # Why ``expected`` is None.
     missing_reason: str = "the producer sent no checksums"
@@ -219,6 +227,7 @@ class KVChecksumScheduler:
             group_id: kv_cache_config.kv_cache_groups[group_id]
             for group_id in kv_cache_config.transfer_group_ids
         }
+        self._hash_block_size = kv_cache_config.hash_block_size
         self._sends: dict[str, _Pending] = {}
         self._recvs: dict[str, _Pending] = {}
         # Consumer requests whose KV load has not started yet.
@@ -283,22 +292,30 @@ class KVChecksumScheduler:
         blocks: "KVCacheBlocks",
         num_local_computed_tokens: int,
     ) -> None:
-        """Checksum the blocks a consumer request's load starting this step
-        writes, once it finishes.
-
-        Only a load from the producer is checksummed, not one from a cache tier
-        (e.g. an offloading connector in a MultiConnector).
+        """Checksum the blocks a load starting this step writes, once it
+        finishes: a consumer request's load from its producer, or a load of
+        offloaded KV whose connector offloaded checksums with it
+        (``KVConnectorBase_V1.get_kv_checksum_sources``).
 
         ``request.num_computed_tokens`` must already include the loaded
         tokens.
         """
-        if request.request_id not in self._remote_prefills:
-            return
+        remote_prefill = request.request_id in self._remote_prefills
         self._remote_prefills.discard(request.request_id)
         sources = self._connector.get_external_cache_hit_sources(
             request, request.num_computed_tokens - num_local_computed_tokens
-        )
-        if sources.keys() != {CacheHitSource.P2P}:
+        ).keys()
+        if not remote_prefill:
+            if sources and sources <= self._connector.get_kv_checksum_sources(request):
+                checksum_blocks = self._blocks(
+                    blocks, num_local_computed_tokens, request.num_computed_tokens
+                )
+                self._recvs[request.request_id] = _Pending(
+                    checksum_blocks, offload_request=request
+                )
+                self._scheduled.reqs_to_load[request.request_id] = checksum_blocks
+            return
+        if sources != {CacheHitSource.P2P}:
             return
         checksum_blocks = self._blocks(
             blocks, num_local_computed_tokens, request.num_computed_tokens
@@ -317,7 +334,9 @@ class KVChecksumScheduler:
     def build_checksum_meta(self) -> KVChecksumScheduled | None:
         """The requests this step's workers checksum; resets them."""
         scheduled = self._scheduled
-        if not scheduled.reqs_to_send and not scheduled.reqs_to_recv:
+        if not (
+            scheduled.reqs_to_send or scheduled.reqs_to_recv or scheduled.reqs_to_load
+        ):
             return None
         self._scheduled = KVChecksumScheduled()
         return scheduled
@@ -334,7 +353,9 @@ class KVChecksumScheduler:
             skip_req_ids: Requests whose load already failed; not verified.
 
         Returns:
-            The requests whose load fails verification.
+            The requests whose load fails verification. The connector handles
+            a failed load of offloaded KV in
+            ``KVConnectorBase_V1.on_kv_checksum_failure``.
 
         """
         if kv_connector_output is None:
@@ -353,12 +374,16 @@ class KVChecksumScheduler:
         failed: set[str] = set()
         for req_id in kv_connector_output.finished_recving or ():
             pending = self._recvs.pop(req_id, None)
-            if (
-                pending is not None
-                and req_id not in skip_req_ids
-                and not self._verify(req_id, pending)
-            ):
-                failed.add(req_id)
+            if pending is None or req_id in skip_req_ids:
+                continue
+            mismatches = self._verify(req_id, pending)
+            if mismatches is None:
+                continue
+            failed.add(req_id)
+            if pending.offload_request is not None:
+                self._connector.on_kv_checksum_failure(
+                    pending.offload_request, mismatches
+                )
         return failed
 
     def request_finished(
@@ -462,9 +487,15 @@ class KVChecksumScheduler:
             return None
         return KVChecksumPayload(self._tp_size, pending.blocks.num_tokens, groups)
 
-    def _verify(self, req_id: str, pending: _Pending) -> bool:
-        """Compare a finished load with the producer's checksums and log the
-        outcome. Returns whether the load verified."""
+    def _verify(self, req_id: str, pending: _Pending) -> dict[int, list[int]] | None:
+        """Compare a finished load with its expected checksums and log the
+        outcome.
+
+        Returns:
+            None if the load verified, else its mismatching block positions
+            per group, empty if it could not be compared.
+
+        """
         mismatches, unverified = self._compare(pending)
         if mismatches:
             logger.error(
@@ -484,8 +515,8 @@ class KVChecksumScheduler:
                 "; ".join(f"{e.reason} ({e.detail})" for e in unverified),
             )
         else:
-            return True
-        return False
+            return None
+        return mismatches
 
     def _compare(
         self, pending: _Pending
@@ -494,7 +525,7 @@ class KVChecksumScheduler:
         of its groups could not be compared."""
         try:
             pending.check_complete(self._num_workers)
-            if pending.expected is None:
+            if pending.offload_request is None and pending.expected is None:
                 raise _Unverified(pending.missing_reason)
         except _Unverified as e:
             return {}, [e]
@@ -504,9 +535,18 @@ class KVChecksumScheduler:
         num_compared = 0
         for group_id in pending.blocks.groups:
             try:
-                bad = self._compare_group(
-                    pending, pending.expected, group_id, group_id in skipped
-                )
+                if pending.offload_request is not None:
+                    block_size = self._groups[group_id].kv_cache_spec.block_size
+                    bad = _compare_stored(
+                        pending,
+                        group_id,
+                        block_size // (self._hash_block_size or block_size),
+                    )
+                else:
+                    assert pending.expected is not None
+                    bad = self._compare_group(
+                        pending, pending.expected, group_id, group_id in skipped
+                    )
             except _Unverified as e:
                 unverified.append(e)
                 continue
@@ -515,7 +555,9 @@ class KVChecksumScheduler:
             num_compared += 1
             if bad:
                 mismatches[group_id] = bad
-        if not num_compared and not unverified:
+        # Checksums are offloaded only for the groups the workers can
+        # checksum, fixed at startup, so a load of none of them is not checked.
+        if not num_compared and not unverified and pending.offload_request is None:
             unverified.append(_Unverified("no loaded group can be checksummed"))
         return mismatches, unverified
 
@@ -621,6 +663,39 @@ class KVChecksumScheduler:
             for pos in range(chunk * blocks_per_chunk, (chunk + 1) * blocks_per_chunk)
             if start <= pos < start + len(block_ids)
         ]
+
+
+def _compare_stored(
+    pending: _Pending, group_id: int, hashes_per_block: int
+) -> list[int] | None:
+    """The mismatching block positions in a group of a load of offloaded KV:
+    each worker's checksums against those offloaded with the KV it loaded,
+    untagged with the ``block_checksum_tags`` of the blocks the request
+    expects there. None if no worker checksums the group, e.g. because none
+    are offloaded for it.
+
+    Raises:
+        _Unverified: If a worker checksummed other blocks than scheduled.
+
+    """
+    if not pending.group_checksums(group_id):
+        return None
+    assert pending.offload_request is not None
+    request_hashes = pending.offload_request.block_hashes
+    start, block_ids = pending.blocks.groups[group_id]
+    block_hashes = [
+        request_hashes[(pos + 1) * hashes_per_block - 1]
+        for pos in range(start, start + len(block_ids))
+    ]
+    bad: set[int] = set()
+    for checksums, record in pending.reports.values():
+        if (group := checksums.get(group_id)) is None:
+            continue
+        assert group.stored is not None
+        tags = block_checksum_tags(block_hashes, record.fingerprints[group_id])
+        sums = group.values.sum(axis=1, dtype=np.uint64)
+        bad.update((np.flatnonzero(sums ^ tags != group.stored) + start).tolist())
+    return sorted(bad)
 
 
 def _non_null_run(
