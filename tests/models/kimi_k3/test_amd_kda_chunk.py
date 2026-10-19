@@ -645,13 +645,15 @@ def test_triton_fallback_refuses_a_checkpoint_export() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _paged_cache(inp: dict, warm: list[bool], rows: list[int], slots: int):
+def _paged_cache(
+    inp: dict, warm: list[bool], rows: list[int], slots: int, dtype=torch.float32
+):
     """A cache holding each sequence's h0 at its row, a fill pattern elsewhere."""
     cache = torch.full(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         -7.0,
         device="cuda",
-        dtype=torch.float32,
+        dtype=dtype,
     )
     idx = torch.tensor(rows, device="cuda", dtype=torch.int32)
     for n, row in enumerate(rows):
@@ -734,14 +736,18 @@ def test_paged_bf16_state_matches_dense_pair(use_fused: bool) -> None:
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_cold_rows_start_from_zero_not_from_cache_junk(
+    use_fused: bool, dtype: torch.dtype
+) -> None:
     """`has_initial_state=False` must ignore whatever the row already holds."""
     _requires_kernel()
     seqlens = [256, 256, 256]
     inp = _inputs(seqlens, seed=12)
+    inp["h0"] = inp["h0"].to(dtype).float()
     warm = [True, False, True]
     rows = [4, 9, 1]
-    cache, idx, warm_t = _paged_cache(inp, warm, rows, slots=16)
+    cache, idx, warm_t = _paged_cache(inp, warm, rows, slots=16, dtype=dtype)
 
     # The dense reference zeroes exactly the cold sequences' initial states.
     ref = dict(inp)
@@ -751,11 +757,14 @@ def test_cold_rows_start_from_zero_not_from_cache_junk(use_fused: bool) -> None:
     o_got, _ = _run_paged(inp, cache, idx, warm_t, use_fused=use_fused)
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_state_indices_accept_a_block_table_column(
+    use_fused: bool, dtype: torch.dtype
+) -> None:
     # The layer passes block_table[:, 0], which is contiguous only while the
     # table has one column. Speculative decoding reserves a state page per
     # draft token, so the table widens and that column becomes strided.
@@ -764,7 +773,9 @@ def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
     inp = _inputs(seqlens, seed=43)
     n = len(seqlens)
     rows = [3 * i + 5 for i in range(n)]
-    cache, idx, warm = _paged_cache(inp, [True] * n, rows, slots=3 * n + 12)
+    cache, idx, warm = _paged_cache(
+        inp, [True] * n, rows, slots=3 * n + 12, dtype=dtype
+    )
     ref_cache = cache.clone()
 
     table = torch.zeros(n, 9, dtype=torch.int32, device="cuda")
@@ -780,7 +791,10 @@ def test_state_indices_accept_a_block_table_column(use_fused: bool) -> None:
 
 
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_zero_length_sequence_is_inert(
+    use_fused: bool, dtype: torch.dtype, monkeypatch
+) -> None:
     # A batch carrying speculative decodes pads its non-spec group with
     # zero-length sequences whose cache row still belongs to a request, so
     # consuming no tokens has to mean writing nothing and perturbing nobody.
@@ -791,11 +805,21 @@ def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
     padded, unpadded = _inputs([*live, 0], seed=41), _inputs(live, seed=41)
     rows = [3 * i + 5 for i in range(4)]
 
-    cache, idx, warm = _paged_cache(padded, [True] * 4, rows, slots=24)
+    cache, idx, warm = _paged_cache(padded, [True] * 4, rows, slots=24, dtype=dtype)
     before = cache.clone()
-    _run_paged(padded, cache, idx, warm, use_fused=use_fused)
+    # Poison unwritten outputs rather than relying on allocator contents.
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    monkeypatch.setattr(torch.utils.deterministic, "fill_uninitialized_memory", True)
+    try:
+        torch.use_deterministic_algorithms(True)
+        _run_paged(padded, cache, idx, warm, use_fused=use_fused)
+    finally:
+        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
 
-    ref_cache, ref_idx, ref_warm = _paged_cache(unpadded, [True] * 3, rows[:3], 24)
+    ref_cache, ref_idx, ref_warm = _paged_cache(
+        unpadded, [True] * 3, rows[:3], 24, dtype=dtype
+    )
     _run_paged(unpadded, ref_cache, ref_idx, ref_warm, use_fused=use_fused)
 
     assert torch.equal(cache[rows[3]], before[rows[3]]), (
@@ -805,19 +829,23 @@ def test_padded_zero_length_sequence_is_inert(use_fused: bool) -> None:
 
 
 @pytest.mark.parametrize("groups", [2, 4])
-def test_paged_state_survives_the_group_split(groups: int, monkeypatch) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_paged_state_survives_the_group_split(
+    groups: int, dtype: torch.dtype, monkeypatch
+) -> None:
     """At G>1 the read and the write are different blocks of one launch."""
     _requires_kernel()
     _force_groups(monkeypatch, groups)
     inp = _inputs([1024, 512], seed=13)
+    inp["h0"] = inp["h0"].to(dtype).float()
     rows = [6, 2]
-    cache, idx, warm = _paged_cache(inp, [True, True], rows, slots=12)
+    cache, idx, warm = _paged_cache(inp, [True, True], rows, slots=12, dtype=dtype)
 
     o_ref, ht_ref = _run(inp, use_fused=True)
     o_got, _ = _run_paged(inp, cache, idx, warm, use_fused=True)
 
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -867,8 +895,64 @@ def test_paged_state_rejects_a_dense_initial_state() -> None:
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("groups", [1, 2, 4])
+def test_paged_checkpoint_can_resume_with_graph_replay(
+    dtype: torch.dtype, groups: int, monkeypatch
+) -> None:
+    """Resume from a stored checkpoint, including cold zero-token padding."""
+    _requires_kernel()
+    _force_groups(monkeypatch, groups)
+    inp = _inputs([1024], seed=47)
+    cache, idx, warm = _paged_cache(inp, [True], [3], slots=12, dtype=dtype)
+    ckidx = torch.tensor([8], device="cuda", dtype=torch.int32)
+    _run_paged(
+        inp,
+        cache,
+        idx,
+        warm,
+        use_fused=True,
+        checkpoint_state=cache,
+        checkpoint_offsets=torch.tensor([512], device="cuda", dtype=torch.int32),
+        checkpoint_state_indices=ckidx,
+    )
+
+    # Compare against the same rounded checkpoint, not an uninterrupted FP32 walk.
+    tail = dict(inp)
+    for key in ("q", "k", "v", "raw_g", "raw_beta"):
+        tail[key] = inp[key][:, 512:].contiguous()
+    tail["cu"] = torch.tensor([0, 512], device="cuda", dtype=torch.int32)
+    tail["h0"] = cache[ckidx.long()].float()
+    o_ref, ht_ref = _run(tail, use_fused=True)
+
+    tail["cu"] = torch.tensor([0, 512, 512], device="cuda", dtype=torch.int32)
+    resume_idx = torch.tensor([8, 10], device="cuda", dtype=torch.int32)
+    resume_warm = torch.tensor([True, False], device="cuda", dtype=torch.bool)
+    before = cache.clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _run_paged(tail, cache, resume_idx, resume_warm, use_fused=True)
+    torch.cuda.current_stream().wait_stream(stream)
+    cache.copy_(before)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        o_got, ht_got = _run_paged(tail, cache, resume_idx, resume_warm, use_fused=True)
+    for _ in range(2):
+        cache.copy_(before)
+        graph.replay()
+        assert ht_got is None
+        torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(
+            cache[ckidx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3
+        )
+        untouched = torch.arange(cache.shape[0], device="cuda") != 8
+        assert torch.equal(cache[untouched], before[untouched])
+
+
 @pytest.mark.parametrize("use_fused", [False, True])
-def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_padded_cache_stride_is_honoured(use_fused: bool, dtype: torch.dtype) -> None:
     """A mamba page may pad stride(0); only each state row is dense.
 
     The real `recurrent_state` is not a contiguous tensor, so a kernel that
@@ -879,10 +963,11 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
     _requires_kernel()
     seqlens = [1024, 512]
     inp = _inputs(seqlens, seed=21)
+    inp["h0"] = inp["h0"].to(dtype).float()
     n = len(seqlens)
     row = NUM_HEADS * HEAD_DIM * HEAD_DIM
-    slots, pad = 16, 512
-    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=torch.float32)
+    slots, pad = 16, 513 if dtype == torch.bfloat16 else 512
+    raw = torch.full((slots, row + pad), -7.0, device="cuda", dtype=dtype)
     cache = raw.as_strided(
         (slots, NUM_HEADS, HEAD_DIM, HEAD_DIM),
         (row + pad, HEAD_DIM * HEAD_DIM, HEAD_DIM, 1),
@@ -901,7 +986,7 @@ def test_padded_cache_stride_is_honoured(use_fused: bool) -> None:
 
     assert ht_got is None
     torch.testing.assert_close(o_got, o_ref, rtol=5e-3, atol=5e-3)
-    torch.testing.assert_close(cache[idx.long()], ht_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(cache[idx.long()].float(), ht_ref, rtol=5e-3, atol=5e-3)
 
     # The padding between rows, and every unowned row, must be untouched.
     untouched = torch.ones(slots, dtype=torch.bool, device="cuda")
