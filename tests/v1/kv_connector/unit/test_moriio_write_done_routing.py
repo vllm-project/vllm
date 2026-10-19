@@ -351,32 +351,6 @@ def test_write_scheduler_waits_for_worker_ack_past_defer_deadline():
     assert scheduler._deferred_send_deadlines == {}
 
 
-def test_write_failed_after_the_load_expired_is_not_reported_again():
-    wrapper = _real_wrapper()
-    with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
-        wrapper._handle_structured_message(
-            {"type": "write_failed", "transfer_id": "tA"}
-        )
-    worker = SimpleNamespace(
-        mode=MoRIIOMode.WRITE,
-        is_producer=False,
-        moriio_wrapper=wrapper,
-        # Still mapped: the request is being recomputed.
-        transfer_id_to_request_id={"tA": "req-1"},
-        _unmatched_write_failures=OrderedDict(),
-        _settled_writes=OrderedDict({"tA": None}),
-        get_finished=lambda: (set(), set()),
-        _expire_awaited_writes=lambda done_recving: set(),
-        _awaiting_write={},
-        _settle_writes=lambda transfer_ids: None,
-    )
-
-    results = MoRIIOConnectorWorker.get_transfer_results(worker)
-
-    assert results.finished_recving == set()
-    assert results.failed_recving == set()
-
-
 def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     wrapper = _real_wrapper()
     with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
@@ -390,11 +364,7 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         moriio_wrapper=wrapper,
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
-        _settled_writes=OrderedDict(),
         get_finished=lambda: (set(), set()),
-        _expire_awaited_writes=lambda done_recving: set(),
-        _awaiting_write={},
-        _settle_writes=lambda transfer_ids: None,
     )
 
     results = MoRIIOConnectorWorker.get_transfer_results(worker)

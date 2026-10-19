@@ -484,11 +484,13 @@ def test_cudagraph_pool_sleep(level):
 
 
 @pytest.mark.parametrize("offload", [True, False], ids=["offload", "discard"])
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only ROCm splits allocations"
+)
 def test_single_allocation_survives_sleep(offload):
-    """Memory a NIC registers (MoRIIO's KV cache) is one physical allocation,
-    and stays one across sleep and wake-up."""
+    """A single allocation (MoRIIO's KV cache) stays one chunk across sleep and
+    wake-up. dmabuf re-export and VRAM release need the hardware tests."""
     allocator = get_mem_allocator_instance()
     # Larger than ROCm's default 256 MiB chunks.
     numel = 600 * 1024 * 1024 // 4
@@ -499,10 +501,10 @@ def test_single_allocation_survives_sleep(offload):
 
     def chunks(tag: str) -> list:
         (data,) = [d for d in allocator.pointer_to_data.values() if d.tag == tag]
-        return data.handle[3] if current_platform.is_rocm() else [data.handle[3]]
+        return data.handle[3]
 
     assert len(chunks("kv_cache")) == 1
-    assert len(chunks("weights")) > (1 if current_platform.is_rocm() else 0)
+    assert len(chunks("weights")) > 1
     single = chunks("kv_cache")
 
     allocator.sleep(offload_tags=("weights", "kv_cache") if offload else "weights")

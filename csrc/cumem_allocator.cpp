@@ -23,12 +23,9 @@ static const char* PYARGS_PARSE = "KKKK";
 static const unsigned long long DEFAULT_MEMCREATE_CHUNK_SIZE =
     (256ULL * 1024ULL * 1024ULL);
 
-  #ifdef USE_ROCM
-// When set, each allocation is backed by a single physical allocation instead
-// of chunks. RDMA registration through dmabuf covers one allocation only, so
-// memory that a NIC must register as a single region needs this.
+// When set, back each allocation by one physical allocation instead of chunks:
+// a dmabuf RDMA registration covers a single allocation.
 static std::atomic<bool> g_single_allocation{false};
-  #endif
 
 static unsigned long long get_memcreate_chunk_size() {
   const char* env = getenv("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE");
@@ -157,9 +154,8 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
 #else
-  // Single allocations (see g_single_allocation) are made exportable as a
-  // dmabuf through the allocation handle, which unlike an address-range export
-  // does not keep the memory alive once it is released.
+  // Single allocations export a dmabuf through the handle, which (unlike an
+  // address-range export) does not keep the memory alive after release.
   prop.requestedHandleType =
       exportable ? hipMemHandleTypePosixFileDescriptor : hipMemHandleTypeNone;
 #endif
@@ -190,9 +186,8 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     CUresult ret = cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0);
     CUDA_CHECK(ret);
     if (error_code != 0 && exportable) {
-      // No silent fallback to a plain allocation: its dmabuf would be
-      // exported through the address range, which keeps the memory alive, so
-      // every sleep would leak the KV cache.
+      // No fallback to a plain allocation: its address-range dmabuf export
+      // keeps the memory alive, so every sleep would leak the KV cache.
       snprintf(error_msg, sizeof(error_msg),
                "cumem_allocator: cannot create an exportable (POSIX fd) "
                "allocation for the RDMA-registered KV cache: %s",

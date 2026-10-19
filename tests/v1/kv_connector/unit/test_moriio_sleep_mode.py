@@ -10,29 +10,29 @@ leaves the peer's queue pair unusable, so peers must forget the metadata first.
 
 import threading
 import time
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 import msgpack
 import msgspec
 import pytest
 import zmq
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     HandshakeError,
     HandshakeTimeoutError,
     MoRIIOAgentMetadata,
     MoRIIOConstants,
     MoRIIOError,
-    MoRIIOMode,
     PeerUnavailableError,
     RemoteAllocInfo,
     TransferError,
     get_port_offset,
-    write_failure_grace,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -59,6 +59,11 @@ def _worker(
         ("deregister", desc)
     )
     wrapper.register_local_tensor.side_effect = lambda tensor: next(registered)
+
+    def invalidate_peers(peers) -> list[str]:
+        calls.append(("invalidate", peers))
+        return []  # Every peer confirmed.
+
     worker = SimpleNamespace(
         moriio_wrapper=wrapper,
         layer_name_to_local_kv_cache_metadata=region_metas,
@@ -68,9 +73,12 @@ def _worker(
         _handshake_lock=threading.RLock(),
         _peer_listeners={},
         built_write_session=defaultdict(list, {"peer_dp0": ["session"]}),
-        _invalidate_peers=lambda peers: calls.append(("invalidate", peers)),
+        _invalidate_peers=invalidate_peers,
         _drain_transfers=lambda: calls.append(("drain", None)),
+        _all_tp_ranks_ok=lambda ok: ok,
     )
+    worker._deregister_regions = partial(W._deregister_regions, worker)
+    worker._register_regions = partial(W._register_regions, worker)
     return worker, calls
 
 
@@ -138,6 +146,51 @@ def test_unregister_deregisters_every_region_even_if_one_fails():
     assert worker._kv_released
 
 
+def _expect_sleep_refused(worker, calls, match: str) -> None:
+    with pytest.raises(MoRIIOError, match=match):
+        W.unregister_kv_caches(worker)
+    # Still registered and served: a transfer may still use the memory.
+    assert not [c for c in calls if c[0] == "deregister"]
+    assert not worker._kv_released
+    assert worker._peer_listeners == {("h", 1000): "peer"}
+    peer = {"engine_id": "p", "host": "h", "port": 1}
+    assert W._serve_kv_metadata(worker, peer) is not None
+
+
+def test_sleep_is_refused_while_a_peer_may_still_transfer_to_us():
+    worker, calls = _worker({"l0": [b"m"]}, {"l0": [object()]})
+    worker._peer_listeners = {("h", 1000): "peer"}
+    # The peer could not drain (negative ack) or did not answer.
+    worker._invalidate_peers = lambda peers: ["peer at tcp://h:1000 (no answer)"]
+    _expect_sleep_refused(worker, calls, "no answer")
+
+    # The sleep can be retried once the peer confirms.
+    worker._invalidate_peers = lambda peers: []
+    W.unregister_kv_caches(worker)
+    assert calls[-1] == ("deregister", b"m")
+    assert worker._kv_released
+
+
+def test_sleep_is_refused_while_our_own_transfers_are_pending():
+    worker, calls = _worker({"l0": [b"m"]}, {"l0": [object()]})
+    worker._peer_listeners = {("h", 1000): "peer"}
+    worker._drain_transfers = MagicMock(side_effect=TransferError("1 pending"))
+    _expect_sleep_refused(worker, calls, "1 pending")
+
+
+def test_sleep_is_refused_on_every_tp_rank_if_it_fails_on_one(monkeypatch):
+    import torch.distributed as dist
+
+    worker, calls = _worker({"l0": [b"m"]}, {"l0": [object()]})
+    worker._peer_listeners = {("h", 1000): "peer"}
+    worker._all_tp_ranks_ok = partial(W._all_tp_ranks_ok, worker)
+    worker.world_size = 2
+    worker.tp_group = SimpleNamespace(cpu_group=None)
+    # Fine on this rank; another rank voted 0.
+    monkeypatch.setattr(dist, "all_reduce", lambda vote, group, op: vote.fill_(0))
+    _expect_sleep_refused(worker, calls, "another TP rank")
+
+
 def test_failed_restore_releases_what_it_registered_and_can_be_retried():
     tensors = [MagicMock(data_ptr=lambda i=i: i, nbytes=64) for i in range(2)]
     worker, calls = _worker(
@@ -180,7 +233,7 @@ def test_drop_remote_engine_forgets_only_that_peers_regions_then_drains():
     worker = SimpleNamespace(
         _handshake_lock=threading.RLock(),
         _remote_epoch=0,
-        _dropped_peers=[],
+        _invalidated_at={},
         _is_peer_key=W._is_peer_key,
         layer_name_to_remote_kv_cache_metadata={"A_dp0": {}, "B_dp0": {}},
         remote_moriio_metadata={"A_dp0": 1, "B_dp0": 2},
@@ -209,6 +262,22 @@ def test_drop_remote_engine_forgets_only_that_peers_regions_then_drains():
     assert not W._dropped_since(worker, 0, "B_dp0")
     assert not W._dropped_since(worker, 1, "A_dp1")
 
+    # However many other peers are invalidated meanwhile.
+    for i in range(100):
+        W._drop_remote_engine(worker, f"C{i}")
+    assert W._dropped_since(worker, 0, "A_dp1")
+
+
+def test_peer_is_not_acknowledged_while_our_transfers_to_it_are_pending():
+    worker = SimpleNamespace(
+        _transfer_post_lock=threading.RLock(),
+        moriio_config=SimpleNamespace(transfer_timeout=0.1),
+        moriio_wrapper=SimpleNamespace(drain_transfers=lambda timeout: 1),
+    )
+    # The handshake listener then sends INVALIDATE_NACK.
+    with pytest.raises(TransferError, match="1 MoRIIO transfer"):
+        W._drain_transfers(worker)
+
 
 def test_drop_matches_the_engine_id_the_peer_named_itself():
     # Stored under the address this engine dialed (a hostname), not the
@@ -217,7 +286,7 @@ def test_drop_matches_the_engine_id_the_peer_named_itself():
     worker = SimpleNamespace(
         _handshake_lock=threading.RLock(),
         _remote_epoch=0,
-        _dropped_peers=[],
+        _invalidated_at={},
         _is_peer_key=W._is_peer_key,
         layer_name_to_remote_kv_cache_metadata={"pod-a:5000_dp0": {}},
         remote_moriio_metadata={"pod-a:5000_dp0": peer},
@@ -252,7 +321,7 @@ def _session_worker(handshake):
             build_session=lambda local, remote: (local, remote),
         ),
         _remote_epoch=0,
-        _dropped_peers=[],
+        _invalidated_at={},
         _is_peer_key=W._is_peer_key,
     )
     # The methods these call on self.
@@ -471,95 +540,51 @@ def test_hybrid_read_errors_fail_the_step_on_every_tp_rank(monkeypatch):
     W._fail_step_on_hybrid_read_errors(worker)
 
 
-def test_write_load_fails_once_the_producer_can_no_longer_write():
-    # The producer starts no write after recv_abort_timeout; the consumer
-    # frees the blocks only write_failure_grace() later.
-    give_up = 10.0 + write_failure_grace(40.0)
-    assert give_up == 90.0
-    worker = SimpleNamespace(
-        moriio_config=SimpleNamespace(recv_abort_timeout=10.0, transfer_timeout=40.0),
-        _awaiting_write={
-            "tx-late": "late",
-            "tx-grace": "grace",
-            "tx-done": "done",
-        },
-        _write_wait_since={
-            "tx-late": time.monotonic() - give_up - 1,
-            # Past the 60s minimum, within 2 * transfer_timeout.
-            "tx-grace": time.monotonic() - 10 - 61,
-            "tx-done": time.monotonic() - give_up - 1,
-        },
-        _settled_writes=OrderedDict(),
-    )
-
-    assert W._expire_awaited_writes(worker, done_recving={"done"}) == {"late"}
+def _write_consumer_scheduler(stop_after: float | None):
+    S = MoRIIOConnectorScheduler
+    scheduler = S.__new__(S)
+    scheduler.is_producer = False
+    scheduler._global_dp_rank = 0
+    scheduler._stop_write_after = stop_after
+    scheduler._write_stop_due = {}
+    scheduler._awaiting_write = {}
+    scheduler._unmap_after_recv = {}
+    scheduler.paths = {f"tcp://h:{port}": MagicMock() for port in (1, 2)}
+    for port in (1, 2):  # One producer TP rank each.
+        S.send_notify_block(scheduler, "req", "tx", [5], host="h", port=port)
+    scheduler._awaiting_write["tx"] = "req"
+    return scheduler
 
 
-def _write_consumer(bound: bool, **attrs):
-    worker = SimpleNamespace(
-        mode=MoRIIOMode.WRITE,
-        is_producer=False,
-        _bound_write_loads=bound,
-        _awaiting_write={},
-        _write_wait_since={},
-        _settled_writes=OrderedDict(),
-    )
-    worker.__dict__.update(attrs)
-    return worker
+def test_overdue_write_load_asks_the_producer_to_stop_and_keeps_its_blocks():
+    S = MoRIIOConnectorScheduler
+    scheduler = _write_consumer_scheduler(stop_after=10.0)
+    stop = call(msgpack.dumps({"type": "stop_write", "transfer_id": "tx"}))
+
+    S._stop_overdue_writes(scheduler)
+    for sock in scheduler.paths.values():
+        assert stop not in sock.send.mock_calls
+
+    due, paths = scheduler._write_stop_due["tx"]
+    scheduler._write_stop_due["tx"] = (time.monotonic() - 1, paths)
+    S._stop_overdue_writes(scheduler)
+    for sock in scheduler.paths.values():
+        assert sock.send.mock_calls[-1] == stop
+    # No timer frees the blocks: only the producer's answer does, and the
+    # stop is sent again if none comes.
+    assert scheduler._awaiting_write == {"tx": "req"}
+    assert scheduler._write_stop_due["tx"][0] > time.monotonic() + 5
+
+    # The producer's write_failed (or write_done) completes the load.
+    S.update_connector_output(scheduler, SimpleNamespace(finished_recving={"req"}))
+    assert scheduler._write_stop_due == {}
 
 
-def _write_step(worker, awaiting: dict) -> None:
-    W.start_load_kv(
-        worker,
-        SimpleNamespace(transfer_id_to_request_id={}, awaiting_write=awaiting),
-    )
-
-
-def test_reported_write_load_is_not_failed_again_while_still_listed():
-    worker = _write_consumer(bound=True)
-    _write_step(worker, {"t1": "r1", "t2": "r2"})
-    worker._write_wait_since["t1"] -= 1000
-
-    # Done in this step; with async scheduling the next step's metadata,
-    # built before the scheduler saw it, still lists it.
-    W._settle_writes(worker, {"t1"})
-    _write_step(worker, {"t1": "r1", "t2": "r2"})
-
-    assert set(worker._write_wait_since) == {"t2"}
-    assert list(worker._settled_writes) == ["t1"]
-
-
-def test_write_loads_are_bounded_only_with_sleep_mode():
+def test_write_loads_are_stopped_only_with_sleep_mode():
     # Without sleep mode nothing waits for the engine to drain, and a busy
     # prefill must not turn loads into failures.
-    worker = _write_consumer(bound=False)
-    _write_step(worker, {"t1": "r1"})
-    assert worker._write_wait_since == {}
-
-
-def test_producer_starts_no_write_after_recv_abort_timeout():
-    old = time.monotonic() - 11
-    allocations = {
-        "tx-old": RemoteAllocInfo(block_ids=[1], allocated_at=old, write_deadline=10),
-        "tx-new": RemoteAllocInfo(block_ids=[1], write_deadline=10),
-        # The consumer does not bound its loads (no sleep mode).
-        "tx-unbounded": RemoteAllocInfo(block_ids=[1], allocated_at=old - 1000),
-    }
-    writer = SimpleNamespace(
-        worker=SimpleNamespace(
-            moriio_wrapper=SimpleNamespace(done_remote_allocate_req_dict=allocations)
-        ),
-    )
-
-    def closed(transfer_id: str) -> bool:
-        task = SimpleNamespace(transfer_id=transfer_id, request_id="req")
-        return MoRIIOWriter._write_window_closed(writer, task)
-
-    assert closed("tx-old")
-    assert not closed("tx-new")
-    assert not closed("tx-unbounded")
-    # Not allocated yet: defer_timeout handles it.
-    assert not closed("tx-unallocated")
+    scheduler = _write_consumer_scheduler(stop_after=None)
+    assert scheduler._write_stop_due == {}
 
 
 def test_aborted_write_load_stays_mapped_until_it_completes_or_fails():
@@ -567,6 +592,7 @@ def test_aborted_write_load_stays_mapped_until_it_completes_or_fails():
     scheduler = S.__new__(S)
     scheduler.is_producer = False
     scheduler._awaiting_write = {"tx": "req"}
+    scheduler._write_stop_due = {}
     scheduler._unmap_after_recv = {}
     scheduler.unmap_request_id = MagicMock()
     request = SimpleNamespace(
@@ -577,7 +603,7 @@ def test_aborted_write_load_stays_mapped_until_it_completes_or_fails():
 
     assert S.request_finished(scheduler, request, block_ids=[]) == (False, None)
     # The worker must still map the completion so the scheduler frees the
-    # blocks, and the load must stay bounded by the WRITE deadline.
+    # blocks, and the producer can still be asked to stop the load.
     scheduler.unmap_request_id.assert_not_called()
     assert scheduler._awaiting_write == {"tx": "req"}
 
@@ -611,7 +637,7 @@ def test_tracking_prunes_finished_transfers_in_amortized_time():
     assert wrapper._track_prune_at == 1024
 
 
-def test_drain_waits_past_failures_and_forgets_transfers_that_never_finish():
+def test_drain_waits_past_failures_and_keeps_tracking_unfinished_transfers():
     failed, finishing, stuck = _Status("failed"), _Status(), _Status()
     wrapper = SimpleNamespace(
         lock=threading.Lock(), transfer_status=[], _track_prune_at=1024
@@ -624,36 +650,76 @@ def test_drain_waits_past_failures_and_forgets_transfers_that_never_finish():
     assert MoRIIOWrapper.drain_transfers(wrapper, timeout=0.5) == 1
     assert time.monotonic() - start >= 0.5
     assert finishing.Succeeded()
-    # The stuck transfer does not make every later drain wait out the timeout.
-    assert wrapper.transfer_status == []
+    # A timeout does not cancel RDMA: the stuck transfer stays tracked, so no
+    # later drain reports success while it may still touch the memory.
+    assert wrapper.transfer_status == [stuck]
+    assert MoRIIOWrapper.drain_transfers(wrapper, timeout=0.1) == 1
+    stuck.state = "ok"
     assert MoRIIOWrapper.drain_transfers(wrapper, timeout=5) == 0
+    assert wrapper.transfer_status == []
 
 
-def test_failed_write_is_reported_only_after_posted_writes_settle():
-    # The consumer frees its blocks on write_failed.
+class _WriterWorker:
+    """What MoRIIOWriter uses of its worker (which it references weakly)."""
+
+    def __init__(self, wrapper: MoRIIOWrapper):
+        self.moriio_wrapper = wrapper
+        self.moriio_config = SimpleNamespace(defer_timeout=60.0, transfer_timeout=0.2)
+
+
+def _writer(**allocations: RemoteAllocInfo):
+    wrapper = MoRIIOWrapper()
+    wrapper.done_remote_allocate_req_dict.update(allocations)
+    worker = _WriterWorker(wrapper)
+    writer = MoRIIOWriter(worker)
+    writer.worker_ref = worker  # keep it alive
+    writer.ensure_worker_started = lambda: None
+    events: list[str] = []
+    writer._send_write_failed = lambda task: events.append(task.transfer_id)
+    return writer, wrapper, events
+
+
+def _task(layer_name: str = "l0") -> SimpleNamespace:
+    return SimpleNamespace(transfer_id="tx", request_id="req", layer_name=layer_name)
+
+
+def _released(wrapper: MoRIIOWrapper) -> list[str]:
+    """Transfers whose source blocks the producer released."""
+    return [ack.transfer_id for ack in wrapper.done_req_ids]
+
+
+def test_failed_write_keeps_its_blocks_until_posted_writes_settle():
     posted = _Status()
-    events: list[tuple[str, str]] = []
-    writer = SimpleNamespace(
-        worker=SimpleNamespace(
-            moriio_wrapper=SimpleNamespace(
-                done_remote_allocate_req_dict={
-                    "tx": RemoteAllocInfo(block_ids=[1], transfer_statuses=[posted])
-                }
-            )
-        ),
-        _write_state_lock=threading.Lock(),
-        _transfer_timeout=5.0,
-        _mark_request_done=lambda tid: events.append(("done", posted.state)),
-        _send_write_failed=lambda task: events.append(("failed", posted.state)),
+    writer, wrapper, events = _writer(
+        tx=RemoteAllocInfo(block_ids=[1], transfer_statuses=[posted])
     )
-    threading.Timer(0.2, lambda: setattr(posted, "state", "ok")).start()
 
-    MoRIIOWriter._fail_write(writer, SimpleNamespace(transfer_id="tx"))
+    writer._fail_write(_task())
+    # The NIC may still read our source blocks and write the consumer's.
+    assert events == [] and _released(wrapper) == []
+    assert not writer._is_transfer_terminal("tx")
 
-    assert events == [("done", "ok"), ("failed", "ok")]
+    posted.state = "ok"
+    writer._process_failing_writes()
+    writer._process_failing_writes()
+    assert events == ["tx"] and _released(wrapper) == ["tx"]
+    assert writer._is_transfer_terminal("tx")
 
 
-def test_write_failing_at_completion_is_not_reported_while_writes_may_land():
+def test_write_that_never_settles_never_releases_its_blocks():
+    writer, wrapper, events = _writer(
+        tx=RemoteAllocInfo(block_ids=[1], transfer_statuses=[_Status()])
+    )
+
+    writer._fail_write(_task())
+    time.sleep(0.3)  # past transfer_timeout
+    writer._process_failing_writes()
+
+    assert events == [] and _released(wrapper) == []
+    assert writer._failing_writes["tx"].warned
+
+
+def test_write_failing_at_completion_is_reported_only_after_its_writes_settle():
     # Waiting on a transfer's writes stops at the first failure.
     pending = _Status()
     info = RemoteAllocInfo(
@@ -665,51 +731,70 @@ def test_write_failing_at_completion_is_not_reported_while_writes_may_land():
         completion_remote_ip="h",
         transfer_statuses=[_Status("failed"), pending],
     )
-    events: list[str] = []
+    writer, wrapper, events = _writer(tx=info)
 
     def wait(statuses):
         raise TransferError("one write failed")
 
-    writer = SimpleNamespace(
-        worker=SimpleNamespace(
-            moriio_wrapper=SimpleNamespace(
-                done_remote_allocate_req_dict={"tx": info},
-                waiting_for_transfer_complete=wait,
-            )
-        ),
-        _write_state_lock=threading.Lock(),
-        _transfer_timeout=0.2,
-        _mark_request_done=lambda tid: events.append("done"),
-        _send_write_failed=lambda task: events.append("failed"),
-    )
-
+    wrapper.waiting_for_transfer_complete = wait
     with pytest.raises(TransferError):
-        MoRIIOWriter._finalize_if_complete(writer, "tx", info)
-    MoRIIOWriter._fail_write(writer, SimpleNamespace(transfer_id="tx"))
+        writer._finalize_if_complete("tx", info)
+    writer._fail_write(_task())
+    assert events == [] and _released(wrapper) == []
 
-    assert events == ["done"]
+    pending.state = "failed"
+    writer._process_failing_writes()
+    assert events == ["tx"] and _released(wrapper) == ["tx"]
 
 
-def test_failed_write_is_not_reported_while_a_posted_write_may_still_land():
-    stuck = _Status()
-    events: list[str] = []
-    writer = SimpleNamespace(
-        worker=SimpleNamespace(
-            moriio_wrapper=SimpleNamespace(
-                done_remote_allocate_req_dict={
-                    "tx": RemoteAllocInfo(block_ids=[1], transfer_statuses=[stuck])
-                }
-            )
-        ),
-        _write_state_lock=threading.Lock(),
-        _transfer_timeout=0.2,
-        _mark_request_done=lambda tid: events.append("done"),
-        _send_write_failed=lambda task: events.append("failed"),
-    )
+def test_consumer_stop_closes_the_transfer_and_fails_it_once_writes_settle():
+    posted = _Status()
+    info = RemoteAllocInfo(block_ids=[1], transfer_statuses=[posted])
+    writer, wrapper, events = _writer(tx=info)
+    writer.schedule_write(_task("l0"))
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.PRODUCER):
+        wrapper._handle_structured_message({"type": "stop_write", "transfer_id": "tx"})
 
-    MoRIIOWriter._fail_write(writer, SimpleNamespace(transfer_id="tx"))
+    writer._process_stop_requests()
+    assert events == [] and _released(wrapper) == []
+    # No later write of the transfer is posted, and it cannot complete normally.
+    writer._execute_write_task = MagicMock()
+    writer._deferred_tasks = [_task("l1")]
+    writer._process_deferred_tasks()
+    writer._execute_write_task.assert_not_called()
+    info.writes_expected, info.completion_request_id = 0, "req"
+    info.completion_notify_port, info.completion_remote_ip = 1, "h"
+    writer._finalize_if_complete("tx", info)
+    assert not info.completion_notified
 
-    assert events == ["done"]
+    posted.state = "ok"
+    writer._process_failing_writes()
+    assert events == ["tx"] and _released(wrapper) == ["tx"]
+
+
+def test_stop_before_the_first_write_fails_the_transfer_when_its_task_arrives():
+    writer, wrapper, events = _writer(tx=RemoteAllocInfo(block_ids=[1]))
+    wrapper.stop_write_req_ids.add("tx")
+
+    writer._process_stop_requests()
+    assert events == []
+
+    writer._execute_write_task = MagicMock()
+    writer._deferred_tasks = [_task()]
+    writer._process_deferred_tasks()
+    writer._execute_write_task.assert_not_called()
+    assert events == ["tx"] and _released(wrapper) == ["tx"]
+
+
+def test_stop_for_a_finished_transfer_is_ignored():
+    writer, wrapper, events = _writer()
+    with wrapper.lock:
+        wrapper._mark_transfer_terminal_locked("tx")
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.PRODUCER):
+        wrapper._handle_structured_message({"type": "stop_write", "transfer_id": "tx"})
+
+    writer._process_stop_requests()
+    assert events == [] and writer._closed_writes == set()
 
 
 def _start_listener(serve, on_invalidate) -> int:
@@ -767,7 +852,7 @@ def test_repeated_handshake_keeps_sessions_unless_the_regions_changed():
     port = _start_listener(lambda peer: msgpack.dumps(regions), lambda e: None)
     worker = SimpleNamespace(
         _remote_epoch=0,
-        _dropped_peers=[],
+        _invalidated_at={},
         _is_peer_key=W._is_peer_key,
         _handshake_lock=threading.RLock(),
         engine_id="me",
@@ -799,22 +884,25 @@ def test_repeated_handshake_keeps_sessions_unless_the_regions_changed():
     assert worker.layer_name_to_remote_kv_cache_metadata["P_dp0"] == regions
 
 
-def test_listener_does_not_ack_an_invalidation_it_failed_to_apply():
-    def on_invalidate(engine_id):
-        raise RuntimeError("cannot drop")
+def _refuse_invalidation(engine_id):
+    raise TransferError("1 transfer still pending")
 
-    path = make_zmq_path("tcp", "127.0.0.1", _start_listener(None, on_invalidate))
+
+def test_listener_nacks_an_invalidation_it_failed_to_apply():
+    path = make_zmq_path(
+        "tcp", "127.0.0.1", _start_listener(None, _refuse_invalidation)
+    )
     with zmq_ctx(zmq.DEALER, path) as sock:
-        sock.send_multipart((MoRIIOConstants.INVALIDATE_MSG, b"owner"))
-        assert not sock.poll(500)
-        # The listener keeps serving.
-        sock.send_multipart((MoRIIOConstants.INVALIDATE_MSG, b"owner"))
-        assert not sock.poll(500)
+        for _ in range(2):  # The listener keeps serving.
+            sock.send_multipart((MoRIIOConstants.INVALIDATE_MSG, b"owner"))
+            assert sock.poll(5000)
+            assert sock.recv_multipart()[1] == MoRIIOConstants.INVALIDATE_NACK
 
 
-def test_unresponsive_peers_cost_one_timeout_in_total():
+def test_peers_that_do_not_confirm_fail_and_cost_one_timeout_in_total():
     invalidated: list[str] = []
     live_port = _start_listener(lambda peer: None, invalidated.append)
+    refusing_port = _start_listener(lambda peer: None, _refuse_invalidation)
     timeout = 1.0
     worker = SimpleNamespace(
         engine_id="owner",
@@ -823,12 +911,20 @@ def test_unresponsive_peers_cost_one_timeout_in_total():
     )
     peers = {("127.0.0.1", get_open_port()): f"dead{i}" for i in range(3)}
     peers[("127.0.0.1", live_port)] = "live"
+    peers[("127.0.0.1", refusing_port)] = "refusing"
 
     start = time.monotonic()
-    W._invalidate_peers(worker, peers)
+    failed = W._invalidate_peers(worker, peers)
     elapsed = time.monotonic() - start
 
     assert invalidated == ["owner"]
+    assert sorted(f.split(" at ")[0] for f in failed) == [
+        "dead0",
+        "dead1",
+        "dead2",
+        "refusing",
+    ]
+    assert sum("(no answer)" in f for f in failed) == 3
     # Peers get twice transfer_timeout: they drain their transfers first.
     assert 2 * timeout <= elapsed < 3 * timeout
     worker.zmq_context.destroy(linger=0)

@@ -396,8 +396,7 @@ class CuMemAllocator:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
             single_allocation: Back each allocation by one physical allocation
-                instead of ROCm's chunks, so that a NIC can register it as one
-                dmabuf region. No effect on CUDA.
+                (not ROCm's chunks), registrable as one dmabuf region by a NIC.
 
         """
         if tag is None:
@@ -414,7 +413,8 @@ class CuMemAllocator:
         # is handed, so a bare "expandable_segments:False" would also drop
         # max_split_size_mb, garbage_collection_threshold and
         # roundup_power2_divisions for the rest of the process.
-        # First: it may refuse, and nothing has changed yet.
+
+        # First, since it may refuse while nothing has changed yet.
         prev_single = _set_single_allocation(single_allocation)
         prev_conf = current_alloc_conf()
         expandable_was_enabled = conf_flag_enabled(prev_conf, EXPANDABLE_SEGMENTS)

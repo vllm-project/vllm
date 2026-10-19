@@ -103,10 +103,6 @@ class RemoteAllocInfo:
     completion_remote_ip: str | None = None
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
-    # When the consumer's allocation arrived, and for how long after it writes
-    # may start (None: no limit); see MoRIIOWriter._write_window_closed.
-    allocated_at: float = field(default_factory=time.monotonic)
-    write_deadline: float | None = None
     transfer_offsets: dict[
         TransferOffsetsKey,
         tuple[list[int], list[int], list[int]],
@@ -216,14 +212,6 @@ def get_recv_abort_timeout(extra_config: dict[str, Any]) -> float:
             legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
         ),
     )
-
-
-def write_failure_grace(transfer_timeout: float) -> float:
-    """How long a WRITE consumer waits past recv_abort_timeout before freeing
-    a load's blocks. The producer posts no write after recv_abort_timeout and
-    then waits up to transfer_timeout for its posted writes, twice when a
-    write fails, so the writes it started have landed by then."""
-    return max(MoRIIOConstants.WRITE_FAILURE_GRACE, 2 * transfer_timeout)
 
 
 class HandshakeTimeoutError(HandshakeError):
@@ -353,10 +341,8 @@ class MoRIIOConfig:
         #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec). In
-        #                     WRITE mode with sleep mode on the consumer, the
-        #                     producer starts no write later than this after
-        #                     the consumer allocated, and the consumer fails
-        #                     the load write_failure_grace() later.
+        #                     WRITE mode with sleep mode, the consumer then asks
+        #                     the producer to stop, and fails the load on reply.
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -433,12 +419,12 @@ class MoRIIOConstants:
     # ZMQ message types
     GET_META_MSG = b"get_meta_msg"
     POP_DONE_RECV = b"pop_done_recv"
-    # Sent to every peer that fetched our metadata before our KV cache is
-    # deregistered; the peer drops it and handshakes again on next use.
+    # Sent to peers that fetched our metadata before deregistering it; a peer
+    # acks once it dropped the metadata and drained its transfers to us.
     INVALIDATE_MSG = b"invalidate_msg"
     INVALIDATE_ACK = b"invalidate_ack"
-    # Handshake reply in place of the metadata while the KV cache is
-    # unregistered.
+    INVALIDATE_NACK = b"invalidate_nack"
+    # Handshake reply in place of the metadata while the KV cache is unregistered.
     KV_UNAVAILABLE = b"kv_unavailable"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
@@ -462,9 +448,6 @@ class MoRIIOConstants:
     # is aborted, so the decode worker does not hang on it forever.
     # Overridable via kv_connector_extra_config["recv_abort_timeout"].
     DEFAULT_RECV_ABORT_TIMEOUT = 120.0
-    # Minimum extra time (seconds) a WRITE consumer waits past
-    # recv_abort_timeout before freeing the blocks; see write_failure_grace.
-    WRITE_FAILURE_GRACE = 60.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -561,9 +544,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
-        # WRITE consumer: transfers whose blocks were sent to the producer and
-        # whose completion has not been reported yet.
-        self.awaiting_write: dict[TransferId, ReqId] = {}
 
     def __repr__(self):
         return (
