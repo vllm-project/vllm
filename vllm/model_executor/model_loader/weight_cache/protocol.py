@@ -301,6 +301,8 @@ class WeightCacheKey:
     """Daemon group the weights come from; False is the target model."""
     dp_size: int = 1
     dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -314,6 +316,8 @@ class WeightCacheKey:
         is_draft: bool = False,
         dp_size: int = 1,
         dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -348,6 +352,8 @@ class WeightCacheKey:
             is_draft=is_draft,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
