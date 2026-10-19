@@ -205,7 +205,7 @@ else
     # RELEASE-ONLY: torch==2.15.0 is a pre-release that is not on PyPI yet, so pull
     # it from the PyTorch test channel. Drop this once torch 2.15.0 is published to PyPI.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
-        --extra-index-url https://download.pytorch.org/whl/test/cu130
+        --extra-index-url https://download.pytorch.org/whl/test/cu132
 fi
 # Run the script
 python3 -c 'import vllm'

@@ -33,10 +33,10 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/test/rocm${ROCM_VER}")
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then
-        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/nightly/cu130")
+        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/nightly/cu132")
     else
-        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/cu130")
-        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/test/cu130")
+        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/cu132")
+        TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/test/cu132")
     fi
 fi
 echo ">>> Using PyTorch indexes: ${TORCH_INDEX_URLS[*]:-PyPI default}"
