@@ -173,6 +173,37 @@ def unpinned_nccl_env() -> Iterator[None]:
         _swap_env(pinned)
 
 
+def reread_nccl_env(*names: str) -> None:
+    """Make NCCL re-read these variables for every communicator, so
+    `scoped_nccl_env` can set them for some communicators only. NCCL parses
+    NCCL_NO_CACHE once, so this must run before the process's first NCCL call.
+    """
+    if _nccl_has_no_cache():
+        no_cache = os.environ.get("NCCL_NO_CACHE")
+        os.environ["NCCL_NO_CACHE"] = ",".join(filter(None, [no_cache, *names]))
+
+
+@contextlib.contextmanager
+def scoped_nccl_env(values: Mapping[str, str | None]) -> Iterator[None]:
+    """Set NCCL variables for the communicators created inside the block.
+
+    shortcut: the environment is process-wide, so a communicator another
+    thread creates meanwhile gets them too; none does where this is used.
+
+    A no-op without NCCL_NO_CACHE: NCCL would cache the value from the first
+    communicator, so a process whose first one is created here (a joining
+    rank) would keep it for every later one while its peers do not.
+    """
+    if not _nccl_has_no_cache():
+        yield
+        return
+    old = _swap_env(values)
+    try:
+        yield
+    finally:
+        _swap_env(old)
+
+
 def _nccl_has_no_cache() -> bool:
     # NCCL_NO_CACHE arrived in NCCL 2.29.7; ask the library vLLM loads.
     if torch.version.cuda is None:
