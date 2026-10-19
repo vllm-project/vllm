@@ -55,6 +55,9 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return self._parser.count_reasoning_tokens(token_ids)
+
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:

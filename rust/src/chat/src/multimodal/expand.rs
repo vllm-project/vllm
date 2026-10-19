@@ -10,6 +10,7 @@ use vllm_engine_core_client::protocol::multimodal::PlaceholderRange;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use super::PreparedMedia;
+use super::timing::MM_STAGE_TARGET;
 use crate::error::{Error, Result, bail_multimodal};
 
 /// One modality's queue of pending placeholder replacements for prompt
@@ -55,6 +56,12 @@ impl<'a> ExpansionLane<'a> {
 ///
 /// The returned ranges point into the already-expanded prompt, grouped per
 /// modality in item order.
+#[tracing::instrument(
+    name = "mm_stage",
+    target = MM_STAGE_TARGET,
+    skip_all,
+    fields(stage = "prompt_expansion")
+)]
 pub(super) fn expand_prompt_token_ids(
     prompt_token_ids: &mut Vec<u32>,
     prepared: &[PreparedMedia],
