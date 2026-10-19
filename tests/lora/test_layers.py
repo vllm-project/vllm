@@ -290,13 +290,25 @@ def check_punica_wrapper(punica_wrapper) -> bool:
         return False
 
 
+class _ScaledVocabParallelEmbedding(VocabParallelEmbedding):
+    """Scales its lookup, like a Transformers `*ScaledWordEmbedding`."""
+
+    def __init__(self, *args, embed_scale: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embed_scale = embed_scale
+
+    def forward(self, input_):
+        return super().forward(input_) * self.embed_scale
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("embed_scale", [None, 16.0])
 def test_embeddings(
-    default_vllm_config, dist_init, num_loras, device, vocab_size, stage
+    default_vllm_config, dist_init, num_loras, device, vocab_size, stage, embed_scale
 ) -> None:
     # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
     # device, see: https://github.com/triton-lang/triton/issues/2925
@@ -313,7 +325,12 @@ def test_embeddings(
     assert check_punica_wrapper(punica_wrapper)
 
     def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(vocab_size, 256)
+        if embed_scale is None:
+            embedding = VocabParallelEmbedding(vocab_size, 256)
+        else:
+            embedding = _ScaledVocabParallelEmbedding(
+                vocab_size, 256, embed_scale=embed_scale
+            )
         embedding.weight.data = torch.rand_like(embedding.weight.data)
         embedding.weight.data[vocab_size:, :] = 0
         lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
@@ -358,7 +375,8 @@ def test_embeddings(
                 input_,
                 lora.lora_a.T,
             )
-            result += after_a @ lora.lora_b.T
+            # PEFT scales the delta of a scaled embedding as well
+            result += after_a @ lora.lora_b.T * (embed_scale or 1.0)
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
 
