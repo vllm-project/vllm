@@ -113,45 +113,21 @@ vllm serve <model> \
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
-## Adapting KV event consumers
+## KV cache events
 
-`KVEventBatch.events` is a tagged union. A consumer that decodes the wire
-format into a closed union must add every new event type to its decoder and
-dispatch it before handling the next batch. A consumer that only indexes
-individual blocks may ignore control events, but it must not decode a control
-event as a `BlockStored` or `BlockRemoved` placeholder.
+`KVEventBatch.events` is a tagged union containing block events and cache
+invalidation events:
 
-For forward compatibility, consumers that do not need a new event should
-decode events individually and skip unknown tags instead of rejecting the
-whole batch. Consumers that maintain an inventory cannot skip an invalidation
-event: they must implement its scope before accepting a producer that emits it.
+| Event | Definition |
+| --- | --- |
+| `BlockStored` | One or more KV blocks became available in `medium`. It includes the block hashes and metadata needed to identify the stored blocks. |
+| `BlockRemoved` | One or more KV blocks are no longer available in `medium`. It includes the affected block hashes and optional scope metadata. |
+| `AllBlocksCleared` | The GPU prefix cache was cleared. This is a global cache invalidation. |
+| `OffloadingBlocksCleared` | An offloading residency was cleared. `medium` identifies the cleared medium; `locality` and `ownership` further restrict the scope when provided. |
 
-`OffloadingConnector.reset_cache()` is one example of a scoped invalidation. It
-clears the CPU primary tier, so the event stream includes an
-`OffloadingBlocksCleared` event before any events generated after the reset.
-That event has the following scope:
-
-```json
-{
-  "medium": "CPU",
-  "locality": null,
-  "ownership": null
-}
-```
-
-Consumers that maintain an offload inventory should treat the event as a
-control event and remove entries matching its scope. In this release that
-means removing CPU-primary entries while retaining entries owned by secondary
-tiers such as `STORAGE`. The `medium`, `locality`, and `ownership` fields are
-scope metadata; `null` means that the field is unspecified for this
-invalidation, not that the invalidation applies to every medium. A later
-`BlockStored`/`BlockRemoved` event for a secondary tier continues to carry its
-normal medium, locality, ownership, and block metadata.
-
-The existing `AllBlocksCleared` event remains a separate global invalidation:
-it means that the GPU prefix cache was cleared and has broader scope. Consumers
-must keep these two control events on separate handling paths rather than
-mapping every clear event to a global inventory reset.
+`OffloadingConnector.reset_cache()` emits
+`OffloadingBlocksCleared(medium="CPU")` because it clears the CPU primary
+residency while secondary tiers such as `STORAGE` remain available.
 
 ## Info Metric Labels
 
