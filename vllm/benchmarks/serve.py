@@ -1080,14 +1080,16 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if probe_task is not None:
-        probe_stop.set()
-        await probe_task
-
     if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    # Stop probes AFTER measuring the duration, so the sleep gap before
+    # probe_loop sees probe_stop is not counted into throughput.
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
