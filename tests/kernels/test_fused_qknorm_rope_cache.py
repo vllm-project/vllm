@@ -193,3 +193,56 @@ def test_norm_rope_and_cache(dtype, case):
 )
 def test_empty_input_and_graph_replay(case):
     check_norm_rope_and_cache(**case)
+
+
+def test_fp8_query_store_preserves_model_dtype_kv_and_cache():
+    torch.manual_seed(19)
+    tokens, q_heads, kv_heads, dim = 7, 5, 2, 192
+    qkv = torch.randn(
+        (tokens, (q_heads + 2 * kv_heads) * dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    weight = torch.randn(dim, device="cuda", dtype=torch.bfloat16)
+    rope = torch.randn((64, 128), device="cuda", dtype=torch.bfloat16)
+    positions = torch.arange(tokens, device="cuda")
+    slots = torch.tensor([0, 1, -1, 33, 34], device="cuda")
+    key_cache = torch.zeros((2, 32, kv_heads, dim), device="cuda", dtype=torch.uint8)
+    value_cache = torch.zeros_like(key_cache)
+    scales = [torch.tensor(v, device="cuda") for v in (0.5, 2.0)]
+
+    def run(fp8_query):
+        return ops.fused_qknorm_rope_cache(
+            qkv,
+            weight,
+            weight,
+            rope,
+            positions,
+            slots,
+            key_cache,
+            value_cache,
+            q_heads,
+            kv_heads,
+            dim,
+            128,
+            1e-5,
+            kv_cache_dtype="fp8",
+            k_scale=scales[0],
+            v_scale=scales[1],
+            fp8_query=fp8_query,
+            q_scale=1 / 256,
+        )
+
+    native = run(False)
+    stored = key_cache.clone(), value_cache.clone()
+    run(True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run(True)
+    graph.replay()
+    expected_q = (native[0].float() * 256).clamp(-448, 448).to(torch.float8_e4m3fn)
+    torch.testing.assert_close(actual[0].float(), expected_q.float(), atol=0, rtol=0)
+    for output, expected in zip(actual[1:], native[1:]):
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    for output, expected in zip((key_cache, value_cache), stored):
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
