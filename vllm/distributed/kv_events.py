@@ -414,15 +414,12 @@ class ZmqEventPublisher(EventPublisher):
 
         if self._thread.is_alive():
             self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
-
-        # Clean up ZMQ resources
-        try:
-            if self._pub is not None:
-                self._pub.close(linger=0)
-            if self._replay is not None:
-                self._replay.close(linger=0)
-        finally:
-            pass  # Do not terminate context; other sockets may use it
+            if self._thread.is_alive():
+                logger.warning(
+                    "ZMQ publisher thread is still running after %s seconds; "
+                    "sockets will be closed when the thread exits",
+                    self.SHUTDOWN_TIMEOUT,
+                )
 
     def _socket_setup(self) -> None:
         """Initialize sockets
@@ -469,7 +466,23 @@ class ZmqEventPublisher(EventPublisher):
         _, _, port = split_zmq_path(sock.getsockopt_string(zmq.LAST_ENDPOINT))
         return get_tcp_uri(ip, int(port))
 
+    def _close_sockets(self) -> None:
+        if self._pub is not None:
+            self._pub.close(linger=0)
+            self._pub = None
+        if self._replay is not None:
+            self._replay.close(linger=0)
+            self._replay = None
+
     def _publisher_thread(self) -> None:
+        try:
+            self._run_publisher_thread()
+        finally:
+            # ZMQ sockets are not thread-safe. Keep sending and cleanup on the
+            # publisher thread so no other thread closes an in-use socket.
+            self._close_sockets()
+
+    def _run_publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
         self._pack = msgspec.msgpack.Encoder()
 
