@@ -15,6 +15,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.iteration import IterationMetricsCollector
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -173,22 +174,42 @@ def test_completed_idle_timing_poll_is_consumed_when_inference_resumes(dummy):
     assert submitted == [True]  # No new timing RPC on the active inference path.
 
 
-def test_iteration_records_have_one_stable_frontend_owner():
+@pytest.mark.parametrize("stats_owner", [None, 0, 3])
+def test_iteration_records_preserve_scheduler_stats_owner(stats_owner):
     from vllm.v1.engine.core import EngineCore
+    from vllm.v1.engine.output_processor import OutputProcessor
 
     collector = IterationMetricsCollector()
     index = collector.begin_dummy_iteration()
     collector.complete_timing_samples(((index, 10.0),))
     stats = SchedulerStats(num_running_reqs=7, kv_cache_usage=0.5)
-    outputs = {3: EngineCoreOutputs(scheduler_stats=stats)}
-    core = SimpleNamespace(iteration_metrics=collector)
+    outputs = {}
+    if stats_owner is not None:
+        outputs[0] = EngineCoreOutputs()
+        outputs[stats_owner] = EngineCoreOutputs(scheduler_stats=stats)
+    core = SimpleNamespace(
+        iteration_metrics=collector,
+        scheduler=SimpleNamespace(make_stats=lambda: stats),
+    )
     EngineCore._attach_iteration_records(core, outputs)
-    assert outputs[3].scheduler_stats is None
-    assert outputs[0].scheduler_stats is stats
+    owner = 0 if stats_owner is None else stats_owner
+    assert outputs[owner].scheduler_stats is stats
+    assert sum(output.scheduler_stats is not None for output in outputs.values()) == 1
     assert stats.num_running_reqs == 7
     assert [record.iteration_index for record in stats.iteration_records] == [index]
     EngineCore._attach_iteration_records(core, outputs)
     assert len(stats.iteration_records) == 1
+
+    frontends = {
+        i: SimpleNamespace(lora_states=LoRARequestStates(log_stats=True))
+        for i in outputs
+    }
+    frontends[owner].lora_states.request_running("running", "adapter-A")
+    frontends[owner].lora_states.request_waiting("waiting", "adapter-B")
+    for i, output in outputs.items():
+        OutputProcessor.update_scheduler_stats(frontends[i], output.scheduler_stats)
+    assert stats.running_lora_adapters == {"adapter-A": 1, "adapter-B": 0}
+    assert stats.waiting_lora_adapters == {"adapter-A": 0, "adapter-B": 1}
 
 
 def test_prefix_cache_stats_hits_by_source_accumulate():

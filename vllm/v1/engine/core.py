@@ -668,19 +668,15 @@ class EngineCore:
         collector = self.iteration_metrics
         if collector is None or not (records := collector.take_ready()):
             return
-        # A stable observation owner also prevents multiple API processes from
-        # exporting the same engine's records. Preserve the existing stats once.
+        # Keep stats with their frontend for request-local enrichment (e.g. LoRA).
+        for output in outputs.values():
+            if output.scheduler_stats is not None:
+                output.scheduler_stats.iteration_records.extend(records)
+                return
         owner = outputs.get(0)
         if owner is None:
             outputs[0] = owner = EngineCoreOutputs()
-        if owner.scheduler_stats is None:
-            for output in outputs.values():
-                if output.scheduler_stats is not None:
-                    owner.scheduler_stats = output.scheduler_stats
-                    output.scheduler_stats = None
-                    break
-            else:
-                owner.scheduler_stats = self.scheduler.make_stats() or SchedulerStats()
+        owner.scheduler_stats = self.scheduler.make_stats() or SchedulerStats()
         owner.scheduler_stats.iteration_records.extend(records)
 
     def _poll_iteration_metrics(self) -> dict[int, EngineCoreOutputs]:

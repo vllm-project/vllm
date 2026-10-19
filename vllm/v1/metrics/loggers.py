@@ -113,9 +113,6 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
         self.vllm_config = vllm_config
-        self.enable_logging_iteration_details = (
-            vllm_config.observability_config.enable_logging_iteration_details
-        )
         device_type = vllm_config.device_config.device_type
         self.kv_cache_device = "GPU" if device_type == "cuda" else device_type.upper()
         self._reset(time.monotonic())
@@ -188,7 +185,7 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
-        if not self.enable_logging_iteration_details:
+        if not self.vllm_config.observability_config.enable_logging_iteration_details:
             return
 
         records = scheduler_stats.iteration_records

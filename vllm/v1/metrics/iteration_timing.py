@@ -54,7 +54,6 @@ class IterationTimer:
             self._event_pool.put((self._event_factory(), self._event_factory()))
         self._pending: deque[_PendingTiming] = deque()
         self._active: _PendingTiming | None = None
-        self._pending_lock = threading.Lock()
         self._drain_lock = threading.Lock()
 
     @staticmethod
@@ -83,8 +82,7 @@ class IterationTimer:
         pending = self._active
         self._active = None
         pending.end_event.record()
-        with self._pending_lock:
-            self._pending.append(pending)
+        self._pending.append(pending)
 
     def cancel(self) -> None:
         # Discard this pair instead of recycling an event still in flight.
@@ -96,23 +94,14 @@ class IterationTimer:
             return ()
         ready: list[tuple[int, float]] = []
         try:
-            while True:
-                if not self._pending_lock.acquire(blocking=False):
-                    break
-                try:
-                    pending = self._pending[0] if self._pending else None
-                finally:
-                    self._pending_lock.release()
-                if pending is None or not pending.end_event.query():
+            while self._pending:
+                # The producer only appends; _drain_lock keeps this head stable.
+                pending = self._pending[0]
+                if not pending.end_event.query():
                     break
 
                 elapsed_ms = pending.start_event.elapsed_time(pending.end_event)
-                if not self._pending_lock.acquire(blocking=False):
-                    break
-                try:
-                    self._pending.popleft()
-                finally:
-                    self._pending_lock.release()
+                self._pending.popleft()
                 ready.append((pending.iteration_id, elapsed_ms))
                 self._event_pool.put((pending.start_event, pending.end_event))
         finally:
