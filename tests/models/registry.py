@@ -197,6 +197,10 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
+    "AliceAIForCausalLM": _HfExamplesInfo(
+        "yandex/AliceAI-Foundation-80B-A3B-Base",
+        trust_remote_code=True,
+    ),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
@@ -211,6 +215,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "BailingMoeV3ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-3.0-flash", trust_remote_code=True
+    ),
+    "BeamForCausalLM": _HfExamplesInfo(
+        "reflection/Beam-1.0-501B-A23B-NVFP4",
+        is_available_online=False,
+        # Include MoE in the reduced one-layer initialization test.
+        hf_overrides={"mlp_layer_types": ["sparse"]},
     ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
@@ -266,6 +276,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        hf_overrides={"architectures": ["ExaoneMoEForCausalLM"]},
+    ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
@@ -356,6 +370,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "Kolibri1ForCausalLM": _HfExamplesInfo(
+        "Aleph-Alpha/Kolibri-1", min_transformers_version="5.20.0"
+    ),
     "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
@@ -380,12 +397,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
-    "LongcatFlashForCausalLM": _HfExamplesInfo(
-        "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
-    ),
+    "LongcatFlashForCausalLM": _HfExamplesInfo("meituan-longcat/LongCat-Flash-Chat"),
     "LongcatFlashNgramForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Lite",
-        trust_remote_code=True,
         # Shrink the ~62GB n-gram tables (ngram_vocab_size_ratio * vocab_size)
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
@@ -454,7 +468,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoHybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo(
-        "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
+        "facebook/opt-125m",
+        {"350m": "facebook/opt-350m", "1b": "facebook/opt-iml-max-1.3b"},
     ),
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
@@ -547,6 +562,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         hf_overrides={"num_hidden_layers": 4},
     ),
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
+    "Step5ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        # Published checkpoints wrap the text model in Step5ForConditionalGeneration.
+        is_available_online=False,
+    ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
@@ -583,6 +603,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826",
         trust_remote_code=True,
         hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
+    ),
+    "EmbeddingGemma2Model": _HfExamplesInfo(
+        "google/embeddinggemma-2",
+        is_available_online=False,
     ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -659,6 +683,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
+    "ColUltraVBertForRetrieval": _HfExamplesInfo("athrael-soju/ColUltraVBERT"),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
         "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
@@ -717,6 +742,17 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     ),
+    "D3ForSequenceClassification": _HfExamplesInfo(
+        "vllm-sr/d3-edge",
+        extras={
+            "d3": "vllm-sr/d3",
+            "d3-flash": "vllm-sr/d3-flash",
+            "d3-mini": "vllm-sr/d3-mini",
+            "d3-nano": "vllm-sr/d3-nano",
+            "d3-lite": "vllm-sr/d3-lite",
+        },
+        max_model_len=4096,
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),
@@ -774,10 +810,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
+        "nvidia/audio-flamingo-3-hf"
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
@@ -800,6 +833,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Salesforce/blip2-opt-2.7b",
         extras={"6b": "Salesforce/blip2-opt-6.7b"},
     ),
+    "ClefFlashForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-flash",
+        max_model_len=4096,
+    ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025",
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
@@ -816,12 +853,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
         use_original_num_layers=True,
-        hf_overrides={
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "*-",
-            }
-        },
+        hf_overrides={"text_config": {"layers_block_type": ["full_attention", "mlp"]}},
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -1121,6 +1153,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_6",
     ),
+    "MiniCPMV4_7ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_7",
+        min_transformers_version="5.18.0",
+        is_available_online=False,
+    ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
@@ -1349,6 +1386,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
     ),
+    "ClefOmniForJointSchema": _HfExamplesInfo(
+        "Cloudflare/clef-omni",
+        max_model_len=4096,
+    ),
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
@@ -1403,6 +1444,20 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # ``dummy_hf_overrides``) to avoid OOM during init.
         hf_overrides={"text_config": {"num_hidden_layers": 4, "moe_num_experts": 8}},
     ),
+    "Step5ForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        use_original_num_layers=True,
+        max_model_len=4096,
+        # Retain three SWA dense layers and the first DSA MoE layer.
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 4,
+                "moe_num_experts": 8,
+                "moe_layer_list": [3],
+                "moe_layers_enum": "3",
+            },
+        },
+    ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
@@ -1424,7 +1479,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        extras={"2.0": "nvidia/NVIDIA-Nemotron-Parse-2.0"},
+        trust_remote_code=True,
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
@@ -1436,16 +1493,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    # [Medusa]
-    "MedusaModel": _HfExamplesInfo(
-        "JackFram/llama-68m", speculative_model="abhigoyal/vllm-medusa-llama-68m-random"
-    ),
-    # Temporarily disabled.
-    # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
-    # "MLPSpeculatorPreTrainedModel": _HfExamplesInfo(
-    #     "JackFram/llama-160m",
-    #     speculative_model="ibm-ai-platform/llama-160m-accelerator"
-    # ),
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-4B",
@@ -1468,6 +1515,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         max_model_len=8192,
         max_num_seqs=32,
+    ),
+    "DFlash2BeamDraftModel": _HfExamplesInfo(
+        "reflection/Beam-1.0-501B-A23B-NVFP4",
+        speculative_model="reflection/Beam-1.0-501B-A23B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
     ),
     "DFlashLagunaForCausalLM": _HfExamplesInfo(
         "poolside/Laguna-XS-2.1-NVFP4",
@@ -1752,7 +1805,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
-        trust_remote_code=True,
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
     ),
     "MiMoMTPModel": _HfExamplesInfo(
@@ -1803,6 +1855,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
+        is_available_online=False,
+    ),
+    "Step5MTP": _HfExamplesInfo(
+        "stepfun-ai/Step-5-Preview",
+        speculative_model="stepfun-ai/Step-5-Preview",
+        speculative_method="mtp",
         is_available_online=False,
     ),
 }

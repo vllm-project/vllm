@@ -75,7 +75,7 @@ from vllm.model_executor.layers.quantization import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
@@ -422,6 +422,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(  # type: ignore[call-arg]
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
@@ -439,18 +440,21 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         projected into latent space by ``W_UK_T`` and the attention output is
         projected back to ``v`` by ``W_UV`` -- avoiding materializing full K/V.
         """
-        W_UK, W_UV = split_kv_b_proj(
-            self.kv_b_proj,
-            act_dtype,
-            self.kv_lora_rank,
-            self.num_local_heads,
-            self.qk_nope_head_dim,
-            self.v_head_dim,
-        )
-        # (L, N, V) -> (N, L, V)
-        replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
-        # (L, N, P) -> (N, P, L)
-        replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+        # The weight cache daemon exports the absorbed weights. Repeating the
+        # absorption would mutate its shared CUDA allocation.
+        if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
+            W_UK, W_UV = split_kv_b_proj(
+                self.kv_b_proj,
+                act_dtype,
+                self.kv_lora_rank,
+                self.num_local_heads,
+                self.qk_nope_head_dim,
+                self.v_head_dim,
+            )
+            # (L, N, V) -> (N, L, V)
+            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            # (L, N, P) -> (N, P, L)
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
         quant_method = (
             resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
@@ -785,6 +789,15 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cos_sin_cache=cos_sin_cache,
         )
 
+    def _fused_mla_kv_concat(
+        self, kv_nope: torch.Tensor, k_pe: torch.Tensor, use_fp8_prefill: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pack one DCP context chunk's ``(k, v)`` with the fused kernels."""
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        if use_fp8_prefill:
+            return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+        return fused_mla_kv_concat(k_nope, k_pe), v
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -814,8 +827,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         copied per chunk.
 
         Decode context parallelism keeps using
-        ``impl._context_parallel_compute_prefill_context``; its extra allgather
-        and reorg are not fused here.
+        ``impl._context_parallel_compute_prefill_context`` for its allgather and
+        reorg, with this layer's ``_fused_mla_kv_concat`` as its per-chunk pack.
         """
         prefill = attn_metadata.prefill
         assert prefill is not None
@@ -1074,6 +1087,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                         attn_metadata,
                         k_scale=self._k_scale,
                         dcp_world_size=self.dcp_world_size,
+                        fused_mla_kv_concat_fn=self._fused_mla_kv_concat,
                     )
                 )
             else:

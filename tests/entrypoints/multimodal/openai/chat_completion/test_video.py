@@ -40,13 +40,11 @@ def server():
         "--trust-request-mm-kwargs",
     ]
 
-    # ROCm: Increase timeouts to handle potential network delays and slower
-    # video processing when downloading multiple videos from external sources
+    # ROCm: Allow more time to download videos from external sources.
     env_overrides = {}
     if current_platform.is_rocm():
         env_overrides = {
             "VLLM_VIDEO_FETCH_TIMEOUT": "120",
-            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
         }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
