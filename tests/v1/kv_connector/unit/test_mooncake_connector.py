@@ -530,6 +530,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.dcp_size = 1
     worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
     worker._physical_blocks_per_logical_kv_block = 1
@@ -2160,6 +2161,7 @@ async def test_build_transfer_params_sends_packed_region_once(
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.dcp_size = 1
     worker.use_mla = True
     worker.kv_cache_config = _make_packed_mla_kv_cache_config(
         num_blocks=4, num_groups=len(local_ids)
@@ -3192,8 +3194,8 @@ def test_get_prefill_ranks_for_decode_mla_cases(
         (0, 16, 1, 16, 4, 4, [0, 1, 2, 3]),
         (3, 16, 1, 16, 4, 4, [0, 1, 2, 3]),
         (4, 16, 1, 16, 4, 4, [4, 5, 6, 7]),
-        # Same TP/head groups: D splits by DCP, P keeps one representative copy.
-        (5, 16, 4, 16, 1, 4, [4]),
+        # D queries every P replica for completion; only the first sends data.
+        (5, 16, 4, 16, 1, 4, [4, 5, 6, 7]),
         # Same TP/head groups and same DCP: point-to-point by dcp rank.
         (6, 16, 4, 16, 4, 4, [6]),
         # P has a larger DCP size: one D slice maps to multiple finer P slices.
