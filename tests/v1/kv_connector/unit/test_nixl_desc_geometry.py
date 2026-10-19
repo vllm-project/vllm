@@ -1698,9 +1698,10 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
 
 def _make_shared_base_ring_worker():
     """MLA swa group plus a compressor ring group aliasing the same
-    block-major allocation with a smaller page: the DeepSeek-V4.1-Flash
+    block-major allocation with a larger page: the DeepSeek-V4.1-Flash
     HMA shape where a compressor state cache shares its storage base with
-    the swa cache it serves."""
+    the swa cache it serves. The ring page is wider than the swa page, so
+    folding it into the swa region truncates every transferred block."""
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -1718,19 +1719,19 @@ def _make_shared_base_ring_worker():
     )
 
     num_blocks = 2
-    # Every 256-byte block holds one 256-byte MLA swa page (4 tokens x 64B)
-    # and a 128-byte compressor ring page (8 tokens x 16B) aliased at the
+    # Every 256-byte block holds one 128-byte MLA swa page (4 tokens x 32B)
+    # and a 256-byte compressor ring page (8 tokens x 32B) aliased at the
     # same base address.
-    block_stride, swa_page, ring_page = 256, 256, 128
+    block_stride, swa_page, ring_page = 256, 128, 256
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
 
     swa_spec = MLAAttentionSpec(
-        block_size=4, num_kv_heads=1, head_size=64, dtype=torch.uint8
+        block_size=4, num_kv_heads=1, head_size=32, dtype=torch.uint8
     )
     ring_spec = CircularBufferSpec(
         block_size=8,
         num_kv_heads=1,
-        head_size=16,
+        head_size=32,
         head_size_v=0,
         dtype=torch.uint8,
     )
@@ -1778,7 +1779,7 @@ def _make_shared_base_ring_worker():
         set_current_vllm_config(vllm_config),
     ):
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
-        swa_cache = raw.view(num_blocks, swa_page)
+        swa_cache = raw.as_strided((num_blocks, swa_page), (block_stride, 1))
         ring_cache = raw.as_strided(
             (num_blocks, 1, ring_page), (block_stride, block_stride, 1)
         )
@@ -1796,14 +1797,14 @@ def test_shared_base_regions_with_distinct_block_lens_stay_separate():
     base = worker.kv_caches_base_addr[worker.engine_id][0]
     assert base[0] == base[1]
     assert worker.num_regions == 2
-    assert worker.block_len_per_layer == [256, 128]
+    assert worker.block_len_per_layer == [128, 256]
     assert worker.block_stride_per_layer == [256, 256]
     assert worker._region_is_mla == [True, False]
     assert worker._scratch_region_indices == [1]
     assert worker.region_group_ids == [0, 1]
     assert worker.num_descs == 4
     descs = worker.src_blocks_data
-    assert descs[:, 1].tolist() == [256, 256, 128, 128]
+    assert descs[:, 1].tolist() == [128, 128, 256, 256]
     np.testing.assert_array_equal(
         descs[:, 0], [base[0], base[0] + 256, base[0], base[0] + 256]
     )
