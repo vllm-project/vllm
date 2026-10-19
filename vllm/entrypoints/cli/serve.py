@@ -394,10 +394,10 @@ def run_multi_api_server(args: argparse.Namespace):
             timeout = vllm_config.shutdown_timeout
             shutdown_by = time.monotonic() + timeout
             logger.info("Waiting up to %d seconds for processes to exit", timeout)
-            # 1. Stop accepting: the API servers close their listeners but keep
-            # serving the requests they already accepted, and the launcher
-            # closes its own copy of the shared socket, so new arrivals are
-            # refused at the socket rather than admitted and then rejected.
+            # Stop accepting (API servers via SIGUSR1, the launcher's own copy of
+            # the socket below), then drain the engines, then stop the API
+            # servers: stopping them first would close their engine sockets and
+            # fail every in-flight request before the engines could drain.
             stop_accepting = getattr(api_server_manager, "stop_accepting", None)
             if callable(stop_accepting):
                 stop_accepting()
@@ -408,15 +408,6 @@ def run_multi_api_server(args: argparse.Namespace):
                 deadline if deadline is None else max(deadline - time.monotonic(), 0.0)
             )
 
-        # 2. Drain the engines before stopping the API servers. With a
-        # positive shutdown_timeout the engines finish the in-flight requests,
-        # but their outputs only reach the clients while the API servers that
-        # own those requests are still running. Stopping the API servers first
-        # makes each of them close its engine sockets at once, which fails
-        # every in-flight request with EngineDeadError and leaves the engines
-        # draining for nobody.
-        # 3. Then the API servers, which have nothing left in flight, and the
-        # coordinator.
         if local_engine_manager:
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         api_server_manager.shutdown(timeout=to_timeout(shutdown_by))

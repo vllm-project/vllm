@@ -272,11 +272,7 @@ class APIServerProcessManager:
         )
 
     def stop_accepting(self) -> None:
-        """Tell every API server to stop accepting new connections.
-
-        The servers keep serving the requests they already accepted and exit
-        on the later ``shutdown()``; see ``NoSignalServer.stop_accepting``.
-        """
+        """Make the live API servers stop accepting new connections (SIGUSR1)."""
         for proc in self.processes:
             if proc.pid is not None and proc.is_alive():
                 with contextlib.suppress(ProcessLookupError):
@@ -537,8 +533,7 @@ def run_api_server_worker_proc(
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
-    # The launcher's "stop accepting" signal must not kill a worker that is
-    # still starting up; serve_http installs the real handler.
+    # Ignore the launcher's stop-accepting signal until serve_http handles it.
     signal.signal(signal.SIGUSR1, signal.SIG_IGN)
 
     uvloop.run(
