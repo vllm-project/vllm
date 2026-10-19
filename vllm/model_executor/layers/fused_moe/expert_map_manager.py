@@ -359,13 +359,6 @@ class ExpertMapManager:
             return True
         return self._expert_map[global_id] != -1
 
-    def get_local_expert_ids(self) -> list[int]:
-        """Get list of global IDs for experts on this rank."""
-        if self._expert_map is None:
-            return list(range(self.global_num_experts))
-
-        return torch.where(self._expert_map != -1)[0].tolist()
-
     def update(
         self,
         moe_parallel_config: FusedMoEParallelConfig,
@@ -440,18 +433,21 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        (
-            self._local_num_experts,
-            self._expert_map,
-            self._expert_mask,
-        ) = determine_expert_map(
-            ep_size=self.ep_size,
-            ep_rank=self.ep_rank,
-            global_num_experts=self.global_num_experts,
-            expert_placement_strategy=self._placement_strategy,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            return_expert_mask=self.rocm_aiter_enabled,
-        )
+        device = torch.get_default_device()
+        device = device if device.type != "meta" else torch.device("cpu")
+        with device:
+            (
+                self._local_num_experts,
+                self._expert_map,
+                self._expert_mask,
+            ) = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                expert_placement_strategy=self._placement_strategy,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_enabled,
+            )
 
         self._local_num_experts += self.num_fused_shared_experts
 
