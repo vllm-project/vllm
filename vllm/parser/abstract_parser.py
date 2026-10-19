@@ -521,7 +521,10 @@ class DelegatingParser(Parser):
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
         if strict_level is None:
-            strict_level = tool_parser.default_tool_strict_level
+            if is_auto and structured_outputs is not None:
+                strict_level = ToolStrictLevel.AUTO
+            else:
+                strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
             # Auto with structured outputs keeps its format-only grammar, so the

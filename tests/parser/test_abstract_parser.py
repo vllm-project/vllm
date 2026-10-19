@@ -184,6 +184,58 @@ class TestToolChoice_Plus_ResponseFormat:
         assert out.structured_outputs is None
         mock_warn.assert_called_once()
 
+    def test_auto_without_strict_tools_with_parser_default_function_strict_level(self):
+        """Regression test for #62483: a parser whose default_tool_strict_level
+        is FUNCTION (such as Glm47MoeModelToolParser) must not widen an explicit
+        response_format / structured_outputs constraint into a tool-call OR
+        grammar when tool_choice="auto", no tool has strict=True, and the
+        operator did not set --tool-strict-level.
+        """
+        from vllm.tool_parsers.abstract_tool_parser import ToolStrictLevel
+        from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+
+        class TestGlm47Parser(DelegatingParser):
+            tool_parser_cls = Glm47MoeModelToolParser
+
+        tools = self._tools(strict=False)
+        request = self._setup_request(
+            tools=tools,
+            tool_choice="auto",
+            response_format=self._json_schema_response_format(),
+        )
+        parser = TestGlm47Parser(MagicMock(), tools=tools)
+
+        with patch("vllm.parser.abstract_parser.logger.warning_once") as mock_warn:
+            out = parser.adjust_request(request)
+
+        assert out.response_format is not None
+        assert out.structured_outputs is None
+        mock_warn.assert_called_once()
+
+        # When the operator explicitly configures tool_strict_level=FUNCTION,
+        # or when a tool has strict=True, the combined OrFormat grammar is built.
+        explicit_request = self._setup_request(
+            tools=tools,
+            tool_choice="auto",
+            response_format=self._json_schema_response_format(),
+        )
+        explicit_parser = TestGlm47Parser(MagicMock(), tools=tools)
+        explicit_parser.tool_strict_level = ToolStrictLevel.FUNCTION
+        explicit_out = explicit_parser.adjust_request(explicit_request)
+        assert explicit_out.response_format is None
+        assert explicit_out.structured_outputs is not None
+
+        strict_tools = self._tools(strict=True)
+        strict_request = self._setup_request(
+            tools=strict_tools,
+            tool_choice="auto",
+            response_format=self._json_schema_response_format(),
+        )
+        strict_parser = TestGlm47Parser(MagicMock(), tools=strict_tools)
+        strict_out = strict_parser.adjust_request(strict_request)
+        assert strict_out.response_format is None
+        assert strict_out.structured_outputs is not None
+
     def test_when_model_does_not_have_structural_tag(self):
         """Note(arpera):
         When model does NOT have structural tag support
