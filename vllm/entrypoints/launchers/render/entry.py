@@ -112,7 +112,7 @@ if __name__ == "__main__":
         make_arg_parser,
         validate_parsed_serve_args,
     )
-    from vllm.entrypoints.common.setup import cli_env_setup
+    from vllm.entrypoints.common.startup import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     cli_env_setup()

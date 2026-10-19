@@ -18,7 +18,7 @@ from vllm.entrypoints.common.cli_args import (
     init_parser_plugin,
     validate_api_server_args,
 )
-from vllm.entrypoints.common.setup import (
+from vllm.entrypoints.common.startup import (
     log_non_default_args,
     log_version_and_model,
 )

@@ -29,7 +29,7 @@ from vllm.config.model import (
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
-from vllm.entrypoints.common.setup import log_non_default_args
+from vllm.entrypoints.common.startup import log_non_default_args
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin

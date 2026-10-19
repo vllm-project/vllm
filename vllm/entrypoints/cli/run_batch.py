@@ -7,7 +7,7 @@ import importlib.metadata
 import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.common.setup import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from argparse import Namespace
 
-from vllm.entrypoints.common import setup
-from vllm.entrypoints.common.setup import redact_sensitive_args
+from vllm.entrypoints.common.startup import redact_sensitive_args
 
 
 class TestRedactSensitiveArgs:

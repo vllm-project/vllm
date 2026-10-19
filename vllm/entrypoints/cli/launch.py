@@ -11,7 +11,7 @@ from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.common.setup import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
