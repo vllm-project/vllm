@@ -122,8 +122,6 @@ def _validate_api_url(
     if isinstance(expected_suffixes, str):
         expected_suffixes = {expected_suffixes}
 
-    expected_suffixes = {*expected_suffixes, "profile"}
-
     if not api_url.endswith(tuple(expected_suffixes)):
         raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
 
@@ -156,6 +154,34 @@ def _get_headers(content_type: str | None = None) -> dict[str, str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+async def async_request_profile(
+    api_url: str,
+    session: aiohttp.ClientSession,
+    extra_headers: dict | None = None,
+) -> RequestFuncOutput:
+    _validate_api_url(
+        api_url,
+        "Profiling API",
+        {"start_profile", "stop_profile"},
+    )
+
+    headers = _get_headers()
+    if extra_headers:
+        headers |= extra_headers
+
+    output = RequestFuncOutput()
+    try:
+        async with session.post(url=api_url, headers=headers) as response:
+            output.success = response.status == 200
+            if not output.success:
+                output.error = response.reason or ""
+    except Exception:
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+
+    return output
 
 
 async def async_request_openai_completions(
@@ -209,7 +235,6 @@ async def async_request_openai_completions(
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -343,6 +368,23 @@ def _get_chat_messages(
     ]
 
 
+def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    if (
+        delta.get("content")
+        or delta.get("reasoning")
+        or delta.get("tool_calls")
+        or delta.get("function_call")
+    ):
+        return True
+    # A generated token can decode to an empty string, e.g. a special token
+    # under skip_special_tokens. Those chunks carry `content` and no `role`.
+    # The opening metadata chunk carries `role`.
+    return delta.get("content") == "" and "role" not in delta
+
+
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -386,7 +428,6 @@ async def async_request_openai_chat_completions(
                 first_chunk_received = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
@@ -404,7 +445,9 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
-                            if choices := data.get("choices"):
+                            if (
+                                choices := data.get("choices")
+                            ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
                                 # First token
                                 if not first_chunk_received:
@@ -687,7 +730,6 @@ async def async_request_openai_audio(
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
-                        chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 

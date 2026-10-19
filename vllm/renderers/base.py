@@ -66,7 +66,7 @@ from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.entrypoints.chat_utils import (
+    from vllm.renderers.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
@@ -362,7 +362,7 @@ class BaseRenderer(ABC, Generic[_T]):
         no-op if the background warmup — or a prior reset_mm_cache that joined
         it — already ran it.
         """
-        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+        from vllm.exceptions import ChatTemplateResolutionError
 
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):
@@ -416,6 +416,43 @@ class BaseRenderer(ABC, Generic[_T]):
             return None
 
         return self.tokenizer.eos_token_id
+
+    def validate_token_ids(
+        self, token_ids: Sequence[int], *, parameter: str | None = None
+    ) -> None:
+        """Raise VLLMValidationError if a token id is out of vocabulary.
+
+        Skipped when the tokenizer is not initialized.
+        """
+        tokenizer = self.tokenizer
+        if not token_ids or tokenizer is None:
+            return
+
+        max_input_id = max(token_ids)
+        min_input_id = min(token_ids)
+
+        # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
+        # self.model_config.get_vocab_size() is the model’s vocab size.
+        # For Qwen3 models, the language model has extra tokens that do
+        # not exist in the tokenizer, and vice versa for multimodal
+        # placeholder tokens in some multimodal models.
+        # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
+        # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+
+        # Here we take the max of the two to determine if a token id is
+        # truly out-of-vocabulary.
+        model_vocab_size = self.model_config.get_vocab_size()
+        # A negative id is out of vocabulary just like an over-large one,
+        # but is not caught by the upper-bound check below. Reject it here
+        # so it is not used as an embedding index downstream.
+        if min_input_id < 0:
+            raise VLLMValidationError(
+                f"Token id {min_input_id} is out of vocabulary", parameter=parameter
+            )
+        if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+            raise VLLMValidationError(
+                f"Token id {max_input_id} is out of vocabulary", parameter=parameter
+            )
 
     def get_dec_start_token_id(self) -> int:
         """Obtain the decoder start token id employed by an encoder/decoder model,
@@ -650,13 +687,17 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+
+        # Detokenize after truncation so the text matches the tokens sent
+        # to the engine.
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
 
-        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        return prompt
 
     @overload
     async def _tokenize_singleton_prompt_async(
@@ -690,13 +731,17 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+
+        # Detokenize after truncation so the text matches the tokens sent
+        # to the engine.
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
             prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
 
-        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        return prompt
 
     def _tokenize_enc_dec_prompt(
         self,

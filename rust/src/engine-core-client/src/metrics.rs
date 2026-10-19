@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, LoraAdapterNames,
-    LoraInfoLabels, MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily,
-    MooncakeOperationLabels, RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics,
-    U64Counter, U64Gauge, WaitingReasonLabels,
+    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
+    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
+    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
+    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
-    KvConnectorStats, MooncakeStats, MultiConnectorStats, NixlStats, SchedulerStats,
+    CachedTokensBySource, KvConnectorStats, MooncakeStats, MultiConnectorStats, NixlStats,
+    SchedulerStats,
 };
 use crate::transport::ConnectedEngine;
 
@@ -60,6 +61,8 @@ struct SchedulerStatsHandles {
     prefix_cache_hits: U64Counter,
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
+    /// One handle per `CachedTokensBySource::SOURCES` entry.
+    prompt_tokens_cached_by_source: [U64Counter; 5],
 
     // Speculative decoding counters.
     spec_decode_num_drafts: U64Counter,
@@ -165,6 +168,15 @@ fn resolve_scheduler_stats_handles(
             .external_prefix_cache_queries
             .get_or_create_owned(&labels),
         external_prefix_cache_hits: metrics.external_prefix_cache_hits.get_or_create_owned(&labels),
+        prompt_tokens_cached_by_source: CachedTokensBySource::SOURCES.map(|source| {
+            metrics
+                .prompt_tokens_cached_by_source
+                .get_or_create_owned(&CacheHitSourceLabels {
+                    model_name: model_name.to_string(),
+                    engine,
+                    source,
+                })
+        }),
         spec_decode_num_drafts: metrics.spec_decode_num_drafts.get_or_create_owned(&labels),
         spec_decode_num_draft_tokens: metrics
             .spec_decode_num_draft_tokens
@@ -220,6 +232,8 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     // Prefix-cache counters, including the connector-backed external cache path.
     handles.prefix_cache_queries.inc_by(stats.prefix_cache_stats.base.queries);
     handles.prefix_cache_hits.inc_by(stats.prefix_cache_stats.base.hits);
+    // Local prefix-cache hits are the `device` tier.
+    handles.prompt_tokens_cached_by_source[0].inc_by(stats.prefix_cache_stats.base.hits);
 
     if let Some(connector_prefix_cache_stats) = &stats.connector_prefix_cache_stats {
         handles
@@ -228,6 +242,10 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         handles
             .external_prefix_cache_hits
             .inc_by(connector_prefix_cache_stats.base.hits);
+        let counts = connector_prefix_cache_stats.hits_by_source.counts();
+        for (handle, count) in handles.prompt_tokens_cached_by_source.iter().zip(counts) {
+            handle.inc_by(count);
+        }
     }
 
     // Speculative decoding counters.
