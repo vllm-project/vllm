@@ -35,6 +35,9 @@ class OnlineRequantizationMixin:
             for name, parameter in layer._parameters.items()
             if name not in existing_parameter_names and parameter is not None
         }
+        for parameter in self.requantization_source_parameters.values():
+            # `replace_parameter` then registers new params over these.
+            parameter.requantization_source = True
         return True
 
     def release_requantization_source_weights(self, layer: torch.nn.Module) -> None:

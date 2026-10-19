@@ -2650,17 +2650,20 @@ class ModelOptLinearMethod(LinearMethodBase):
                     "NVFP4 weights."
                 )
             assert self.ctx.group_size is not None
+            # Copies: the kernel may write its layout into the params in place.
             layer.register_buffer(
-                "_nvfp4_weight_for_gather", layer.weight.detach(), persistent=False
+                "_nvfp4_weight_for_gather",
+                layer.weight.detach().clone(),
+                persistent=False,
             )
             layer.register_buffer(
                 "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach(),
+                layer.weight_scale.detach().clone(),
                 persistent=False,
             )
             layer.register_buffer(
                 "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach(),
+                layer.weight_global_scale.detach().clone(),
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size

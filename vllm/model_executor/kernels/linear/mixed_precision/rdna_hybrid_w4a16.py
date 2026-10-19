@@ -597,7 +597,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         c = self.config
 
         w_q_raw = getattr(layer, self.w_q_name)
-        w_s_raw = getattr(layer, self.w_s_name)
 
         unpacked = unpack_quantized_values_into_int32(
             w_q_raw.data, c.weight_type, packed_dim=w_q_raw.packed_dim
@@ -610,18 +609,25 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         # Store as int8; Triton reinterprets via .view(torch.int32) at apply time.
         w_q_skinny = pack_skinny_int4(unpacked)
 
-        permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
-        w_s_skinny = w_s_raw.data.contiguous()
-
+        # Permute via `_transform_param`, so the loader params keep their dims.
         if c.zero_points:
             assert self.w_zp_name is not None
-            w_zp_raw = getattr(layer, self.w_zp_name)
-            permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
-            w_zp = w_zp_raw.data.contiguous()
-            self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
+            self._transform_param(
+                layer,
+                self.w_zp_name,
+                lambda x: permute_param_layout_(
+                    x, input_dim=1, output_dim=0, packed_dim=0
+                ).data.contiguous(),
+            )
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
-        self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
+        self._transform_param(
+            layer,
+            self.w_s_name,
+            lambda x: permute_param_layout_(
+                x, input_dim=1, output_dim=0
+            ).data.contiguous(),
+        )
 
     def apply_weights(
         self,
