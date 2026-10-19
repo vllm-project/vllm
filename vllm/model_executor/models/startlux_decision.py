@@ -33,6 +33,10 @@ class StartLuxDecisionPooler(Pooler):
 
     def __init__(self, symbol_ids: list[int], hidden_size: int):
         super().__init__()
+        if not symbol_ids or len(set(symbol_ids)) != len(symbol_ids):
+            raise ValueError("Candidate token IDs must be nonempty and distinct")
+        if min(symbol_ids) < 0:
+            raise ValueError("Candidate token IDs must be nonnegative")
         self.method = LastPool()
         self.symbol_ids = symbol_ids
         self.register_buffer(
@@ -48,6 +52,8 @@ class StartLuxDecisionPooler(Pooler):
         return PoolingParamsUpdate()
 
     def load_head(self, weight: torch.Tensor) -> None:
+        if max(self.symbol_ids) >= weight.shape[0]:
+            raise ValueError("Candidate token ID exceeds the loaded vocabulary")
         self.letter_weight.copy_(weight[self.symbol_ids].float())
 
     def forward(
