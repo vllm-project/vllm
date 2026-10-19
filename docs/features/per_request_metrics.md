@@ -38,6 +38,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
   },
   "metrics": {
     "time_to_first_token_ms": 85.2,
+    "time_to_first_content_token_ms": 268.2,
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
     "mean_itl_ms": 9.1,
@@ -49,6 +50,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | Field | Description |
 | --- | --- |
 | `time_to_first_token_ms` | Time from when the request was scheduled until the first output token was generated (TTFT). |
+| `time_to_first_content_token_ms` | Time from when the request was scheduled until the first final-content token was generated. For reasoning models, this separates the reasoning phase from the visible answer. It equals `time_to_first_token_ms` when no response parser is active, and is `null` when the parser produces no final content or the boundary cannot be determined. Timing has engine output-batch resolution. |
 | `generation_time_ms` | Decode time: time from the first output token to the last output token. Excludes both queue wait and prefill/TTFT. |
 | `queue_time_ms` | Time the request spent waiting in the scheduler queue before processing began. |
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
