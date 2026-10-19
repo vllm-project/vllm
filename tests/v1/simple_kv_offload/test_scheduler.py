@@ -1316,16 +1316,25 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
     )
     simulate_store_completion(sched, meta.store_event)
 
-    # req_a's prefix is reused and hits entirely on GPU: nothing to load.
+    # req_a's prefix is reused and hits entirely on GPU, so the eager store
+    # finds both blocks already on CPU and stores nothing.
     req_a2 = Request(
         request_id="req-a2",
         prompt_token_ids=req_a.prompt_token_ids,
         sampling_params=req_a.sampling_params,
         pooling_params=None,
         mm_features=None,
-        block_hasher=req_a._block_hasher,
+        block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
     )
-    assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
+    req_a2.num_computed_tokens = 2 * BLOCK_SIZE
+    sched.update_state_after_alloc(req_a2, kv_a, num_external_tokens=0)
+    meta_a2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req_a2.request_id: 1},
+            new_reqs={req_a2.request_id: kv_a.get_block_ids()},
+        )
+    )
+    assert meta_a2.store_event == -1
 
     # Storing 2 new blocks evicts the 2 LRU blocks, which are now req_b's.
     req_c = make_request(num_blocks=2)
