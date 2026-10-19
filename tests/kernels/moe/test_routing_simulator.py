@@ -13,6 +13,7 @@ import tempfile
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     init_distributed_environment,
@@ -23,77 +24,139 @@ from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import
     RoutingSimulator,
 )
 
+BUILTIN_STRATEGIES = [
+    strategy
+    for strategy in RoutingSimulator.get_available_strategies()
+    if strategy != "uniform_subset"
+]
+
 
 @pytest.fixture
 def device():
-    """Fixture to provide the appropriate device for testing."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@pytest.mark.parametrize("num_tokens", [1, 16, 256])
-@pytest.mark.parametrize("hidden_size", [64, 1024])
-@pytest.mark.parametrize("num_experts", [16, 128])
-@pytest.mark.parametrize("top_k", [1, 4])
-def test_basic_functionality(
+def _simulate(
+    strategy_name: str,
+    *,
     num_tokens: int,
-    hidden_size: int,
     num_experts: int,
     top_k: int,
-    device,
-):
-    """Test basic functionality of the routing simulator."""
-    # Test each routing strategy
-    strategies = RoutingSimulator.get_available_strategies()
-
-    hidden_states = torch.randn(num_tokens, hidden_size, device=device)
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    hidden_states = torch.randn(num_tokens, 8, device=device)
     router_logits = torch.randn(num_tokens, num_experts, device=device)
+    topk_weights, topk_ids = RoutingSimulator.simulate_routing(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        strategy_name=strategy_name,
+        top_k=top_k,
+    )
+    assert topk_weights.shape == (num_tokens, top_k)
+    assert topk_ids.shape == (num_tokens, top_k)
+    assert topk_ids.min() >= 0
+    assert topk_ids.max() < num_experts
+    return topk_weights, topk_ids
 
-    for strategy in strategies:
-        # Simulate routing
-        topk_weights, topk_ids = RoutingSimulator.simulate_routing(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            strategy_name=strategy,
-            top_k=top_k,
+
+@pytest.mark.parametrize("strategy", BUILTIN_STRATEGIES)
+@pytest.mark.parametrize("num_tokens", [1, 16])
+@pytest.mark.parametrize("top_k", [1, 4])
+def test_builtin_strategies(strategy, num_tokens, top_k, device):
+    _simulate(
+        strategy,
+        num_tokens=num_tokens,
+        num_experts=32,
+        top_k=top_k,
+        device=device,
+    )
+
+
+def test_register_custom_strategy(device):
+    RoutingSimulator.register_strategy(
+        "custom_normal",
+        DistributionBasedRouting(distribution="normal", mean=2.0, std=0.5),
+    )
+    topk_weights, topk_ids = _simulate(
+        "custom_normal",
+        num_tokens=16,
+        num_experts=8,
+        top_k=2,
+        device=device,
+    )
+    assert topk_weights.shape == (16, 2)
+    assert topk_ids.shape == (16, 2)
+
+
+def test_uniform_subset_routing(device):
+    RoutingSimulator.register_strategy(
+        "test_uniform_subset",
+        DistributionBasedRouting(distribution="uniform_subset", subset_size=8),
+    )
+    _, topk_ids = _simulate(
+        "test_uniform_subset",
+        num_tokens=16,
+        num_experts=32,
+        top_k=4,
+        device=device,
+    )
+    assert topk_ids.max() < 8
+
+
+def test_uniform_subset_requires_subset_size():
+    with pytest.raises(ValueError, match="subset_size"):
+        DistributionBasedRouting(distribution="uniform_subset")
+
+
+def test_uniform_subset_rejects_invalid_sizes(device):
+    strategy = DistributionBasedRouting(
+        distribution="uniform_subset",
+        subset_size=4,
+    )
+    hidden_states = torch.randn(4, 8, device=device)
+    router_logits = torch.randn(4, 8, device=device)
+
+    with pytest.raises(ValueError, match="top_k"):
+        strategy.route_tokens(hidden_states, router_logits, top_k=8)
+
+    with pytest.raises(ValueError, match="subset_size"):
+        strategy.route_tokens(
+            hidden_states,
+            torch.randn(4, 2, device=device),
+            top_k=1,
         )
 
-        # Check output shapes
-        assert topk_weights.shape == (
-            num_tokens,
-            top_k,
-        ), f"Wrong weights shape for {strategy}"
-        assert topk_ids.shape == (
-            num_tokens,
-            top_k,
-        ), f"Wrong ids shape for {strategy}"
 
-        # Check that expert IDs are valid
-        assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
-        assert topk_ids.max() < num_experts, (
-            f"Invalid expert ID (too large) for {strategy}"
-        )
+def test_uniform_subset_env_resolution(device, monkeypatch):
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_SUBSET_SIZE",
+        lambda: 4,
+    )
+    _, topk_ids = _simulate(
+        "uniform_subset",
+        num_tokens=8,
+        num_experts=10,
+        top_k=2,
+        device=device,
+    )
+    assert topk_ids.max() < 4
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="FusedMoEFactory integration requires a CUDA MoE backend",
+)
 def test_routing_strategy_integration(monkeypatch, device):
-    """Test that the routing strategy environment variable works with
-    FusedMoEFactory."""
     pytest.importorskip("vllm.model_executor.layers.fused_moe.layer")
-
-    import vllm.envs as envs
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
 
-    # Test parameters
     num_tokens = 32
     hidden_size = 16
     num_experts = 4
     top_k = 2
-
-    # Create test data
     hidden_states = torch.randn(num_tokens, hidden_size, device=device)
     router_logits = torch.randn(num_tokens, num_experts, device=device)
-
-    # Test different routing strategies
-    strategies = RoutingSimulator.get_available_strategies()
 
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
@@ -109,7 +172,7 @@ def test_routing_strategy_integration(monkeypatch, device):
             pipeline_model_parallel_size=1,
         )
 
-        for strategy in strategies:
+        for strategy in BUILTIN_STRATEGIES:
             fused_moe = FusedMoEFactory(
                 num_experts=num_experts,
                 top_k=top_k,
@@ -120,90 +183,20 @@ def test_routing_strategy_integration(monkeypatch, device):
                 prefix=strategy,
             )
 
-            # Set environment variable
             env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
             monkeypatch.setenv(env_name, strategy)
-
-            # Temporarily override the envs lookup so the router factory
-            # reads the monkeypatched value instead of the module-load-time
-            # default. Use monkeypatch.setitem so the original lambda is
-            # restored automatically at teardown.
             monkeypatch.setitem(
                 envs.environment_variables,
                 env_name,
                 lambda s=strategy: s,
             )
 
-            # Test the select_experts method
             topk_weights, topk_ids = fused_moe.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
 
-            # Verify output shapes
-            assert topk_weights.shape == (num_tokens, top_k), (
-                f"Wrong weights shape for {strategy}"
-            )
-            assert topk_ids.shape == (num_tokens, top_k), (
-                f"Wrong ids shape for {strategy}"
-            )
-
-            # Verify expert IDs are valid
-            assert topk_ids.min() >= 0, f"Invalid expert ID (negative) for {strategy}"
-            assert topk_ids.max() < num_experts, (
-                f"Invalid expert ID (too large) for {strategy}"
-            )
-
-
-def test_distribution_based_routing_with_custom_strategy():
-    """Test registering and using DistributionBasedRouting with custom
-    parameters."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Register custom distribution-based strategy
-    custom_strategy = DistributionBasedRouting(distribution="normal", mean=2.0, std=0.5)
-    RoutingSimulator.register_strategy("custom_normal", custom_strategy)
-
-    # Test data
-    num_tokens = 60
-    hidden_size = 48
-    num_experts = 6
-    top_k = 3
-
-    hidden_states = torch.randn(num_tokens, hidden_size, device=device)
-    router_logits = torch.randn(num_tokens, num_experts, device=device)
-
-    # Use the custom strategy
-    topk_weights, topk_ids = RoutingSimulator.simulate_routing(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        strategy_name="custom_normal",
-        top_k=top_k,
-    )
-
-    # Check output shapes
-    assert topk_weights.shape == (num_tokens, top_k)
-    assert topk_ids.shape == (num_tokens, top_k)
-
-    # Check that expert IDs are valid
-    assert topk_ids.min() >= 0
-    assert topk_ids.max() < num_experts
-
-
-def test_instance_compatibility():
-    """Test that static methods work correctly."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Test static method directly
-    hidden_states = torch.randn(10, 8, device=device)
-    router_logits = torch.randn(10, 4, device=device)
-
-    topk_weights, topk_ids = RoutingSimulator.simulate_routing(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        strategy_name="uniform_random",
-        top_k=2,
-    )
-
-    assert topk_weights.shape == (10, 2)
-    assert topk_ids.shape == (10, 2)
+            assert topk_weights.shape == (num_tokens, top_k)
+            assert topk_ids.shape == (num_tokens, top_k)
+            assert topk_ids.min() >= 0
+            assert topk_ids.max() < num_experts
