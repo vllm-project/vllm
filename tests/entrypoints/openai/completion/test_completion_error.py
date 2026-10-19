@@ -232,6 +232,9 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms == pytest.approx(
+        500.0
+    )
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():

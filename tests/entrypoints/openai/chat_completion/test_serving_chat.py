@@ -932,30 +932,12 @@ async def test_chat_content_ttft_uses_first_content_delta():
         DeltaMessage(content="answer"),
     ]
 
-    reasoning_output = _make_metrics_request_output(
-        RequestStateStats(
-            queued_ts=1.0,
-            scheduled_ts=1.5,
-            first_token_ts=2.0,
-            last_token_ts=2.0,
-            num_generation_tokens=1,
-        ),
-        token_ids=(100,),
-    )
+    reasoning_output = _make_metrics_request_output(token_ids=(100,))
     reasoning_output.outputs[0].text = "thinking"
     reasoning_output.outputs[0].finish_reason = None
     reasoning_output.finished = False
 
-    content_output = _make_metrics_request_output(
-        RequestStateStats(
-            queued_ts=1.0,
-            scheduled_ts=1.5,
-            first_token_ts=2.0,
-            last_token_ts=3.0,
-            num_generation_tokens=2,
-        ),
-        token_ids=(101,),
-    )
+    content_output = _make_metrics_request_output(token_ids=(101,))
     content_output.outputs[0].text = "answer"
 
     response = await serving.chat_completion_full_generator(

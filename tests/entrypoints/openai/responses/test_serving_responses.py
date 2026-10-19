@@ -2215,32 +2215,12 @@ def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
     return (delta if streamed else []) + [completed]
 
 
-def test_harmony_context_records_first_content_timestamp():
-    parser = MagicMock(spec=HarmonyParser)
-    parser.process_chunk.side_effect = [
-        ChunkResult(
-            segments=[Segment("analysis", None, "thinking")],
-            reasoning_token_count=1,
-        ),
-        ChunkResult(
-            segments=[Segment("final", None, "answer")],
-            reasoning_token_count=0,
-        ),
-    ]
-    context = HarmonyContext([], [], frozenset(), parser)
-
-    reasoning_output = _make_request_output("thinking", [10], _PER_REQUEST_STATS)
-    reasoning_output.finished = False
-    reasoning_output.outputs[0].finish_reason = None
-    context.append_output(reasoning_output)
-    assert context.first_content_token_ts is None
-
-    context.append_output(_make_request_output("answer", [20], _PER_REQUEST_STATS))
-    assert context.first_content_token_ts == _PER_REQUEST_STATS.last_token_ts
-
-
-async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
-    serving = _make_serving_instance()
+async def _harmony_stream_events(
+    segment_chunks: list[list[Segment]], *, enable_per_request_metrics: bool = False
+):
+    serving = _make_serving_instance(
+        enable_per_request_metrics=enable_per_request_metrics
+    )
     serving.use_harmony = True
     parser = MagicMock(spec=HarmonyParser)
     parser.process_chunk.side_effect = [
@@ -2251,7 +2231,18 @@ async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
 
     async def result_generator():
         for token_id in range(len(segment_chunks)):
-            context.append_output(_make_request_output("", [token_id]))
+            metrics = (
+                RequestStateStats(
+                    queued_ts=1.0,
+                    scheduled_ts=1.5,
+                    first_token_ts=2.0,
+                    last_token_ts=2.0 + token_id * 0.5,
+                )
+                if enable_per_request_metrics
+                else None
+            )
+            context.append_output(_make_request_output("", [token_id], metrics))
+            context.request_metrics = metrics
             yield context
 
     return [
@@ -2278,7 +2269,10 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
         _harmony_msg("final", "Sunny"),
     ]
 
-    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+    events = await _harmony_stream_events(
+        [_harmony_segments(msg) for msg in messages],
+        enable_per_request_metrics=True,
+    )
 
     streamed = [e.item for e in events if e.type == "response.output_item.done"]
     output = events[-1].response.output
@@ -2286,6 +2280,10 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
     assert [item.id for item in output] == [item.id for item in streamed]
     assert output[1].call_id == streamed[1].call_id
     assert output[2].content[0].text == "Sunny"
+    assert events[-1].response.metrics is not None
+    assert events[-1].response.metrics.time_to_first_content_token_ms == pytest.approx(
+        1500.0
+    )
 
 
 @pytest.mark.asyncio
