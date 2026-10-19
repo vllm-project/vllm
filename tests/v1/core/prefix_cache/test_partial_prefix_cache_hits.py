@@ -760,7 +760,7 @@ def test_transient_checkpoint_evicts_retained_boundary_hash():
     request = make_request("producer", list(range(240)), hash_block_size, sha256)
     # Block 2 ends at the shared-prefix junction 96, so the full-block pass
     # hashes it as a retained boundary.
-    request.shared_prefix_boundary = 96
+    request.shared_prefix_boundaries = (96,)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
     assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
 

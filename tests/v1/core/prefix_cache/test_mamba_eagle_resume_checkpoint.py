@@ -87,7 +87,7 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
     test in this file hard-codes one.
     """
     blocks, local, junction = manager.get_computed_blocks(request)
-    request.shared_prefix_boundary = junction
+    request.shared_prefix_boundaries = junction
     ends = []
     first = True
     while request.num_computed_tokens < request.num_tokens:
@@ -155,13 +155,13 @@ def test_sibling_resumes_from_the_observed_junction():
     consumer = make_request(
         "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
     )
-    junction = manager.get_computed_blocks(consumer)[2]
-    assert junction, "expected a junction against the orphaned full-attention tail"
+    junctions = manager.get_computed_blocks(consumer)[2]
+    assert junctions, "expected a junction against the orphaned full-attention tail"
     _prefill(manager, stub, consumer)
 
     hit = _sibling_hit(manager, 2016, [-2] * 584, hash_block_size)
-    assert hit == junction, (
-        f"the chunk stopped at {junction} but nothing was cached there: "
+    assert hit in junctions, (
+        f"the chunk stopped at {junctions} but nothing was cached there: "
         f"sibling resumes at {hit}"
     )
 
@@ -255,21 +255,22 @@ def test_scheduler_never_stops_where_the_manager_refuses():
             consumer = make_request(
                 "consumer", PREFIX[:shared] + suffix, hash_block_size, sha256
             )
-            junction = manager.get_computed_blocks(consumer)[2]
-            if not junction:
+            junctions = manager.get_computed_blocks(consumer)[2]
+            if not junctions:
                 continue
-            case = (block_size, hash_block_size, prompt_len, junction)
+            case = (block_size, hash_block_size, prompt_len, junctions)
             # The stop and the check-point are both keyed on the junction, so it
             # has to be on the hash grid -- nothing else keeps them together.
-            assert junction % hash_block_size == 0, case
-            if junction not in _prefill(manager, stub, consumer):
+            assert all(j % hash_block_size == 0 for j in junctions), case
+            ends = _prefill(manager, stub, consumer)
+            if not all(j in ends for j in junctions):
                 skipped.append(case)
                 continue
             evaluated += 1
             hit = _sibling_hit(
                 manager, shared, [-2] * (block_size + 3), hash_block_size
             )
-            if hit < junction:
+            if hit < junctions[-1]:
                 refused.append(case + (hit,))
 
     assert not skipped, (
@@ -303,10 +304,10 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     # 2208 is past the prompt: not used verbatim, but the block-floored stop
     # (2048) still applies -- not the last cacheable boundary (3072), which is
     # what dropping the stop would give.
-    request.shared_prefix_boundary = 2208
+    request.shared_prefix_boundaries = (2208,)
     assert Scheduler._mamba_block_aligned_split(stub, request, 8192) == 2048
     # Inside the prompt it still stops, at the junction itself.
-    request.shared_prefix_boundary = 992
+    request.shared_prefix_boundaries = (992,)
     assert Scheduler._mamba_block_aligned_split(stub, request, 8192) == 992
 
     # And the manager refuses on its own at the position that matters: the
@@ -318,7 +319,7 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     mamba = manager.coordinator.single_type_managers[1]
     running = request.num_computed_tokens
     assert not mamba.req_to_blocks["r"][running // block_size].is_null
-    request.shared_prefix_boundary = running
+    request.shared_prefix_boundaries = (running,)
     assert (
         mamba._cache_partial_tail_block(
             request,
@@ -375,12 +376,12 @@ def test_disabled_by_default():
     consumer = make_request(
         "consumer", PREFIX[:2016] + [-1] * 584, hash_block_size, sha256
     )
-    junction = manager.get_computed_blocks(consumer)[2]
-    assert junction, "expected a junction"
+    junctions = manager.get_computed_blocks(consumer)[2]
+    assert junctions, "expected a junction"
     _prefill(manager, stub, consumer)
 
-    assert _sibling_hit(manager, 2016, [-2] * 584, hash_block_size) < junction
+    assert _sibling_hit(manager, 2016, [-2] * 584, hash_block_size) < junctions[0]
 
     request = make_request("r", PREFIX[:10000], hash_block_size, sha256)
-    request.shared_prefix_boundary = 2000
+    request.shared_prefix_boundaries = (2000,)
     assert Scheduler._mamba_block_aligned_split(stub, request, 8192) == 1536

@@ -507,9 +507,7 @@ class SingleTypeKVCacheManager(ABC):
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: every position a replaying sibling can resume at (see
         # ``replay_boundaries``) and any detected shared-prefix junction.
-        reachable_boundaries = [*replay_boundaries]
-        if request.shared_prefix_boundary:
-            reachable_boundaries.append(request.shared_prefix_boundary)
+        reachable_boundaries = [*replay_boundaries, *request.shared_prefix_boundaries]
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -2053,7 +2051,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if (
                 not is_prompt_checkpoint
                 and not is_retained_checkpoint
-                and checkpoint_position != request.shared_prefix_boundary
+                and checkpoint_position not in request.shared_prefix_boundaries
             ):
                 # The transient state overwrites this slot, so neither it nor
                 # the full-block hash registered earlier this step is reusable.
@@ -2076,14 +2074,14 @@ class MambaManager(SingleTypeKVCacheManager):
             hash_block_size,
             self.drop_eagle_checkpoint_block,
         )
-        # The junction is the other position a sibling resumes at: where one was
+        # A junction is another position a sibling resumes at: where one was
         # observed to stop, and where the scheduler already ends a chunk. Bounded
         # to the prompt chunk being computed -- during decode the target is the
         # running state block, mutated in place, which equals what its key
         # promises only after that step's forward.
         if num_tokens != latest_prompt_hash_boundary and not (
             self.shared_prefix_checkpoint
-            and num_tokens == request.shared_prefix_boundary
+            and num_tokens in request.shared_prefix_boundaries
             and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
         ):
             return None
