@@ -502,7 +502,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             > /tmp/nccl-override.txt && \
         export UV_OVERRIDE=/tmp/nccl-override.txt; \
     fi && \
-    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
+    DEEPEP_ARCH_LIST='9.0a 10.0a' && \
+    if [ "$(printf '%s\n' 12.9 "$CUDA_VERSION" | sort -V | head -n1)" = 12.9 ]; then \
+        DEEPEP_ARCH_LIST="$DEEPEP_ARCH_LIST 10.3a"; \
+    fi && \
+    export TORCH_CUDA_ARCH_LIST="$DEEPEP_ARCH_LIST" && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \

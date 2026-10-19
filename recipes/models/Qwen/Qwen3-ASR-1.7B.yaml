@@ -1,0 +1,154 @@
+meta:
+  title: "Qwen3-ASR-1.7B"
+  slug: "qwen3-asr-1.7b"
+  provider: "Qwen"
+  description: "Speech-to-text model supporting 11 languages, multiple accents, and singing voice with customizable text-context prompting."
+  date_added: 2026-01-29
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Accurate multilingual ASR, including singing voice; single-GPU serving"
+  related_recipes: []
+
+model:
+  model_id: "Qwen/Qwen3-ASR-1.7B"
+  min_vllm_version: "0.16.0"
+  architecture: dense
+  parameter_count: "2.3B"
+  active_parameters: "2.3B"
+  context_length: 65536
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Audio extras — required for ASR input pre-processing (librosa, soundfile)"
+    command: 'uv pip install -U "vllm[audio]"'
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 4
+    description: "Full precision BF16 — fits on a single mid-range GPU"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args: []
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Qwen3-ASR is a speech-to-text model that achieves accurate and robust recognition across 11 languages and multiple accents. It supports prompting the model with text context in any format to produce customized ASR results and performs well on singing-voice recognition. This guide demonstrates how to deploy Qwen3-ASR efficiently with vLLM.
+
+  ## Prerequisites
+
+  Install vLLM with audio dependencies:
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --pre \
+      --extra-index-url https://wheels.vllm.ai/nightly/cu129 \
+      --extra-index-url https://download.pytorch.org/whl/cu129 \
+      --index-strategy unsafe-best-match
+  uv pip install "vllm[audio]"
+  ```
+
+  ## Launching with vLLM
+
+  ```bash
+  vllm serve Qwen/Qwen3-ASR-1.7B
+  ```
+
+  ## Client Usage
+
+  ### Chat Completions (OpenAI SDK)
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3-ASR-1.7B",
+      messages=[{
+          "role": "user",
+          "content": [{
+              "type": "audio_url",
+              "audio_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav"},
+          }],
+      }],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Transcription API
+  ```python
+  import httpx
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  audio_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav"
+  audio_file = httpx.get(audio_url).content
+
+  transcription = client.audio.transcriptions.create(
+      model="Qwen/Qwen3-ASR-1.7B",
+      file=audio_file,
+  )
+  print(transcription.text)
+  ```
+
+  ### cURL
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "messages": [
+        {"role": "user", "content": [
+          {"type": "audio_url", "audio_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav"}}
+        ]}
+      ]
+    }'
+  ```
+
+  ### Offline Inference
+  ```python
+  from vllm import LLM, SamplingParams
+  from vllm.assets.audio import AudioAsset
+
+  llm = LLM(model="Qwen/Qwen3-ASR-1.7B")
+  audio_asset = AudioAsset("winning_call")
+
+  conversation = [{
+      "role": "user",
+      "content": [{"type": "audio_url", "audio_url": {"url": audio_asset.url}}],
+  }]
+
+  sampling_params = SamplingParams(temperature=0.01, max_tokens=256)
+  outputs = llm.chat(conversation, sampling_params=sampling_params)
+  print(outputs[0].outputs[0].text)
+  ```
+
+  ## Troubleshooting
+
+  - Make sure `vllm[audio]` extras are installed or audio requests will fail.
+  - Use the nightly wheel until Qwen3-ASR support lands in the stable release.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
+  - [vLLM audio support](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
