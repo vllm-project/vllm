@@ -4875,7 +4875,10 @@ def test_blob_block_hashes_empty():
         ("store", [-1], False),
     ],
 )
-def test_control_worker_reports_exact_copy_outcomes(direction, result, success):
+def test_control_worker_reports_exact_copy_outcomes(
+    direction, result, success, monkeypatch
+):
+    monkeypatch.setattr(torch.accelerator, "set_device_index", MagicMock())
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = result
     store.batch_put_from_multi_buffers.return_value = result
@@ -4899,6 +4902,7 @@ def test_control_worker_reports_exact_copy_outcomes(direction, result, success):
         group_replication={0: 1},
     )
     ready = MagicMock()
+    ready.device = torch.device("cuda", 1)
     try:
         completed = control._transfer(lease, ready)
         ready.synchronize.assert_called_once()
@@ -4916,11 +4920,19 @@ def test_control_worker_reports_exact_copy_outcomes(direction, result, success):
         control.close()
 
 
-def test_control_worker_never_reads_source_before_compute_event():
+def test_control_worker_never_reads_source_before_compute_event(monkeypatch):
+    selected: list[int] = []
+    monkeypatch.setattr(torch.accelerator, "set_device_index", selected.append)
     store = MagicMock()
     control = MooncakeControlWorker(store, {}, rank=0, tp_rank=0, group_replication={})
     ready = MagicMock()
-    ready.synchronize.side_effect = RuntimeError("compute event failed")
+    ready.device = torch.device("cuda", 1)
+
+    def wait_for_compute():
+        assert selected == [1], "Wait on the event's GPU before touching its buffers"
+        raise RuntimeError("compute event failed")
+
+    ready.synchronize.side_effect = wait_for_compute
     lease = KVCacheTransferLease(
         1,
         0,
@@ -4933,6 +4945,8 @@ def test_control_worker_never_reads_source_before_compute_event():
     try:
         completed = control._transfer(lease, ready)
         assert not completed.success
+        ready.synchronize.assert_called_once()
+        assert selected == [1]
         store.batch_put_from_multi_buffers.assert_not_called()
     finally:
         control.close()

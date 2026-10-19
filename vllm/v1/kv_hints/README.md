@@ -189,5 +189,10 @@ Waiting proposals do not consume the execution budget, so a one-action-per-step 
 There is no automatic tool-call detector.
 Request-free control and local policy production are explicit extensions to the initial request-attached RFC profile.
 
+Policies may declare `consumed_signals` as an immutable set of signal names.
+Signals with no configured consumer return `unconsumed` without building a request observation or invalidating scheduler guidance.
+The default `None` preserves delivery of every signal to existing third-party policies.
+Subclasses must explicitly redeclare the filter to opt in, so an overridden handler does not silently inherit a narrower signal set.
+
 Source references: [RFC #59708](https://github.com/vllm-project/vllm/issues/59708), [PR #59714 at 7966f717dd4e](https://github.com/vllm-project/vllm/tree/7966f717dd4eb09461dd97102db1352c924bbf50/vllm/v1/kv_hints).
 Copy claims use the existing eviction queue; the branch does not add the draft PR's separate victim-selection heap.

@@ -103,6 +103,8 @@ class KVPolicy:
     """Policies receive values, never a scheduler, allocator or connector."""
 
     uses_scheduler_guidance = False
+    # None preserves delivery of every signal to third-party policies.
+    consumed_signals: frozenset[str] | None = None
 
     def on_signal(
         self,
@@ -136,6 +138,8 @@ def _positive(value: float, name: str) -> None:
 
 
 class RetentionPolicy(KVPolicy):
+    consumed_signals = frozenset({"importance", "resume"})
+
     def __init__(self, priority: int = 50, ttl_seconds: float = 30.0):
         if type(priority) is not int or not 0 <= priority <= 100:
             raise ValueError("Retention priority must be between 0 and 100")
@@ -171,6 +175,8 @@ class RetentionPolicy(KVPolicy):
 
 
 class ToolWaitPolicy(KVPolicy):
+    consumed_signals = frozenset({"tool_wait", "resume", "resume_prediction"})
+
     def __init__(
         self,
         tier: Literal["cpu", "mooncake"] = "mooncake",
@@ -193,6 +199,7 @@ class ToolWaitPolicy(KVPolicy):
         self._stored: OrderedDict[str, tuple[HashTarget, tuple[str, ...], int]] = (
             OrderedDict()
         )
+        self._known_stored: OrderedDict[tuple[str, ContentSpan], None] = OrderedDict()
         self._stored_blocks = 0
         self._copy_seconds_per_byte: float | None = None
 
@@ -219,14 +226,33 @@ class ToolWaitPolicy(KVPolicy):
             )
         if not isinstance(action, MoveTo) or result.namespace is None:
             return
-        blocks = tuple(
+        intended = tuple(
             ContentSpan(o.block_hash, o.group_id, o.start_token, o.end_token)
             for o in result.target_outcomes
+            if (o.block_hash is not None and o.group_id is not None)
+        )
+        for outcome in result.target_outcomes:
             if (
-                o.block_hash is not None
-                and o.group_id is not None
-                and "cold_copy_stored" in o.completed_steps
+                outcome.block_hash is None
+                or outcome.group_id is None
+                or "cold_copy_stored" not in outcome.completed_steps
+            ):
+                continue
+            block = ContentSpan(
+                outcome.block_hash,
+                outcome.group_id,
+                outcome.start_token,
+                outcome.end_token,
             )
+            content_key = result.namespace, block
+            self._known_stored[content_key] = None
+            self._known_stored.move_to_end(content_key)
+            while len(self._known_stored) > self.max_stored_blocks:
+                self._known_stored.popitem(last=False)
+        blocks = tuple(
+            block
+            for block in intended
+            if (result.namespace, block) in self._known_stored
         )
         if not blocks or len(blocks) > self.max_stored_blocks:
             return
@@ -309,6 +335,7 @@ class ToolWaitPolicy(KVPolicy):
 
 class QuotaPolicy(KVPolicy):
     uses_scheduler_guidance = True
+    consumed_signals = frozenset({"importance"})
 
     def __init__(
         self,

@@ -121,6 +121,10 @@ class MooncakeControlWorker:
         self, lease: KVCacheTransferLease, ready: torch.Event
     ) -> KVTransferRankResult:
         try:
+            device = ready.device
+            if device is None or device.index is None:
+                raise ValueError("Control transfer requires a recorded device event")
+            torch.accelerator.set_device_index(device.index)
             ready.synchronize()
             group = get_group_id(lease.key)
             layout = self.layouts[group]

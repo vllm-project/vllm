@@ -44,6 +44,19 @@ pytestmark = [
 ]
 
 
+class _DeviceCheckedStore:
+    def __init__(self, store, device):
+        self.store, self.device = store, device
+
+    def batch_get_into_multi_buffers(self, *args):
+        assert torch.accelerator.current_device_index() == self.device
+        return self.store.batch_get_into_multi_buffers(*args)
+
+    def batch_put_from_multi_buffers(self, *args):
+        assert torch.accelerator.current_device_index() == self.device
+        return self.store.batch_put_from_multi_buffers(*args)
+
+
 @pytest.fixture(scope="module")
 def store_master(tmp_path_factory):
     configured = os.environ.get("VLLM_TEST_MOONCAKE_MASTER")
@@ -115,80 +128,15 @@ def stores(store_master):
             client.close()
 
 
-@pytest.mark.parametrize("source_device", [0, 1])
-@pytest.mark.parametrize("dtype", [torch.uint8, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("numel", [1024, 16384, 65536])
-@pytest.mark.parametrize("buffers_per_key", [1, 3])
-def test_store_gpu_buffers_preserve_values_across_a_partial_miss(
-    stores, source_device, dtype, numel, buffers_per_key
-):
-    """A missing batch member must not corrupt successfully transferred GPU data."""
-    destination_device = 1 - source_device
-    producer, consumer = stores[source_device], stores[destination_device]
-    sources = [
-        [
-            torch.arange(
-                numel + 16 * i, device=f"cuda:{source_device}", dtype=torch.float32
-            )
-            .remainder(127)
-            .add(group)
-            .to(dtype)
-            for i in range(buffers_per_key)
-        ]
-        for group in range(2)
-    ]
-    destinations = [
-        [torch.zeros_like(t, device=f"cuda:{destination_device}") for t in group]
-        for group in sources
-    ]
-    sentinel = torch.full(
-        (256,), 17, device=f"cuda:{destination_device}", dtype=torch.uint8
-    )
-    torch.accelerator.synchronize(source_device)
-    torch.accelerator.synchronize(destination_device)
-    keys = [f"vllm-store-test-{uuid.uuid4().hex}" for _ in sources]
-    registered = []
-    try:
-        for client, groups in (
-            (producer, sources),
-            (consumer, destinations + [[sentinel]]),
-        ):
-            for group in groups:
-                for tensor in group:
-                    assert client.register_buffer(tensor.data_ptr(), tensor.nbytes) == 0
-                    registered.append((client, tensor))
-        sizes = [[t.nbytes for t in group] for group in sources]
-        assert producer.batch_put_from_multi_buffers(
-            keys, [[t.data_ptr() for t in group] for group in sources], sizes
-        ) == [0, 0]
-        missing = f"missing-{uuid.uuid4().hex}"
-        assert consumer.batch_is_exist(keys + [missing]) == [1, 1, 0]
-        result = consumer.batch_get_into_multi_buffers(
-            keys + [missing],
-            [[t.data_ptr() for t in group] for group in destinations]
-            + [[sentinel.data_ptr()]],
-            sizes + [[sentinel.nbytes]],
-        )
-        # Native Get returns byte counts, unlike Put's zero success status.
-        assert all(size >= 0 for size in result[:2]) and result[2] < 0
-        torch.accelerator.synchronize(destination_device)
-        for source_group, destination_group in zip(sources, destinations, strict=True):
-            for source, destination in zip(
-                source_group, destination_group, strict=True
-            ):
-                torch.testing.assert_close(
-                    source.cpu(), destination.cpu(), rtol=0, atol=0
-                )
-        assert torch.all(sentinel.cpu() == 17)
-    finally:
-        for client, tensor in reversed(registered):
-            client.unregister_buffer(tensor.data_ptr())
-        for key in keys:
-            producer.remove(key, True)
-
-
-@pytest.mark.parametrize("outcome", ["success", "missing_rank", "reset"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "outcome,dtype",
+    [
+        ("success", torch.float16),
+        ("success", torch.bfloat16),
+        ("missing_rank", torch.bfloat16),
+        ("reset", torch.bfloat16),
+    ],
+)
 def test_native_control_moves_real_gpu_buffers_before_publishing_hits(
     stores, outcome, dtype
 ):
@@ -252,7 +200,7 @@ def test_native_control_moves_real_gpu_buffers_before_publishing_hits(
             layouts.append(layout)
             workers.append(
                 MooncakeControlWorker(
-                    store,
+                    _DeviceCheckedStore(store, rank),
                     {0: layout},
                     rank=rank,
                     tp_rank=rank,

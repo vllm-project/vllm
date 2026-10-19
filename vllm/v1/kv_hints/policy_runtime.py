@@ -367,6 +367,19 @@ class KVPolicyRuntime:
     def on_signal(
         self, operation: OperationResult, payload: SignalPayload, request_id: str | None
     ) -> None:
+        consumers = [
+            (name, policy)
+            for name, policy in self.policies.items()
+            if (signals := type(policy).__dict__.get("consumed_signals")) is None
+            or payload.signal in signals
+        ]
+        if not consumers:
+            self.controller.registry.update(
+                operation,
+                OperationStatus.UNCONSUMED,
+                reason="No enabled policy consumes this signal",
+            )
+            return
         self._reap()
         self._view = None
         view = self.observation()
@@ -393,7 +406,7 @@ class KVPolicyRuntime:
                 owners = (session_id,)
         proposed: list[tuple[str, str, PolicyProposal]] = []
         consumed = 0
-        for name, policy in self.policies.items():
+        for name, policy in consumers:
             owner = f"policy:{name}:{identity}"
             decision = policy.on_signal(
                 PolicySignal(payload, payload.target, owner, binding), view

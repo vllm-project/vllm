@@ -6215,49 +6215,21 @@ def test_scoped_eviction_does_not_abandon_an_unpinned_source_reader():
 
 
 def test_native_evict_reports_actual_effects_from_the_existing_manager():
-    config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
-                ),
-            )
-        ],
-    )
-    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
-    registry = OperationRegistry("engine", engine_epoch="epoch")
-    index = SessionPrefixIndex("namespace", "epoch")
-    declarations = RetentionDeclarations(index)
-    resources = KVResourceController(manager, registry, declarations)
-    controller = NativeKVController(registry, index, declarations, executor=resources)
-    request = make_request("request", list(range(12)), block_size=4, hash_fn=sha256)
-    pool = manager.block_pool
-    blocks = pool.get_new_blocks(3)
-    pool.cache_full_blocks(request, blocks, 0, 3, 4, 0)
-    pool.free_blocks(blocks)
-    pool.touch([blocks[0]])
-    target = {
-        "kind": "hashes",
-        "namespace": "namespace",
-        "blocks": [
-            {
-                "block_hash": h.hex(),
-                "group_id": 0,
-                "start_token": i * 4,
-                "end_token": (i + 1) * 4,
-            }
-            for i, h in enumerate(request.block_hashes)
-        ],
-    }
-    hint = KvHintsEnvelope(
-        "0.1", "evict", [KvHintAction("action", "evict", "1", {"target": target})]
-    )
-    result = controller.submit(
-        hint, ControlContext("engine", "epoch", "native")
-    ).results[0]
+    manager, request, controller, _, target = make_movement_controller()
+    manager.allocate_slots(request, 12)
+    blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    manager.free(request)
+    manager.block_pool.touch([blocks[0]])
+    target["blocks"] = [
+        {
+            "block_hash": h.hex(),
+            "group_id": 0,
+            "start_token": i * 4,
+            "end_token": (i + 1) * 4,
+        }
+        for i, h in enumerate(request.block_hashes)
+    ]
+    result = submit_movement(controller, "evict", "evict", {"target": target})
     assert result.status == OperationStatus.PARTIAL
     assert result.affected_blocks == 2 and result.blocked_targets == 1
     assert result.missing_targets == 0
@@ -6266,61 +6238,21 @@ def test_native_evict_reports_actual_effects_from_the_existing_manager():
 
 
 def test_native_retention_rejects_an_unconfigured_group_before_changing_state():
-    config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
-                ),
-            )
-        ],
-    )
-    manager = make_kv_cache_manager(config, max_model_len=64, hash_block_size=4)
-    registry = OperationRegistry("engine", engine_epoch="epoch")
-    index = SessionPrefixIndex("namespace", "epoch")
-    declarations = RetentionDeclarations(index)
-    controller = NativeKVController(
-        registry,
-        index,
-        declarations,
-        executor=KVResourceController(manager, registry, declarations),
-    )
-    hint = KvHintsEnvelope(
-        "0.1",
+    manager, _, controller, _, target = make_movement_controller()
+    target["blocks"][0]["group_id"] = 1
+    result = submit_movement(
+        controller,
         "retain",
-        [
-            KvHintAction(
-                "action",
-                "retain",
-                "1",
-                {
-                    "owner_id": "s",
-                    "declaration_id": "d",
-                    "priority": 90,
-                    "target": {
-                        "kind": "hashes",
-                        "namespace": "namespace",
-                        "blocks": [
-                            {
-                                "block_hash": "0011",
-                                "group_id": 1,
-                                "start_token": 0,
-                                "end_token": 4,
-                            }
-                        ],
-                    },
-                },
-            )
-        ],
+        "retain",
+        {
+            "owner_id": "s",
+            "declaration_id": "d",
+            "priority": 90,
+            "target": target,
+        },
     )
-    result = controller.submit(
-        hint, ControlContext("engine", "epoch", "native")
-    ).results[0]
     assert result.status == OperationStatus.UNSUPPORTED
-    assert declarations.get("s", "d") is None
+    assert controller.declarations.get("s", "d") is None
     assert manager.block_pool.get_num_free_blocks() == 3
 
 
@@ -6618,9 +6550,13 @@ def make_movement_controller(num_blocks=4):
 
 
 def submit_movement(controller, message_id, action, payload):
+    version = "1.0" if action.startswith("vllm.") else "1"
+    registry = controller.registry
     return controller.submit(
-        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1", payload)]),
-        ControlContext("engine", "epoch", "native"),
+        KvHintsEnvelope(
+            "0.1", message_id, [KvHintAction("a", action, version, payload)]
+        ),
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
     ).results[0]
 
 
@@ -6675,10 +6611,11 @@ def test_native_shared_prefetch_survives_independent_task_cleanup(cancel_action)
     assert manager.get_computed_blocks(request)[1] == 4 and block.ref_cnt == 0
 
 
+@pytest.mark.parametrize("action", ["demote", "vllm.move_to"])
 @pytest.mark.parametrize("active_request", [False, True])
 @pytest.mark.parametrize("success", [False, True])
 def test_native_demote_distinguishes_storage_from_gpu_reclamation(
-    active_request, success
+    action, active_request, success
 ):
     manager, request, controller, adapter, target = make_movement_controller()
     blocks = manager.allocate_slots(request, 4)
@@ -6689,10 +6626,13 @@ def test_native_demote_distinguishes_storage_from_gpu_reclamation(
     result = submit_movement(
         controller,
         "demote",
-        "demote",
-        {
+        action,
+        {"target": target, "destination": "mooncake"}
+        if action == "demote"
+        else {
             "target": target,
-            "destination": "mooncake",
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
         },
     )
     assert result.status == OperationStatus.RUNNING
@@ -6711,39 +6651,11 @@ def test_native_demote_distinguishes_storage_from_gpu_reclamation(
             result.status == OperationStatus.COMPLETED and result.affected_blocks == 1
         )
         assert result.completed_steps == ("cold_copy_stored", "gpu_copies_reclaimed")
+    if success and action == "vllm.move_to":
+        assert result.target_outcomes[0].completed_steps == result.completed_steps
     assert manager.get_computed_blocks(request)[1] == (
         4 if active_request or not success else 0
     )
-
-
-def test_native_prefetch_reports_partial_capacity_and_actual_registered_scope():
-    manager, request, controller, adapter, target = make_movement_controller(
-        num_blocks=2
-    )
-    target["blocks"].append(
-        {
-            "group_id": 0,
-            "block_hash": request.block_hashes[1].hex(),
-            "start_token": 4,
-            "end_token": 8,
-        }
-    )
-    result = submit_movement(
-        controller,
-        "prefetch",
-        "prefetch",
-        {
-            "target": target,
-            "source": "mooncake",
-        },
-    )
-    assert result.status == OperationStatus.RUNNING and len(adapter.jobs) == 1
-    adapter.finish()
-    controller.executor.progress()
-    result = controller.registry.get("prefetch", "a")
-    assert result.status == OperationStatus.PARTIAL
-    assert result.affected_blocks == 1 and result.blocked_targets == 1
-    assert manager.get_computed_blocks(request)[1] == 4
 
 
 def test_native_prefetch_reset_cancels_result_before_draining_worker():
@@ -6851,6 +6763,117 @@ def derived_results(controller, parent):
         assert child.origin.action_id == parent.action_id
         assert child.origin.operation_id == parent.operation_id
     return children
+
+
+@pytest.mark.parametrize("history_blocks", [1, 2])
+def test_policy_reuses_shared_cold_checkpoint_after_original_owner_finishes(
+    history_blocks,
+):
+    from vllm.v1.kv_hints.policy import ToolWaitPolicy
+
+    manager, request, controller, adapter, first = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["movement"] = ToolWaitPolicy(max_stored_blocks=history_blocks)
+    second = {
+        **first,
+        "blocks": [
+            {
+                "group_id": 0,
+                "block_hash": request.block_hashes[1].hex(),
+                "start_token": 4,
+                "end_token": 8,
+            }
+        ],
+    }
+
+    def complete():
+        adapter.finish()
+        controller.executor.progress()
+        runtime.tick(force=True)
+
+    for session, target in (
+        ("a", first),
+        ("b", {**first, "blocks": first["blocks"] + second["blocks"]}),
+    ):
+        submit_movement(
+            controller,
+            f"associate-{session}",
+            "associate",
+            {
+                "session_id": session,
+                "continuation_id": "main",
+                "expected_revision": 0,
+                "target": target,
+            },
+        )
+    seeded = submit_movement(
+        controller, "seed-first", "prefetch", {"target": first, "source": "mooncake"}
+    )
+    assert seeded.status == OperationStatus.RUNNING
+    complete()
+    a = {"kind": "session", "session_id": "a"}
+    b = {"kind": "session", "session_id": "b"}
+    submit_movement(
+        controller, "a-wait", "signal", {"target": a, "signal": "tool_wait"}
+    )
+    complete()
+    revision = controller.index.get("a", "main").revision
+    submit_movement(
+        controller,
+        "finish-a",
+        "finish_task",
+        {"session_id": "a", "expected_revision": revision},
+    )
+    seeded = submit_movement(
+        controller, "seed-second", "prefetch", {"target": second, "source": "mooncake"}
+    )
+    assert seeded.status == OperationStatus.RUNNING
+    complete()
+    submit_movement(
+        controller, "b-wait", "signal", {"target": b, "signal": "tool_wait"}
+    )
+    complete()
+    submit_movement(controller, "b-resume", "signal", {"target": b, "signal": "resume"})
+    complete()
+    assert manager.get_computed_blocks(request)[1] == (8 if history_blocks == 2 else 0)
+
+
+def test_unconsumed_policy_signal_preserves_observation_and_does_not_scan_requests(
+    monkeypatch,
+):
+    from vllm.v1.kv_hints.policy import QuotaPolicy
+
+    manager, _, controller, _, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["quota"] = QuotaPolicy()
+    view = runtime.observation()
+    runtime._view = view
+
+    def unexpected_observation():
+        pytest.fail("An unconsumed signal must not build a request observation")
+
+    monkeypatch.setattr(runtime, "observation", unexpected_observation)
+    parent = submit_movement(
+        controller, "ignored", "signal", {"target": target, "signal": "tool_wait"}
+    )
+    assert parent.status == OperationStatus.UNCONSUMED
+    assert runtime._view is view
+
+
+def test_custom_policy_without_signal_filter_receives_all_signals():
+    from vllm.v1.kv_hints.policy import PolicyDecision, ToolWaitPolicy
+
+    class Observer(ToolWaitPolicy):
+        def on_signal(self, signal, view):
+            return PolicyDecision()
+
+    manager, _, controller, _, target = make_movement_controller()
+    runtime, _ = install_movement_policies(manager, controller)
+    runtime.policies["observer"] = Observer()
+    parent = submit_movement(
+        controller, "observed", "signal", {"target": target, "signal": "importance"}
+    )
+    assert parent.status == OperationStatus.COMPLETED
 
 
 def test_policy_signal_receipt_and_duplicate_do_not_claim_gpu_readiness():
@@ -7206,18 +7229,10 @@ def test_policy_cancel_preserves_an_explicit_shared_transfer_interest():
     assert runtime.observation().pending_policy_actions == 0
 
 
-def submit_primitive(controller, message_id, action, payload):
-    registry = controller.registry
-    return controller.submit(
-        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1.0", payload)]),
-        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
-    ).results[0]
-
-
 def priority_primitive(
     controller, target, message, claim="claim", revision=1, value=10, ttl=10
 ):
-    return submit_primitive(
+    return submit_movement(
         controller,
         message,
         "vllm.set_priority",
@@ -7286,11 +7301,11 @@ def test_copy_priority_tombstones_end_with_the_physical_copy(cleanup):
     assert pool.get_new_blocks(1) == [block]
 
 
-def test_primitive_copy_preserves_source_and_move_reports_per_target_reclamation():
+def test_primitive_copy_preserves_source_and_reports_stored_target():
     manager, request, controller, adapter, target = make_movement_controller()
     manager.allocate_slots(request, 5)
     manager.free(request)
-    copy = submit_primitive(
+    copy = submit_movement(
         controller,
         "copy",
         "vllm.copy_to",
@@ -7307,29 +7322,10 @@ def test_primitive_copy_preserves_source_and_move_reports_per_target_reclamation
     assert copy.status == "completed" and copy.completed_steps == ("cold_copy_stored",)
     assert manager.get_computed_blocks(request)[1] == 4
     assert copy.target_outcomes[0].block_hash == target["blocks"][0]["block_hash"]
-    move = submit_primitive(
-        controller,
-        "move",
-        "vllm.move_to",
-        {
-            "target": target,
-            "src": {"tier": "gpu"},
-            "dst": {"tier": "mooncake"},
-        },
-    )
-    assert move.status == "running"
-    adapter.finish()
-    controller.executor.progress()
-    move = controller.registry.get("move", "a")
-    assert move.status == "completed"
-    assert move.target_outcomes[0].completed_steps == (
-        "cold_copy_stored",
-        "gpu_copies_reclaimed",
-    )
-    assert manager.get_computed_blocks(request)[1] == 0
 
 
-def test_copy_target_results_identify_deferred_scope_before_retry():
+@pytest.mark.parametrize("action", ["prefetch", "vllm.copy_to"])
+def test_copy_target_results_identify_deferred_scope_before_retry(action):
     manager, request, controller, adapter, target = make_movement_controller(
         num_blocks=2
     )
@@ -7342,11 +7338,13 @@ def test_copy_target_results_identify_deferred_scope_before_retry():
             "end_token": 8,
         },
     ]
-    result = submit_primitive(
+    result = submit_movement(
         controller,
         "partial",
-        "vllm.copy_to",
-        {
+        action,
+        {"target": {**target, "blocks": blocks}, "source": "mooncake"}
+        if action == "prefetch"
+        else {
             "target": {**target, "blocks": blocks},
             "src": {"tier": "mooncake"},
             "dst": {"tier": "gpu"},
@@ -7357,13 +7355,17 @@ def test_copy_target_results_identify_deferred_scope_before_retry():
     controller.executor.progress()
     result = controller.registry.get("partial", "a")
     assert result.status == "partial"
+    assert result.affected_blocks == result.blocked_targets == 1
+    assert manager.get_computed_blocks(request)[1] == 4
+    if action == "prefetch":
+        return
     assert [(r.end_token, r.status) for r in result.target_outcomes] == [
         (4, "completed"),
         (8, "deferred"),
     ]
     controller.registry.max_result_targets = 1
     free = manager.block_pool.get_num_free_blocks()
-    result = submit_primitive(
+    result = submit_movement(
         controller,
         "bounded",
         "vllm.copy_to",
