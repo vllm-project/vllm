@@ -222,6 +222,65 @@
         "extraContainers": {
             "type": "array"
         },
+        "probeRequest": {
+            "type": "object",
+            "properties": {
+                "endpoint": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "prompt": {
+                    "type": "string"
+                },
+                "maxTokens": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "required": [
+                "endpoint",
+                "model",
+                "prompt",
+                "maxTokens"
+            ]
+        },
+        "startupProbe": {
+            "type": "object",
+            "properties": {
+                "initialDelaySeconds": {
+                    "type": "integer"
+                },
+                "periodSeconds": {
+                    "type": "integer"
+                },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "failureThreshold": {
+                    "type": "integer"
+                },
+                "httpGet": {
+                    "type": "object"
+                },
+                "exec": {
+                    "type": "object"
+                },
+                "tcpSocket": {
+                    "type": "object"
+                },
+                "grpc": {
+                    "type": "object"
+                }
+            },
+            "required": [
+                "failureThreshold",
+                "periodSeconds",
+                "timeoutSeconds"
+            ]
+        },
         "readinessProbe": {
             "type": "object",
             "properties": {
@@ -231,30 +290,31 @@
                 "periodSeconds": {
                     "type": "integer"
                 },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
                 "failureThreshold": {
                     "type": "integer"
                 },
                 "httpGet": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string"
-                        },
-                        "port": {
-                            "type": "integer"
-                        }
-                    },
-                    "required": [
-                        "path",
-                        "port"
-                    ]
+                    "type": "object"
+                },
+                "exec": {
+                    "type": "object"
+                },
+                "tcpSocket": {
+                    "type": "object"
+                },
+                "grpc": {
+                    "type": "object"
                 }
             },
             "required": [
                 "failureThreshold",
-                "httpGet",
                 "initialDelaySeconds",
-                "periodSeconds"
+                "periodSeconds",
+                "timeoutSeconds"
             ]
         },
         "livenessProbe": {
@@ -269,27 +329,28 @@
                 "periodSeconds": {
                     "type": "integer"
                 },
+                "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                },
                 "httpGet": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string"
-                        },
-                        "port": {
-                            "type": "integer"
-                        }
-                    },
-                    "required": [
-                        "path",
-                        "port"
-                    ]
+                    "type": "object"
+                },
+                "exec": {
+                    "type": "object"
+                },
+                "tcpSocket": {
+                    "type": "object"
+                },
+                "grpc": {
+                    "type": "object"
                 }
             },
             "required": [
                 "failureThreshold",
-                "httpGet",
                 "initialDelaySeconds",
-                "periodSeconds"
+                "periodSeconds",
+                "timeoutSeconds"
             ]
         },
         "labels": {
@@ -323,10 +384,12 @@
         "labels",
         "livenessProbe",
         "maxUnavailablePodDisruptionBudget",
+        "probeRequest",
         "readinessProbe",
         "replicaCount",
         "resources",
         "secrets",
-        "servicePort"
+        "servicePort",
+        "startupProbe"
     ]
 }

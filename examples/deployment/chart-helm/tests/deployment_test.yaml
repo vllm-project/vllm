@@ -150,3 +150,70 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].ports[0].containerPort
           value: 8080
+
+  - it: should render startup, readiness and liveness probes that query the model by default
+    asserts:
+      - isNotNull:
+          path: spec.template.spec.containers[0].startupProbe.exec
+      - isNotNull:
+          path: spec.template.spec.containers[0].readinessProbe.exec
+      - isNotNull:
+          path: spec.template.spec.containers[0].livenessProbe.exec
+      - isNull:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+      - isNull:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[0]
+          value: /bin/sh
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[2]
+          pattern: "localhost:8000/v1/completions"
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[2]
+          pattern: "--max-time 9 "
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[4]
+          pattern: '"model":"opt-125m"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[4]
+          pattern: '"max_tokens":1'
+
+  - it: should use probeRequest values and the container port in the generated probes
+    set:
+      containerPort: 9000
+      probeRequest:
+        endpoint: /v1/chat/completions
+        model: my-model
+        prompt: "Say hi"
+        maxTokens: 4
+      livenessProbe:
+        timeoutSeconds: 20
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].startupProbe.exec.command[2]
+          pattern: "localhost:9000/v1/chat/completions"
+      - matchRegex:
+          path: spec.template.spec.containers[0].startupProbe.exec.command[4]
+          pattern: '"model":"my-model"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].startupProbe.exec.command[4]
+          pattern: '"max_tokens":4'
+      - matchRegex:
+          path: spec.template.spec.containers[0].livenessProbe.exec.command[2]
+          pattern: "--max-time 19 "
+
+  - it: should keep a user-provided httpGet handler instead of generating an exec probe
+    set:
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /health
+      - isNull:
+          path: spec.template.spec.containers[0].livenessProbe.exec
+      - isNotNull:
+          path: spec.template.spec.containers[0].readinessProbe.exec

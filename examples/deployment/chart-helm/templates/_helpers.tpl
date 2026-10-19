@@ -82,19 +82,37 @@ Define chart external ConfigMaps and Secrets
 
 
 {{/*
-Define liveness et readiness probes
+Define the exec handler of a probe: a completion request that succeeds only if the model returns text.
+The request body is passed as a positional argument to avoid shell quoting issues.
+*/}}
+{{- define "chart.probe-exec" -}}
+{{-   $request := .root.Values.probeRequest }}
+{{-   $maxTime := max (sub (int .probe.timeoutSeconds) 1) 1 }}
+{{-   $body := dict "model" $request.model "prompt" $request.prompt "max_tokens" $request.maxTokens "temperature" 0 }}
+{{-   $url := printf "http://localhost:%v%s" (include "chart.container-port" .root) $request.endpoint }}
+{{-   $script := printf "curl -s --max-time %d -H 'Content-Type: application/json' -d \"$1\" %s | grep -Eq '\"text\": *\"[^\"]'" $maxTime $url }}
+exec:
+  command:
+    - /bin/sh
+    - -c
+    - {{ $script | quote }}
+    - model-probe
+    - {{ $body | toJson | quote }}
+{{- end }}
+
+{{/*
+Define startup, readiness and liveness probes.
+A probe uses the model request unless a handler (httpGet, exec, tcpSocket, grpc) is set in its values.
 */}}
 {{- define "chart.probes" -}}
-{{-   if .Values.readinessProbe  }}
-readinessProbe:
-{{-     with .Values.readinessProbe }}
-{{-       toYaml . | nindent 2 }}
-{{-     end }}
-{{-   end }}
-{{-   if .Values.livenessProbe  }}
-livenessProbe:
-{{-     with .Values.livenessProbe }}
-{{-       toYaml . | nindent 2 }}
+{{-   range $name := list "startupProbe" "readinessProbe" "livenessProbe" }}
+{{-     $probe := index $.Values $name }}
+{{-     if $probe }}
+{{ $name }}:
+{{-       toYaml $probe | nindent 2 }}
+{{-       if not (or $probe.httpGet $probe.exec $probe.tcpSocket $probe.grpc) }}
+{{-         include "chart.probe-exec" (dict "root" $ "probe" $probe) | trim | nindent 2 }}
+{{-       end }}
 {{-     end }}
 {{-   end }}
 {{- end }}
