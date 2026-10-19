@@ -34,6 +34,9 @@ NUM_GSM8K_QUESTIONS = 256
 EXPECTED_ACCURACY = 0.58
 ACCURACY_TOL = 0.08
 DEFAULT_ALL2ALL_BACKEND = "allgather_reducescatter"
+# The probe's sleep bounds downtime_seconds' resolution; traffic keeps 50 ms,
+# so num_503 (traffic requests only) is unchanged.
+PROBE_INTERVAL_S = float(os.getenv("VLLM_TEST_ELASTIC_EP_PROBE_INTERVAL_S", "0.05"))
 
 
 def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:
@@ -80,7 +83,7 @@ def _traffic_loop(
                 is_ready = True
             if finished.is_set():
                 return responses
-        time.sleep(0.05)
+        time.sleep(PROBE_INTERVAL_S if is_probe else 0.05)
     return responses
 
 
@@ -147,7 +150,8 @@ def _scale_with_traffic(
         f"[traffic={traffic_mode}] "
         f"scale_seconds={scale_seconds:.3f} "
         f"downtime_seconds={_downtime(probe_result):.3f} "
-        f"num_503={sum(s == 503 for r in results for _, _, s in r)}",
+        f"num_503={sum(s == 503 for r in results for _, _, s in r)} "
+        f"probe_interval_s={PROBE_INTERVAL_S}",
         flush=True,
     )
 
