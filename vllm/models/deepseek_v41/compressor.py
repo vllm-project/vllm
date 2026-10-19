@@ -113,6 +113,9 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         self.slot_mapping_buffer = torch.empty(
             max_num_batched_tokens, dtype=torch.int64, device=self.device
         )
+        # Speculative rejection can resume before the chunk's last row, so
+        # every PCP rank needs the full ring tail. Ordinary decode only needs
+        # the latest open row to complete the next ratio-2 pair.
         self.tail_size = self.capacity if self.vllm_config.speculative_config else 1
 
     def build(
