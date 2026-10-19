@@ -878,7 +878,8 @@ steps:
   - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
-  - python3 ../examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+  # Loading weights from the shared HF cache can exceed the default 300s --timeout.
+  - python3 ../examples/features/data_parallel/data_parallel_offline.py --enforce-eager --timeout 900
   # rlhf examples
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_http_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_http_ipc.py
