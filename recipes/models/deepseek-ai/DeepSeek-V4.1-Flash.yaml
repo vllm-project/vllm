@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-17
+  date_updated: 2026-10-19
   tasks:
     - text
     - multimodal
@@ -362,7 +362,7 @@ strategy_overrides:
       # H200 takes the TP4 default on 8x141 GB. Moving the Engram tables to
       # pinned host DRAM (23.6 GiB per rank, 94 GiB across the replica) drops
       # resident weights to 81.2 GiB per GPU and leaves 38.5 GiB of KV per GPU,
-      # about 20M tokens, measured on the InferenceX AgentX sweep. Without the
+      # about 20M tokens, measured on the InferenceX validation sweep. Without the
       # offload the tables stay row-sharded in HBM and the KV pool collapses.
       h200:
         extra_args:
@@ -763,7 +763,7 @@ guide: |
   BASH
   ```
 
-  The AgentX sweep uses task concurrencies 1, 2, 4, 8, 16 and 32, GPU-resident KV,
+  The validation sweep uses task concurrencies 1, 2, 4, 8, 16 and 32, GPU-resident KV,
   and `WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126`. Five-token DSpark
   uses golden acceptance length 3.51. For replay setup and results, see
   [InferenceX #3058](https://github.com/SemiAnalysisAI/InferenceX/pull/3058) and its
@@ -893,7 +893,7 @@ guide: |
   serving profile. For high interactivity on any of them, use
   `--tensor-parallel-size 4`.
 
-  ## B200 AgentX tuning
+  ## B200 scheduling and KV offload
 
   On B200, TP2 at concurrency 1 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'`,
   `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. DEP2 (TP1 x DP2 with expert
@@ -905,6 +905,71 @@ guide: |
   For DEP2 at c128, add vLLM's native CPU KV offloading with
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
   server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`.
+
+  ## Dynamo sidecar serving
+
+  Dynamo can route requests to vLLM's native gRPC server through a colocated
+  sidecar. Choose the checkpoint, hardware and parallelism in the command
+  builder above. For compatible runtime installation and complete launch
+  examples, see the [Dynamo vLLM sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md).
+
+  The B300 deployment in [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231)
+  validated this integration with the original
+  [DeepSeek-V4.1-Flash checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash).
+  The builder defaults to DeepSeek-V4.1-Flash-1017; that checkpoint was not
+  covered by this deployment's validation.
+
+  ### Connect the engine and sidecar
+
+  Use the generated model and hardware arguments with `vllm-rs serve`.
+  Add `--grpc-port 19000` and set `--reasoning-parser None`; omit the engine's
+  `--tool-call-parser` and `--enable-auto-tool-choice` flags because the
+  sidecar handles reasoning and tool parsing. For KV-aware routing, enable
+  KV events on the engine with `--kv-events-config`:
+
+  ```json
+  {"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}
+  ```
+
+  With etcd running, set its reachable address in each frontend and sidecar
+  shell, along with the shared request and event planes:
+
+  ```bash
+  export ETCD_ENDPOINTS=http://ETCD_HOST:2379
+  export DYN_REQUEST_PLANE=tcp DYN_EVENT_PLANE=zmq
+  ```
+
+  In a separate shell on the engine host, connect one sidecar to the engine:
+
+  ```bash
+  export DYN_VLLM_KV_EVENT_PORT=5200
+  uv run --no-project python -m dynamo.vllm.sidecar \
+    --grpc-endpoint 127.0.0.1:19000 \
+    --dyn-tool-call-parser deepseek_v41 --dyn-reasoning-parser deepseek_v41
+  ```
+
+  Start a shared frontend:
+
+  ```bash
+  uv run --no-project python -m dynamo.frontend --http-port 8000 --router-mode kv
+  ```
+
+  For disaggregated serving, follow Dynamo's launch examples to configure
+  the prefill and decode engines, NIXL KV transfer and the host's transport.
+  Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
+  and `--disaggregation-mode decode` to decode sidecars. Allocate distinct
+  gRPC and KV-event ports when running several engines on the same host.
+
+  Check the frontend after the workers register:
+
+  ```bash
+  curl --fail http://FRONTEND_HOST:8000/health
+  curl --fail http://FRONTEND_HOST:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+  ```
+
+  Set the request's `model` to the served model name selected for the engine.
 
   ## DGX Station (GB300) Tensor Parallel
 
