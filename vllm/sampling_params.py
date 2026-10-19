@@ -372,6 +372,18 @@ class SamplingParams(
     NOTE: GC costs of FlatLogprobs is significantly smaller than
     list[dict[int, Logprob]]. After enabled, PromptLogprobs and
     SampleLogprobs would populated as FlatLogprobs."""
+    sampled_logprobs_only: bool = False
+    """Return only the sampled token's logprob per generated token, as the
+    float list `CompletionOutput.sampled_logprobs`, instead of per-token
+    `Logprob` entries. The engine transports one float per token and the
+    output processor builds no `Logprob` objects and detokenizes nothing, so
+    it is much cheaper than `logprobs=0` (e.g. for RL rollouts that only need
+    the sampled-token logprobs). `CompletionOutput.logprobs` is `None` and
+    `cumulative_logprob` is still computed. Implies `logprobs=0` when
+    `logprobs` is unset; any other `logprobs` value and `logprob_token_ids`
+    are rejected. Requires `--logprobs-mode` `raw_logprobs` or
+    `processed_logprobs`, since the values are named logprobs. Values are not
+    clamped: `-inf` is returned as is."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -595,6 +607,9 @@ class SamplingParams(
         if self.prompt_logprobs is True:
             self.prompt_logprobs = 1
 
+        if self.sampled_logprobs_only and self.logprobs is None:
+            self.logprobs = 0
+
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not self.include_stop_str_in_output:
@@ -632,6 +647,19 @@ class SamplingParams(
             )
 
     def _verify_args(self) -> None:
+        if self.sampled_logprobs_only:
+            if self.logprobs != 0:
+                raise VLLMValidationError(
+                    "sampled_logprobs_only requires logprobs to be 0 or unset, "
+                    f"got logprobs={self.logprobs}.",
+                    parameter="sampled_logprobs_only",
+                    value=self.logprobs,
+                )
+            if self.logprob_token_ids is not None:
+                raise VLLMValidationError(
+                    "sampled_logprobs_only cannot be combined with logprob_token_ids.",
+                    parameter="sampled_logprobs_only",
+                )
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
@@ -920,6 +948,18 @@ class SamplingParams(
         )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
+        if self.sampled_logprobs_only and model_config.logprobs_mode not in (
+            "raw_logprobs",
+            "processed_logprobs",
+        ):
+            # The values are returned as logprobs; do not hand back logits
+            # under that name.
+            raise VLLMValidationError(
+                "sampled_logprobs_only requires --logprobs-mode raw_logprobs "
+                f"or processed_logprobs (server runs {model_config.logprobs_mode}).",
+                parameter="sampled_logprobs_only",
+            )
+
         max_logprobs = model_config.max_logprobs
         if max_logprobs == -1:
             max_logprobs = model_config.get_vocab_size()

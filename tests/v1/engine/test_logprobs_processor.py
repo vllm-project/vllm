@@ -11,6 +11,7 @@ row), the trailing positions are populated with sentinel values
 """
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.logprobs import create_sample_logprobs
@@ -87,3 +88,136 @@ def test_prompt_token_id_logprobs_are_popped_once():
     assert scores is not None
     assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
     assert processor.pop_prompt_token_id_logprobs() is None
+
+
+def test_sampled_logprobs_only_keeps_a_float_list_and_no_entries():
+    """``sampled_logprobs_only`` requests receive one float per token from
+    the scheduler and never build Logprob entries or detokenize."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
+
+    params = SamplingParams(sampled_logprobs_only=True)
+    request = EngineCoreRequest(
+        request_id="r",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    processor = LogprobsProcessor.from_new_request(tokenizer=None, request=request)
+    assert processor.logprobs is None
+    assert processor.sampled_logprobs == []
+    assert processor.cumulative_logprob == 0.0
+
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="r", new_token_ids=[7, 8], new_sampled_logprobs=[-0.5, -1.25]
+        )
+    )
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="r", new_token_ids=[9], new_sampled_logprobs=[-0.25]
+        )
+    )
+    assert processor.sampled_logprobs == [-0.5, -1.25, -0.25]
+    assert processor.cumulative_logprob == -2.0
+    assert processor.logprobs is None
+
+
+def test_sampled_logprobs_only_implies_logprobs_zero():
+    from vllm.sampling_params import SamplingParams
+
+    assert SamplingParams(sampled_logprobs_only=True).logprobs == 0
+    assert SamplingParams(logprobs=0, sampled_logprobs_only=True).logprobs == 0
+    assert SamplingParams().sampled_logprobs_only is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"logprobs": 2}, {"logprobs": -1}, {"logprob_token_ids": [5]}],
+)
+def test_sampled_logprobs_only_rejects_other_logprobs(kwargs):
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    with pytest.raises(VLLMValidationError, match="sampled_logprobs_only"):
+        SamplingParams(sampled_logprobs_only=True, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("logprobs_mode", "ok"),
+    [
+        ("raw_logprobs", True),
+        ("processed_logprobs", True),
+        ("raw_logits", False),
+        ("processed_logits", False),
+    ],
+)
+def test_sampled_logprobs_only_requires_a_logprobs_mode(logprobs_mode, ok):
+    """Checked at engine level, so AsyncLLM callers get it too: the values are
+    returned as logprobs, so logits modes are rejected."""
+    from unittest.mock import MagicMock
+
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import SamplingParams
+
+    model_config = MagicMock(logprobs_mode=logprobs_mode, max_logprobs=20)
+    SamplingParams(logprobs=0)._validate_logprobs(model_config)
+    params = SamplingParams(sampled_logprobs_only=True)
+    if ok:
+        params._validate_logprobs(model_config)
+    else:
+        with pytest.raises(VLLMValidationError, match="logprobs-mode"):
+            params._validate_logprobs(model_config)
+
+
+def test_sampled_logprobs_only_from_the_request_schema_reaches_the_engine():
+    """Public field: settable in /inference/v1/generate ``sampling_params`` and
+    carried to the engine over msgpack."""
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateRequest,
+    )
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    request = GenerateRequest.model_validate(
+        {"token_ids": [1, 2], "sampling_params": {"sampled_logprobs_only": True}}
+    )
+    params = request.sampling_params
+    assert params.sampled_logprobs_only is True
+    assert params.logprobs == 0
+    decoded = MsgpackDecoder(SamplingParams).decode(MsgpackEncoder().encode(params))
+    assert decoded.sampled_logprobs_only is True
+    assert decoded.logprobs == 0
+
+
+def test_aggregated_delta_outputs_merge_sampled_logprobs():
+    from vllm.outputs import CompletionOutput, RequestOutput
+
+    def delta(token_ids, sampled):
+        return RequestOutput(
+            request_id="r",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=token_ids,
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    sampled_logprobs=sampled,
+                )
+            ],
+            finished=False,
+        )
+
+    merged = delta([7, 8], [-0.5, -1.25])
+    merged.add(delta([9], [-0.25]), aggregate=True)
+    assert merged.outputs[0].token_ids == [7, 8, 9]
+    assert merged.outputs[0].sampled_logprobs == [-0.5, -1.25, -0.25]

@@ -497,6 +497,13 @@ class RequestState:
             # list or FlatLogprobs representation while returning no entries.
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
+        sampled_logprobs = self.logprobs_processor.sampled_logprobs
+        if delta and sampled_logprobs is not None:
+            num_new_tokens = len(token_ids)
+            sampled_logprobs = (
+                sampled_logprobs[-num_new_tokens:] if num_new_tokens else []
+            )
+
         sampling_mask = None
         if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
@@ -521,6 +528,7 @@ class RequestState:
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
+            sampled_logprobs=sampled_logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
@@ -897,6 +905,8 @@ class OutputProcessor:
         del output.new_token_ids[num_kept:]
         if output.new_logprobs is not None:
             output.new_logprobs = output.new_logprobs.slice_request(0, num_kept)
+        if output.new_sampled_logprobs is not None:
+            del output.new_sampled_logprobs[num_kept:]
         if output.new_sampling_mask is not None:
             output.new_sampling_mask = output.new_sampling_mask.slice_request(
                 0, num_kept

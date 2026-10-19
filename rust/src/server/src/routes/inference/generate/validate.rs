@@ -27,6 +27,14 @@ pub(crate) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
+    if request.sampling_params.sampled_logprobs_only == Some(true) {
+        bail_invalid_request!(
+            param = "sampled_logprobs_only",
+            "sampled_logprobs_only is not supported by the Rust frontend yet; \
+             use the Python frontend."
+        );
+    }
+
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -118,6 +126,25 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_sampled_logprobs_only() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"logprobs": 0, "sampled_logprobs_only": true}
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "sampling_params": {"sampled_logprobs_only": false}
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
     }
 
     #[test]

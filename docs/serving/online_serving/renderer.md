@@ -106,6 +106,16 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 ```
 
 - `content` has one entry per generated token, in generation order.
+- `sampled` is the sampled token's logprob per generated position, as a flat
+  float list (per chunk when streaming). It is only returned when
+  `sampling_params.sampled_logprobs_only` is set (`output_mode: "tokens"`),
+  for RL rollouts that need one float per token: the engine sends one float
+  per token and no per-token entries are built, so `content: null` is the
+  normal state, not an error. The flag implies `logprobs=0` and cannot be
+  combined with other `logprobs` values or `logprob_token_ids`; the server must
+  run `--logprobs-mode` `raw_logprobs` or `processed_logprobs`. The same flag
+  works on `SamplingParams` for `LLM` / `AsyncLLM` callers, who read
+  `CompletionOutput.sampled_logprobs`.
 - `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
   the ordering would be implicit. It follows the engine's order: the sampled
   token first, then the remaining candidates in rank order. It holds every

@@ -26,6 +26,9 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// `SamplingParams.sampled_logprobs_only` (Python frontend feature).
+    /// Captured so validation rejects it instead of silently dropping it.
+    pub sampled_logprobs_only: Option<bool>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
