@@ -119,9 +119,6 @@ def _initialize_kv_cache(runner: GPUModelRunner) -> None:
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
-        kernel_block_sizes=[
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-        ],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
@@ -197,7 +194,6 @@ def test_prefill_continuation_keeps_placeholder_decode_zero_draft_becomes_zero(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={"decode_with_draft": [99]},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -242,7 +238,6 @@ def test_prefill_tail_of_two_or_three_tokens_also_keeps_the_placeholder(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={"decode_with_draft": [99]},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
