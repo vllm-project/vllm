@@ -3837,19 +3837,6 @@ void paged_attention_custom_launcher_navi(
       break;                                                                \
   }
 
-#define CALL_CUSTOM_LAUNCHER_BLK_HEAD(T, KVT, KV_DTYPE, MFMA_TYPE) \
-  switch (head_size) {                                             \
-    case 64:                                                       \
-      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 64, MFMA_TYPE);   \
-      break;                                                       \
-    case 128:                                                      \
-      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 128, MFMA_TYPE);  \
-      break;                                                       \
-    default:                                                       \
-      TORCH_CHECK(false, "Unsupported head size: ", head_size);    \
-      break;                                                       \
-  }
-
 // ---------------------------------------------------------------------------
 // Fixed-head-size entry points.
 //
@@ -3883,19 +3870,11 @@ void paged_attention_custom_launcher_navi(
 // Declare/define one fixed-head-size entry point.
 #define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
 
-// Instantiate every block size for one compile-time head size.
-#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)                 \
-  switch (block_size) {                                                     \
-    case 16:                                                                \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE, MFMA_TYPE); \
-      break;                                                                \
-    case 32:                                                                \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE, MFMA_TYPE); \
-      break;                                                                \
-    default:                                                                \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);           \
-      break;                                                                \
-  }
+// Instantiate one per-TU entry point, for every supported block size. Kept as
+// an alias of CALL_CUSTOM_LAUNCHER_BLK so the block-size switch has a single
+// definition; the head-size switch lives in attention_dispatch.cu.
+#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE) \
+  CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)
 
 #undef WARP_SIZE
 #undef MAX
