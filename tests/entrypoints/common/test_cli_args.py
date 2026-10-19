@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import vllm.entrypoints.launchers.cli_args as cli_args_module
+import vllm.entrypoints.common.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.launchers.cli_args import (
+from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
