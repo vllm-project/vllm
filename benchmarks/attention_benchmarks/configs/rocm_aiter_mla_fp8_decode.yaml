@@ -1,0 +1,34 @@
+description: "ROCM_AITER_MLA fp8-KV decode, asm vs mla_gluon, DeepSeek-V3"
+
+backend: ROCM_AITER_MLA
+
+model:
+  num_layers: 61
+  head_dim: 576
+  num_kv_heads: 1
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 16
+
+kv_cache_dtype: fp8
+
+parameter_sweep:
+  param_name: decode_kernel
+  values: [asm, gluon]
+  label_format: "{backend}_{value}"
+
+batch_specs:
+  - "1q1s1k"
+  - "1q1s32k"
+  - "8q1s1k"
+  - "8q1s32k"
+  - "16q1s1k"
+  - "16q1s32k"
+  - "64q1s1k"
+  - "64q1s32k"
+  - "72q1s1k"
+  - "72q1s32k"
+  - "88q1s1k"
+  - "88q1s32k"
