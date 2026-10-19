@@ -200,6 +200,10 @@ pub struct CompletionRequest {
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
 
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,

@@ -251,6 +251,10 @@ pub struct ChatCompletionRequest {
     /// yet.
     pub return_prompt_text: Option<bool>,
 
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -337,6 +341,7 @@ impl Default for ChatCompletionRequest {
             return_tokens_as_token_ids: None,
             return_token_ids: None,
             return_prompt_text: None,
+            return_weight_versions: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
