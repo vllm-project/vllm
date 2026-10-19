@@ -745,12 +745,20 @@ class Reference:
     prompts: list[list[int]]
     logprobs: list[dict[str, float]]
     hybrid: bool
+    read_mode: bool = False
 
     @property
     def expected_external_hits(self) -> int:
-        # Hybrid prefill stops one token short; attention-only prefill hands
-        # decode the whole prompt.
-        return sum(len(p) - int(self.hybrid) for p in self.prompts)
+        return _expected_external_hits(self.prompts, self.hybrid, self.read_mode)
+
+
+def _expected_external_hits(
+    prompts: list[list[int]], hybrid: bool, read_mode: bool
+) -> int:
+    # Hybrid prefill stops one token short, and a READ decode always computes
+    # the last prompt token itself; an attention-only WRITE hands decode the
+    # whole prompt.
+    return sum(len(p) - int(hybrid or read_mode) for p in prompts)
 
 
 def _reference(
@@ -792,7 +800,7 @@ def _reference(
         # Determinism of the reference itself (served from its prefix cache).
         again = _first_step(url, arch.model, prompts[-1])
         print(f"[noise] repeat distance={_distance(refs[-1], again)}")
-    return Reference(prompts, refs, arch.hybrid)
+    return Reference(prompts, refs, arch.hybrid, case.read_mode)
 
 
 def _pd_distances(
@@ -875,7 +883,7 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
         hits = _external_hits(decode) - hits_before
     print(f"[pd] {case.id} lens={lengths} external_hits={hits}")
 
-    expected = sum(len(p) - int(arch.hybrid) for p in prompts)
+    expected = _expected_external_hits(prompts, arch.hybrid, case.read_mode)
     assert hits == expected, (
         f"decode reported {hits} external prefix-cache hits, expected {expected}"
     )
