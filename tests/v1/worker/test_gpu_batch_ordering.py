@@ -293,11 +293,18 @@ def test_extends_precede_prefills_through_the_splitter():
 
 
 def test_ordering_holds_for_the_dcp_splitter_threshold():
-    """The same ordering must satisfy the splitter's other caller.
+    """The same ordering must still satisfy the splitter's other caller.
 
     split_dcp_context_queries (vllm/v1/worker/cp_utils.py) splits at the default
     decode_threshold=1, where a context-less chunk of exactly decode_query_len
-    tokens is a prefill rather than a decode.
+    tokens is a prefill rather than a decode. The context term fires only above
+    decode_query_len, so it leaves such a chunk among the decodes and this caller
+    classifies it as a zero-context extend instead. That is the trade the term
+    accepts: the alternative keeps the chunk out of the extend region here, but
+    puts every undrafted 2..decode_query_len prompt into it at the model runner's
+    own threshold, on every step. What must still hold at threshold 1 is the one
+    thing the splitter cannot recover from: no request carrying context may be
+    classified as a prefill.
     """
     decode_query_len = 4
     num_tokens_per_req = {"fresh": 4, "extend": 4096, "d0": 4}
@@ -312,8 +319,9 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
         num_computed,
         req_id_to_index,
     )
-    # The fresh decode-shaped chunk must trail the extend, not lead it.
-    assert req_ids == ["d0", "extend", "fresh"]
+    # "fresh" is not above decode_query_len, so the context term leaves it with
+    # the decodes rather than sorting it behind the extend.
+    assert req_ids == ["d0", "fresh", "extend"]
 
     metadata = _make_common_attn_metadata(
         [num_tokens_per_req[r] for r in req_ids],
@@ -323,10 +331,17 @@ def test_ordering_holds_for_the_dcp_splitter_threshold():
     num_decodes, num_extends, num_prefills, *_ = split_decodes_prefills_and_extends(
         metadata
     )
-    assert (num_decodes, num_extends, num_prefills) == (0, 2, 1)
+    # Every row is longer than this threshold, so none is a decode, and the
+    # clamp ends the extend region past "extend", the last row with context.
+    # "fresh" is inside it: a zero-context extend, the cost described above.
+    assert (num_decodes, num_extends, num_prefills) == (0, 3, 0)
 
-    # The request carrying 100k of context must not be on the prefill side.
-    assert req_ids[len(req_ids) - num_prefills :] == ["fresh"]
+    # The invariant the clamp exists to hold: whatever the ordering, no request
+    # carrying context is left on the prefill side.
+    prefill_rows = req_ids[len(req_ids) - num_prefills :] if num_prefills else []
+    assert all(num_computed[req_id_to_index[r]] == 0 for r in prefill_rows), (
+        f"context-carrying request in the prefill region: {prefill_rows}"
+    )
 
 
 def test_sorted_batches_never_put_context_on_the_prefill_side():
@@ -416,7 +431,8 @@ def test_sort_key_reads_state_slots_not_batch_positions():
     #   batch position 2, "chunked", slot 4,  64 computed tokens
     num_computed = np.array([300, 11, 0, 11, 64], dtype=np.int32)
     req_id_to_index = {"fresh": 2, "resumed": 0, "chunked": 4}
-    num_tokens_per_req = {"fresh": 5, "resumed": 5, "chunked": 5}
+    # Above decode_query_len, so the context term consults the state array.
+    num_tokens_per_req = {"fresh": 16, "resumed": 16, "chunked": 16}
     # By position the three would read 300, 11 and 0 rather than 0, 300 and 64,
     # putting the only context-less request at the front.
     assert sort_batch_req_ids(
@@ -445,8 +461,13 @@ def test_sort_key_reads_state_slots_not_batch_positions():
                 req_id_to_index,
             )
 
-            context_less = [r for r in order if not num_computed[req_id_to_index[r]]]
-            with_context = [r for r in order if num_computed[req_id_to_index[r]]]
+            # Only rows above decode_query_len consult the term; the shorter
+            # ones stay with the decodes and may sort either way.
+            consulting = [r for r in order if num_tokens_per_req[r] > decode_query_len]
+            context_less = [
+                r for r in consulting if not num_computed[req_id_to_index[r]]
+            ]
+            with_context = [r for r in consulting if num_computed[req_id_to_index[r]]]
             if not context_less or not with_context:
                 continue
             boundary = order.index(context_less[0])
