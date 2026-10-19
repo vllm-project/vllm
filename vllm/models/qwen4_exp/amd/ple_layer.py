@@ -29,6 +29,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -242,7 +243,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         embedding_prefix = f"{prefix}.ngram_embedding"
@@ -280,9 +281,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             reduce_results=not self.use_reduce_scatter,
         )
         logger.info(
-            "Initialized AMD PLE embedding %s: quantization_method=%s, "
+            "Initialized AMD PLE embedding %s: "
+            "quantization_config=%s, quantization_method=%s, "
             "weight_dtype=%s, weight_device=%s, pinned=%s",
             embedding_prefix,
+            type(quant_config).__name__,
             type(embedding_quant_method).__name__,
             self.ngram_embedding.weight.dtype,
             self.ngram_embedding.weight.device,
@@ -742,7 +745,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
-        gated_output, conv_input = ple_gate(
+        gated_output, conv_input = torch.ops.vllm.qwen4_exp_ple_gate(
             key,
             value,
             hidden_states,
@@ -846,6 +849,28 @@ def qwen4_exp_ple_short_conv(
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
     layer._short_conv(inputs, residual, outer_residual)
+
+
+def _ple_gate_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    hidden: torch.Tensor,
+    norm_key_w: torch.Tensor,
+    norm_query_w: torch.Tensor,
+    norm_conv_w: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the gate output shapes for AMD graph tracing."""
+    return torch.empty_like(hidden), torch.empty_like(hidden)
+
+
+# Keep the AMD gate opaque to Dynamo while reusing the shared Triton kernel.
+direct_register_custom_op(
+    op_name="qwen4_exp_ple_gate",
+    op_func=ple_gate,
+    mutates_args=[],
+    fake_impl=_ple_gate_fake,
+)
 
 
 direct_register_custom_op(
