@@ -143,3 +143,29 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+def test_explicit_seed_triggers_native_sampling_dispatch():
+    """Verify that an explicit seed sets any_explicit_seed, which causes
+    fused_sampler_eligible to evaluate to False, routing to native top-k/top-p
+    and Gumbel sampling (#54425). Also verify slot reuse resets the flag."""
+    sampler = _make_sampler()
+    unseeded = SamplingParams.for_sampler_warmup()
+    seeded = SamplingParams(temperature=0.9, seed=42)
+
+    sampler.add_request(0, unseeded)
+    sampler.sampling_states.apply_staged_writes()
+    assert not sampler.sampling_states.any_explicit_seed(np.array([0], dtype=np.int32))
+
+    sampler.add_request(1, seeded)
+    sampler.sampling_states.apply_staged_writes()
+    assert sampler.sampling_states.any_explicit_seed(np.array([1], dtype=np.int32))
+    assert sampler.sampling_states.any_explicit_seed(np.array([0, 1], dtype=np.int32))
+
+    # Verify slot reuse resets the seeded flag
+    sampler.add_request(1, unseeded)
+    sampler.sampling_states.apply_staged_writes()
+    assert not sampler.sampling_states.any_explicit_seed(np.array([1], dtype=np.int32))
+    assert not sampler.sampling_states.any_explicit_seed(
+        np.array([0, 1], dtype=np.int32)
+    )
