@@ -325,3 +325,18 @@ steps:
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+
+- label: ':amd: (MI355) Kimi-K3 Specialized Decode'
+  key: kimi-k3-specialized-decode-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 60
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/kimi_k3/amd/
+  - tests/models/kimi_k3/amd_specialized_decode/
+  commands:
+  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode
