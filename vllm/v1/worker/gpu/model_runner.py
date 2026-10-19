@@ -991,6 +991,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Default pass: compiles the kernels the first real step uses (logits in
         # the model dtype, no per-request processing).
         self.sampler(logits, dummy_input_batch)
+        if current_platform.is_cpu():
+            # The CPU worker sizes the KV cache from process RSS, which would
+            # keep the extra pass's buffers, and has no warmup OOM to prevent.
+            return
         # Warmup-param pass: warmup_kernels (run after the KV cache is sized)
         # pays for the fp32 logits pipeline, so the profiled peak must too.
         warmup_params = SamplingParams.for_sampler_warmup()
