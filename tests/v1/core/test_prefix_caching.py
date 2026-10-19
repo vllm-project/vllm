@@ -3597,6 +3597,25 @@ def test_maybe_evict_cached_block():
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
+    # One count per evicted block, drained once.
+    assert pool.take_prefix_cache_evictions() == 4
+    assert pool.take_prefix_cache_evictions() == 0
+
+
+def test_prefix_cache_eviction_counter_ignores_reset_and_uncached_blocks():
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+
+    assert pool._maybe_evict_cached_block(pool.blocks[0]) is False
+    assert pool.take_prefix_cache_evictions() == 0
+
+    block_hash = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
+    for block in pool.blocks:
+        if block.is_null:
+            continue
+        block.set_block_hash(block_hash)
+        pool.cached_block_hash_to_block.insert(block_hash, block)
+    assert pool.reset_prefix_cache()
+    assert pool.take_prefix_cache_evictions() == 0
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])

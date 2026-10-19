@@ -326,6 +326,10 @@ pub struct SchedulerStats {
     pub connector_prefix_cache_stats: Option<PrefixCacheStats>,
     /// Sampled KV cache eviction events for residency metrics.
     pub kv_cache_eviction_events: Vec<KvCacheEvictionEvent>,
+    /// Device prefix-cache blocks dropped since the previous stats publish.
+    /// Older engines omit the field.
+    #[serde(default)]
+    pub prefix_cache_evictions: u64,
     /// Speculative decoding scheduler stats, when enabled.
     pub spec_decoding_stats: Option<SpecDecodingStats>,
     /// Connector-specific KV transfer stats.

@@ -447,6 +447,21 @@ rate(cache_query_hit[5m]) / rate(cache_query_total[5m])
 To achieve this, we should record the queries and hits as counters in
 Prometheus, rather than recording the hit rate as a gauge.
 
+`vllm:prefix_cache_evictions` counts device prefix-cache blocks that were
+dropped because their slot was reused, or because they were explicitly
+removed from the cache. A block is one increment, however many hashes it
+carried. `reset_prefix_cache` clears the cache in bulk and does not
+increment the counter. Eviction rate over an interval is:
+
+```text
+rate(vllm:prefix_cache_evictions_total[5m])
+```
+
+This is separate from `vllm:num_preemptions` (running requests recomputed
+to free KV space) and from the sampled `vllm:kv_block_*` residency
+histograms, which describe how long a sampled block lived before it was
+evicted.
+
 ## Deprecated Metrics
 
 ### How To Deprecate

@@ -3024,6 +3024,7 @@ class Scheduler(SchedulerInterface):
             if self.kv_metrics_collector is not None
             else []
         )
+        prefix_cache_evictions = self.kv_cache_manager.take_prefix_cache_evictions()
         spec_stats = spec_decoding_stats
         connector_stats_payload = (
             kv_connector_stats.to_dict() if kv_connector_stats else None
@@ -3042,6 +3043,7 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
+            prefix_cache_evictions=prefix_cache_evictions,
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
