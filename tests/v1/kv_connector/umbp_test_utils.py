@@ -223,6 +223,19 @@ def install_memory_runtime(monkeypatch):
     return runtime
 
 
+def handshake(scheduler_connector, worker_connector) -> None:
+    """Deliver one worker's handshake to the scheduler as every rank's report.
+
+    The namespace does not depend on the worker rank, so one worker stands in
+    for the engine core collecting a report from each rank.
+    """
+    metadata = worker_connector.get_handshake_metadata()
+    rank_count = scheduler_connector.connector_scheduler.topology.rank_count
+    scheduler_connector.set_xfer_handshake_metadata(
+        {rank: metadata for rank in range(rank_count)}
+    )
+
+
 def _kv_cache_config() -> KVCacheConfig:
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16

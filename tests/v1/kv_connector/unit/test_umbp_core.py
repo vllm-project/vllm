@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.umbp_test_utils import (
+    MemoryRuntime,
     _DelayedLoadWorkerHandle,
     _DelayedStoreWorkerHandle,
     _EmbeddedRuntime,
@@ -17,6 +18,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     _vllm_config,
     _WaitRecordingDelayedLoadHandle,
     _WorkerHandle,
+    handshake,
     install_memory_runtime,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -51,6 +53,55 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    KVQuantMode,
+    UniformTypeKVCacheSpecs,
+)
+
+_LAYER1_SPEC = FullAttentionSpec(
+    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+)
+_LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
+
+
+def _uniform_type_kv_cache_config(
+    layer2: FullAttentionSpec = _LAYER2_SPEC,
+    *,
+    block_stride: int | None = None,
+    num_blocks: int = 8,
+) -> KVCacheConfig:
+    """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
+
+    Without ``block_stride`` each layer is laid out layer-major with its own
+    page as the block stride; with it both pages share one block-major stride.
+    """
+    specs = {"layer1": _LAYER1_SPEC, "layer2": layer2}
+    tensors = []
+    offset = 0
+    for name, spec in specs.items():
+        stride = block_stride or spec.page_size_bytes
+        tensors.append(
+            KVCacheTensor(
+                size=stride * num_blocks,
+                layers=[name],
+                layer_stride=stride * num_blocks,
+                block_stride=stride,
+                offset=offset if block_stride else 0,
+            )
+        )
+        offset += spec.page_size_bytes
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[KVCacheGroupSpec(list(specs), group_spec)],
+    )
 
 
 def test_block_identity_codec_does_not_use_physical_block_id():
@@ -152,6 +203,161 @@ def test_namespace_distinguishes_draft_models():
     assert namespace(draft("drafter-a")) == namespace(draft("drafter-a"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-b"))
     assert namespace(draft("drafter-a")) != namespace(draft("drafter-a", "v2"))
+
+
+def test_layout_planner_sizes_uniform_type_layers_independently():
+    """A wrapper's page size is the sum of its layers, not any one layer's."""
+    planner = KVLayoutPlanner.from_kv_cache_config(_uniform_type_kv_cache_config())
+
+    assert [region.block_bytes for region in planner.regions] == [64, 128]
+    assert [region.object_offset for region in planner.regions] == [0, 64]
+    assert planner.object_size == 192
+
+
+def test_uniform_type_block_major_round_trip_stays_within_layer_pages():
+    num_blocks = 8
+    block_bytes = 192
+    planner = KVLayoutPlanner.from_kv_cache_config(
+        _uniform_type_kv_cache_config(block_stride=block_bytes, num_blocks=num_blocks)
+    )
+    backing = torch.zeros(num_blocks * block_bytes, dtype=torch.uint8)
+    caches = {
+        "layer1": backing.as_strided((num_blocks, 64), (block_bytes, 1)),
+        "layer2": backing.as_strided((num_blocks, 128), (block_bytes, 1), 64),
+    }
+    planner.register_kv_caches(caches)
+
+    source = planner.plan_registered_block("key", block_id=1)
+    assert [
+        (item.base_address - backing.data_ptr(), item.length, item.object_offset)
+        for item in source.ranges
+    ] == [(192, 64, 0), (256, 128, 64)]
+
+    def block(index):
+        return backing[index * block_bytes : (index + 1) * block_bytes]
+
+    block(1).copy_(torch.arange(block_bytes, dtype=torch.uint8))
+    block(4).fill_(0xAB)
+    handle = MemoryRuntime().create_worker_handle(
+        "namespace", RankTopology(), planner.describe(RankTopology())
+    )
+    handle.register_buffers(caches)
+    handle.publish(handle.store([source]))
+    loaded = handle.load([planner.plan_registered_block("key", block_id=3)])
+
+    assert loaded.status is TransferJobStatus.COMPLETED
+    assert torch.equal(block(3), block(1))
+    assert torch.all(block(4) == 0xAB)
+
+
+@pytest.mark.parametrize(
+    ("baseline", "variant"),
+    [
+        pytest.param(
+            _LAYER2_SPEC, replace(_LAYER2_SPEC, dtype=torch.bfloat16), id="dtype"
+        ),
+        pytest.param(
+            _LAYER2_SPEC,
+            replace(_LAYER2_SPEC, num_kv_heads=1, head_size=2),
+            id="geometry",
+        ),
+        pytest.param(
+            replace(
+                _LAYER2_SPEC,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            ),
+            replace(
+                _LAYER2_SPEC,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+            ),
+            id="quantization",
+        ),
+    ],
+)
+def test_namespace_fingerprints_uniform_type_layer_specs(baseline, variant):
+    vllm_config = _vllm_config({"mode": "embedded"})
+
+    def namespace(layer2):
+        return UMBPNamespace.from_vllm_config(
+            vllm_config, _uniform_type_kv_cache_config(layer2)
+        ).value
+
+    assert namespace(baseline) == namespace(baseline)
+    assert namespace(baseline) != namespace(variant)
+
+
+def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
+    """The scheduler sees a flattened group spec; keys must still match."""
+    install_memory_runtime(monkeypatch)
+    worker_config = _uniform_type_kv_cache_config(block_stride=192)
+    vllm_config = _vllm_config({"mode": "embedded"})
+    scheduler = UMBPStoreConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        generate_scheduler_kv_cache_config([worker_config]),
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, worker_config)
+    try:
+        handshake(scheduler, worker)
+
+        assert scheduler.connector_scheduler.codec.key(b"a") == (
+            worker.connector_worker.codec.key(b"a")
+        )
+    finally:
+        scheduler.shutdown()
+        worker.shutdown()
+
+
+def test_scheduler_defers_lookup_until_worker_handshake(monkeypatch):
+    runtime = _EmbeddedRuntime()
+    monkeypatch.setitem(UMBPRuntimeFactory._builders, "embedded", lambda _: runtime)
+    scheduler = UMBPStoreConnector(
+        _vllm_config({"mode": "embedded"}),
+        KVConnectorRole.SCHEDULER,
+        _kv_cache_config(),
+    )
+    request = SimpleNamespace(
+        request_id="early", num_tokens=33, block_hashes=[b"a", b"b"]
+    )
+
+    assert runtime.scheduler_args is None
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+@pytest.mark.parametrize("no_reports", [False, True])
+def test_scheduler_rejects_inconsistent_worker_namespaces(monkeypatch, no_reports):
+    install_memory_runtime(monkeypatch)
+    parallel = {"tensor_parallel_size": 2, "world_size": 2}
+    config = _kv_cache_config()
+    other_model = _vllm_config({"mode": "embedded"}, rank=1, **parallel)
+    other_model.model_config.model = "other-model"
+    workers = [
+        UMBPStoreConnector(
+            _vllm_config({"mode": "embedded"}, rank=0, **parallel),
+            KVConnectorRole.WORKER,
+            config,
+        ),
+        UMBPStoreConnector(other_model, KVConnectorRole.WORKER, config),
+    ]
+    scheduler = UMBPStoreConnector(
+        _vllm_config({"mode": "embedded"}, **parallel),
+        KVConnectorRole.SCHEDULER,
+        config,
+    )
+    reports = {
+        rank: worker.get_handshake_metadata() for rank, worker in enumerate(workers)
+    }
+    if no_reports:
+        reports = {0: None}
+    try:
+        with pytest.raises(ValueError, match="namespace"):
+            scheduler.set_xfer_handshake_metadata(reports)
+    finally:
+        scheduler.shutdown()
+        for worker in workers:
+            worker.shutdown()
 
 
 def test_layout_planner_builds_scatter_gather_ranges():
