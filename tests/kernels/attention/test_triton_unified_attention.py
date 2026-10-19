@@ -19,6 +19,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
+    NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT,
     reduce_segments,
     unified_attention,
 )
@@ -370,10 +371,13 @@ def _compute_window_segment_bounds(
     USE_CAUSAL: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     NUM_SEGMENTS: tl.constexpr,
+    MIN_TILES_PER_SEGMENT: tl.constexpr,
 ):
     TILE_SIZE: tl.constexpr = 32
     segm_idx = tl.program_id(0)
-    tiles_per_segment = tl.cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE)
+    tiles_per_segment = tl.maximum(
+        tl.cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE), MIN_TILES_PER_SEGMENT
+    )
     loop_lo, loop_hi, _ = compute_tile_loop_bounds(
         context_len,
         seq_len,
@@ -394,9 +398,12 @@ def _compute_window_segment_bounds(
     tl.store(output_ptr + 2 * segm_idx + 1, loop_hi)
 
 
+@pytest.mark.parametrize("min_tiles", [1, 2, NON_CAUSAL_MAX_MIN_TILES_PER_SEGMENT])
 @pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("seq_len", [40, 600, 4096, 32768])
-def test_splitk_segments_split_sliding_window(causal: bool, seq_len: int) -> None:
+def test_splitk_segments_split_sliding_window(
+    causal: bool, seq_len: int, min_tiles: int
+) -> None:
     """3D segments tile the pruned window exactly, using only the segments
     that reduce_segments reads."""
     num_segments, tile_size, window, query_len = 16, 32, 1024, 8
@@ -408,10 +415,11 @@ def test_splitk_segments_split_sliding_window(causal: bool, seq_len: int) -> Non
         USE_CAUSAL=causal,
         SLIDING_WINDOW=window,
         NUM_SEGMENTS=num_segments,
+        MIN_TILES_PER_SEGMENT=min_tiles,
     )
     bounds = bounds.view(num_segments, 2).tolist()
 
-    tiles_per_segment = triton.cdiv(seq_len, num_segments * tile_size)
+    tiles_per_segment = max(triton.cdiv(seq_len, num_segments * tile_size), min_tiles)
     read_segments = triton.cdiv(seq_len, tiles_per_segment * tile_size)
     first_key = max(seq_len - query_len - window + 1, 0)
     last_key = seq_len - 1  # the non-causal right window ends at seq_len too
