@@ -294,6 +294,20 @@ class Indexer(nn.Module):
             tail_cache=self.tail_cache,
         )
 
+    def refresh_post_load_cache(self) -> None:
+        """(Re)build the fp32 head-gate projection from the loaded weights, in
+        place once it exists (captured CUDA graphs hold its address)."""
+        wp = (
+            self.wk_weights_proj.weight.data[self.head_dim :, :]
+            .t()
+            .contiguous()
+            .float()
+        )
+        if self._wp_fp32 is not None and self._wp_fp32.shape == wp.shape:
+            self._wp_fp32.copy_(wp)
+        else:
+            self._wp_fp32 = wp
+
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
@@ -305,12 +319,7 @@ class Indexer(nn.Module):
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
         if self._wp_fp32 is None:
-            self._wp_fp32 = (
-                self.wk_weights_proj.weight.data[self.head_dim :, :]
-                .t()
-                .contiguous()
-                .float()
-            )
+            self.refresh_post_load_cache()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(

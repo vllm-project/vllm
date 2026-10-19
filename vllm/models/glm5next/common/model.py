@@ -1043,6 +1043,16 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
+def refresh_post_load_caches(model: nn.Module) -> None:
+    """Rebuild caches derived from loaded weights (KDA merged conv weight,
+    indexer fp32 head gate). Runs after every load and reload."""
+    for module in model.modules():
+        if module is not model and callable(
+            getattr(module, "refresh_post_load_cache", None)
+        ):
+            module.refresh_post_load_cache()
+
+
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
@@ -1130,6 +1140,9 @@ class Glm5NextForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def process_weights_after_loading(self) -> None:
+        refresh_post_load_caches(self)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1234,6 +1247,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def process_weights_after_loading(self) -> None:
+        refresh_post_load_caches(self)
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
