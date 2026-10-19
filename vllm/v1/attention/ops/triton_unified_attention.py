@@ -89,6 +89,20 @@ _GFX1100_2D_DECODE_CONFIGS = {
     256: (16, 4, 1),
     512: (32, 8, 1),
 }
+# gfx1100 3D (split-KV) decode: 16 segments under-fill the GPU when few sequences x
+# KV heads run (one request on 2 KV heads: 32 programs for 48 CUs). Use
+# next_pow2(T / (num_seqs * num_kv_heads)) segments, at most 128; x8 for sliding
+# windows >= 512 (segments outside the window are idle). Padded head size ->
+# (T, (TILE_SIZE, num_warps, num_stages)). Only values fixed per CUDA graph are used.
+_GFX1100_3D_CONFIGS = {
+    64: (512, (16, 2, 1)),
+    128: (128, (16, 4, 1)),
+    256: (128, (16, 4, 1)),
+    512: (64, (32, 8, 1)),
+}
+# gfx1100 sliding-window decode: padded head size -> num_seqs * num_kv_heads from
+# which the 2D launch is faster than 3D.
+_GFX1100_SW_2D_MIN_FILL = {64: 32, 512: 8}
 
 
 @triton.jit
@@ -1190,6 +1204,44 @@ def unified_attention(
     if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
         logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
         use_3d = False
+
+    gfx1100_head_size = triton.next_power_of_2(head_size)
+    if (
+        is_gfx1100
+        and use_3d
+        and gfx1100_head_size in _GFX1100_3D_CONFIGS
+        and q.element_size() == 2
+        and not use_td
+        and not is_batch_invariant
+    ):
+        fill = num_seqs * num_kv_heads
+        sw_2d_fill = _GFX1100_SW_2D_MIN_FILL.get(gfx1100_head_size)
+        if (
+            sliding_window_val > 0
+            and max_seqlen_q == 1
+            and sw_2d_fill is not None
+            and fill >= sw_2d_fill
+        ):
+            use_3d = False
+        elif sliding_window_val == 0 or sliding_window_val >= 512:
+            target, (tile, warps, stages) = _GFX1100_3D_CONFIGS[gfx1100_head_size]
+            segments = triton.next_power_of_2(triton.cdiv(target, fill))
+            if sliding_window_val >= 512:
+                segments *= 8
+            segments = min(segments, 128)
+            # The scratch holds query tokens x segments rows per Q head.
+            max_rows = softmax_segm_max.numel() // num_query_heads
+            while segments > num_par_softmax_segments and q.shape[0] * segments > (
+                max_rows
+            ):
+                segments //= 2
+            if segments > num_par_softmax_segments:
+                num_par_softmax_segments = segments
+                TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
+                    tile,
+                    warps,
+                    stages,
+                )
 
     # gfx1100: tuned 2D launch. Applied after the 2D/3D choice, so it does not
     # move the 3D threshold. Launch parameters do not change the result:
