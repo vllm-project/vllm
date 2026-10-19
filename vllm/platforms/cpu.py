@@ -341,10 +341,11 @@ class CpuPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
-        # Disable DBO
-        if parallel_config.enable_dbo:
-            logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
+        # The CPU runner does not implement overlapping microbatch execution.
+        if parallel_config.use_ubatching:
+            logger.warning_once("Microbatching is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
+            parallel_config.ubatch_size = 0
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode

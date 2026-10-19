@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -40,6 +41,14 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
+    sampling_states_cls: type[SamplingStates] = SamplingStates
+    sampling_mask_tensors_cls: type[SamplingMaskTensors] = SamplingMaskTensors
+    logit_bias_state_cls: type[LogitsProcessor] = LogitBiasState
+    penalties_state_cls: type = PenaltiesState
+    bad_words_state_cls: type[LogitsProcessor] = BadWordsState
+    thinking_budget_state_cls: type = ThinkingBudgetState
+    trace_replay_state_cls = TraceReplayState
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -59,12 +68,12 @@ class Sampler:
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        self.sampling_states = self.sampling_states_cls(max_num_reqs, vocab_size)
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
-        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
-        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
-        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+        self.penalties_state = self.penalties_state_cls(vllm_config, lp_req_state)
+        logit_bias_state = self.logit_bias_state_cls(vllm_config, lp_req_state)
+        bad_words_state = self.bad_words_state_cls(vllm_config, lp_req_state)
 
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.
@@ -76,11 +85,11 @@ class Sampler:
         ]
 
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
-        self.thinking_budget_state = ThinkingBudgetState(
+        self.thinking_budget_state = self.thinking_budget_state_cls(
             req_states, vllm_config.reasoning_config
         )
         self.trace_replay_state = (
-            TraceReplayState(req_states) if enable_trace_replay else None
+            self.trace_replay_state_cls(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
@@ -131,6 +140,43 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    @staticmethod
+    def _get_num_nans(logits: torch.Tensor) -> torch.Tensor:
+        return get_num_nans(logits)
+
+    def _get_num_sampled_and_rejected(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+
+    def _compute_topk_scores(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        sampled_token_ids: torch.Tensor,
+        cu_num_logits: list[int] | torch.Tensor | None,
+        logprob_token_ids_state: LogprobTokenIdsState,
+        expanded_idx_mapping: torch.Tensor,
+        max_per_req_token_ids: int,
+        logits_mode: bool,
+    ) -> LogprobsTensors:
+        return compute_topk_scores(
+            logits,
+            num_logprobs,
+            sampled_token_ids,
+            cu_num_logits,
+            logprob_token_ids_state=logprob_token_ids_state,
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_per_req_token_ids,
+            logits_mode=logits_mode,
+        )
+
     def __call__(
         self,
         logits: torch.Tensor,
@@ -147,7 +193,7 @@ class Sampler:
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.compute_nans else None
+        num_nans = self._get_num_nans(logits) if self.compute_nans else None
 
         logprobs_dims = self.get_logprobs_dims(idx_mapping_np)
 
@@ -174,7 +220,7 @@ class Sampler:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
-            logprobs_tensors = compute_topk_scores(
+            logprobs_tensors = self._compute_topk_scores(
                 logits,
                 num_logprobs,
                 sampled,
@@ -190,19 +236,13 @@ class Sampler:
         # 1 sampled token per request, except chunked-prefill requests
         # (seq_len < prefill_len) which aren't done prefilling and produce no
         # output token. num_rejected is always 0 here (one logit per request).
-        num_sampled, num_rejected = get_num_sampled_and_rejected(
-            input_batch.seq_lens.new_ones(input_batch.num_reqs),
-            input_batch.seq_lens,
-            input_batch.cu_num_logits,
-            input_batch.idx_mapping,
-            self.req_states.prefill_len.gpu,
-        )
+        num_sampled, num_rejected = self._get_num_sampled_and_rejected(input_batch)
 
         sampling_mask_tensors = None
         if self.return_sampling_mask:
             # Size by the validated top_k batch max; wider supports use the bitmask.
             max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
-            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+            sampling_mask_tensors = self.sampling_mask_tensors_cls.from_logits(
                 processed_logits,
                 input_batch.cu_num_logits,
                 num_sampled,

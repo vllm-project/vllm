@@ -20,7 +20,16 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.worker.cpu.model_state import (
+    CPUDefaultModelState,
+    CPUEncoderOnlyModelState,
+    CPUMambaHybridModelState,
+    CPURopeState,
+)
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.encoder_decoder import EncoderDecoderModelState
+from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
@@ -340,7 +349,7 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
-def test_postprocess_state_scalar_with_int32_mapping(
+def test_postprocess_state_scalar_with_int64_mapping(
     num_sampled: int, expected_value: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
@@ -350,7 +359,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
     state._align_mode = False
     state.recoverssm = None
     state._mamba_ctx = None
-    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device="cuda")
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int64, device="cuda")
 
     state.postprocess_state(idx_mapping, num_sampled)
 
@@ -360,12 +369,164 @@ def test_postprocess_state_scalar_with_int32_mapping(
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
 
 
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+@pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
+def test_cpu_postprocess_state_scalar(num_sampled: int, expected_value: int) -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.full((4,), 9, dtype=torch.int32)
+    state._align_mode = False
+    state.recoverssm = None
+    state._mamba_ctx = None
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int64)
+
+    state.postprocess_state(idx_mapping, num_sampled)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [
+        expected_value,
+        9,
+        expected_value,
+        9,
+    ]
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_postprocess_state_tensor() -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.full((5,), 9, dtype=torch.int32)
+    state._align_mode = False
+    state.recoverssm = None
+    state._mamba_ctx = None
+    idx_mapping = torch.tensor([3, -1, 1], dtype=torch.int64)
+    num_sampled = torch.tensor([0, 4, 2], dtype=torch.int32)
+
+    state.postprocess_state(idx_mapping, num_sampled)
+
+    assert state.num_accepted_tokens_gpu.tolist() == [9, 2, 9, 1, 9]
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_preprocess_state_copies_state_across_align_boundary() -> None:
+    state = object.__new__(CPUMambaHybridModelState)
+    state._align_mode = True
+    state._mamba_group_ids = [1]
+    state._mamba_spec = SimpleNamespace(block_size=4)
+    state._mamba_state_idx_gpu = torch.tensor([0, 2, -1], dtype=torch.int32)
+    state.num_accepted_tokens_gpu = torch.tensor([5, 6, 7], dtype=torch.int32)
+
+    conv_state = torch.arange(60, dtype=torch.float32).view(10, 2, 3)
+    temporal_state = torch.arange(80, dtype=torch.float32).view(10, 2, 4)
+    expected_conv_state = conv_state.clone()
+    expected_temporal_state = temporal_state.clone()
+    expected_conv_state[7].copy_(conv_state[2])
+    expected_temporal_state[7].copy_(temporal_state[2])
+
+    layer = SimpleNamespace(kv_cache=(conv_state, temporal_state))
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"gdn": layer},
+        )
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["attention"]),
+            SimpleNamespace(layer_names=["gdn"]),
+        ]
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        idx_mapping=torch.tensor([2, 0, 1], dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 1, 3, 4], dtype=torch.int32),
+    )
+    block_tables = (
+        torch.zeros((3, 4), dtype=torch.int32),
+        torch.tensor(
+            [
+                [1, 0, 0, 0],
+                [2, 7, 0, 0],
+                [0, 0, 6, 0],
+            ],
+            dtype=torch.int32,
+        ),
+    )
+    num_computed_tokens = torch.tensor([3, 9, 0], dtype=torch.int32)
+
+    state.preprocess_state(
+        input_batch,
+        block_tables,
+        kv_cache_config,
+        num_computed_tokens,
+    )
+
+    assert state._mamba_state_idx_gpu.tolist() == [1, 2, 0]
+    assert state.num_accepted_tokens_gpu.tolist() == [1, 6, 7]
+    torch.testing.assert_close(conv_state, expected_conv_state)
+    torch.testing.assert_close(temporal_state, expected_temporal_state)
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+@pytest.mark.parametrize(
+    ("model_state_cls", "cpu_model_state_cls"),
+    [
+        (DefaultModelState, CPUDefaultModelState),
+        (MambaHybridModelState, CPUMambaHybridModelState),
+        (EncoderOnlyModelState, CPUEncoderOnlyModelState),
+        (EncoderDecoderModelState, EncoderDecoderModelState),
+    ],
+)
+def test_cpu_runner_selects_model_state(
+    monkeypatch, model_state_cls, cpu_model_state_cls
+) -> None:
+    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+    triton_runner = object.__new__(cpu_model_runner.CPUModelRunner)
+    no_triton_runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
+    for runner in (triton_runner, no_triton_runner):
+        runner.vllm_config = Mock()
+        runner.model = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner,
+        "resolve_model_state_cls",
+        lambda *_: model_state_cls,
+    )
+
+    assert no_triton_runner.model_state_cls is cpu_model_state_cls
+    if cpu_model_state_cls in (
+        CPUDefaultModelState,
+        CPUEncoderOnlyModelState,
+        CPUMambaHybridModelState,
+    ):
+        assert no_triton_runner.model_state_cls.rope_state_cls is CPURopeState
+
+    assert triton_runner.model_state_cls is model_state_cls
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="Requires CPU")
+def test_cpu_runner_rejects_custom_model_state_without_triton(monkeypatch) -> None:
+    from vllm.v1.worker.cpu import model_runner as cpu_model_runner
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner
+
+    class CustomModelState(DefaultModelState):
+        pass
+
+    runner = object.__new__(cpu_model_runner.NoTritonCPUModelRunner)
+    runner.vllm_config = Mock()
+    runner.model = Mock()
+    monkeypatch.setattr(
+        gpu_model_runner,
+        "resolve_model_state_cls",
+        lambda *_: CustomModelState,
+    )
+    with pytest.raises(ValueError, match="CustomModelState"):
+        _ = runner.model_state_cls
+
+
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     state = RecoverSSMState()
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
-    idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int64)
     num_accepted_tokens = torch.ones(2, dtype=torch.int32)
     group = SimpleNamespace(layer_names=["layer"])
 
@@ -413,7 +574,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
         block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
     )
     num_sampled = torch.tensor([2, sampled], dtype=torch.int32, device="cuda")
-    idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
+    idx_mapping = torch.tensor([3, 1], dtype=torch.int64, device="cuda")
     group = SimpleNamespace(layer_names=["layer"])
 
     state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)

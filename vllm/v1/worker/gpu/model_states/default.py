@@ -15,7 +15,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.rope import get_rope_state
+from vllm.v1.worker.gpu.mm.rope import RopeState, get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
@@ -28,6 +28,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 class DefaultModelState(ModelState):
     supports_prompt_embeds = True
+    rope_state_cls = RopeState
 
     def __init__(
         self,
@@ -57,6 +58,7 @@ class DefaultModelState(ModelState):
             max_num_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
+            rope_state_cls=self.rope_state_cls,
         )
 
         # Pruner is used for multimodal embedding pruning (EVS).

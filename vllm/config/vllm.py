@@ -723,6 +723,10 @@ class VllmConfig:
             return use_v2_model_runner
 
         if not HAS_TRITON:
+            from vllm.platforms import current_platform
+
+            if current_platform.is_cpu():
+                return True
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
@@ -3044,6 +3048,30 @@ class VllmConfig:
 
         return unsupported
 
+    def _get_cpu_no_triton_v2_unsupported_features(self) -> list[str]:
+        """Collect V2 features not supported by CPU without Triton."""
+        unsupported: list[str] = []
+
+        if self.speculative_config is not None:
+            unsupported.append("speculative decoding")
+
+        if self.model_config is not None:
+            if self.model_config.enable_prompt_embeds:
+                unsupported.append("prompt embeddings")
+            if self.model_config.is_diffusion:
+                unsupported.append("diffusion models")
+
+        if self.parallel_config.decode_context_parallel_size > 1:
+            unsupported.append("decode context parallelism")
+
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+
+        if self.parallel_config.enable_batch_sharded_sampling:
+            unsupported.append("batch-sharded sampling")
+
+        return unsupported
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
 
@@ -3280,14 +3308,24 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
-            raise ValueError("Model Runner V2 requires Triton.")
-
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
+
+        if not HAS_TRITON:
+            from vllm.platforms import current_platform
+
+            if current_platform.is_cpu():
+                unsupported = self._get_cpu_no_triton_v2_unsupported_features()
+                if unsupported:
+                    raise ValueError(
+                        "CPU Model Runner V2 without Triton does not yet support: "
+                        f"{', '.join(unsupported)}"
+                    )
+                return
+            raise ValueError("Model Runner V2 requires Triton.")
 
     def _validate_v1_model_runner(self) -> None:
         unsupported = self._get_v1_model_runner_unsupported_features()
