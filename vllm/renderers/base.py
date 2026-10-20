@@ -687,11 +687,14 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        original_token_ids = prompt.get("prompt_token_ids")
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text if validation changed the token IDs.
+        if params.needs_detokenization and (
+            "prompt" not in prompt
+            or prompt.get("prompt_token_ids") is not original_token_ids
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
@@ -731,11 +734,14 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
+        original_token_ids = prompt.get("prompt_token_ids")
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Detokenize after truncation so the text matches the tokens sent
-        # to the engine.
-        if params.needs_detokenization and "prompt" not in prompt:
+        # Rebuild cached text if validation changed the token IDs.
+        if params.needs_detokenization and (
+            "prompt" not in prompt
+            or prompt.get("prompt_token_ids") is not original_token_ids
+        ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
