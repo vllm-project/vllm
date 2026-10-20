@@ -1202,7 +1202,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             a=a.contiguous(),
             core_attn_out=core_attn_out,
         )
-        core_attn_out.copy_(self.norm(core_attn_out, z))
+        self._rms_norm_gated_cuda(core_attn_out, z, core_attn_out)
 
     def forward_hip(
         self,
