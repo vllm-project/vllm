@@ -28,7 +28,7 @@ def get_fused_shared_expert_layers(
     from vllm.model_executor.models.utils import PPMissingLayer
 
     fused_layers = []
-    num_moe_layers = 0
+    moe_layer_indices = []
     for idx, layer in enumerate(layers):
         if isinstance(layer, PPMissingLayer):
             continue
@@ -37,12 +37,22 @@ def get_fused_shared_expert_layers(
             moe = getattr(moe, name, None)
         if not isinstance(moe, moe_cls):
             continue
-        num_moe_layers += 1
+        moe_layer_indices.append(idx)
         if getattr(moe, "is_fused_shared_expert_enabled", False):
             fused_layers.append(idx)
-    if enable_eplb and 0 < len(fused_layers) < num_moe_layers:
+    if enable_eplb and 0 < len(fused_layers) < len(moe_layer_indices):
         raise NotImplementedError(
             "Mixed per-layer shared-expert fusion is not supported with EPLB"
+        )
+    if fused_layers:
+        skipped_layers = [
+            idx for idx in moe_layer_indices if idx not in fused_layers
+        ]
+        logger.info(
+            "AITER fused shared experts: enabled on MoE layer(s) %s; "
+            "disabled on MoE layer(s) %s.",
+            fused_layers,
+            skipped_layers or "none",
         )
     return fused_layers
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import re
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -47,6 +48,23 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
+
+
+# Causes of skipped shared-expert fusion already reported. The per-layer
+# enabled/disabled summary is emitted by `get_fused_shared_expert_layers`; this
+# only dedupes the skip warnings so a long model does not log one per layer.
+_report_skip_reasons: set[str] = set()
+
+# Matches a layer-qualified module path (e.g. ``model.layers.5.mlp.shared_experts``
+# or ``layers.26.mtp_block.ffn.shared_experts``) so skip reasons are reported
+# once per cause instead of once per layer.
+_LAYER_MODULE_PATH_RE = re.compile(
+    r"(?:model\.)?(?:language_model\.)?(?:layers|mtp)\.\d+\.[\w.]*"
+)
+
+
+def _normalize_skip_reason(reason: str) -> str:
+    return _LAYER_MODULE_PATH_RE.sub("<shared_expert>", reason)
 
 
 def resolve_layer_fused_shared_expert(
@@ -154,11 +172,16 @@ def resolve_layer_fused_shared_expert(
                     target_pattern,
                 )
     if fse_requested and not is_fused_shared_expert_enabled:
-        logger.warning(
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled - skipping for this layer: %s.",
-            fse_reason,
-        )
+        reason = _normalize_skip_reason(fse_reason or "unknown reason")
+        # Different layers share the same cause; report each cause once and
+        # leave the per-layer breakdown to the model-level summary.
+        if reason not in _report_skip_reasons:
+            _report_skip_reasons.add(reason)
+            logger.warning(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                "cannot be enabled - skipping shared-expert fusion: %s.",
+                reason,
+            )
     return is_fused_shared_expert_enabled
 
 

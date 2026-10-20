@@ -562,6 +562,7 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
         "is_shared_expert_quant_fse_compatible",
         lambda *_, **__: (False, "shared experts are excluded"),
     )
+    fused_moe_utils._report_skip_reasons.clear()
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
         ExpertsInt8Config(), "model.layers.0.mlp"
@@ -979,6 +980,7 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
+    fused_moe_utils._report_skip_reasons.clear()
     per_layer_fse = model_type in {
         "qwen3_next",
         "qwen3_5",
@@ -1358,7 +1360,7 @@ def test_models_fse_init(
             ].mtp_block.ffn.is_fused_shared_expert_enabled
             warning.assert_called_once()
             assert (
-                "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"
+                "DeepSeek-V4 shared experts at <shared_expert>"
                 in (warning.call_args.args[1])
             )
         if aiter_fse_enabled and shared_expert_precision == "mixed" and not exclude:
@@ -1389,7 +1391,7 @@ def test_models_fse_init(
                 # CPU has no FSE path, so the resolver never warns.
                 warning.assert_not_called()
             else:
-                assert warning.call_count == (2 if per_layer_fse else 1)
+                assert warning.call_count == 1
                 assert (
                     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
                     in (warning.call_args.args[0])
