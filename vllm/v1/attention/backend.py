@@ -888,8 +888,6 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
 
     kv_cache_dtype: str
-    alibi_slopes: torch.Tensor | None
-    sinks: torch.Tensor | None
 
     @property
     def kv_quant_mode(self) -> "KVQuantMode":

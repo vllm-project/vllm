@@ -324,9 +324,6 @@ class B12xPagedMetadataBuilder(AttentionMetadataBuilder[B12xPagedMetadata]):
 class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
     """b12x paged GQA attention implementation."""
 
-    # Attention hands this impl a layer-owned fp32 buffer as `sinks`.
-    needs_fp32_sinks = True
-
     can_return_lse_for_decode: bool = False
     supports_dcp: bool = False
 

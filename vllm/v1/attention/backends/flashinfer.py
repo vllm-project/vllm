@@ -1840,9 +1840,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 
 class FlashInferImpl(AttentionImpl):
-    # Attention hands this impl a layer-owned fp32 buffer as `sinks`.
-    needs_fp32_sinks = True
-
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
 
