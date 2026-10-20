@@ -50,7 +50,13 @@
 #   26.5 GB stored, 0 loads).  24 GiB = ~685K tok at the measured
 #   37.6 KB/tok effective (padding + TP copies) = 1.48x GPU KV -- keep the
 #   tier >= 1.5x GPU KV; raising gpu-util or KV dtype changes re-derive this.
-# RAM cost: 25.77 GB tmpfs address space, pages committed on touch
+# 2026-10-20 (Q22 a+b, GO user): KV dtype -> nvfp4 (750,747 tok, x1.75) and
+#   tier 24 -> 32 GiB.  32 GiB clears >=1.5x GPU-KV in tokens under either
+#   storage format (nvfp4 or fp8 blocks) and equals ~2x the GPU-KV byte pool;
+#   48 GiB kept in reserve to protect host commit margin during the Minimax
+#   pilot (commit was 83.7% pre-window).  Tier tmpfs = pages committed on
+#   touch: capacity raise is free until filled.
+# RAM cost: 34.4 GB tmpfs address space (32 GiB tier), pages committed on touch
 #   (traffic-bound; worst-case bench touched ~19 GB), 63 GB /dev/shm cap.
 # METRIC TRAP: kv_offload_cpu_cache_usage_perc = pinned-by-in-flight-transfers
 #   gauge, NOT a fill gauge (reads 2% while full).  Do not use it for occupancy.
@@ -94,7 +100,7 @@ services:
           --no-enable-flashinfer-autotune \
           --gpu-memory-utilization 0.70 \
           --max-model-len 262144 \
-          --kv-cache-dtype ${KV_DTYPE_SWIFT15:-fp8} \
+          --kv-cache-dtype ${KV_DTYPE_SWIFT15:-nvfp4} \
           --dtype auto \
           --limit-mm-per-prompt '{"image":4,"video":0}' \
           --mm-processor-kwargs '{"max_pixels":774000}' \
@@ -104,7 +110,7 @@ services:
           --speculative-config '${VLLM_SPEC_CONFIG_SWIFT15:-null}' \
           --performance-mode interactivity \
           --enable-chunked-prefill \
-          --kv-offloading-size ${KV_OFFLOAD_GB_SWIFT15:-24} \
+          --kv-offloading-size ${KV_OFFLOAD_GB_SWIFT15:-32} \
           --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
           --enable-prefix-caching \
           --prefix-caching-hash-algo sha256 \
