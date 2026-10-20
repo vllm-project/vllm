@@ -548,10 +548,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
             and not cache_config.enable_prefix_caching
         ):
-            logger.warning_once(
-                "SWA bounded replay with PCP requires prefix caching; "
-                "decoder-side replay is not supported with PCP."
-            )
+            logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():
             logger.warning_once(

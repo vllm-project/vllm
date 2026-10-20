@@ -164,6 +164,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
+        # Trimming can leave request entries with no query tokens.
         if num_decode_tokens > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],

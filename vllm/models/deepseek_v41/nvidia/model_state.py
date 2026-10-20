@@ -349,6 +349,7 @@ class DeepseekV41ModelState(DefaultModelState):
             and self.decoder_replay_layers is not None
             and self._replay_attn_groups is None
         ):
+            # Initialize replay builders even for untrimmed warmup batches.
             layers = self.decoder_replay_layers
             self._replay_attn_groups = (
                 self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
@@ -707,7 +708,9 @@ class DeepseekV41ModelState(DefaultModelState):
         if self.pcp_size > 1:
             self._kept_positions[num_tokens:num_padded].zero_()
             is_padding = torch.arange(num_padded, device=self.device) >= num_tokens
-            kept_slot_mappings = get_pcp_group().all_gather(kept_slot_mappings, dim=1)
+            kept_slot_mappings = get_pcp_group().all_gather(
+                kept_slot_mappings.contiguous(), dim=1
+            )
             if not self.vllm_config.parallel_config.enable_expert_parallel:
                 is_padding = (
                     get_pcp_group().all_gather(is_padding.to(torch.uint8), dim=0).bool()
