@@ -32,6 +32,9 @@ model_config: ModelConfig = {
     "query_maxlen": 32,
 }
 
+# The module-scoped `server` is still alive while the offline tests run.
+OFFLINE_GPU_MEMORY_UTILIZATION = 0.5
+
 
 def _get_attr_or_val(obj: object | dict, key: str):
     if isinstance(obj, dict) and key in obj:
@@ -165,6 +168,7 @@ def test_colbert_query_plugin_offline(vllm_runner, input_type: str):
         io_processor_plugin=model_config["plugin"],
         hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
+        gpu_memory_utilization=OFFLINE_GPU_MEMORY_UTILIZATION,
     ) as llm_runner:
         llm = llm_runner.get_llm()
         pooler_output = llm.encode(prompt, pooling_task="plugin")
@@ -205,6 +209,7 @@ def test_colbert_query_plugin_offline_multiple_inputs(vllm_runner):
         io_processor_plugin=model_config["plugin"],
         hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
+        gpu_memory_utilization=OFFLINE_GPU_MEMORY_UTILIZATION,
     ) as llm_runner:
         llm = llm_runner.get_llm()
         pooler_output = llm.encode(prompts, pooling_task="plugin")
