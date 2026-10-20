@@ -9,7 +9,13 @@ from vllm.config import VllmConfig
 from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.utils import bind_engine_zmq_listeners, launch_core_engines
+from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.utils import (
+    CoreEngineActorManager,
+    CoreEngineProcManager,
+    bind_engine_zmq_listeners,
+    launch_core_engines,
+)
 from vllm.v1.executor import Executor
 from vllm.v1.utils import RustFrontendProcessManager, wait_for_completion_or_failure
 
@@ -103,13 +109,15 @@ def _run_rust_frontend(
     # code.
     engine_stack.close()
 
-    def _coord_shutdown() -> None:
+    def _coord_shutdown(coordinator: DPCoordinator):
         coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
 
-    def _engine_shutdown() -> None:
+    def _engine_shutdown(
+        local_engine_manager: CoreEngineProcManager | CoreEngineActorManager,
+    ):
         local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
 
-    def _api_shutdown() -> None:
+    def _api_shutdown():
         timeout = (
             vllm_config.shutdown_timeout if signal_utils.shutdown_requested else None
         )
@@ -119,9 +127,9 @@ def _run_rust_frontend(
     #   set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
     #   -> grpc_sock cleanup -> sock cleanup
     if coordinator is not None:
-        exit_stack.callback(_coord_shutdown)
+        exit_stack.callback(_coord_shutdown, coordinator)
     if local_engine_manager is not None:
-        exit_stack.callback(_engine_shutdown)
+        exit_stack.callback(_engine_shutdown, local_engine_manager)
     exit_stack.callback(_api_shutdown)
 
     wait_for_completion_or_failure(
