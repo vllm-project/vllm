@@ -39,6 +39,8 @@ def audit(path):
         if "driver_signal" in row:
             signals[row["driver_signal"]].append(row.get("driver_seconds", 0))
     summary = report.get("summary", {})
+    forecasts = report.get("tool_waits", [])
+    errors = [r["predicted_seconds"] - r["actual_seconds"] for r in forecasts]
     manifest_path = path.parent / "matrix.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     config = dict(manifest.get("config", {}))
@@ -65,6 +67,13 @@ def audit(path):
         "signal_seconds": {
             name: distribution(values) for name, values in signals.items()
         },
+        "forecast_error_seconds": distribution(errors),
+        "forecast_absolute_error_seconds": distribution([abs(v) for v in errors]),
+        "forecast_underestimates": sum(v < 0 for v in errors),
+        "forecast_overestimates": sum(v > 0 for v in errors),
+        "client_queue_seconds": distribution(
+            [r["client_queue_seconds"] for r in report.get("episodes", [])]
+        ),
         "summary": summary,
         "instrumented": config.get("profile", False),
         "conditions": {
@@ -115,10 +124,25 @@ def main():
         if any(r["instrumented"] for r in runs[args.baseline]):
             raise ValueError("Timing baseline must not be instrumented")
         baseline = statistics.median(r["seconds"] for r in runs[args.baseline])
+        baseline_families = defaultdict(list)
+        for row in runs[args.baseline]:
+            for family, values in row["summary"].get("family_latency", {}).items():
+                baseline_families[family].append(values["p95_seconds"])
         for label, group in runs.items():
             if any(r["instrumented"] for r in group):
                 continue
             seconds = [r["seconds"] for r in group]
+            families = defaultdict(list)
+            for row in group:
+                for family, values in row["summary"].get("family_latency", {}).items():
+                    families[family].append(values["p95_seconds"])
+            ratios = {
+                family: statistics.median(values)
+                / statistics.median(baseline_families[family])
+                for family, values in families.items()
+                if family in baseline_families
+                and statistics.median(baseline_families[family]) > 0
+            }
             comparison[label] = {
                 "seconds": distribution(seconds),
                 "throughput_gain_percent": 100
@@ -134,6 +158,8 @@ def main():
                     for r in group
                     if r["summary"].get("family_latency")
                 ),
+                "family_p95_ratio_to_baseline": ratios,
+                "families_with_higher_p95": sum(v > 1 for v in ratios.values()),
             }
     result = {
         "equal_work": comparable,

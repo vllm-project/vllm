@@ -252,9 +252,19 @@ def main():
     parser.add_argument("--policy-decode-lookahead-tokens", type=int, default=512)
     parser.add_argument("--replay-pause-floor", type=float, default=0)
     parser.add_argument("--live-after-replay", action="store_true")
+    parser.add_argument("--live-only", action="store_true")
+    parser.add_argument("--live-repeats", type=int, default=1)
     parser.add_argument("--verl-root", type=Path, default=Path("../verl"))
     args = parser.parse_args()
     install_signal_handlers()
+    if args.live_repeats < 1:
+        parser.error("live-repeats must be positive")
+    if args.live_only:
+        if args.trace is None:
+            parser.error("live-only requires a trace providing workload configuration")
+        if args.profile:
+            parser.error("live-only profiling is not supported")
+        args.live_after_replay = True
     allowed_arms = {
         "native",
         "idle",
@@ -645,7 +655,7 @@ def main():
                     timeout=300,
                 )
                 warmup.raise_for_status()
-            for repeat in range(args.repeats):
+            for repeat in range(0 if args.live_only else args.repeats):
                 order = list(group)
                 random.Random(repeat).shuffle(order)
                 for arm in order:
@@ -850,9 +860,12 @@ def main():
                     manifest.write_text(json.dumps(record, indent=2) + "\n")
                     print(json.dumps(record["runs"][-1]), flush=True)
             if args.live_after_replay:
-                for arm in group:
+                for live_repeat, arm in (
+                    (i, a) for i in range(args.live_repeats) for a in group
+                ):
                     reset_cache(base, controlled)
-                    output = args.output_dir / f"{arm}-live.json.gz"
+                    suffix = "live" if live_repeat == 0 else f"live-{live_repeat}"
+                    output = args.output_dir / f"{arm}-{suffix}.json.gz"
                     command = [
                         sys.executable,
                         "-m",
@@ -902,7 +915,10 @@ def main():
                             ]
                         )
                     record["commands"].append(command)
-                    with (args.output_dir / f"{arm}-live.log").open("w") as log:
+                    cpu_before = process_cpu(server.pid)
+                    if store is not None:
+                        cpu_before.update(process_cpu(store.pid))
+                    with (args.output_dir / f"{arm}-{suffix}.log").open("w") as log:
                         subprocess.run(
                             command,
                             env=env,
@@ -910,11 +926,45 @@ def main():
                             stderr=subprocess.STDOUT,
                             check=True,
                         )
+                    cpu_after = process_cpu(server.pid)
+                    if store is not None:
+                        cpu_after.update(process_cpu(store.pid))
                     with gzip.open(output, "rt") as file:
                         report = json.load(file)
                     assert report["passed"], report.get("error")
+                    started = report["clock"]["wall_time"] + (
+                        report["workload_started"] - report["clock"]["monotonic"]
+                    )
+                    audit = gpu_process_window(
+                        args.output_dir / "gpu-processes.csv",
+                        started,
+                        started + report["seconds"],
+                        {
+                            pid
+                            for pid, row in cpu_after.items()
+                            if pid in cpu_before
+                            and row["start_ticks"] == cpu_before[pid]["start_ticks"]
+                        },
+                    )
+                    record.setdefault("live_resource_validation", []).append(
+                        {"arm": arm, "repeat": live_repeat, **audit}
+                    )
+                    if (
+                        audit["unexpected_processes"]
+                        or len(audit["devices"]) != len(args.gpus.split(","))
+                        or any(
+                            device["max_gap_seconds"] > 10
+                            for device in audit["devices"].values()
+                        )
+                    ):
+                        raise RuntimeError(f"Live GPU process audit failed: {audit}")
                     record["live_runs"].append(
-                        {"arm": arm, "seconds": report["seconds"], **report["summary"]}
+                        {
+                            "arm": arm,
+                            "repeat": live_repeat,
+                            "seconds": report["seconds"],
+                            **report["summary"],
+                        }
                     )
                     manifest.write_text(json.dumps(record, indent=2) + "\n")
                     print(json.dumps({"live": record["live_runs"][-1]}), flush=True)
@@ -928,6 +978,7 @@ def main():
                 r["rollouts_per_second"] for r in record["runs"] if r["arm"] == arm
             )
             for arm in arms
+            if any(r["arm"] == arm for r in record["runs"])
         }
         if "native" in medians:
             record["throughput_ratios"] = {

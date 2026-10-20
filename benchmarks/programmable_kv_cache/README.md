@@ -74,6 +74,7 @@ PYTHONPATH=../verl \
 | `--gpu-memory-utilization 0.5` | 默认主要性能预算，各对照记录实际分配出的 KV 容量 |
 | `--cache-gib 2` | 历史人工配额压力诊断；不要当作正常资源主基线 |
 | `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
+| `--live-only` / `--live-repeats` | 用已有 trace 提供问题、采样和工具配置，直接重复真实在线循环；每轮重置缓存，记录独立 GPU 归属审计，不计算固定工作量回放的吞吐比 |
 | `--trace` | 固定原输入、输出长度和暂停，重新生成；不执行工具或报告回放奖励分数 |
 | `--tool-delay` / `--replay-pause-floor` | 明确标记的人为工具等待；不能代替真实服务延迟 |
 | `--prediction-mode adaptive` | 默认使用已完成工具批次更新预测；在线按工具组合区分，旧 trace 无工具名时使用统一估计 |
@@ -220,11 +221,16 @@ CUDA_VISIBLE_DEVICES=0,3 \
 | `weight_update.py` | `--base-url --model --trace --output`；同机 GPU、对应模型检查点、IPC 权重传输后端和 Store |
 | `evaluate.py` | `--model --dataset --output`，可加 `--enable-kv-control`；仅运行重算/APC 质量基线，控制协议由 pytest 检查 |
 | `control_overhead.py` | `--output`；测量 CPU 元数据操作，不代表推理服务或 RL 吞吐 |
-| `run_recovery.py` | 自建服务/Store，`--model --dataset --trace --output-dir`，可加 `--evaluation-samples 128`；新组合测试驱动尚未执行 |
+| `run_recovery.py` | 自建服务/Store，`--model --dataset --trace --output-dir`；`--evaluation-samples 128` 增加 Mooncake 质量对照，`--lifecycle` 检查分支/取消，`--weight-update` 检查真实参数更新/回滚，`--cpu-evaluation-samples 128` 增加 CPU 质量对照 |
+| `run_recovery.py --capacity-deferral-only` | 单独启动在途加载预算为 1 的功能服务，检查部分加载、容量延期、逐次重试和重算回退；该预算用于正确性检查，不作为性能结果 |
 
 IPC 权重检查要求服务额外启用 `--weight-transfer-config '{"backend":"ipc"}'`，设置 `VLLM_SERVER_DEV_MODE=1` 与既有同机 IPC 序列化配置 `VLLM_ALLOW_INSECURE_SERIALIZATION=1`，服务保持绑定本地地址。
 脚本修改真实 GPU 参数并回滚，未执行优化器更新。
+权重检查只使用 trace 的一个可复用边界加 128 个 token，避免压力输入超过功能服务的上下文上限。
 其他示例不需要这些权重更新设置。
+
+同步 HTTP 示例收齐终态后 ACK 结果，保留完整返回值并检查结果容量清空。
+重放保护沿用引擎原来的 TTL，ACK 不重新执行已完成的命令。
 
 策略在启动时通过 `--kv-control-config` 配置，空 `policies` 使信号不产生策略动作。
 `http_control.py --policy` 的专用服务可用：

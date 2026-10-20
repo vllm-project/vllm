@@ -44,6 +44,49 @@ def test_tool_estimates_learn_completed_batches_without_future_samples():
     assert estimator.predict(("lookup",)) == 0.25
 
 
+def test_rollout_analysis_retains_opposite_forecast_errors(tmp_path):
+    """Early and late predictions must remain visible when signed errors cancel."""
+    import gzip
+
+    from benchmarks.programmable_kv_cache.analyze_rollout import audit
+
+    path = tmp_path / "report.json.gz"
+    with gzip.open(path, "wt") as file:
+        json.dump(
+            {
+                "passed": True,
+                "requests": [],
+                "controls": [],
+                "tool_waits": [
+                    {"predicted_seconds": 1, "actual_seconds": 2},
+                    {"predicted_seconds": 2, "actual_seconds": 1},
+                ],
+            },
+            file,
+        )
+    result = audit(path)
+    assert result["forecast_error_seconds"]["median"] == 0
+    assert result["forecast_absolute_error_seconds"]["median"] == 1
+    assert result["forecast_underestimates"] == result["forecast_overestimates"] == 1
+
+
+def test_sync_control_acknowledges_after_preserving_terminal_failure():
+    from benchmarks.programmable_kv_cache.client import wait_operation
+
+    methods = []
+    failure = {"message_id": "m", "action_id": "a", "status": "failed"}
+
+    def call(method, payload):
+        methods.append(method)
+        if method == "acknowledge":
+            assert methods == ["operation", "operation", "acknowledge"]
+            return {"acknowledged": True}
+        return {**failure, "status": "running"} if len(methods) == 1 else failure
+
+    assert wait_operation(call, "m", "a", acknowledge=True) == failure
+    assert methods[-1] == "acknowledge"
+
+
 @pytest_asyncio.fixture
 async def rollout_client():
     clients = []

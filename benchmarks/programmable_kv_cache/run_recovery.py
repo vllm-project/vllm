@@ -136,6 +136,14 @@ async def recover(args, report, restart, stop_store):
         )
         report["restart_requests"] = replacement.rows
         report["restart_controls"] = replacement.controls
+        for identifier in tuple(replacement.targets):
+            await replacement.finish(identifier)
+        report["restart_final_capacity"] = await replacement.wait_control_idle()
+        report["restart_final_associations"] = await replacement.call(
+            "associations", {}
+        )
+        assert report["restart_final_capacity"]["records"] == 0
+        assert not report["restart_final_associations"]["items"]
     finally:
         await client.http.aclose()
         if replacement is not None:
@@ -152,7 +160,13 @@ def main():
     parser.add_argument("--port", type=int, default=18083)
     parser.add_argument("--store-port", type=int, default=19151)
     parser.add_argument("--evaluation-samples", type=int, default=0)
+    parser.add_argument("--lifecycle", action="store_true")
+    parser.add_argument("--weight-update", action="store_true")
+    parser.add_argument("--cpu-evaluation-samples", type=int, default=0)
+    parser.add_argument("--capacity-deferral-only", action="store_true")
     args = parser.parse_args()
+    if args.evaluation_samples < 0 or args.cpu_evaluation_samples < 0:
+        parser.error("Evaluation sample counts must be nonnegative")
     install_signal_handlers()
     for port in (args.port, args.port + 1, args.store_port, args.store_port + 2):
         require_free_port(port)
@@ -180,7 +194,17 @@ def main():
         TRANSFORMERS_OFFLINE="1",
         MOONCAKE_CONFIG_PATH=str(config),
     )
-    report = {"passed": False, "commands": [], "source_hashes": source_hashes()}
+    if args.weight_update:
+        env["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+    report = {
+        "passed": False,
+        "commands": [],
+        "source_hashes": source_hashes(),
+        "source_revision": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "started_epoch": time.time(),
+    }
     owned = []
 
     def launch(command, label):
@@ -209,12 +233,12 @@ def main():
             label,
         )
 
-    def server(port, engine, label):
+    def server(port, engine, label, *, cpu=False):
         settings = {
             "engine_id": engine,
             "policy_decode_lookahead_tokens": 512,
             "max_policy_wait_seconds": 30,
-            "max_inflight_load_blocks": 32,
+            "max_inflight_load_blocks": 1 if args.capacity_deferral_only else 32,
             "policies": [
                 {
                     "name": "quota",
@@ -237,6 +261,20 @@ def main():
                 "save_decode_cache": False,
             },
         }
+        if cpu:
+            connector = {
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 8 * 2**30,
+                    "blocks_per_chunk": 1,
+                },
+            }
+        weight_options = (
+            ["--weight-transfer-config", json.dumps({"backend": "ipc"})]
+            if args.weight_update and not cpu
+            else []
+        )
         process = launch(
             [
                 sys.executable,
@@ -272,6 +310,7 @@ def main():
                 json.dumps(settings),
                 "--kv-transfer-config",
                 json.dumps(connector),
+                *weight_options,
             ],
             label,
         )
@@ -309,6 +348,26 @@ def main():
     try:
         master = store("store")
         source = server(args.port, "recovery-source", "source")
+        if args.capacity_deferral_only:
+            process = launch(
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.programmable_kv_cache.lifecycle",
+                    "--base-url",
+                    f"http://127.0.0.1:{args.port}",
+                    "--trace",
+                    str(args.trace),
+                    "--capacity-deferral",
+                    "--output",
+                    str(args.output_dir / "capacity-deferral.json.gz"),
+                ],
+                "capacity-deferral",
+            )
+            if process.wait() != 0:
+                raise RuntimeError("Capacity deferral check failed; inspect its log")
+            report["passed"] = True
+            return
         destination = server(args.port + 1, "recovery-destination", "destination")
         # The destination also hosts Store segments until the deliberate outage.
         http_check(
@@ -318,6 +377,33 @@ def main():
             http_check(
                 "model-quality", ["--evaluation-samples", str(args.evaluation_samples)]
             )
+        for enabled, module, label, extra in (
+            (args.lifecycle, "lifecycle", "lifecycle", []),
+            (
+                args.weight_update,
+                "weight_update",
+                "weight-update",
+                ["--model", str(args.model)],
+            ),
+        ):
+            if enabled:
+                process = launch(
+                    [
+                        sys.executable,
+                        "-m",
+                        f"benchmarks.programmable_kv_cache.{module}",
+                        "--base-url",
+                        f"http://127.0.0.1:{args.port}",
+                        "--trace",
+                        str(args.trace),
+                        "--output",
+                        str(args.output_dir / f"{label}.json.gz"),
+                        *extra,
+                    ],
+                    label,
+                )
+                if process.wait() != 0:
+                    raise RuntimeError(f"{label} failed; inspect its log")
 
         def restart():
             stop(source)
@@ -326,6 +412,31 @@ def main():
             server(args.port, "recovery-source", "restarted-source")
 
         asyncio.run(recover(args, report, restart, lambda: stop(master)))
+        if args.cpu_evaluation_samples:
+            for process in reversed(owned):
+                if process.poll() is None:
+                    stop(process)
+            server(args.port, "recovery-cpu", "cpu-source", cpu=True)
+            process = launch(
+                [
+                    sys.executable,
+                    "-m",
+                    "benchmarks.programmable_kv_cache.http_control",
+                    "--base-url",
+                    f"http://127.0.0.1:{args.port}",
+                    "--dataset",
+                    str(args.dataset),
+                    "--tier",
+                    "cpu",
+                    "--evaluation-samples",
+                    str(args.cpu_evaluation_samples),
+                    "--output",
+                    str(args.output_dir / "cpu-model-quality.json"),
+                ],
+                "cpu-model-quality",
+            )
+            if process.wait() != 0:
+                raise RuntimeError("CPU quality check failed; inspect its log")
         report["passed"] = True
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
@@ -334,6 +445,7 @@ def main():
         for process in reversed(owned):
             if process.poll() is None:
                 stop(process)
+        report["finished_epoch"] = time.time()
         with gzip.open(args.output_dir / "recovery.json.gz", "wt") as file:
             json.dump(report, file)
 

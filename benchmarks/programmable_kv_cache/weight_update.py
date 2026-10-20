@@ -15,6 +15,7 @@ from safetensors import safe_open
 from torch.multiprocessing.reductions import reduce_tensor
 
 from benchmarks.programmable_kv_cache.rollout import RolloutClient
+from benchmarks.programmable_kv_cache.run_rollout_matrix import source_hashes
 from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
 from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferUpdateInfo
 
@@ -26,6 +27,7 @@ async def run(args):
         "requests": client.rows,
         "controls": client.controls,
         "scope": "real single-parameter IPC update and rollback; no optimizer step",
+        "source_hashes": source_hashes(),
     }
     sync = HTTPVLLMWeightSyncClient(args.base_url)
     with gzip.open(args.trace, "rt") as file:
@@ -76,6 +78,8 @@ async def run(args):
 
     try:
         await client.initialize()
+        prompt = prompt[: client.boundary + 128]
+        report["input_tokens"] = len(prompt)
         before_caps = client.capabilities
         before_version = (await client.http.get("/weight_info")).json()[
             "weight_version"

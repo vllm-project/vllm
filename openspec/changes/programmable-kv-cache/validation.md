@@ -1,12 +1,27 @@
 # Validation evidence index
 
 测试方法与下一轮设计见[testing.md](../../../docs/programmable-kvc/testing.md)。
-当前结论、逐轮数据及未完成验收见[本轮实验报告](../../../docs/programmable-kvc/rollout-report-2026-10-19.md)，任务状态见[tasks.md](tasks.md)。
+当前验收见[剩余验收报告](../../../docs/programmable-kvc/acceptance-report-2026-10-19.md)，主性能数据见[优化报告](../../../docs/programmable-kvc/rollout-report-2026-10-19.md)，任务状态见[tasks.md](tasks.md)。
 本文只定位证据，不重复实验叙述。
 下文的 `results/` 文件均为本地实验数据，该目录已加入 `.gitignore`，Git 不跟踪这些原始文件。
 版本库保留测试方法和结果报告；读取逐请求证据需要对应的本地数据或实验归档。
 
-## Current local round
+## Current acceptance
+
+原始记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-19/`。
+任务 7.9/11.4 已完成，整体为 76/82；策略消融、预测、在线重复、profile 和交付汇总继续执行。
+
+| 数据 | 已验证范围 |
+| --- | --- |
+| `cpu-offline.log`、`api-final.log`、`gpu-buffers-driver.log` | 1,999 项相关 CPU、36 项更新 HTTP/工具检查（重叠）、56 项 GPU 通过，1 项 ROCm 跳过 |
+| `functional-summary.json`、`recovery/` | 双引擎实际命中 784 token；共享分支/TTL/取消；真实参数更新及回滚；Store 失败/重启与旧 epoch 拒绝 |
+| `recovery/{model-quality,cpu-model-quality}.json` | 两路径各 128 题重算/预取，均 124/128；零答案差异、零长度截断，命中 0/784 token，结束记录与在途工作清空 |
+| `capacity-deferral/` | 在途预算为 1，partial/partial/partial/completed、延期 3/2/1/0；真实重试命中及普通重算回退，清理完成 |
+| `runtime-identity.json`、`model-identity.json` | 18 个 vLLM 运行文件匹配此前版本；权重/配置等 21 个文件 SHA256 与环境版本 |
+| `main-analysis.json`、`shared-load-analysis.json`、`cooperative-final-normal-preparation-audit.json` | 主实验逐家族尾延迟、预测误差、共享物理加载 ID 和操作范围覆盖；不能将所有命中归因于搬运 |
+| `attempt-index.json`、`recovery-before-ack/`、`recovery-ack-replay-order/` | 未完成/失败的工具验证尝试，未计入通过数据 |
+
+## October 19 optimization round
 
 原始数据位于[rollout-2026-10-19](../../../benchmarks/programmable_kv_cache/results/rollout-2026-10-19/)。
 采用 GPU 0/3、Qwen3.8-27B BF16 TP=2、利用率 0.5、每卡实际 KV 12.12 GiB，未覆盖 KV 字节预算。

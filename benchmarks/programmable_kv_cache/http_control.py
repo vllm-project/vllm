@@ -81,8 +81,8 @@ def main():
             {"method": method, "invocation": invocation, "payload": payload},
         )
 
-    def wait(name):
-        result = wait_operation(control, run + "-" + name)
+    def wait(name, *, acknowledge=True):
+        result = wait_operation(control, run + "-" + name, acknowledge=acknowledge)
         report["actions"][name] = result
         return result
 
@@ -176,10 +176,10 @@ def main():
             ],
         }
 
-        def action(name, kind, payload):
+        def action(name, kind, payload, *, acknowledge=True):
             message = envelope(run + "-" + name, kind, payload)
             control("submit", message)
-            result = wait(name)
+            result = wait(name, acknowledge=acknowledge)
             assert result["status"] == "completed", result
             return result
 
@@ -202,10 +202,24 @@ def main():
             "value": 80,
             "ttl_seconds": 300,
         }
-        action("priority", "vllm.set_priority", priority)
+        action("priority", "vllm.set_priority", priority, acknowledge=False)
         assert control(
             "submit", envelope(run + "-priority", "vllm.set_priority", priority)
         )["replayed"]
+        control("acknowledge", {"message_id": run + "-priority"})
+        replay = session.post(
+            base + "/v1/kv/control",
+            json={
+                "method": "submit",
+                "invocation": invocation,
+                "payload": envelope(run + "-priority", "vllm.set_priority", priority),
+            },
+            timeout=30,
+        )
+        assert replay.status_code == 409 and replay.json()["error"]["code"] == (
+            "acknowledged"
+        )
+        report["acknowledged_replay"] = replay.json()
         action(
             "release",
             "vllm.set_priority",
@@ -254,7 +268,7 @@ def main():
                     },
                 ),
             )
-            ready = wait_operation(peer_control, message)
+            ready = wait_operation(peer_control, message, acknowledge=True)
             assert ready["status"] == "completed", ready
             peer_model = get("/v1/models", args.destination_url)["data"][0]["id"]
             response = infer(base_url=args.destination_url, model_id=peer_model)
@@ -283,13 +297,19 @@ def main():
                     parent["status"] == "completed" and parent["derived_operations"]
                 ), parent
                 children = [
-                    wait_operation(control, child["message_id"], child["action_id"])
+                    wait_operation(
+                        control,
+                        child["message_id"],
+                        child["action_id"],
+                        acknowledge=True,
+                    )
                     for child in parent["derived_operations"]
                 ]
                 assert all(child["status"] == "completed" for child in children), (
                     children
                 )
                 report["actions"][name] = {"parent": parent, "children": children}
+                control("acknowledge", {"message_id": parent["message_id"]})
             again = infer()
             assert again["usage"]["prompt_tokens_details"]["cached_tokens"] >= end
             assert again["choices"][0]["token_ids"] == first["choices"][0]["token_ids"]
@@ -402,6 +422,9 @@ def main():
                 for a, b in zip(baseline["rows"], moved["rows"], strict=True)
             )
 
+        report["final_capacity"] = control("capacity", {})
+        assert report["final_capacity"]["records"] == 0
+        assert not report["final_capacity"].get("pending_transfers")
         report["passed"] = True
     except Exception as error:
         report["error"] = str(error)

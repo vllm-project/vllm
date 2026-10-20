@@ -11,11 +11,17 @@ from pathlib import Path
 
 from benchmarks.programmable_kv_cache.client import envelope
 from benchmarks.programmable_kv_cache.rollout import RolloutClient
+from benchmarks.programmable_kv_cache.run_rollout_matrix import source_hashes
 
 
 async def run(args):
     client = RolloutClient(args.base_url, "priority")
-    report = {"passed": False, "requests": client.rows, "controls": client.controls}
+    report = {
+        "passed": False,
+        "requests": client.rows,
+        "controls": client.controls,
+        "source_hashes": source_hashes(),
+    }
     try:
         await client.initialize()
         with gzip.open(args.trace, "rt") as file:
@@ -116,6 +122,47 @@ async def run(args):
         assert stored["status"] == "completed", stored
         evicted = await client.action("evict", {"target": target}, version="1")
         assert evicted["status"] == "completed", evicted
+        if args.capacity_deferral:
+            payload = {
+                "target": target,
+                "src": {"tier": "mooncake"},
+                "dst": {"tier": "gpu"},
+            }
+            attempts = []
+            for _ in range(len(blocks) + 1):
+                result = await client.action("vllm.copy_to", payload)
+                attempts.append(result)
+                if result["status"] == "completed":
+                    break
+                assert result["status"] == "partial" and result["blocked_targets"] > 0
+            assert attempts[0]["status"] == "partial"
+            assert attempts[-1]["status"] == "completed"
+            report["capacity_retry"] = attempts
+            resumed = await client.generate(
+                "capacity-resumed", prompt, {"temperature": 0, "max_tokens": 16}
+            )
+            assert (
+                resumed["usage"]["prompt_tokens_details"]["cached_tokens"]
+                >= client.boundary
+            )
+            assert resumed["token_ids"] == root["token_ids"]
+            await client.action("evict", {"target": target}, version="1")
+            partial = await client.action("vllm.copy_to", payload)
+            assert partial["status"] == "partial" and partial["blocked_targets"] > 0
+            fallback = await client.generate(
+                "capacity-fallback", prompt, {"temperature": 0, "max_tokens": 16}
+            )
+            assert fallback["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+            assert fallback["token_ids"] == root["token_ids"]
+            report["capacity_fallback"] = partial
+            for identifier in tuple(client.targets):
+                await client.finish(identifier)
+            report["final_capacity"] = await client.wait_control_idle()
+            report["final_associations"] = await client.call("associations", {})
+            assert report["final_capacity"]["records"] == 0
+            assert not report["final_associations"]["items"]
+            report["passed"] = True
+            return
         message = uuid.uuid4().hex
         command = envelope(
             message,
@@ -182,6 +229,10 @@ async def run(args):
         report["missing_content"] = missing
         for identifier in tuple(client.targets):
             await client.finish(identifier)
+        report["final_capacity"] = await client.wait_control_idle()
+        report["final_associations"] = await client.call("associations", {})
+        assert report["final_capacity"]["records"] == 0
+        assert not report["final_associations"]["items"]
         report["passed"] = True
         print(
             json.dumps({"passed": True, "branches": 3, "shared_priority": [90, 20, 0]})
@@ -203,6 +254,11 @@ def main():
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--trace", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--capacity-deferral",
+        action="store_true",
+        help="Check partial loads and retry on a server with a one-block load budget",
+    )
     asyncio.run(run(parser.parse_args()))
 
 

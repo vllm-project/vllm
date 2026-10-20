@@ -64,7 +64,7 @@
 - [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
 - [x] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
 - [x] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
-- [ ] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.
+- [x] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.
 - [x] 7.10 Check all rows in coverage.md against concrete examples and tests; distinguish implemented, unsupported backend scope, and unexecuted validation.
 - [x] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
 
@@ -130,7 +130,7 @@ Section 12 records the later completed pressure/fit repetitions and real tool lo
 - [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
 - [x] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
 - [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
-- [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
+- [x] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
 - [x] 11.5 Record commands, raw evidence locations, measured conclusions and validation scope; pass required code checks and commit locally.
 
 ## 12. Application timing and live admission, 2026-10-19
@@ -176,3 +176,11 @@ Keep tasks unchecked until their evidence is complete:
 | 7.5, 11.3 | Model quality, per-family tails, request phases, RPC and CPU/index cost, GPU ownership, forecast errors and retained negative cases |
 | 7.9, 11.4 | Final-source lifecycle, duplicate/race/cancel/deferral, real Store failure/restart, real weight update/rollback and CPU/Mooncake validation |
 | 10.6, 8.4 | Final regressions/lint, reconciled coverage and reports, complete local PR description with AI disclosure and human review requirements |
+
+Tasks 7.9 and 11.4 completed against the unchanged final runtime: 1,999 related
+CPU checks, 36 updated HTTP/tool checks (overlapping), 56 GPU checks and one
+ROCm-specific skip; real lifecycle, Store outage/restart, IPC parameter change
+and rollback, load-budget partial/retry/fallback, and paired 128-question
+CPU/Mooncake evaluations passed. Both quality paths score 124/128 with zero
+answer mismatches and zero length cuts. See the
+[acceptance report](../../../docs/programmable-kvc/acceptance-report-2026-10-19.md).
