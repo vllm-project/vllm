@@ -37,6 +37,7 @@ from flydsl.expr.typing import T
 from .device import (
     BLOCKS,
     CM_DEV,
+    FP8_MAX,
     THREADS,
     Mailbox,
     bf16_round,
@@ -394,11 +395,15 @@ def stage_qkv(c, t):
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
     e0 = bf16_round(kn[0] * cs - kn[1] * sn)
     e1 = bf16_round(kn[0] * sn + kn[1] * cs)
-    # record quant of the nope dims: a 64-block = 32 threads (half a wave)
+    # record quant of the nope dims: a 64-block = 32 threads (half a wave).
+    # On gfx942 FP8_MAX is 224: vLLM's gfx942 cache writer and reader use
+    # FNUZ records with that maximum.
     amax = butterfly(fx.max(abs(e0), abs(e1)), (1, 2, 4, 8, 16), fx.max)
     rcode = ceil_exp(
         div_rn(
-            fx.max(amax, fx.Float32(1e-4)), fx.Float32(448.0), fx.Float32(1.0 / 448.0)
+            fx.max(amax, fx.Float32(1e-4)),
+            fx.Float32(FP8_MAX),
+            fx.Float32(1.0 / FP8_MAX),
         )
     )
     inv = mx_mul(rcode)
