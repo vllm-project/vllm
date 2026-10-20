@@ -41,6 +41,8 @@ from vllm.v1.worker.utils import AttentionGroup
 if TYPE_CHECKING:
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
 logger = init_logger(__name__)
 
@@ -101,6 +103,26 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def make_rejection_sampler(self, sampler: "Sampler") -> "RejectionSampler | None":
+        """Return the sampler that verifies this speculator's drafts.
+
+        Called once when the model runner builds its samplers. Return ``None``
+        (the default) to keep vLLM's chain ``RejectionSampler``. A replacement
+        is called like ``RejectionSampler.__call__``,
+        ``(logits, input_batch, draft_logits, invalid_drafts) -> SamplerOutput``,
+        and must keep the contract the runner relies on: ``sampled_token_ids``
+        holds the accepted tokens then the bonus token for each request,
+        ``num_sampled`` counts them, and ``num_rejected`` is the number of
+        scheduled query tokens that were not committed (so that
+        ``num_computed_tokens`` advances by ``num_sampled``). Row ``k`` of a
+        request in ``logprobs_tensors`` and ``sampling_mask_tensors`` belongs to
+        its sampled token ``k``: ``RejectionSampler`` takes them from the
+        request's first logits rows, which holds only when the accepted drafts
+        are a prefix of the verified ones. A verifier for trees or other
+        non-chain drafts can do that here.
+        """
+        return None
 
 
 class DraftModelSpeculator(BaseSpeculator):

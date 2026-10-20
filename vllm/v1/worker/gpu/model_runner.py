@@ -511,14 +511,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                    watermark_key=speculative_target_watermark_key(
-                        self.vllm_config.watermark_config
-                    ),
-                )
+                self.rejection_sampler = self._build_rejection_sampler()
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -563,6 +556,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def dp_rank(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
         return self.parallel_config.data_parallel_rank
+
+    def _build_rejection_sampler(self) -> RejectionSampler:
+        """The speculator's own verifier if it supplies one, else the chain one."""
+        assert self.sampler is not None
+        assert self.speculative_config is not None
+        if self.speculator is not None:
+            custom = self.speculator.make_rejection_sampler(self.sampler)
+            if custom is not None:
+                return custom
+        return RejectionSampler(
+            self.sampler,
+            self.speculative_config,
+            self.device,
+            watermark_key=speculative_target_watermark_key(
+                self.vllm_config.watermark_config
+            ),
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
