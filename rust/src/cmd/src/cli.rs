@@ -32,8 +32,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, ReasoningEffort,
+    RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::HfOverrides;
 
@@ -150,6 +150,14 @@ pub struct RenderArgs {
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    reasoning_effort_map: Option<ReasoningEffortMap>,
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
@@ -182,6 +190,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
@@ -305,6 +314,16 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    #[serde(default)]
+    pub reasoning_effort_map: Option<ReasoningEffortMap>,
 
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
@@ -558,6 +577,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
@@ -621,6 +641,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: reasoning_effort_map(self.reasoning_effort_map),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
@@ -695,6 +716,16 @@ pub struct ProfilerConfig {
     /// Additional Python profiler config fields consumed by the engine layer.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
+}
+
+/// Keys are API effort names, so unknown efforts fail at startup.
+type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
+
+fn reasoning_effort_map(map: Option<ReasoningEffortMap>) -> HashMap<String, String> {
+    map.unwrap_or_default()
+        .into_iter()
+        .map(|(effort, value)| (effort.as_str().to_string(), value))
+        .collect()
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
