@@ -1918,6 +1918,20 @@ class TestThinkingConfig:
         assert result.thinking_token_budget == 2048
         assert result.reasoning_effort is None
 
+    def test_enabled_ignores_budget_the_server_cannot_enforce(self):
+        """Without a reasoning parser that can enforce it, `budget_tokens` is
+        ignored like `display` instead of failing the request."""
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking={"type": "enabled", "budget_tokens": 2048},
+        )
+
+        result = _convert(request, thinking_budget_supported=False)
+        assert result.thinking_token_budget is None
+        assert result.reasoning_effort is None
+
     @pytest.mark.parametrize(
         "thinking",
         [

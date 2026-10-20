@@ -188,6 +188,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
+        reasoning_config = engine_client.vllm_config.reasoning_config
+        self._thinking_budget_supported = (
+            reasoning_config is not None and reasoning_config.enabled
+        )
         # Resolved lazily from the renderer when "auto".
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
@@ -326,6 +330,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         *,
         merge_inline_system: bool = False,
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
+        thinking_budget_supported: bool = True,
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format."""
         openai_messages: list[dict[str, Any]] = []
@@ -343,7 +348,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
-        cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
+        cls._handle_thinking(
+            req, anthropic_request, disabled_thinking_effort, thinking_budget_supported
+        )
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -631,11 +638,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         req: ChatCompletionRequest,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none",
+        thinking_budget_supported: bool = True,
     ) -> None:
         """Handle extended-thinking configuration.
 
         ``display`` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
+        ``budget_tokens`` is ignored when the server cannot enforce it.
         """
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
         if thinking is None:
@@ -646,7 +655,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             # that cannot disable thinking are configured with a low effort.
             req.reasoning_effort = disabled_thinking_effort
         elif thinking.type == "enabled":
-            req.thinking_token_budget = thinking.budget_tokens
+            if thinking_budget_supported:
+                req.thinking_token_budget = thinking.budget_tokens
+            else:
+                logger.warning_once(
+                    "Ignoring thinking.budget_tokens: enforcing it requires a "
+                    "--reasoning-parser with reasoning start and end tokens."
+                )
         # "adaptive" pins nothing: the model chooses depth beneath the ceiling
         # already set from output_config.effort.
 
@@ -809,6 +824,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             request,
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
+            thinking_budget_supported=self._thinking_budget_supported,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -1222,6 +1238,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             request,
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
+            thinking_budget_supported=self._thinking_budget_supported,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
