@@ -325,6 +325,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
 
         if self.g_proj is not None:
             gate = self.g_proj(hidden_states)[0]
+        if gate is not None:
             if rocm_aiter_ops.is_enabled():
                 from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
 
