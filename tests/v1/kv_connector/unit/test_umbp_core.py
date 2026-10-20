@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -52,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.kv_cache_interface import (
@@ -61,6 +63,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     KVQuantMode,
     UniformTypeKVCacheSpecs,
+)
+
+mori_available = importlib.util.find_spec("mori") is not None
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_rocm() and mori_available),
+    reason="UMBP is only available on ROCm with the mori package installed",
 )
 
 _LAYER1_SPEC = FullAttentionSpec(
