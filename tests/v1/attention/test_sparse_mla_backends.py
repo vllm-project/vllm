@@ -3935,6 +3935,9 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
         [[[7], [3]], [[8], [5]]], dtype=torch.int32, device=DEVICE_TYPE
     )
     runtime = SimpleNamespace(
+        is_group_leader=True,
+        begin_forward=lambda: None,
+        eager_host_mirror=True,
         max_swap_rows=max_swap_rows,
         request_state_indices=torch.tensor(
             [1, 0], dtype=torch.int32, device=DEVICE_TYPE
@@ -3943,8 +3946,6 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
     cache = HiSparseCacheHandle(runtime)
     cache.view = SimpleNamespace(block_size=64, attention_block_stride=832)
     cache.block_table = residency[:, 1]
-    cache.num_actual_tokens = 2
-    cache.num_decode_tokens = num_decode_tokens
     group = HiSparseMLAIndexGroup(
         logical_topk_indices=topk,
         physical_topk_indices=torch.empty_like(topk),
@@ -3956,16 +3957,30 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
         caches=[cache],
     )
     metadata = SimpleNamespace(
-        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE)
+        num_actual_tokens=2,
+        num_decode_tokens=num_decode_tokens,
+        max_query_len=1 if num_decode_tokens == 2 else 2,
+        num_reqs=2,
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE),
     )
 
-    group.set_logical_topk_ready(0)
-    physical = group.convert_logical_to_physical_topk(
-        0, topk, metadata, block_stride_rows=None, return_valid_counts=False
-    )
-
-    expected = torch.tensor([[5 * 832], [3 * 832]], device=DEVICE_TYPE)
-    torch.testing.assert_close(physical, expected.int().expand_as(topk))
+    # Repeat after compilation so its host delay cannot hide a stream race, and
+    # change the residency so a stale table cannot pass.
+    for step in range(2):
+        residency.add_(step * 10)
+        expected = torch.tensor(
+            [[(5 + step * 10) * 832], [(3 + step * 10) * 832]], device=DEVICE_TYPE
+        )
+        torch.accelerator.synchronize()
+        group.prepare_for_batch(0, metadata)
+        group.set_logical_topk_ready(0)
+        # Compute-stream work between the indexer and the layer must not delay
+        # the inputs the side-stream converter reads.
+        torch.cuda._sleep(200_000_000)
+        physical = group.convert_logical_to_physical_topk(
+            0, topk, metadata, block_stride_rows=None, return_valid_counts=False
+        )
+        torch.testing.assert_close(physical, expected.int().expand_as(topk))
 
 
 def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():
