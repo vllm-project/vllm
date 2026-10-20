@@ -44,8 +44,10 @@
 ## Chemins du siège (po-2023)
 
 - `.env` prod : `D:\Production\Embeddings\compose\.env` (`VLLM_API_KEY`,
-  `HUGGING_FACE_HUB_TOKEN`). **Pas de `QDRANT_API_KEY`** (gap de migration — baromètres
-  points non mesurables, registre Q-P2023-2).
+  `HUGGING_FACE_HUB_TOKEN`).
+- `QDRANT_API_KEY` (baromètre double) : dans `C:\Users\jsboi\.roo-state-manager\.env`
+  (le `.env` du MCP RSM — validée 200 le 20/10 ; `D:\Dev\roo-extensions\.env` porte
+  une copie stale, 401).
 - Compose actif : profil repo `configs/docker/profiles/embeddings-qwen3-4b-awq-po2026.yml`
   (nom historique conservé), lancé avec `--env-file` vers le `.env` prod ci-dessus.
 - Sidecar : script `D:\Production\Embeddings\scripts\embedding-proxy-logger.py`,
@@ -58,6 +60,8 @@
 ## Gaps de migration (consignés au registre du siège)
 
 1. Gouverneur thermique non migré (Q-P2023-1) — surveillance manuelle à chaque cycle.
-2. `QDRANT_API_KEY` absente (Q-P2023-2) — santé healthz vérifiable, points non.
-3. HF token vide dans le conteneur courant (Q-P2023-3, bénin — cache local) — à la
+2. HF token vide dans le conteneur courant (Q-P2023-3, bénin — cache local) — à la
    prochaine re-création : `--env-file D:\Production\Embeddings\compose\.env`.
+
+Baselines d'inauguration (2026-10-20 01:20Z) : warm 176 ms · roo_tasks 2 547 977 pts ·
+ws 65 coll. / 7 090 135 pts · cadence sidecar ~175 req/min.
