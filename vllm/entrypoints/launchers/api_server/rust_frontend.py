@@ -6,16 +6,19 @@ import contextlib
 import vllm
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.utils import bind_engine_zmq_listeners, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.utils import RustFrontendProcessManager, wait_for_completion_or_failure
 
-from ..cli_args import propagate_flash_late_interaction
-from ..launcher import create_server_socket, setup_server
 from ..utils import signal_utils
-from ..utils.listen import cleanup_listen_socket
+from ..utils.listen import (
+    cleanup_listen_socket,
+    setup_listen_address,
+    setup_listen_address_from_args,
+)
 from ..utils.signal_utils import set_signal_handler, set_timeout, to_timeout
 
 logger = init_logger(__name__)
@@ -30,7 +33,10 @@ def _run_rust_frontend(
 ) -> None:
     set_signal_handler()
 
-    listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
+    listen_address, sock = setup_listen_address_from_args(
+        args,
+        reuse_port=num_api_servers > 1,
+    )
     exit_stack.callback(cleanup_listen_socket, sock, args.uds or None)
 
     # `--grpc-port` is only accepted for the Rust frontend, which inherits this
@@ -39,7 +45,9 @@ def _run_rust_frontend(
     grpc_sock = None
     if args.grpc_port is not None:
         grpc_host = "127.0.0.1" if args.uds else (args.host or "")
-        grpc_sock = create_server_socket((grpc_host, args.grpc_port), reuse_port=False)
+        _, grpc_sock = setup_listen_address(
+            host=grpc_host, port=args.grpc_port, reuse_port=False
+        )
         exit_stack.callback(cleanup_listen_socket, grpc_sock)
 
     executor_class = Executor.get_class(vllm_config)
@@ -50,20 +58,17 @@ def _run_rust_frontend(
     assert parallel_config.local_engines_only or dp_rank == 0
 
     zmq_listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers)
+    addresses = zmq_listeners.addresses
 
     # Nested ExitStack so we can control exactly when
-    # `launch_core_engines.__exit__` runs: it must fire before
-    # `wait_for_completion_or_failure` because the CM performs engine-startup
-    # checks against `watched_frontend_processes` on exit. Attaching it
-    # directly to the outer stack would defer that check until after wait,
-    # changing error-detection timing.
+    # `launch_core_engines.__exit__` runs.
     engine_stack = exit_stack.enter_context(contextlib.ExitStack())
     engine_launch = engine_stack.enter_context(
         launch_core_engines(
             vllm_config,
             executor_class,
             log_stats,
-            zmq_listeners.addresses,
+            addresses,
         )
     )
 
@@ -95,23 +100,16 @@ def _run_rust_frontend(
     engine_launch.watched_frontend_processes = api_server_manager.processes
 
     # Equivalent to leaving `with launch_core_engines(...)` in the original
-    # code. `engine_stack` is still attached to the outer ExitStack, so if
-    # anything above raised, it would have been cleaned up there; close() is
-    # idempotent.
+    # code.
     engine_stack.close()
 
     def _coord_shutdown() -> None:
-        if coordinator is not None:
-            coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+        coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
 
     def _engine_shutdown() -> None:
-        if local_engine_manager is not None:
-            local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+        local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
 
     def _api_shutdown() -> None:
-        # Matches `run_multi_api_server`: API servers get the full
-        # `shutdown_timeout`, while engine / coordinator get the remaining
-        # deadline. In practice the delta is a few microseconds.
         timeout = (
             vllm_config.shutdown_timeout if signal_utils.shutdown_requested else None
         )
@@ -120,9 +118,9 @@ def _run_rust_frontend(
     # Register callbacks in reverse of the desired LIFO execution order:
     #   set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
     #   -> grpc_sock cleanup -> sock cleanup
-    if coordinator:
+    if coordinator is not None:
         exit_stack.callback(_coord_shutdown)
-    if local_engine_manager:
+    if local_engine_manager is not None:
         exit_stack.callback(_engine_shutdown)
     exit_stack.callback(_api_shutdown)
 
@@ -134,23 +132,20 @@ def _run_rust_frontend(
 
 
 def run_rust_frontend(args: argparse.Namespace) -> None:
+    assert not args.headless
+
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
     )
-    num_api_servers: int = args.api_server_count
-
-    assert not args.headless
-    assert num_api_servers == 1, (
-        "VLLM_RUST_FRONTEND_PATH does not support api_server_count > 1"
-    )
     assert rust_frontend_path is not None
 
-    # Reset residual signal state from any previous invocation (tests,
-    # embedded use). A stale `shutdown_by` deadline would make
-    # `to_timeout(shutdown_by)` return 0, forcing an immediate kill.
-    signal_utils.shutdown_requested = False
-    signal_utils.shutdown_by = None
-    signal_utils.timeout = None
+    num_api_servers: int = args.api_server_count
+    if num_api_servers != 1:
+        logger.warning(
+            "Ignoring --api-server-count=%d when using rust front-end process",
+            args.api_server_count,
+        )
+        num_api_servers = 1
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     propagate_flash_late_interaction(args, engine_args)
@@ -175,8 +170,4 @@ def run_rust_frontend(args: argparse.Namespace) -> None:
             logger.exception("[shutdown] API server: unexpected error during shutdown")
             raise
         finally:
-            # Register in `finally` so `set_timeout` also runs for the signal
-            # path (`SystemExit` raised by `set_signal_handler`, which bypasses
-            # both `except` clauses). Without it, graceful shutdown would fall
-            # back to the default 5s timeout instead of `shutdown_timeout`.
             exit_stack.callback(set_timeout, vllm_config)
