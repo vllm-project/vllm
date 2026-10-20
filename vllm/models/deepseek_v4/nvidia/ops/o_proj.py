@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_and_maybe_dequant_weights,
@@ -16,6 +17,8 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+
+logger = init_logger(__name__)
 
 
 def compute_fp8_einsum_recipe(
@@ -119,6 +122,11 @@ def maybe_dequant_wo_a(wo_a: nn.Module) -> None:
         weight.dtype == torch.float8_e4m3fn and weight.dim() == 3
     ):
         return
+    logger.warning_once(
+        "DeepSeek-V4 wo_a is dequantized to BF16 because the selected linear "
+        "backend does not keep the DeepGEMM FP8 layout. This uses more memory "
+        "and turns off RopeQuant on SM100."
+    )
     weight = get_and_maybe_dequant_weights(wo_a, out_dtype=torch.bfloat16)
     replace_parameter(wo_a, "weight", weight.contiguous())
 
