@@ -1,12 +1,40 @@
 # Validation evidence index
 
 测试方法与下一轮设计见[testing.md](../../../docs/programmable-kvc/testing.md)。
-当前结论、逐轮数据及未完成验收见[本轮实验报告](../../../docs/programmable-kvc/rollout-report-2026-10-18.md)，任务状态见[tasks.md](tasks.md)。
+当前结论、逐轮数据及未完成验收见[本轮实验报告](../../../docs/programmable-kvc/rollout-report-2026-10-19.md)，任务状态见[tasks.md](tasks.md)。
 本文只定位证据，不重复实验叙述。
 下文的 `results/` 文件均为本地实验数据，该目录已加入 `.gitignore`，Git 不跟踪这些原始文件。
 版本库保留测试方法和结果报告；读取逐请求证据需要对应的本地数据或实验归档。
 
 ## Current local round
+
+原始数据位于[rollout-2026-10-19](../../../benchmarks/programmable_kv_cache/results/rollout-2026-10-19/)。
+采用 GPU 0/3、Qwen3.8-27B BF16 TP=2、利用率 0.5、每卡实际 KV 12.12 GiB，未覆盖 KV 字节预算。
+最终正常配置的三轮压力中位吞吐相对 native 高 68.0%、相对 quota 高 16.6%；
+两轮容量充足计时接近 native，零搬运，命中 token 数相同。不能据小差值宣称通用零开销。
+
+| 数据 | 范围 |
+| --- | --- |
+| `final-audit.json`、`final-pressure-comparison.json`、`final-fit-comparison.json` | 所选 9 个压力与 6 个容量回放的 SHA256、源码、等工作量、条件、逐轮指标和资源验证 |
+| `native-v3-{0,1,2}/`、`quota-v3-{0,1,2}/` | 无 profiler 的三轮基线/配额，256 条轨迹、920 次调用、60,136 输出 token |
+| `cooperative-v4-probe/`、`cooperative-v4-verify-1/`、`cooperative-final-normal/policy-0.json.gz` | 正常暂停/传输成本、占用阈值 0.8、按准入准备，所选三轮协同策略 |
+| `fit-native-v3/`、`fit-quota-v3/`、`fit-cooperative-v4/` | 各两轮容量充足负载，4 个家族、256 条轨迹、864 次调用、66,160 输出 token，命中相同且无抢占 |
+| `cooperative-final-normal/policy-live.json.gz`、`live-process-tree*.json`、`live-gpu-audit.json` | 真实 verl 工具循环 256 条轨迹、923 次调用、60,231 token；256 次查询/528 次算术调用，reward 248/256；在线窗口两卡各 216 个样本，无非实验进程，清理完成 |
+| `v3-cpu.log`、`v3-gpu.log` | 扩展 CPU 1,993 项通过；实际 GPU 搬运 56 项通过、1 项 ROCm 专用检查跳过 |
+| `v4-related-final.log`、`v4-mypy-final.log`、`v4-hooks-final.log` | 采用的正常决策与两阶段观察：671 项完整相关检查、Python 3.12 全量类型、默认 hooks 通过 |
+| `restored-code-identity.json`、`v4-baseline-identity.json`、`final-normal-validation-ready.json` | 恢复后 29 个运行文件逐字节匹配 B5；quota/retention 类及未变的基线执行路径核对，源码/命令冻结 |
+| `pressure-only-v2-0/`、`native-repeat/` | 控制超时/记录残留失败和 GPU 干扰失败，原始失败保留，排除于性能采用数据 |
+| `pressure-only-v3-{0,1,2}/`、`fit-cooperative-v3/` | 强制压力消融：压力组快，容量充足组 483–503 s 的有效退化保留，未混入正常策略中位数 |
+| `fit-cooperative-v4-p70/`、`cooperative-v4-p70-probe/` | 阈值 0.7 的探索性结果，单轮小差值不作稳定优势结论，最终仍用 0.8 |
+| `fit-cooperative-v5-copy/`、`cooperative-v5-copy-probe/` | COPY 备份候选及负面/不确定结果；源提交 `2d8899bfd6`，选项已撤回，现有公共 COPY 原语保留 |
+| `v3-negative.runs.json`、`v4-repeat-live.runs.json` | 实现切换时在模型加载阶段取消的服务，没有产生计时结果，不计作通过 |
+
+实际循环是功能和自动 reward 验证，不与固定回放直接计算吞吐提升。
+有 12 个生成请求达到长度上限，一条算术工具参数格式警告；本轮未逐 token 比较输出质量。
+idle/noop、oracle/预测误差系统矩阵及其他模型/硬件、部分故障/参数更新重验保持未完成。
+本轮自建模型、Store、采样、观察进程均已结束，GPU 0/3 无本轮计算进程。
+
+## October 18 historical round
 
 原始数据位于[rollout-2026-10-18](../../../benchmarks/programmable_kv_cache/results/rollout-2026-10-18/)。
 只使用本地 GPU 0、3；主要性能场景为利用率 0.5，无固定 KV 字节覆盖。

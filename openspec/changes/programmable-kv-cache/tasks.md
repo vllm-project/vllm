@@ -124,10 +124,11 @@ Resumed on October 18 at the user's request. The October 12 stop boundary no lon
 On October 19 the user requested incremental tested commits and prioritized speed over detailed output checks.
 Completed `quota-wait120-aging30` and stopped all experiment launchers at the user's requested boundary.
 Ordinary native/quota 30/1/quota 120/30 runs take 1,994.30/1,898.86/1,369.48 seconds at utilization 0.5 and equal work; the latter exceeds the 25% target in this single run.
-Repeated cache-fit/pressure, remaining ablations and external models stay incomplete; detailed output validation was deferred by the user.
+At that stop, repeated cache-fit/pressure, remaining ablations and external models were incomplete; detailed output validation was deferred by the user.
+Section 12 records the later completed pressure/fit repetitions and real tool loop; broader ablations and external coverage remain incomplete.
 
 - [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
-- [ ] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
+- [x] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
 - [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
 - [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
 - [x] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.
@@ -148,5 +149,16 @@ performance. The previous requested stop boundary is superseded for this work.
 - [x] 12.11 Check complete preparation capacity before starting; preserve admission fairness and skip automatic resume work after admission without suppressing explicit importance.
 - [x] 12.12 Amortize short-pause movement against current KV occupancy and sustained admission backlog; preserve ample-capacity reuse and retain forced-pressure regression evidence.
 - [x] 12.13 Evaluate GPU-source COPY backups against the validated MOVE policy and retain the measured selection without unused policy options.
-- [ ] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
-- [ ] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.
+- [x] 12.4 Run repeated native/quota/cooperative full-work comparisons and relevant negative cases, recording workload fingerprints and per-family tails.
+- [x] 12.5 Run relevant regression and lint checks, document measured limits, and commit complete tested changes locally.
+
+Completed this optimization round with selected normal-cost MOVE settings: pressure
+native/quota/cooperative medians 1997.26/1386.21/1188.53 seconds (3 runs each),
+fit medians 170.87/168.97/169.61 seconds (2 runs each), utilization 0.5 throughout.
+All selected fixed-work fingerprints and GPU audits passed. The actual 256-rollout
+verl loop completed 923 calls and 60,231 tokens with reward 248/256, clean control
+state and a separate live GPU audit. Source restoration matched all 29 runtime
+file hashes to tested B5 code. No experiment queue remains active.
+See the [October 19 report](../../../docs/programmable-kvc/rollout-report-2026-10-19.md).
+Tasks 10.5/10.6 and 11.3/11.4 remain open for broader ablations, forecast sensitivity,
+fault/model checks and external coverage, not merely the completed round here.

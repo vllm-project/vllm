@@ -90,6 +90,8 @@ PYTHONPATH=../verl \
 短工具使用排队窗口时，要求实际占用达到配置阈值，且已观察等待超过搬运成本。
 选中对应请求、整组容量足够时准备前缀。
 实测收益与容量范围见[2026-10-19 报告](../../docs/programmable-kvc/rollout-report-2026-10-19.md)。
+该配置三轮压力中位吞吐相对 native 高 68.0%、相对 quota 高 16.6%；
+两轮容量充足计时接近 native，零搬运，命中数相同。范围与未覆盖项在报告中分列。
 
 ```bash
 .venv/bin/python -m benchmarks.programmable_kv_cache.run_rollout_matrix \
