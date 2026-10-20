@@ -301,6 +301,9 @@ def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
         )
 
     producer.worker._get_built_session = get_built_session
+    # Sessions are stubbed above: nothing to fetch or build first.
+    producer.worker._prepare_transfer_to = lambda engine_id: None
+    producer.worker._transfer_post_lock = threading.RLock()
     producer.wrapper = SimpleNamespace(
         done_remote_allocate_req_dict={},
         lock=threading.Lock(),
@@ -320,6 +323,7 @@ def _consumer_wrapper() -> MoRIIOWrapper:
     wrapper.done_write_cache_req_ids = []
     wrapper.failed_write_cache_req_ids = []
     wrapper._write_done_counts = {}
+    wrapper._failed_writer_ids = set()
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 

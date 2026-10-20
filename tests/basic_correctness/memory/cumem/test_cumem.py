@@ -481,3 +481,39 @@ def test_cudagraph_pool_sleep(level):
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
+
+
+@pytest.mark.parametrize("offload", [True, False], ids=["offload", "discard"])
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only ROCm splits allocations"
+)
+def test_single_allocation_survives_sleep(offload):
+    """A single allocation (MoRIIO's KV cache) stays one chunk across sleep and
+    wake-up. dmabuf re-export and VRAM release need the hardware tests."""
+    allocator = get_mem_allocator_instance()
+    # Larger than ROCm's default 256 MiB chunks.
+    numel = 600 * 1024 * 1024 // 4
+    with allocator.use_memory_pool("kv_cache", single_allocation=True):
+        kv = torch.full((numel,), 3.0, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("weights"):
+        weights = torch.full((numel,), 2.0, device=DEVICE_TYPE)
+
+    def chunks(tag: str) -> list:
+        (data,) = [d for d in allocator.pointer_to_data.values() if d.tag == tag]
+        return data.handle[3]
+
+    assert len(chunks("kv_cache")) == 1
+    assert len(chunks("weights")) > 1
+    single = chunks("kv_cache")
+
+    allocator.sleep(offload_tags=("weights", "kv_cache") if offload else "weights")
+    assert mapped_usage(allocator) == 0
+    allocator.wake_up()
+
+    assert chunks("kv_cache") == single
+    assert torch.equal(weights, torch.full_like(weights, 2.0))
+    if offload:
+        assert torch.equal(kv, torch.full_like(kv, 3.0))
+    kv.fill_(4.0)
+    assert torch.equal(kv + weights, torch.full_like(kv, 6.0))

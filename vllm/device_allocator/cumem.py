@@ -35,12 +35,19 @@ logger = init_logger(__name__)
 cumem_available = False
 libcudart: Any = None
 try:
+    import vllm.cumem_allocator as _cumem_ext
     from vllm.cumem_allocator import (
         init_module,
         python_create_and_map,
         python_unmap_and_release,
     )
     from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+    # Missing from an extension built before it was added (e.g.
+    # VLLM_USE_PRECOMPILED with an older wheel).
+    python_set_single_allocation = getattr(
+        _cumem_ext, "python_set_single_allocation", None
+    )
 
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()
@@ -49,8 +56,24 @@ except ModuleNotFoundError:
     # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
+    python_set_single_allocation = None
     python_unmap_and_release = None
     lib_name = None
+
+
+def _set_single_allocation(enabled: bool) -> bool:
+    """Back new allocations by one physical allocation each (ROCm); returns
+    the previous setting."""
+    if python_set_single_allocation is None:
+        if enabled:
+            # A chunked KV cache cannot be freed on sleep once registered for
+            # RDMA, so do not fall back to it.
+            raise RuntimeError(
+                "The cumem_allocator extension predates single allocations; "
+                "rebuild vLLM's extensions to register the KV cache for RDMA."
+            )
+        return False
+    return python_set_single_allocation(enabled)
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -364,7 +387,7 @@ class CuMemAllocator:
                     torch.accelerator.synchronize()
 
     @contextmanager
-    def use_memory_pool(self, tag: str | None = None):
+    def use_memory_pool(self, tag: str | None = None, single_allocation: bool = False):
         """A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
@@ -372,6 +395,8 @@ class CuMemAllocator:
         Args:
             tag: The tag of the memory allocation. If None, the default tag
                 will be used.
+            single_allocation: Back each allocation by one physical allocation
+                (not ROCm's chunks), registrable as one dmabuf region by a NIC.
 
         """
         if tag is None:
@@ -388,6 +413,9 @@ class CuMemAllocator:
         # is handed, so a bare "expandable_segments:False" would also drop
         # max_split_size_mb, garbage_collection_threshold and
         # roundup_power2_divisions for the rest of the process.
+
+        # First, since it may refuse while nothing has changed yet.
+        prev_single = _set_single_allocation(single_allocation)
         prev_conf = current_alloc_conf()
         expandable_was_enabled = conf_flag_enabled(prev_conf, EXPANDABLE_SEGMENTS)
         if expandable_was_enabled:
@@ -423,6 +451,7 @@ class CuMemAllocator:
                 # TODO: ask for help from PyTorch team to expose this method.
                 self._trim(data[0])
         finally:
+            _set_single_allocation(prev_single)
             self.current_tag = old_tag
             if expandable_was_enabled:
                 set_alloc_conf(prev_conf)

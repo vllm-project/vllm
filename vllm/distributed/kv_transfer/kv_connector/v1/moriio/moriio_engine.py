@@ -3,6 +3,7 @@
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from dataclasses import dataclass, field
 from math import ceil
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
@@ -83,6 +84,20 @@ def _get_write_geometry_key(kv_cache: torch.Tensor) -> WriteGeometryKey:
     return (tuple(kv_cache.shape), tuple(kv_cache.stride()), kv_cache.dtype)
 
 
+# Length at which MoRIIOWrapper starts pruning finished transfers.
+_MIN_TRACK_PRUNE_AT = 1024
+
+
+@dataclass
+class _FailingWrite:
+    """A failed WRITE transfer whose posted writes have not all settled."""
+
+    task: WriteTask
+    posted: list[Any]
+    since: float = field(default_factory=time.monotonic)
+    warned: bool = False
+
+
 class MoRIIOWriter:
     """Handles write operations for KV cache transfers.
 
@@ -110,6 +125,13 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._defer_timeout = worker.moriio_config.defer_timeout
+        self._transfer_timeout = worker.moriio_config.transfer_timeout
+        # Under _write_state_lock: transfers that post no more writes (stopped by
+        # the consumer or failed), and each one's first task, to answer a stop.
+        self._closed_writes: set[TransferId] = set()
+        self._first_task: dict[TransferId, WriteTask] = {}
+        # Writer thread: failed transfers whose posted writes may still land.
+        self._failing_writes: dict[TransferId, _FailingWrite] = {}
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -157,6 +179,7 @@ class MoRIIOWriter:
                 return False
             self._scheduled_layers[task.transfer_id].add(task.layer_name)
             self._scheduled_writes[task.transfer_id] += 1
+            self._first_task.setdefault(task.transfer_id, task)
         self._write_task_q.put(task)
         return True
 
@@ -193,6 +216,8 @@ class MoRIIOWriter:
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
         while True:
+            self._process_stop_requests()
+            self._process_failing_writes()
             # Process deferred tasks first
             self._process_deferred_tasks()
 
@@ -203,6 +228,9 @@ class MoRIIOWriter:
                 continue
 
             if self._is_transfer_terminal(task.transfer_id):
+                continue
+            if task.transfer_id in self._closed_writes:
+                self._fail_write(task)
                 continue
 
             # Check if remote blocks are ready
@@ -223,7 +251,7 @@ class MoRIIOWriter:
                     "Write task failed for request %s, marking done",
                     task.request_id,
                 )
-                self._mark_request_done(task.transfer_id)
+                self._fail_write(task)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -237,7 +265,9 @@ class MoRIIOWriter:
         for task in self._deferred_tasks:
             if self._is_transfer_terminal(task.transfer_id):
                 continue
-            if self._is_remote_ready(task):
+            if task.transfer_id in self._closed_writes:
+                self._fail_write(task)
+            elif self._is_remote_ready(task):
                 try:
                     self._execute_write_task(task)
                 except Exception:
@@ -245,7 +275,7 @@ class MoRIIOWriter:
                         "Deferred write task failed for request %s, marking done",
                         task.request_id,
                     )
-                    self._mark_request_done(task.transfer_id)
+                    self._fail_write(task)
             elif (
                 now - task.enqueue_time > defer_timeout
                 and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
@@ -264,28 +294,93 @@ class MoRIIOWriter:
             task.request_id,
             age,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        self._send_write_failed(task)
+
+    def _process_stop_requests(self) -> None:
+        """Close the transfers whose consumer gave up on them (its
+        recv_abort_timeout passed); each is failed once its writes settle."""
+        for transfer_id in self.worker.moriio_wrapper.pop_stop_write_req_ids():
+            if self._is_transfer_terminal(transfer_id):
+                continue
+            logger.error(
+                "MoRIIO consumer stopped WRITE transfer %s; posting no more writes",
+                transfer_id,
+            )
+            with self._write_state_lock:
+                self._closed_writes.add(transfer_id)
+                task = self._first_task.get(transfer_id)
+            # Without a task yet, the transfer's first task fails on arrival.
+            if task is not None:
+                self._fail_write(task)
+
+    def _fail_write(self, task: WriteTask) -> None:
+        """Post no more writes for the transfer. It is released and reported
+        failed once its posted writes settle (_process_failing_writes)."""
+        transfer_id = task.transfer_id
+        request_info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            transfer_id
+        )
+        with self._write_state_lock:
+            self._closed_writes.add(transfer_id)
+            if transfer_id in self._failing_writes:
+                return
+            if request_info is not None and request_info.completion_notified:
+                # _finalize_if_complete is waiting on another thread; it reports.
+                return
+            posted = list(request_info.transfer_statuses) if request_info else []
+            self._failing_writes[transfer_id] = _FailingWrite(task, posted)
+        self._process_failing_writes()
+
+    def _process_failing_writes(self) -> None:
+        """Release failed transfers once their posted writes settle: until then
+        the NIC may still read the source blocks and write the consumer's."""
+        now = time.monotonic()
+        for transfer_id, failing in list(self._failing_writes.items()):
+            failing.posted = [
+                s for s in failing.posted if not (s.Succeeded() or s.Failed())
+            ]
+            if failing.posted:
+                if not failing.warned and now - failing.since > self._transfer_timeout:
+                    failing.warned = True
+                    logger.error(
+                        "MoRIIO writes of failed transfer %s still pending after "
+                        "%.0fs; holding its blocks until they settle",
+                        transfer_id,
+                        self._transfer_timeout,
+                    )
+                continue
+            del self._failing_writes[transfer_id]
+            self._mark_request_done(transfer_id)
+            self._send_write_failed(failing.task)
+
+    def _send_write_failed(self, task: WriteTask) -> None:
+        """Tell the consumer the load failed. The owning decode DP rank may be
+        unknown, so tell every rank; the others drop it."""
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
-            for remote_ip, remote_port in self._resolve_notify_endpoints(
+            for (remote_ip, remote_port), num_writers in self._resolve_notify_endpoints(
                 task, decode_dp_rank
-            ):
+            ).items():
                 try:
                     self.worker.moriio_wrapper.send_notify(
                         task.transfer_id,
                         remote_ip,
                         remote_port,
                         message_type="write_failed",
+                        message_fields=(
+                            {"num_writers": num_writers} if num_writers != 1 else None
+                        ),
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to notify decode DP rank %d that transfer %s timed out",
+                        "Failed to notify decode DP rank %d that transfer %s failed",
                         decode_dp_rank,
                         task.transfer_id,
                     )
 
     def _clear_transfer_state(self, transfer_id: TransferId) -> None:
         with self._write_state_lock:
+            self._closed_writes.discard(transfer_id)
+            self._first_task.pop(transfer_id, None)
             self._scheduled_writes.pop(transfer_id, None)
             self._scheduled_layers.pop(transfer_id, None)
             self._sealed_writes.pop(transfer_id, None)
@@ -381,36 +476,46 @@ class MoRIIOWriter:
         task.event.synchronize()
 
         is_mamba = self.worker._is_mamba_layer(task.layer_name)
-        transfer_statuses: list[Any] = []
+        targets: list[tuple[WriteTarget | None, str]] = []
         for target in self._write_targets(task):
             if target is not None and not is_mamba and not target.num_heads:
                 # Another producer rank writes this attention copy.
                 continue
-            target_engine_id = self._target_engine_id(
-                task, request_info.decode_dp_rank, target
-            )
-            # Get or create sessions
-            sessions, remote_moriio_meta = self.worker._get_built_session(
-                target_engine_id
-            )
-            if is_mamba:
-                plans = self._prepare_mamba_transfer_plans(
-                    task, request_info, target, remote_moriio_meta
+            targets.append(
+                (
+                    target,
+                    self._target_engine_id(task, request_info.decode_dp_rank, target),
                 )
-            else:
-                plans = [
-                    self._prepare_transfer_plan(
-                        task,
-                        request_info,
-                        remote_moriio_meta,
-                        remote_engine_id=target_engine_id,
-                        target=target,
+            )
+        for _, target_engine_id in targets:
+            self.worker._prepare_transfer_to(target_engine_id)
+        transfer_statuses: list[Any] = []
+        try:
+            with self.worker._transfer_post_lock:
+                for target, target_engine_id in targets:
+                    sessions, remote_moriio_meta = self.worker._get_built_session(
+                        target_engine_id
                     )
-                ]
-            for plan in plans:
-                transfer_statuses.extend(self._do_layer_write(plan, sessions))
-        with self._write_state_lock:
-            request_info.transfer_statuses.extend(transfer_statuses)
+                    if is_mamba:
+                        plans = self._prepare_mamba_transfer_plans(
+                            task, request_info, target, remote_moriio_meta
+                        )
+                    else:
+                        plans = [
+                            self._prepare_transfer_plan(
+                                task,
+                                request_info,
+                                remote_moriio_meta,
+                                remote_engine_id=target_engine_id,
+                                target=target,
+                            )
+                        ]
+                    for plan in plans:
+                        transfer_statuses.extend(self._do_layer_write(plan, sessions))
+        finally:
+            # Keep what was posted even on failure, so _fail_write waits for it.
+            with self._write_state_lock:
+                request_info.transfer_statuses.extend(transfer_statuses)
 
         # Finalize if all layers complete
         self._mark_write_done(task.transfer_id, request_info)
@@ -600,7 +705,7 @@ class MoRIIOWriter:
             expected = request_info.writes_expected
             if expected is None or request_info.writes_done < expected:
                 return
-            if request_info.completion_notified:
+            if request_info.completion_notified or transfer_id in self._closed_writes:
                 return
             request_id = request_info.completion_request_id
             if request_id is None:
@@ -619,7 +724,15 @@ class MoRIIOWriter:
             request_info.completion_notified = True
 
         # Wait for this request's transfers to complete.
-        self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
+        try:
+            self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
+        except Exception:
+            # The wait stops at the first failure or timeout while other writes
+            # may still land: hand them all to _fail_write.
+            with self._write_state_lock:
+                request_info.transfer_statuses.extend(transfer_statuses)
+                request_info.completion_notified = False
+            raise
 
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
@@ -743,6 +856,9 @@ class MoRIIOWrapper:
         self.local_memory_registered = False
         self.local_memory_metadata = None
         self.transfer_status: list[Any] = []
+        # Prune settled transfers at this length; it doubles with the live ones
+        # so pruning stays amortized.
+        self._track_prune_at = _MIN_TRACK_PRUNE_AT
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
         self.lock = threading.Lock()
@@ -750,8 +866,12 @@ class MoRIIOWrapper:
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
-        # write_done messages received per transfer whose writers are not all in.
+        # Producer: transfers the consumer asked to stop writing.
+        self.stop_write_req_ids: set[TransferId] = set()
+        # Writer replies (done or failed) per transfer whose writers are not all
+        # in, and those with a failed writer: blocks are freed once all reply.
         self._write_done_counts: dict[TransferId, int] = {}
+        self._failed_writer_ids: set[TransferId] = set()
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -847,7 +967,7 @@ class MoRIIOWrapper:
             self.moriio_engine.allocate_transfer_uid(),
         )
 
-        return transfer_status
+        return self._track(transfer_status)
 
     def write_remote_data(
         self, transfer_size_byte, local_offset=0, remote_offset=0, session=None
@@ -859,7 +979,7 @@ class MoRIIOWrapper:
         transfer_status = session.batch_write(
             local_offset, remote_offset, transfer_size_byte, write_uid
         )
-        return transfer_status
+        return self._track(transfer_status)
 
     def write_remote_data_single(
         self, transfer_size_byte, local_offset=0, remote_offset=0, sess_idx=0
@@ -872,6 +992,19 @@ class MoRIIOWrapper:
             transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid(),
         )
+        return self._track(transfer_status)
+
+    def _track(self, transfer_status):
+        """Track a posted transfer until it settles, for drain_transfers()."""
+        with self.lock:
+            if len(self.transfer_status) >= self._track_prune_at:
+                self.transfer_status = [
+                    s for s in self.transfer_status if not (s.Succeeded() or s.Failed())
+                ]
+                self._track_prune_at = max(
+                    _MIN_TRACK_PRUNE_AT, 2 * len(self.transfer_status)
+                )
+            self.transfer_status.append(transfer_status)
         return transfer_status
 
     def poll_transfer_batch(self, transfer_statuses: list[Any]) -> TransferBatchState:
@@ -895,9 +1028,9 @@ class MoRIIOWrapper:
 
     def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
         if transfer_statuses is None:
+            # A copy: transfer_status tracks transfers for drain_transfers.
             with self.lock:
                 transfers_to_wait = self.transfer_status[:]
-                self.transfer_status.clear()
         else:
             transfers_to_wait = list(transfer_statuses)
 
@@ -926,6 +1059,32 @@ class MoRIIOWrapper:
             raise TransferError(
                 f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
             )
+
+    def drain_transfers(self, timeout: float) -> int:
+        """Wait up to ``timeout`` seconds for every posted transfer to settle;
+        returns how many are still pending, which stay tracked."""
+        with self.lock:
+            pending = self.transfer_status[:]
+        pending = MoRIIOWrapper.wait_settled(pending, timeout)
+        with self.lock:
+            self.transfer_status = [
+                s for s in self.transfer_status if not (s.Succeeded() or s.Failed())
+            ]
+        return len(pending)
+
+    @staticmethod
+    def wait_settled(transfer_statuses: list[Any], timeout: float) -> list[Any]:
+        """Wait up to ``timeout`` seconds for the transfers to complete or fail;
+        returns the ones still pending."""
+        deadline = time.monotonic() + timeout
+        while True:
+            pending = [
+                s for s in transfer_statuses if not (s.Succeeded() or s.Failed())
+            ]
+            if not pending or time.monotonic() > deadline:
+                return pending
+            transfer_statuses = pending
+            time.sleep(0.001)
 
     def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
         """Fallback for mori builds without the batched wait.
@@ -1041,6 +1200,8 @@ class MoRIIOWrapper:
             self._handle_write_failed_message(data)
         elif message_type == "release":
             self._handle_release_message(data)
+        elif message_type == "stop_write":
+            self._handle_stop_write_message(data)
         else:
             raise MoRIIOError(f"Unhandled structured message type: {message_type}")
 
@@ -1070,26 +1231,46 @@ class MoRIIOWrapper:
                 decode_dp_rank=decode_dp_rank,
             )
 
+    def _handle_stop_write_message(self, data: dict):
+        assert get_role() == ROLE.PRODUCER, "Only prefill can get stop messages"
+        transfer_id = data["transfer_id"]
+        with self.lock:
+            if not self._is_transfer_terminal_locked(transfer_id):
+                self.stop_write_req_ids.add(transfer_id)
+
+    def pop_stop_write_req_ids(self) -> set[TransferId]:
+        with self.lock:
+            stop_write, self.stop_write_req_ids = self.stop_write_req_ids, set()
+        return stop_write
+
     def _handle_write_done_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, (
             "Only decode can get WRITE completion messages"
         )
+        self._record_writer_reply(data, failed=False)
+
+    def _handle_write_failed_message(self, data: dict):
+        assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
+        self._record_writer_reply(data, failed=True)
+
+    def _record_writer_reply(self, data: dict, failed: bool) -> None:
+        """Report a transfer once every producer rank writing into it replied:
+        failed if any failed, since until then another writer may still land."""
         transfer_id = data["transfer_id"]
         num_writers = int(data.get("num_writers", 1))
         with self.lock:
+            if failed:
+                self._failed_writer_ids.add(transfer_id)
             received = self._write_done_counts.get(transfer_id, 0) + 1
             if received < num_writers:
                 self._write_done_counts[transfer_id] = received
                 return
             self._write_done_counts.pop(transfer_id, None)
-            self.done_write_cache_req_ids.append(transfer_id)
-
-    def _handle_write_failed_message(self, data: dict):
-        assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
-        transfer_id = data["transfer_id"]
-        with self.lock:
-            self._write_done_counts.pop(transfer_id, None)
-            self.failed_write_cache_req_ids.append(transfer_id)
+            if transfer_id in self._failed_writer_ids:
+                self._failed_writer_ids.discard(transfer_id)
+                self.failed_write_cache_req_ids.append(transfer_id)
+            else:
+                self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, (

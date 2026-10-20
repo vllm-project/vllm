@@ -187,4 +187,5 @@ def test_native_wait_drains_only_the_unscoped_status_snapshot():
     wrapper.transfer_status.extend(statuses)
     wrapper.waiting_for_transfer_complete()
     engine.wait_all.assert_called_once_with(statuses, timeout_ms=50)
-    assert wrapper.transfer_status == []
+    # Still tracked for drain_transfers until each one settles.
+    assert wrapper.transfer_status == statuses

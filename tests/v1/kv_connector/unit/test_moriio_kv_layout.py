@@ -99,6 +99,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
     wrapper._write_done_counts = {}
+    wrapper._failed_writer_ids = set()
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
 
@@ -457,6 +458,8 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         tp_rank=0,
         get_engine_name_with_dp=lambda name, rank: name,
         _get_built_session=lambda name: (["conv-session", "ssm-session"], None),
+        _prepare_transfer_to=lambda name: None,
+        _transfer_post_lock=threading.RLock(),
         _is_mamba_layer=lambda name: True,
         _mamba_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],

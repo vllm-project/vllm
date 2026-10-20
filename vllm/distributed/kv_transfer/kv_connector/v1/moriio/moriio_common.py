@@ -216,6 +216,35 @@ class HandshakeError(MoRIIOError):
     pass
 
 
+def get_recv_abort_timeout(extra_config: dict[str, Any]) -> float:
+    legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+    if legacy_recv_abort_timeout is not None:
+        logger.warning_once(
+            "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+            "deprecated. Set 'recv_abort_timeout' inside "
+            "kv_transfer_config.kv_connector_extra_config instead."
+        )
+    return _positive_finite_timeout(
+        "kv_connector_extra_config.recv_abort_timeout",
+        extra_config.get(
+            "recv_abort_timeout",
+            legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
+        ),
+    )
+
+
+class HandshakeTimeoutError(HandshakeError):
+    """Raised when a peer does not answer a handshake in time."""
+
+    pass
+
+
+class PeerUnavailableError(MoRIIOError):
+    """Raised when a peer's KV cache cannot be reached, e.g. it is asleep."""
+
+    pass
+
+
 class TransferError(MoRIIOError):
     """Exception raised when transfer fails."""
 
@@ -330,7 +359,9 @@ class MoRIIOConfig:
         # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
         #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
-        #                     completion never arrived is aborted (sec).
+        #                     completion never arrived is aborted (sec). In
+        #                     WRITE mode with sleep mode, the consumer then asks
+        #                     the producer to stop, and fails the load on reply.
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -372,20 +403,7 @@ class MoRIIOConfig:
             "kv_connector_extra_config.defer_timeout",
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
         )
-        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
-        if legacy_recv_abort_timeout is not None:
-            logger.warning_once(
-                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
-                "deprecated. Set 'recv_abort_timeout' inside "
-                "kv_transfer_config.kv_connector_extra_config instead."
-            )
-        recv_abort_timeout = _positive_finite_timeout(
-            "kv_connector_extra_config.recv_abort_timeout",
-            extra_config.get(
-                "recv_abort_timeout",
-                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
-            ),
-        )
+        recv_abort_timeout = get_recv_abort_timeout(extra_config)
 
         return cls(
             local_ip=resolve_host_ip(extra_config),
@@ -420,6 +438,13 @@ class MoRIIOConstants:
     # ZMQ message types
     GET_META_MSG = b"get_meta_msg"
     POP_DONE_RECV = b"pop_done_recv"
+    # Sent to peers that fetched our metadata before deregistering it; a peer
+    # acks once it dropped the metadata and drained its transfers to us.
+    INVALIDATE_MSG = b"invalidate_msg"
+    INVALIDATE_ACK = b"invalidate_ack"
+    INVALIDATE_NACK = b"invalidate_nack"
+    # Handshake reply in place of the metadata while the KV cache is unregistered.
+    KV_UNAVAILABLE = b"kv_unavailable"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
     TRANSFER_PREFIX = "tx"

@@ -70,7 +70,12 @@ def _fake_worker(
     )
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
-    worker = SimpleNamespace(moriio_wrapper=wrapper, tp_rank=tp_rank)
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper,
+        tp_rank=tp_rank,
+        _prepare_transfer_to=lambda engine_id: None,
+        _transfer_post_lock=threading.RLock(),
+    )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
     return worker
@@ -140,6 +145,7 @@ def _real_wrapper() -> MoRIIOWrapper:
     wrapper.done_remote_allocate_req_dict = {}
     wrapper.done_write_cache_req_ids = []
     wrapper._write_done_counts = {}
+    wrapper._failed_writer_ids = set()
     wrapper.failed_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
     return wrapper
@@ -542,7 +548,7 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ran
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
+    wrapper.send_notify = lambda tid, ip, port, message_type, **_: sent.append(
         (ip, port, message_type)
     )
     writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
@@ -578,7 +584,7 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
 def test_deferred_write_timeout_notifies_every_fanout_target():
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
-    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
+    wrapper.send_notify = lambda tid, ip, port, message_type, **_: sent.append(
         (ip, port, message_type)
     )
     writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))

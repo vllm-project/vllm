@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import threading
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -58,6 +59,10 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
         self._is_hma_required = False
+        self._awaiting_write: dict = {}
+        self._stop_write_after = None
+        self._write_stop_due: dict = {}
+        self._unmap_after_recv: dict = {}
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
@@ -149,6 +154,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
+        model_config=SimpleNamespace(enable_sleep_mode=False),
         cache_config=SimpleNamespace(
             block_size=block_size,
             mamba_cache_mode=mamba_cache_mode,
@@ -941,13 +947,17 @@ def test_write_producer_queues_grouped_attention_blocks():
 
 def test_session_build_rejects_per_layer_region_count_mismatch():
     worker = _FakeWorker(
+        _handshake_lock=threading.RLock(),
+        _kv_released=False,
+        _remote_epoch=0,
+        moriio_config=SimpleNamespace(transfer_timeout=1.0),
         built_write_session={},
         layer_name_to_local_kv_cache_metadata={"kda.0": ["conv", "ssm"]},
         layer_name_to_remote_kv_cache_metadata={"prefill": {"kda.0": ["conv"]}},
     )
 
     with pytest.raises(moriio_common.MoRIIOError, match="registered 1 region"):
-        worker._get_built_session("prefill")
+        worker._prepare_transfer_to("prefill")
 
 
 def test_register_kv_caches_rejects_invalid_hybrid_write_state_layout():
@@ -992,6 +1002,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         dst_num_blocks={},
         block_lens={},
         layer_name_to_local_kv_cache_metadata={},
+        _region_tensors={},
         kv_caches_base_addr={},
         kv_layer_mr_offset={},
         local_kv_cache_size=[],
@@ -1008,6 +1019,7 @@ def _make_register_worker(caches, geoms, *, disable_hma: bool = True):
         tp_rank=0,
         dp_rank=0,
         is_producer=False,
+        model_config=SimpleNamespace(enable_sleep_mode=False),
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x")),
             scheduler_config=SimpleNamespace(
