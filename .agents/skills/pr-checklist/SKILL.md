@@ -181,6 +181,8 @@ Summarize model evaluations and benchmarks in compact tables with the configurat
 
 When fixing bugs or issues, provide a clear root-cause analysis. Explain what caused the problem, how it was identified, and why the chosen solution effectively addresses it. A patch which resolves the issue without a proper root-cause analysis may lead to recurring problems and increased maintenance overhead.
 
+For fixes that involve disaggregated prefill/decode (PD) logic, such as the NIXL connector (`vllm/distributed/kv_transfer/kv_connector/v1/nixl/`), make a best effort to include a minimal example of the flow being changed and/or the initial flow that caused the failure. A short numbered sequence (or diagram) of a request's path across the P and D instances, e.g. scheduler admission, prefill execution, KV transfer registration and write, decode-side read, token generation, lets reviewers trace the root cause and the fix without reconstructing the distributed flow from the diff. Keep the example minimal: only the steps and components involved in the change. See the [disaggregated prefill](../../../docs/features/disagg_prefill.md), [NIXL KV push](../../../docs/design/nixl_kv_push_connector.md), and [NIXL KV cache lease](../../../docs/design/nixl_kv_cache_lease.md) docs for the flows involved.
+
 #### 4.4: Implementation Details
 
 Provide a detailed explanation of the implementation, including design decisions, trade-offs, and any relevant technical details. Highlight any non-obvious choices, tradeoffs, potential limitations, and areas where maintainer attention is required.

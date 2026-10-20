@@ -18,6 +18,7 @@ from transformers.models.embedding_gemma2.processing_embedding_gemma2 import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -36,10 +37,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.models.gemma4 import (
-    Gemma4MLP,
-    gemma4_layer_config,
-)
+from vllm.model_executor.models.gemma4 import Gemma4MLP
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
     Gemma4DummyInputsBuilder,
@@ -244,7 +242,7 @@ class EmbeddingGemma2DecoderLayer(nn.Module):
         prefix: str,
     ):
         super().__init__()
-        lc = gemma4_layer_config(config, idx)
+        lc = config.per_layer_config[idx]
         self.self_attn = EmbeddingGemma2Attention(
             config,
             lc,
@@ -337,6 +335,7 @@ class EmbeddingGemma2TextPLE(nn.Module):
         return self.per_layer_projection_norm(proj)
 
 
+@support_torch_compile
 class EmbeddingGemma2TextModel(nn.Module):
     """Text embedding backbone for EmbeddingGemma2 with bidirectional attention."""
 
@@ -1020,7 +1019,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
