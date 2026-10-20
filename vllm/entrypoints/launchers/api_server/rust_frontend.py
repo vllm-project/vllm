@@ -19,11 +19,11 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.utils import RustFrontendProcessManager, wait_for_completion_or_failure
 
+from ..launcher import setup_server
 from ..utils import signal_utils
 from ..utils.listen import (
     cleanup_listen_socket,
     setup_listen_address,
-    setup_listen_address_from_args,
 )
 from ..utils.signal_utils import set_signal_handler, set_timeout, to_timeout
 
@@ -39,7 +39,7 @@ def _run_rust_frontend(
 ) -> None:
     set_signal_handler()
 
-    listen_address, sock = setup_listen_address_from_args(
+    listen_address, sock = setup_server(
         args,
         reuse_port=num_api_servers > 1,
     )

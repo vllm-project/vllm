@@ -25,15 +25,16 @@ from vllm.entrypoints.common.startup import (
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.tracing import instrument
-from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
-from vllm.utils.system_utils import set_ulimit
+from vllm.utils.network_utils import find_process_using_port
 from vllm.version import __version__ as VLLM_VERSION
 
 from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from .utils.listen import create_server_socket, create_server_unix_socket
+from .utils.listen import (
+    setup_listen_address_from_args,
+)
 
 logger = init_logger(__name__)
 
@@ -339,31 +340,10 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args, *, reuse_port: bool):
+def setup_server(args, *, reuse_port: bool) -> tuple[str, socket.socket]:
     """Validate API server args and create the server socket."""
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
     init_parser_plugin(args)
     validate_api_server_args(args)
-
-    # workaround to make sure that we bind the port before the engine is set up.
-    # This avoids race conditions with ray.
-    # see https://github.com/vllm-project/vllm/issues/8204
-    if args.uds:
-        sock = create_server_unix_socket(args.uds)
-    else:
-        sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr, reuse_port=reuse_port)
-
-    # workaround to avoid footguns where uvicorn drops requests with too
-    # many concurrent requests active
-    set_ulimit()
-
-    if args.uds:
-        listen_address = f"unix:{args.uds}"
-    else:
-        addr, port = sock_addr
-        is_ssl = args.ssl_keyfile and args.ssl_certfile
-        host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or "0.0.0.0"
-        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-    return listen_address, sock
+    return setup_listen_address_from_args(args, reuse_port=reuse_port)

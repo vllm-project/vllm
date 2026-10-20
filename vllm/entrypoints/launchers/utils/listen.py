@@ -6,6 +6,7 @@ import os
 import socket
 
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
+from vllm.utils.system_utils import set_ulimit
 
 
 def create_server_socket(
@@ -42,8 +43,9 @@ def setup_listen_address(
     ssl_certfile: str | None = None,
 ) -> tuple[str, socket.socket]:
     """Bind the serve listen socket and return ``(listen_address, sock)``."""
-    # Bind before the engine starts to avoid race conditions with ray.
-    # See https://github.com/vllm-project/vllm/issues/8204
+    # workaround to make sure that we bind the port before the engine is set up.
+    # This avoids race conditions with ray.
+    # see https://github.com/vllm-project/vllm/issues/8204
     if uds:
         try:
             sock = create_server_unix_socket(uds)
@@ -101,6 +103,10 @@ def setup_listen_address(
                 "API server."
             ) from e
         raise
+
+    # workaround to avoid footguns where uvicorn drops requests with too
+    # many concurrent requests active
+    set_ulimit()
 
     # Only the port needs to come from the kernel (so ``--port 0`` reports the
     # real port). Keep the user-supplied host in the address so ``--host
