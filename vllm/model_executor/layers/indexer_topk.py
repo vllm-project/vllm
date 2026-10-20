@@ -174,7 +174,6 @@ class SparseIndexerTopk(torch.nn.Module):
                 1 + (spec.num_speculative_tokens if spec is not None else 0)
             )
         self._gvr2_warmed: set[tuple[int, int, int]] = set()
-        self._gvr2_hint: torch.Tensor | None = None
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
@@ -329,33 +328,6 @@ class SparseIndexerTopk(torch.nn.Module):
             time.perf_counter() - start,
         )
 
-    def _gvr2_hint_rows(
-        self, num_rows: int, topk_tokens: int, device: torch.device
-    ) -> torch.Tensor:
-        """A constant ``[num_rows, topk_tokens]`` int32 hint for gvr_2.
-
-        The kernel derives k from the hint width and only uses the hint to
-        seed its sampling ladder; exactness never depends on it. A fixed
-        ``arange(k)`` row therefore stands in for the previous step's top-k,
-        which the indexer does not keep across steps.
-        """
-        hint = self._gvr2_hint
-        if (
-            hint is None
-            or hint.shape[0] < num_rows
-            or hint.shape[1] != topk_tokens
-            or hint.device != device
-        ):
-            rows = max(num_rows, self._gvr2_max_rows)
-            hint = (
-                torch.arange(topk_tokens, dtype=torch.int32, device=device)
-                .unsqueeze(0)
-                .expand(rows, topk_tokens)
-                .contiguous()
-            )
-            self._gvr2_hint = hint
-        return hint[:num_rows]
-
     @staticmethod
     def _gvr2_constraints(logits: torch.Tensor, topk_tokens: int) -> list[str]:
         """Unmet input constraints of gvr_2 (empty when applicable)."""
@@ -383,20 +355,22 @@ class SparseIndexerTopk(torch.nn.Module):
         return failures
 
     def resolve_prefill_backend(
-        self, logits: torch.Tensor, topk_tokens: int, num_reqs: int
+        self,
+        logits: torch.Tensor,
+        topk_tokens: int,
+        row_starts: torch.Tensor | None,
     ) -> str:
-        """flashinfer_gvr2 for single-request chunks of at least
-        GVR2_PREFILL_MIN_ROWS rows when it was requested explicitly, otherwise
-        per_row (top_k_per_row_prefill).
+        """flashinfer_gvr2 for chunks of at least GVR2_PREFILL_MIN_ROWS
+        row-relative rows (row_starts is None) when it was requested
+        explicitly, otherwise per_row (top_k_per_row_prefill).
 
-        gvr_2 reads every row from column 0, which matches the prefill row
-        bounds only when all row starts are 0, i.e. one request per chunk.
-        Unmet gvr_2 constraints fall back instead of raising, since the
-        same backend setting also drives decode.
+        gvr_2 reads every row from column 0. Unmet gvr_2 constraints fall
+        back instead of raising, since the same backend setting also drives
+        decode.
         """
         if (
             self._backend == "flashinfer_gvr2"
-            and num_reqs == 1
+            and row_starts is None
             and logits.shape[0] >= GVR2_PREFILL_MIN_ROWS
             and self._has_flashinfer_gvr2
             and not self._gvr2_constraints(logits, topk_tokens)
@@ -407,18 +381,17 @@ class SparseIndexerTopk(torch.nn.Module):
     def forward_prefill(
         self,
         logits: torch.Tensor,
-        row_starts: torch.Tensor,
+        row_starts: torch.Tensor | None,
         row_ends: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_tokens: int,
-        num_reqs: int,
     ) -> None:
-        """Prefill top-k over a chunk of ``num_reqs`` requests: row ``r``
-        selects over ``logits[r, row_starts[r]:row_ends[r]]`` and writes
-        indices relative to ``row_starts[r]`` (int32, -1 fill for rows shorter
-        than topk_tokens)."""
+        """Prefill top-k: row ``r`` selects over
+        ``logits[r, row_starts[r]:row_ends[r]]`` (row_starts None means 0) and
+        writes indices relative to the row start (int32, -1 fill for rows
+        shorter than topk_tokens)."""
         num_rows = logits.shape[0]
-        backend = self.resolve_prefill_backend(logits, topk_tokens, num_reqs)
+        backend = self.resolve_prefill_backend(logits, topk_tokens, row_starts)
         if backend == "flashinfer_gvr2":
             logger.info_once("Sparse indexer prefill top-k backend: flashinfer_gvr2")
             from flashinfer.topk_varlen.kernels.gvr2_topk_host import run_varlen
@@ -428,19 +401,20 @@ class SparseIndexerTopk(torch.nn.Module):
             # max_seq_len=row width avoids the host read of row_ends.max().
             run_varlen(
                 logits,
-                self._gvr2_hint_rows(num_rows, topk_tokens, logits.device),
+                None,
                 row_ends.contiguous(),
                 out,
                 next_n=1,
                 compress_ratio=1,
                 max_seq_len=logits.shape[1],
+                top_k=topk_tokens,
             )
             if not direct:
                 topk_indices.copy_(out)
             return
         ops.top_k_per_row_prefill(
             logits,
-            row_starts,
+            torch.zeros_like(row_ends) if row_starts is None else row_starts,
             row_ends,
             topk_indices,
             num_rows,
@@ -575,12 +549,13 @@ class SparseIndexerTopk(torch.nn.Module):
             out = topk_indices if direct else torch.empty_like(topk_indices)
             run_varlen(
                 logits,
-                self._gvr2_hint_rows(num_rows, topk_tokens, logits.device),
+                None,
                 row_ends,
                 out,
                 next_n=1,
                 compress_ratio=1,
                 max_seq_len=logits.shape[1],
+                top_k=topk_tokens,
             )
             if not direct:
                 topk_indices.copy_(out)

@@ -492,8 +492,9 @@ def has_flashinfer_topk_varlen_gvr2() -> bool:
     (self-sampling GVR V2, ``flashinfer.top_k_varlen(backend="gvr_2")``).
 
     Feature-detected on the production entry ``run_varlen`` (FlashInfer >=
-    0.7.0: per-row ``kv_lens`` plus a capture-stable ``max_seq_len``) and the
-    band-aware ``warmup_varlen`` (``row_stride``) that the dispatcher calls.
+    0.7.2: per-row ``kv_lens``, a capture-stable ``max_seq_len`` and the
+    hint-free ``top_k``) and the band-aware ``warmup_varlen`` (``row_stride``)
+    that the dispatcher calls.
     """
     if not has_flashinfer():
         return False
@@ -507,7 +508,7 @@ def has_flashinfer_topk_varlen_gvr2() -> bool:
     except Exception:
         # The module imports the CuTe DSL; anything it raises means unusable.
         return False
-    return {"pre_idx", "kv_lens", "max_seq_len"} <= set(run_params) and {
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
         "num_rows_list",
         "row_stride",
     } <= set(warmup_params)

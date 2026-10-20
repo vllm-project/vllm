@@ -760,12 +760,7 @@ def sparse_attn_indexer(
                             candidate_block_size,
                         )
                 get_indexer_topk(topk_backend).forward_prefill(
-                    logits,
-                    torch.zeros_like(row_ends) if row_starts is None else row_starts,
-                    row_ends,
-                    topk_indices,
-                    topk_tokens,
-                    chunk.num_reqs,
+                    logits, row_starts, row_ends, topk_indices, topk_tokens
                 )
 
             if deinterleave_idx is None:

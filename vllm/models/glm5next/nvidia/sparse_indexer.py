@@ -391,12 +391,7 @@ def sparse_attn_indexer_kpool(
                 topk_dst.fill_(-1)
             else:
                 get_indexer_topk(topk_backend).forward_prefill(
-                    logits,
-                    torch.zeros_like(row_ends),
-                    row_ends,
-                    topk_dst,
-                    select_k,
-                    chunk.num_reqs,
+                    logits, None, row_ends, topk_dst, select_k
                 )
             # Local pool ids -> request-relative global pool ids.
             _merge_dcp_topk_global(

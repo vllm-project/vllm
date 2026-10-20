@@ -2287,25 +2287,28 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 @requires_flashinfer_gvr2
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize(
-    "q_lens,ctx_lens,backend",
+    "q_lens,ctx_lens,row_relative,backend",
     [
-        ([2048], [0], "flashinfer_gvr2"),
-        ([1536], [40000], "flashinfer_gvr2"),
-        ([96], [40000], "per_row"),
-        ([1024, 700, 300], [0, 33000, 1500], "per_row"),
+        ([2048], [0], True, "flashinfer_gvr2"),
+        ([1536], [40000], True, "flashinfer_gvr2"),
+        ([1024, 700, 300], [0, 33000, 1500], True, "flashinfer_gvr2"),
+        ([96], [40000], True, "per_row"),
+        ([1024, 700, 300], [0, 33000, 1500], False, "per_row"),
     ],
 )
 @torch.inference_mode()
 def test_sparse_indexer_prefill_topk_gvr2(
-    top_k: int, q_lens: list[int], ctx_lens: list[int], backend: str
+    top_k: int,
+    q_lens: list[int],
+    ctx_lens: list[int],
+    row_relative: bool,
+    backend: str,
 ) -> None:
-    """Explicit flashinfer_gvr2 runs prefill top-k on gvr_2 only for
-    single-request chunks of >= GVR2_PREFILL_MIN_ROWS rows; small or
-    multi-request chunks fall back. Row r selects over logits[r, ks[r]:ke[r]]
-    (uncleaned outside) with indices relative to ks[r], matching torch.topk."""
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
-
+    """Explicit flashinfer_gvr2 runs prefill top-k on gvr_2 only for chunks
+    of >= GVR2_PREFILL_MIN_ROWS row-relative rows (row_starts None); small
+    chunks and logits with per-row starts fall back. Row r selects over
+    logits[r, ks[r]:ke[r]] (uncleaned outside) with indices relative to ks[r],
+    matching torch.topk."""
     set_random_seed(0)
     ks, ke, k_off = [], [], 0
     for q, c in zip(q_lens, ctx_lens):
@@ -2313,22 +2316,24 @@ def test_sparse_indexer_prefill_topk_gvr2(
             ks.append(k_off)
             ke.append(k_off + c + i + 1)
         k_off += c + q
-    num_rows, width = len(ks), k_off
-    pitch = (width + 255) // 256 * 256
-    logits = torch.randn(num_rows, pitch, device="cuda")[:, :width]
     row_starts = torch.tensor(ks, dtype=torch.int32, device="cuda")
     row_ends = torch.tensor(ke, dtype=torch.int32, device="cuda")
+    if row_relative:
+        row_ends -= row_starts
+        row_starts.zero_()
+    num_rows, width = len(ks), int(row_ends.max())
+    pitch = (width + 255) // 256 * 256
+    logits = torch.randn(num_rows, pitch, device="cuda")[:, :width]
     cols = torch.arange(width, device="cuda")
     outside = (cols < row_starts[:, None]) | (cols >= row_ends[:, None])
     logits[outside] = 1e30
     reference = logits.masked_fill(outside, float("-inf"))
 
-    cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": "flashinfer_gvr2"})
-    with set_current_vllm_config(cfg):
-        topk = SparseIndexerTopk()
-    assert topk.resolve_prefill_backend(logits, top_k, len(q_lens)) == backend
+    topk = _make_topk("flashinfer_gvr2")
+    starts = None if row_relative else row_starts
+    assert topk.resolve_prefill_backend(logits, top_k, starts) == backend
     indices = torch.full((num_rows, top_k), 7, dtype=torch.int32, device="cuda")
-    topk.forward_prefill(logits, row_starts, row_ends, indices, top_k, len(q_lens))
+    topk.forward_prefill(logits, starts, row_ends, indices, top_k)
 
     lens = (row_ends - row_starts)[:, None]
     valid = torch.arange(top_k, device="cuda")[None, :] < lens

@@ -353,8 +353,8 @@ class KernelConfig:
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "flashinfer_gvr2": Use FlashInfer's self-sampling GVR V2 top-k
       (`top_k_varlen(backend="gvr_2")`). SM100 family, fp32 logits, topk in
-      {512, 1024, 2048}. Selecting it explicitly also routes single-request
-      prefill chunks of >= 1024 rows to gvr_2 ("auto" keeps prefill on
+      {512, 1024, 2048}. Selecting it explicitly also routes prefill chunks
+      of >= 1024 row-relative rows to gvr_2 ("auto" keeps prefill on
       top_k_per_row_prefill)
     - "torch": Use a plain torch.topk implementation (debug reference)
     - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
