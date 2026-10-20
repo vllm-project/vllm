@@ -651,6 +651,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
 
+        # Add model-specific tokens (e.g. the JinaVL score token) after
+        # truncation so that truncation cannot remove them.
+        if self.model is not None:
+            self.model.post_process_tokens(engine_prompt)
+
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
             compressed = compress_token_type_ids(
@@ -801,9 +806,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
-
-        if self.model is not None:
-            self.model.post_process_tokens(engine_prompt)
 
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data

@@ -21,7 +21,11 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
-from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
+from vllm.entrypoints.pooling.typing import (
+    OfflineScoringInputsContext,
+    ScoringRenderParams,
+)
+from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
@@ -128,6 +132,35 @@ def test_offline_scoring_uses_default_template_unless_overridden(
 
     assert text == expected
     assert prompt["prompt_token_ids"] == processor.tokenizer.encode(expected)
+
+
+def test_truncation_keeps_jinavl_score_token(llm_reranker_processor):
+    """JinaVL scores the token it appends to the prompt, so binding
+    truncation must not remove it."""
+    processor = llm_reranker_processor
+    processor.supports_score_template = True
+    processor.model = JinaVLForSequenceClassification
+    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
+
+    engine_input = processor.render(
+        ScoringRenderParams(
+            data_1="a",
+            data_2="bc bc bc bc",
+            chat_template=None,
+            max_tokens_per_query=0,
+            max_tokens_per_doc=0,
+            tok_params=TokenizeParams(max_total_tokens=32, truncate_prompt_tokens=4),
+            prompt_extras=None,
+            skip_mm_cache=False,
+            params=PoolingParams(task="classify"),
+            lora_requests=None,
+            priorities=0,
+        )
+    )
+
+    prompt_token_ids = engine_input["prompts"]["prompt_token_ids"]
+    assert len(prompt_token_ids) == 5
+    assert prompt_token_ids[-1] == 100
 
 
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
