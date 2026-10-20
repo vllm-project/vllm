@@ -105,6 +105,8 @@ def _builder(
     asm_dcp_verify: bool = False,
     decode_causal: bool = True,
     supports_segmented_dcp_verify: bool | None = None,
+    use_triton_verify: bool = False,
+    max_model_len: int = 4096,
 ):
     decode_num_heads = num_heads * dcp_world_size
     asm_heads = (
@@ -128,6 +130,9 @@ def _builder(
         # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         _use_triton_dcp_verify=False,
+        _use_triton_verify=use_triton_verify,
+        _triton_verify_max_seq_len=max_model_len,
+        _sm_count=304,
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
             kernel_block_size
@@ -511,6 +516,7 @@ def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
         paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         g_kv_indptr=None,
@@ -575,6 +581,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        triton_verify_num_kv_splits=0,
         dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         has_persistent_metadata=False,
@@ -802,6 +809,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             ),
             use_gluon_decode=False,
             use_gluon_verify=False,
+            triton_verify_num_kv_splits=0,
             dcp_route=rocm_aiter_mla._DCPDecodeRoute.SEGMENTED,
             dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
@@ -1458,6 +1466,148 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
         monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
     )
     assert metadata.has_persistent_metadata
+
+
+@pytest.mark.parametrize(
+    "gfx950, num_heads, qlen, kv_cache_dtype, dcp, expect",
+    [
+        # The #55609 shape: native >=16 heads past qlen 4 off gfx950.
+        (False, 16, 8, "auto", 1, True),
+        (False, 128, 5, "auto", 1, True),
+        # A padded rank would run the non-persistent qseqlen-8 entry, which
+        # reads the wrong KV past 4 GiB of the cache on gfx942.
+        (False, 12, 8, "auto", 1, True),
+        # Persistent kernels exist up to qseqlen 4.
+        (False, 128, 4, "auto", 1, False),
+        # fp8 stops at qseqlen 4 too, except the native 128-head a8w8 kernel.
+        (False, 128, 8, "fp8", 1, False),
+        (False, 16, 8, "fp8", 1, True),
+        (False, 64, 8, "fp8", 1, True),
+        (False, 16, 4, "fp8", 1, False),
+        # DCP takes its row-view routes.
+        (False, 16, 8, "auto", 8, False),
+        # gfx950 folds bf16 onto its (gqa 32, qseqlen 4) kernel; Gluon owns <16.
+        (True, 128, 8, "auto", 1, False),
+        (True, 12, 8, "auto", 1, False),
+    ],
+)
+def test_asm_causal_verify_gap_is_narrow(
+    monkeypatch, gfx950, num_heads, qlen, kv_cache_dtype, dcp, expect
+):
+    """Only shapes the asm decode cannot serve leave it.
+
+    #57642 raised whenever the persistent schedule was off, which also covers
+    Gluon verify, padded ranks and the DCP row-view routes that work.
+    """
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: gfx950)
+    assert (
+        rocm_aiter_mla._asm_causal_verify_unsupported(
+            num_heads * dcp, qlen, kv_cache_dtype, dcp
+        )
+        is expect
+    )
+
+
+def _build_verify(
+    monkeypatch,
+    *,
+    qlen,
+    seq_lens,
+    query_start_loc,
+    num_heads=16,
+    has_full_cudagraphs=False,
+):
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    expand = mock.MagicMock()
+    monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand)
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
+    num_reqs = seq_lens.numel()
+    block_table = torch.arange(num_reqs * 4, dtype=torch.int32).view(num_reqs, 4)
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(
+            mtp_decode_qlen=8,
+            num_heads=num_heads,
+            kernel_block_size=4,
+            use_triton_verify=True,
+            has_full_cudagraphs=has_full_cudagraphs,
+            max_model_len=163840,
+        ),
+        block_table_tensor=block_table,
+        seq_lens_device=seq_lens,
+        max_seq_len=int(seq_lens.max().item()),
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=int(query_start_loc[-1]),
+        max_query_len=qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+    return metadata, get_mla_metadata_v1, expand, block_table
+
+
+@pytest.mark.parametrize("num_heads", [16, 128, 12])
+def test_long_verify_without_dcp_takes_folded_triton(monkeypatch, num_heads):
+    """A verify block past qlen 4 leaves the asm decode for the Triton kernel."""
+    qlen = 8
+    metadata, get_mla_metadata_v1, expand, block_table = _build_verify(
+        monkeypatch,
+        qlen=qlen,
+        seq_lens=torch.tensor([8, 12], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_heads=num_heads,
+    )
+    assert metadata.triton_verify_num_kv_splits >= 1
+    assert metadata.triton_verify_real_seq_lens is None
+    assert metadata.dcp_route is rocm_aiter_mla._DCPDecodeRoute.PLAIN
+    # Neither the persistent schedule nor the flat page view is built.
+    assert not metadata.has_persistent_metadata
+    assert not get_mla_metadata_v1.called
+    assert not expand.__getitem__.called
+    assert metadata.paged_kv_indices is None
+    # The kernel reads the request block table and lengths as they are.
+    assert metadata.block_table is block_table
+    assert metadata.seq_lens.tolist() == [8, 12]
+
+
+def test_short_verify_keeps_the_asm_decode_with_triton_configured(monkeypatch):
+    """A verify block of at most 4 tokens keeps the persistent asm schedule."""
+    qlen = 4
+    metadata, get_mla_metadata_v1, _, _ = _build_verify(
+        monkeypatch,
+        qlen=qlen,
+        seq_lens=torch.tensor([8, 12], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+    )
+    assert metadata.triton_verify_num_kv_splits == 0
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.called
+
+
+def test_folded_verify_split_cap_is_static_under_full_graphs(monkeypatch):
+    """A captured graph keeps one split cap whatever the batch's lengths."""
+    qlen = 8
+    loc = torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32)
+    short, _, _, _ = _build_verify(
+        monkeypatch,
+        qlen=qlen,
+        seq_lens=torch.tensor([8, 12], dtype=torch.int32),
+        query_start_loc=loc,
+        has_full_cudagraphs=True,
+    )
+    long, _, _, _ = _build_verify(
+        monkeypatch,
+        qlen=qlen,
+        seq_lens=torch.tensor([9000, 120000], dtype=torch.int32),
+        query_start_loc=loc,
+        has_full_cudagraphs=True,
+    )
+    assert short.triton_verify_num_kv_splits == long.triton_verify_num_kv_splits
 
 
 def _adaptive_config(
