@@ -222,6 +222,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # Include MoE in the reduced one-layer initialization test.
         hf_overrides={"mlp_layer_types": ["sparse"]},
     ),
+    "BitNetForCausalLM": _HfExamplesInfo("microsoft/bitnet-b1.58-2B-4T"),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
