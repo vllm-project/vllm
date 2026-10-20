@@ -1433,11 +1433,6 @@ def instanttensor_weights_iterator(
                 pbar.update(tensor.numel() * tensor.element_size())
                 yield name, tensor
 
-    if cpu_weights:
-        logger.info(
-            "Loading %d Engram embedding tensors through CPU memory mapping.",
-            sum(len(names) for names in cpu_weights.values()),
-        )
     for path, names in cpu_weights.items():
         with safe_open(path, framework="pt", device="cpu") as f:
             for name in names:
