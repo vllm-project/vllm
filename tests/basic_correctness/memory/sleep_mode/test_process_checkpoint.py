@@ -49,8 +49,10 @@ def _graph_identity(worker):
     os.environ.get("VLLM_TEST_CUDA_PROCESS_CHECKPOINT") != "1",
     reason="requires exclusive GPUs and a checkpoint-capable NVIDIA driver",
 )
-@pytest.mark.parametrize("tp", [1, 2, 4])
-def test_process_checkpoint_preserves_outputs_and_graphs(tp, monkeypatch):
+@pytest.mark.parametrize(
+    "tp,transport", [(1, "p2p"), (2, "p2p"), (4, "p2p"), (2, "shm"), (4, "shm")]
+)
+def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypatch):
     import torch
 
     if torch.accelerator.device_count() < tp:
@@ -60,8 +62,8 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, monkeypatch):
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",  # Test observation RPC only.
         "VLLM_BATCH_INVARIANT": "1",
-        "NCCL_P2P_DISABLE": "0",
-        "NCCL_SHM_DISABLE": "1",
+        "NCCL_P2P_DISABLE": "1" if transport == "shm" else "0",
+        "NCCL_SHM_DISABLE": "0" if transport == "shm" else "1",
         "NCCL_IB_DISABLE": "1",
         "NCCL_CUMEM_ENABLE": "1",
         "NCCL_CUMEM_HOST_ENABLE": "0",
@@ -78,7 +80,7 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, monkeypatch):
         dtype="bfloat16",
         tensor_parallel_size=tp,
         distributed_executor_backend=(
-            "vllm.v1.executor.process_checkpoint_executor.ProcessCheckpointExecutor"
+            "vllm.v1.executor.cuda_checkpoint_executor.CUDACheckpointExecutor"
         ),
         disable_custom_all_reduce=tp > 1,
         enable_nccl_comm_suspend=tp > 1,

@@ -225,7 +225,7 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
 
-## Experimental CUDA process checkpoint executor
+## Experimental CUDA checkpoint executor
 
 This capability is experimental and disabled by default. Selecting the executor
 below checkpoints each CUDA worker after ordinary level-1 sleep,
@@ -243,12 +243,16 @@ llm = LLM(
     "Qwen/Qwen3-0.6B",
     enable_sleep_mode=True,
     distributed_executor_backend=(
-        "vllm.v1.executor.process_checkpoint_executor.ProcessCheckpointExecutor"
+        "vllm.v1.executor.cuda_checkpoint_executor.CUDACheckpointExecutor"
     ),
 )
 llm.sleep(level=1)
 llm.wake_up()
 ```
+
+The previous name,
+`vllm.v1.executor.process_checkpoint_executor.ProcessCheckpointExecutor`,
+remains available as an alias.
 
 This experimental implementation requires Linux, NVIDIA driver checkpoint APIs,
 and dedicated worker processes. It uses an external helper to call
@@ -264,7 +268,8 @@ and FlashInfer 0.6.18.post1. See [PR #58183](https://github.com/vllm-project/vll
 for versioned test results and communication performance comparisons. Support
 for other GPU, driver, and communication-library combinations is not established.
 
-Only a single node with tensor parallel size 1, 2, or 4 is accepted. Use
+Only single-node tensor parallelism is accepted. Tensor parallel sizes 1, 2,
+and 4 have been GPU-tested; other sizes remain unvalidated. Use
 `VLLM_USE_V2_MODEL_RUNNER=1`, the standard GPU worker and the `cumem` sleep
 backend. Pipeline, data, context and expert parallelism, external cache or
 weight transfer, custom worker classes, and sleep level 2 are rejected before
@@ -273,15 +278,19 @@ that allocate additional CUDA IPC resources are outside the validated scope.
 Level 0 remains
 a scheduler pause and does not perform a CUDA checkpoint.
 
-For tensor parallel size 2 or 4, use NCCL 2.29.7 or later with memory
+For tensor parallel sizes greater than 1, use NCCL 2.29.7 or later with memory
 suspension support, set `enable_nccl_comm_suspend=True`, and pass
 `disable_custom_all_reduce=True`. The following explicit configuration retains
-NCCL GPU peer-to-peer communication. Before driver checkpoint, ordinary worker
+NCCL GPU peer-to-peer or legacy shared-memory communication, selected by NCCL.
+`NCCL_P2P_DISABLE` and `NCCL_SHM_DISABLE` need not be set when communicator
+suspension is enabled. NCCL CUDA host-memory allocation remains disabled; it
+is not equivalent to legacy shared-memory transport. Before driver checkpoint,
+ordinary worker
 sleep suspends NCCL mappings; worker wake restores them at their reserved
 addresses. The executor checks each rank's actual suspension state.
 
 ```bash
-export NCCL_P2P_DISABLE=0 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1
+export NCCL_IB_DISABLE=1
 export NCCL_CUMEM_ENABLE=1 NCCL_CUMEM_HOST_ENABLE=0 NCCL_NVLS_ENABLE=0
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_USE_NCCL_SYMM_MEM=0
 export VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=0
@@ -307,7 +316,8 @@ configuration; retaining GPU peer-to-peer communication alone does not establish
 unchanged inference performance.
 
 A more restrictive Socket-only configuration is also accepted without
-`enable_nccl_comm_suspend`: set `NCCL_P2P_DISABLE=1`, `NCCL_CUMEM_ENABLE=0`, and
+`enable_nccl_comm_suspend`: set `NCCL_P2P_DISABLE=1`, `NCCL_SHM_DISABLE=1`,
+`NCCL_CUMEM_ENABLE=0`, and
 `VLLM_ALLREDUCE_USE_FLASHINFER=0`, retaining the other communication restrictions
 above. This configuration is primarily useful for compatibility comparisons.
 Do not create additional CUDA IPC resources or fall back to an independently
@@ -320,8 +330,9 @@ ordinary sleep/wake. The helper itself can retain a small driver allocation, so
 worker offload does not imply a zero device-wide memory reading.
 
 All ranks are locked before any is checkpointed. All ranks are restored before
-any is unlocked. A driver operation has a 30-second response deadline (lock also
-has a 10-second driver timeout). Worker sleep/wake and FlashInfer workspace
+any is unlocked. Operations within each stage run concurrently across workers.
+The whole stage has a 30-second response deadline (each lock also has a
+10-second driver timeout). Worker sleep/wake and FlashInfer workspace
 hooks have a 120-second response deadline. Failure terminates the workers rather than
 serving with a partially restored rank set; restart the engine after failure.
 Shutdown terminates the dedicated worker and helper processes without restoring
