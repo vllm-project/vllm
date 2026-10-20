@@ -821,6 +821,60 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Assert that `method uri` hits the 501 placeholder for the Python route
+/// `route`.
+async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "{method} {uri}"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(
+        error["error"]["type"], "NotImplementedError",
+        "{method} {uri}"
+    );
+    assert_eq!(
+        error["error"]["message"],
+        format!(
+            "{method} {route} is not supported by the Rust frontend yet. \
+             Set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend."
+        ),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_python_routes_return_not_implemented() {
+    let app = test_app().await;
+
+    for (method, uri) in [
+        ("POST", "/v1/messages"),
+        ("POST", "/v1/messages/count_tokens"),
+        ("POST", "/v1/chat/completions/batch"),
+        ("POST", "/v1/decisions"),
+        ("POST", "/v1/systemone"),
+        ("POST", "/scale_elastic_ep"),
+        ("POST", "/is_scaling_elastic_ep"),
+    ] {
+        assert_route_not_supported(&app, method, uri, uri).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn scale_out_generate_route_is_disabled_by_default() {
@@ -883,6 +937,86 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
+    const ROUTES: [&str; 7] = [
+        "/inference/v1/abort_requests",
+        "/v1/chat/completions/render",
+        "/v1/completions/render",
+        "/v1/messages/render",
+        "/v1/responses/render",
+        "/v1/chat/completions/derender",
+        "/v1/completions/derender",
+    ];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-unimplemented",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    for uri in ROUTES {
+        assert_route_not_supported(&enabled, "POST", uri, uri).await;
+    }
+
+    let disabled = build_router_with_scale_out_endpoints(state, false);
+    for uri in ROUTES {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_route_follows_api_server_options() {
+    for enabled in [false, true] {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-tokenizer-info",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    enable_tokenizer_info_endpoint: enabled,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        if enabled {
+            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
+        } else {
+            let response = app
+                .clone()
+                .call(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/tokenizer_info")
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready
@@ -1578,6 +1712,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
                         "vllm_xargs": {"custom": 1},
+                        "kv_transfer_params": {"do_remote_decode": true},
+                        "ec_transfer_params": {"do_remote_encode": true},
                         "chat_template_kwargs": {"enable_thinking": false}
                     })
                     .to_string(),
@@ -1600,7 +1736,19 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["sampling_params"]["bad_words"],
         json!(["blocked"])
     );
-    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    // Transfer params move to the top level, like Python render.
+    assert_eq!(
+        render_json["sampling_params"]["vllm_xargs"],
+        json!({"custom": 1})
+    );
+    assert_eq!(
+        render_json["kv_transfer_params"],
+        json!({"do_remote_decode": true})
+    );
+    assert_eq!(
+        render_json["ec_transfer_params"],
+        json!({"do_remote_encode": true})
+    );
     assert_eq!(
         render_json["reasoning_parser_kwargs"],
         json!({"chat_template_kwargs": {"enable_thinking": false}})
@@ -1620,6 +1768,20 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                     .as_ref()
                     .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
                 Some(&json!(false))
+            );
+            let extra_args = request
+                .sampling_params
+                .as_ref()
+                .and_then(|params| params.extra_args.as_ref())
+                .expect("extra args");
+            assert_eq!(extra_args["custom"], json!(1));
+            assert_eq!(
+                extra_args["kv_transfer_params"],
+                json!({"do_remote_decode": true})
+            );
+            assert_eq!(
+                extra_args["ec_transfer_params"],
+                json!({"do_remote_encode": true})
             );
         },
         Arc::new(FakeChatBackend::new()),
@@ -2934,12 +3096,18 @@ async fn non_stream_chat_returns_json_response() {
 async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
     for endpoint in ["/v1/chat/completions", "/v1/completions"] {
         for stream in [false, true] {
-            for watermarking in [None, Some(true), Some(false)] {
+            // `null` and omission both request watermarking, like `true`.
+            for (watermarking, expected) in [
+                (None, true),
+                (Some(json!(null)), true),
+                (Some(json!(true)), true),
+                (Some(json!(false)), false),
+            ] {
                 let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
                     Arc::new(FakeChatBackend::new()),
                     move |request| {
                         let params = request.sampling_params.as_ref().expect("sampling params");
-                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                        assert_eq!(params.watermarking, expected);
                     },
                 )
                 .await;
@@ -2951,7 +3119,7 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                     body["prompt"] = json!("hi");
                 }
                 if let Some(watermarking) = watermarking {
-                    body["watermarking"] = json!(watermarking);
+                    body["watermarking"] = watermarking;
                 }
                 let response = app
                     .call(
