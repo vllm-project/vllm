@@ -229,11 +229,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.supports_quant_query_input = False
 
         self._sm_count = current_platform.num_compute_units()
+        self._vllm_config = get_current_vllm_config()
 
     def reserve_workspace(self) -> None:
         # The builder reserves after memory profiling; reserve its upper bound
         # here so the KV cache is sized around it.
-        vllm_config = get_current_vllm_config()
+        vllm_config = self._vllm_config
         _reserve_attn_logits_workspace(
             vllm_config,
             vllm_config.scheduler_config.max_num_seqs
