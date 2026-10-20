@@ -348,7 +348,7 @@ _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 def has_non_text_content(messages: Any) -> bool:
-    """Whether any message in ``messages`` has a non-text content part.
+    """Whether any message has non-text content or reasoning.
 
     Only list content is inspected, so validated chat content that is a
     one-shot iterator is never consumed.
@@ -356,6 +356,14 @@ def has_non_text_content(messages: Any) -> bool:
     if not isinstance(messages, list):
         return False
     for msg in messages:
+        if isinstance(msg, dict):
+            for field in ("reasoning", "reasoning_content"):
+                reasoning = msg.get(field)
+                if (
+                    isinstance(reasoning, dict)
+                    and reasoning.get("type") == "prompt_embeds"
+                ):
+                    return True
         content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list):
             continue
@@ -602,6 +610,20 @@ def parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning")
+
+    if (
+        role == "assistant"
+        and isinstance(reasoning, dict)
+        and reasoning.get("type") == "prompt_embeds"
+    ):
+        reasoning = parse_chat_message_content_parts(
+            role,
+            [cast(ChatCompletionContentPartParam, reasoning)],
+            mm_tracker,
+            wrap_dicts=False,
+            interleave_strings=interleave_strings,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )[0]["content"]
 
     if content is None:
         content = []
