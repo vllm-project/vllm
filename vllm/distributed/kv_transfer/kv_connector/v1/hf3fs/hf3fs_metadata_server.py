@@ -215,7 +215,10 @@ class GlobalMetadataState:
 
         The caller must call :meth:`release_keys` once the pages have been
         read. Leases expire after ``ttl_s`` so a crashed reader cannot pin
-        pages forever.
+        pages forever. Leases from several readers on the same key are counted,
+        and the key stays pinned until the latest deadline among its live
+        leases: one reader releasing does not un-pin a key that another reader
+        still holds.
         """
         with self.global_lock:
             if rank not in self.rank_metadata:

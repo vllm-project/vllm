@@ -279,6 +279,21 @@ class TestGlobalMetadataStateEviction:
         state.release_keys(0, ["K1"])
         assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": 0}
 
+    def test_overlapping_leases_keep_the_key_pinned(self):
+        """One reader releasing must not unpin a key another reader still holds."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 1)
+        _fill(state, ["K1"], [0])
+
+        state.acquire_keys(0, ["K1"], ttl_s=10.0)
+        state.acquire_keys(0, ["K1"], ttl_s=1e6)  # a second, later reader
+        state.release_keys(0, ["K1"])  # only the first reader is done
+
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": -1}
+
+        state.release_keys(0, ["K1"])
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": 0}
+
     def test_expired_lease_is_reclaimed(self):
         """A lease from a crashed reader expires instead of pinning pages."""
         state = GlobalMetadataState()
