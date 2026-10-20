@@ -46,6 +46,10 @@ def _make_runner(modules, *, max_tokens: int = 8192):
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
+            kernel_config=SimpleNamespace(
+                enable_flashinfer_autotune=True,
+                flashinfer_autotune_execution_mode="auto",
+            ),
             attention_config=SimpleNamespace(hisparse_config=None),
             parallel_config=SimpleNamespace(
                 enable_elastic_ep=False,
@@ -141,9 +145,16 @@ def test_flashinfer_autotune_uses_token_buckets_for_each_dummy_run(skip_attn):
 
 
 @pytest.mark.parametrize(
-    "has_v2,elastic_ep,node_count",
-    [(False, False, 1), (True, False, 1), (True, True, 1), (True, False, 2)],
-    ids=["v1", "v2", "elastic-v1", "multi-node-v1"],
+    "has_v2,elastic_ep,node_count,execution_mode",
+    [
+        (False, False, 1, "auto"),
+        (True, False, 1, "auto"),
+        (True, True, 1, "auto"),
+        (True, False, 2, "auto"),
+        (True, False, 1, "eager"),
+        (True, False, 1, "cuda_graph"),
+        (False, False, 1, "eager"),
+    ],
 )
 @pytest.mark.parametrize(
     "hisparse,world_size,rank,skip_ops,failure",
@@ -163,6 +174,7 @@ def test_flashinfer_autotune_lifecycle(
     has_v2,
     elastic_ep,
     node_count,
+    execution_mode,
     hisparse,
     world_size,
     rank,
@@ -171,6 +183,7 @@ def test_flashinfer_autotune_lifecycle(
 ):
     use_v2 = has_v2 and not elastic_ep and node_count == 1 and world_size == 1
     runner = _make_runner([])
+    runner.vllm_config.kernel_config.flashinfer_autotune_execution_mode = execution_mode
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.attention_config.hisparse_config = object() if hisparse else None
     model = runner.get_model()
@@ -213,6 +226,11 @@ def test_flashinfer_autotune_lifecycle(
         "flashinfer",
         SimpleNamespace(autotune_v2=events.autotune, autotune_v2_reload=events.reload),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer.autotune_cache",
+        SimpleNamespace(MeasurementPolicy=SimpleNamespace),
+    )
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_world_group", lambda: world
     )
@@ -242,6 +260,12 @@ def test_flashinfer_autotune_lifecycle(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
     )
 
+    if execution_mode != "auto" and not use_v2:
+        with pytest.raises(ValueError, match="eligible.*managed-cache"):
+            warmup.flashinfer_autotune(runner)
+        events.autotune.assert_not_called()
+        events.set_group.assert_not_called()
+        return
     if failure is None:
         warmup.flashinfer_autotune(runner)
     else:
@@ -253,7 +277,19 @@ def test_flashinfer_autotune_lifecycle(
     if use_v2:
         resolve_file.assert_not_called()
         resolve_root.assert_called_once_with()
-        expected.append(call.autotune(mode="tune", cache_root=str(tmp_path), **kwargs))
+        policy = (
+            None
+            if execution_mode == "auto"
+            else SimpleNamespace(execution_mode=execution_mode)
+        )
+        expected.append(
+            call.autotune(
+                mode="tune",
+                cache_root=str(tmp_path),
+                measurement_policy=policy,
+                **kwargs,
+            )
+        )
     else:
         resolve_root.assert_not_called()
         resolve_file.assert_called_once_with(runner)
@@ -293,7 +329,17 @@ def test_flashinfer_autotune_lifecycle(
     [(1, False, 1), (2, False, 1), (1, True, 1), (1, False, 2)],
 )
 @pytest.mark.parametrize("world_size,rank", [(1, 0), (2, 0), (2, 1)])
-@pytest.mark.parametrize("model_runner_v2,max_reqs", [(False, 2), (True, 1), (True, 2)])
+@pytest.mark.parametrize(
+    "model_runner_v2,max_reqs,execution_mode",
+    [
+        (False, 2, "auto"),
+        (True, 1, "auto"),
+        (True, 2, "auto"),
+        (False, 2, "eager"),
+        (True, 1, "cuda_graph"),
+        (True, 2, "eager"),
+    ],
+)
 def test_sparse_autotune_respects_cache_selection(
     monkeypatch,
     tmp_path,
@@ -304,13 +350,14 @@ def test_sparse_autotune_respects_cache_selection(
     rank,
     model_runner_v2,
     max_reqs,
+    execution_mode,
 ):
     import vllm.model_executor.warmup.flashinfer_sparse_mla_warmup as sparse
 
     runner = _make_runner([])
     runner.max_num_reqs = max_reqs
     runner.vllm_config.use_v2_model_runner = model_runner_v2
-    runner.vllm_config.kernel_config = SimpleNamespace(enable_flashinfer_autotune=True)
+    runner.vllm_config.kernel_config.flashinfer_autotune_execution_mode = execution_mode
     runner.vllm_config.parallel_config.enable_elastic_ep = elastic_ep
     runner.vllm_config.parallel_config.pipeline_parallel_size = pp_size
     worker = SimpleNamespace(
@@ -360,6 +407,11 @@ def test_sparse_autotune_respects_cache_selection(
         sparse, "resolve_flashinfer_autotune_file", lambda _: cache_path
     )
     monkeypatch.setattr(sparse, "flashinfer_autotune", legacy)
+    monkeypatch.setitem(
+        sys.modules,
+        "flashinfer.autotune_cache",
+        SimpleNamespace(MeasurementPolicy=SimpleNamespace),
+    )
 
     def mixed_warmup(*args, mixed_step_context=None, **kwargs):
         context = (
@@ -371,10 +423,24 @@ def test_sparse_autotune_respects_cache_selection(
 
     mixed = Mock(side_effect=mixed_warmup)
     monkeypatch.setattr(sparse, "run_mixed_prefill_decode_warmup", mixed)
+    use_v2 = node_count == 1 and not elastic_ep and pp_size == 1 and world_size == 1
+    if execution_mode != "auto" and not use_v2:
+        with pytest.raises(ValueError, match="eligible.*managed-cache"):
+            sparse._run_flashinfer_sparse_mla_decode_autotune(worker, 16, frozenset())
+        managed.assert_not_called()
+        legacy.assert_not_called()
+        return
     assert sparse._run_flashinfer_sparse_mla_decode_autotune(worker, 16, frozenset())
 
-    if node_count == 1 and not elastic_ep and pp_size == 1 and world_size == 1:
-        managed.assert_called_once_with(mode="tune", cache_root=tmp_path)
+    if use_v2:
+        policy = (
+            None
+            if execution_mode == "auto"
+            else SimpleNamespace(execution_mode=execution_mode)
+        )
+        managed.assert_called_once_with(
+            mode="tune", cache_root=tmp_path, measurement_policy=policy
+        )
         legacy.assert_not_called()
         world.broadcast_object.assert_not_called()
         tuner.load_configs.assert_not_called()

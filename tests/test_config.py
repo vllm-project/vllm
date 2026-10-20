@@ -3425,6 +3425,18 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
+@pytest.mark.parametrize("execution_mode", ["eager", "cuda_graph"])
+def test_flashinfer_measurement_requires_autotuning(execution_mode):
+    with pytest.raises(ValueError, match="requires enable_flashinfer_autotune=True"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            kernel_config=KernelConfig(
+                enable_flashinfer_autotune=False,
+                flashinfer_autotune_execution_mode=execution_mode,
+            ),
+        )
+
+
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""

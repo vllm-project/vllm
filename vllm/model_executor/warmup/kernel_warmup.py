@@ -24,6 +24,7 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     resolve_flashinfer_autotune_v2_root,
+    resolve_flashinfer_measurement_policy,
     use_flashinfer_autotune_v2,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -455,6 +456,9 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         autotune_kwargs["skip_ops"] = skip_ops
 
     use_autotune_v2 = use_flashinfer_autotune_v2(runner)
+    measurement_policy = resolve_flashinfer_measurement_policy(
+        runner, managed=use_autotune_v2
+    )
     if use_autotune_v2:
         from flashinfer import autotune_v2, autotune_v2_reload
 
@@ -465,7 +469,10 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 cache_root if cache_root is not None else "flashinfer default",
             )
         autotune_context = autotune_v2(
-            mode="tune", cache_root=cache_root, **autotune_kwargs
+            mode="tune",
+            cache_root=cache_root,
+            measurement_policy=measurement_policy,
+            **autotune_kwargs,
         )
     else:
         cache_path = resolve_flashinfer_autotune_file(runner)
