@@ -436,13 +436,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 B_bias=self.w1_bias,
             )
 
-        # Unrouted rows must not affect the shared activation scale.
-        if (
-            (self.quant_config.use_fp8_w8a8 or self.quant_config.use_int8_w8a8)
-            and self.quant_config.is_per_tensor
-            and a2_scale is None
-        ):
-            intermediate_cache1.zero_()
         if lora_context is not None and lora_context.aux_stream is not None:
             # add_inputs=False: kernel overwrites lora_delta_w13. zeros (not
             # empty) so untouched rows -- e.g. blocks where every program
@@ -621,9 +614,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
     ) -> None:
-        if topk_ids is not None:
-            # Skip the slots the alignment dropped, which are never written:
-            # `-1` ids (e.g. DP padding) and, under EP, experts not on this rank.
+        if expert_map is not None:
+            # Skip the slots whose expert is not on this rank: the rows the
+            # alignment dropped, or the zeros the `-1` blocks wrote.
             ops.moe_sum(input, output, topk_ids, expert_map)
         else:
             ops.moe_sum(input, output)
