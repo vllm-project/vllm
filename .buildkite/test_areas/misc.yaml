@@ -153,7 +153,7 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_umbp_core.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
@@ -188,6 +188,27 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
+# UMBP is a ROCm-only connector, so its unit tests run only on MI355 and are
+# excluded from the shared KV Connectors steps above.
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  key: amd-umbp-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
 # GPUs over xGMI, compared exactly against a direct serve.
