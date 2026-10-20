@@ -28,8 +28,7 @@
 
   #include "octave_format.cuh"
 
-  #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__) && \
-      !defined(__gfx1101__) && !defined(__gfx1102__) && !defined(__gfx1103__)
+  #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__)
     #define OCTAVE_WMMA_STUB
   #endif
 
@@ -46,13 +45,14 @@ using octave::D;
 using octave::Format;
 using octave::LUT_ONE;
 using octave::R;
-constexpr int QG = 4;        // query tokens per block
-constexpr int kWindow = 64;  // exact recent positions (sparse window mode)
-constexpr int kSinks = 4;    // exact leading positions (sparse window mode)
-constexpr int QROW = D + 8;  // padded LDS row (bank spread)
-constexpr float PSCALE = 256.0f;
-constexpr float BIAS = 1152.0f;  // int8 byte x fed as x + 1152
-constexpr uint32_t X = 0x80808080u;
+constexpr int QG = 4;  // query tokens per block
+// Exact recent and leading positions (sparse window mode).
+[[maybe_unused]] constexpr int kWindow = 64;
+[[maybe_unused]] constexpr int kSinks = 4;
+[[maybe_unused]] constexpr int QROW = D + 8;  // padded LDS row (bank spread)
+[[maybe_unused]] constexpr float PSCALE = 256.0f;
+[[maybe_unused]] constexpr float BIAS = 1152.0f;  // int8 byte x fed as x + 1152
+[[maybe_unused]] constexpr uint32_t X = 0x80808080u;
 
 __device__ __forceinline__ uint32_t swap1(uint32_t v) {
   return (uint32_t)__builtin_amdgcn_update_dpp(0, (int)v, 0xB1, 0xF, 0xF,
@@ -586,6 +586,12 @@ constexpr int kSqWmmaSplits = 192;
 constexpr int kSqWmmaMinTps = 64;
 constexpr int kSqWmmaNsb = 2;
 
+int octave_decode_mfma(torch::Tensor query, torch::Tensor cache,
+                       torch::Tensor block_table, torch::Tensor q_to_req,
+                       torch::Tensor q_to_klen, torch::Tensor mid_o,
+                       torch::Tensor k_signs, double sm_scale,
+                       int64_t num_kv_splits, int64_t fmt, int64_t query_group);
+
 // Launches the WMMA decode when the shape is covered; returns the number of
 // splits it wrote (for the reduce), or 0 when the caller must use its own
 // kernel.
@@ -598,12 +604,24 @@ int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        int64_t num_kv_splits, int64_t fmt,
                        const std::optional<torch::Tensor>& indices,
                        const int* qpos, const int* wtags, int wmask,
-                       const int* stags, int smask) {
+                       const int* stags, int smask, int64_t query_group) {
   using namespace octave_wmma;
-  static const bool arch_ok = [] {
-    const auto* prop = at::cuda::getCurrentDeviceProperties();
-    return std::string(prop->gcnArchName).rfind("gfx11", 0) == 0;
+  // 0: gfx1100 (this file), 1: gfx942 (octave_decode_mfma_cdna.cu, dense
+  // only).
+  static const int arch = [] {
+    const std::string name =
+        at::cuda::getCurrentDeviceProperties()->gcnArchName;
+    if (name.rfind("gfx1100", 0) == 0) return 0;
+    if (name.rfind("gfx942", 0) == 0) return 1;
+    return -1;
   }();
+  if (arch == 1)
+    return indices.has_value()
+               ? 0
+               : octave_decode_mfma(query, cache, block_table, q_to_req,
+                                    q_to_klen, mid_o, k_signs, sm_scale,
+                                    num_kv_splits, fmt, query_group);
+  const bool arch_ok = arch == 0;
   const int num_q = query.size(0);
   const int num_q_heads = query.size(1);
   const int num_kv_heads = cache.size(1);

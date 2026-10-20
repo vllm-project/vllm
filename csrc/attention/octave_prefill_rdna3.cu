@@ -36,8 +36,7 @@
 
   #include "octave_format.cuh"
 
-  #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__) && \
-      !defined(__gfx1101__) && !defined(__gfx1102__) && !defined(__gfx1103__)
+  #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__)
     #define OCTAVE_PREFILL_STUB
   #endif
 
@@ -73,18 +72,18 @@ __device__ __forceinline__ int split_len(int ctx, int used) {
 // ===========================================================================
 // Phase 1: prefix
 // ===========================================================================
-constexpr int NW = 8;         // compute wave pairs (16 query vectors each)
-constexpr int NL = 8;         // loader waves
-constexpr int KROW = D + 16;  // bytes per K row in LDS
-constexpr float PSCALE = 4096.0f;
+constexpr int NW = 8;  // compute wave pairs (16 query vectors each)
+constexpr int NL = 8;  // loader waves
+[[maybe_unused]] constexpr int KROW = D + 16;  // bytes per K row in LDS
+[[maybe_unused]] constexpr float PSCALE = 4096.0f;
 // The LDS read of PV step c waits for the WMMA of step c - DEPV, which keeps
 // the scheduler from hoisting every read (and spilling).
-constexpr int DEPV = 4;
+[[maybe_unused]] constexpr int DEPV = 4;
 constexpr int NTHREADS = (2 * NW + NL) * 32;
 constexpr int VPAD = 16;  // halves after every 8 rows of V^T
 constexpr int HD = D / 2;
-constexpr int QSTEPS = HD / 16;
-constexpr int OFRAGS = HD / 16;
+[[maybe_unused]] constexpr int QSTEPS = HD / 16;
+[[maybe_unused]] constexpr int OFRAGS = HD / 16;
 
 __device__ __forceinline__ int vrow(int row) {
   return row * KT + (row >> 3) * VPAD;
@@ -528,8 +527,8 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
 // ===========================================================================
 constexpr int CW = 8;        // waves
 constexpr int CM = 16 * CW;  // query rows per block
-constexpr int FRAGS = D / 16;
-constexpr int X = 8;  // fp16 per 16-byte chunk
+[[maybe_unused]] constexpr int FRAGS = D / 16;
+[[maybe_unused]] constexpr int X = 8;  // fp16 per 16-byte chunk
 
 __device__ __forceinline__ float row16_max(float v) {
   v = fmaxf(v, __shfl_xor(v, 1));
@@ -715,6 +714,12 @@ float* workspace(int64_t need, const at::TensorOptions& opts) {
 }  // namespace octave_pf
 
 int octave_slot_bytes(int64_t fmt);
+void octave_prefill_cdna(torch::Tensor out, torch::Tensor q, torch::Tensor k,
+                         torch::Tensor v, torch::Tensor cache,
+                         torch::Tensor block_table, torch::Tensor cu_seqlens_q,
+                         torch::Tensor seq_lens, int64_t max_query_len,
+                         double sm_scale, int64_t fmt, float* ws,
+                         int num_splits);
 
 void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                     torch::Tensor v, torch::Tensor cache,
@@ -735,11 +740,15 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
                   cache.stride(0) % align == 0,
               "octave_prefill: misaligned slots");
-  static const bool arch_ok = [] {
-    const auto* prop = at::cuda::getCurrentDeviceProperties();
-    return std::string(prop->gcnArchName).rfind("gfx11", 0) == 0;
+  // 0: gfx1100 (WMMA), 1: gfx942 (MFMA, octave_prefill_cdna.cu).
+  static const int arch = [] {
+    const std::string name =
+        at::cuda::getCurrentDeviceProperties()->gcnArchName;
+    if (name.rfind("gfx1100", 0) == 0) return 0;
+    if (name.rfind("gfx942", 0) == 0) return 1;
+    return -1;
   }();
-  TORCH_CHECK(arch_ok, "octave_prefill: RDNA3 (gfx11) only");
+  TORCH_CHECK(arch >= 0, "octave_prefill: gfx1100 or gfx942 only");
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
@@ -760,6 +769,11 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
       std::min(16, std::max(1, (1024 + base_blocks - 1) / base_blocks));
   float* ws = workspace((int64_t)num_splits * total_q * hq * (D + 2),
                         q.options().dtype(at::kFloat));
+  if (arch == 1) {
+    octave_prefill_cdna(out, q, k, v, cache, block_table, cu_seqlens_q,
+                        seq_lens, max_query_len, sm_scale, fmt, ws, num_splits);
+    return;
+  }
 
   dim3 grid1(num_seqs, hkv, rowtiles * num_splits);
   #define PREFIX(B, KC)                                                     \

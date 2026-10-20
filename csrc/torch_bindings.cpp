@@ -20,7 +20,9 @@
 // ROCm-only kernels on the legacy _C extension (they use the full torch API,
 // not the stable ABI).
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
-  // Octave KV cache (ROCm): store, split-KV decode, rotation, prefill.
+#ifdef VLLM_OCTAVE_KV
+  // Octave KV cache (gfx1100, gfx942): store, split-KV decode, rotation,
+  // prefill.
   ops.def(
       "octave_cache_store(Tensor key, Tensor value, Tensor! cache, "
       "Tensor slot_mapping, Tensor k_signs, Tensor v_signs, int fmt) -> ()");
@@ -52,6 +54,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens, "
       "int max_query_len, float sm_scale, int fmt) -> ()");
   ops.impl("octave_prefill", torch::kCUDA, &octave_prefill);
+#endif
 }
 
 #ifdef USE_ROCM

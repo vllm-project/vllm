@@ -3,8 +3,9 @@
 """Octave attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
 
 KV cache format and reference: ``vllm/v1/attention/ops/rocm_octave.py``.
-Kernels: ``csrc/attention/octave_attn.cu`` (portable) and the per-architecture
-tiers in ``_ARCH_TIERS``; see ``docs/design/rocm_octave.md``.
+Kernels: ``csrc/attention/octave_attn.cu`` and the per-architecture tiers in
+``_kernel_tier``; validated on gfx1100 and gfx942 only. See
+``docs/design/rocm_octave.md``.
 
 Decode, MTP verification and short continuation chunks (every request with
 at most ``_DECODE_MAX_QUERY_LEN`` query tokens) run the split-KV decode
@@ -14,6 +15,7 @@ prefix from the packed cache and the current chunk's K/V unquantized.
 """
 
 import contextlib
+import math
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
@@ -22,6 +24,7 @@ import torch
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -41,23 +44,20 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-# Per-architecture kernel tiers (gcnArchName prefix -> (decode, prefill)).
-# Decode always has the portable dot4 kernel; prefill needs a native kernel
-# (HIP or FlyDSL) per architecture and there is no Triton fallback.
-_ARCH_TIERS: dict[str, tuple[str, str | None]] = {
-    # Only the targets the WMMA kernels are compiled for; on others they are
-    # empty stubs.
-    "gfx110": ("wmma", "wmma"),
-}
-_PORTABLE_TIERS: tuple[str, str | None] = ("dot4", None)
 
+# Native kernel tier of the validated architectures; any other architecture is
+# rejected at selection (supports_compute_capability) until it is validated.
+def _kernel_tier() -> str:
+    from vllm.platforms.rocm import on_gfx942, on_gfx1100
 
-def _arch_tiers() -> tuple[str, tuple[str, str | None]]:
-    arch = torch.cuda.get_device_properties().gcnArchName.split(":")[0]
-    for prefix, tiers in _ARCH_TIERS.items():
-        if arch.startswith(prefix):
-            return arch, tiers
-    return arch, _PORTABLE_TIERS
+    if on_gfx1100():
+        return "wmma"
+    if on_gfx942():
+        return "mfma"
+    raise NotImplementedError(
+        "ROCM_OCTAVE is validated on gfx1100 (RDNA3) and gfx942 (MI300) only; "
+        "see the architecture contract in docs/design/rocm_octave.md"
+    )
 
 
 _DECODE_MAX_QUERY_LEN = 128
@@ -66,13 +66,20 @@ _KERNEL_ROPE_DIM = 64
 
 
 def _mid_o_shape(
-    num_q: int, num_heads: int, max_splits: int, capture_size: int
+    num_q: int,
+    num_heads: int,
+    max_splits: int,
+    capture_size: int,
+    split_cap: int | None = None,
 ) -> tuple[tuple[int, int, int, int], int]:
     """Split-KV partials for num_q queries: every split up to the cudagraph
-    capture size, fewer splits past it so the buffer never outgrows that."""
-    splits = max_splits
+    capture size, fewer splits past it so the buffer never outgrows that.
+    With split_cap, small batches spend the same buffer on up to split_cap
+    splits (a wide GPU needs them to fill its CUs with one query)."""
+    budget = capture_size * max_splits
+    splits = max_splits if split_cap is None else min(split_cap, budget // num_q)
     if num_q > capture_size:
-        splits = max(1, min(max_splits, capture_size * max_splits // num_q))
+        splits = max(1, min(max_splits, budget // num_q))
     return (num_q, num_heads, splits, _KERNEL_HEAD_SIZE + 2), splits
 
 
@@ -108,6 +115,13 @@ class RocmOctaveAttentionBackend(AttentionBackend):
         kv_cache_spec: "KVCacheSpec | None" = None,
     ) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        from vllm.platforms.rocm import on_gfx942, on_gfx1100
+
+        # DeviceCapability is unreliable on ROCm; use the gcnArchName.
+        return current_platform.is_rocm() and (on_gfx1100() or on_gfx942())
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -277,13 +291,8 @@ class RocmOctaveAttentionImpl(AttentionImpl):
                 "ROCM_OCTAVE kernels need ROCm, head_size=256 and 64 rotary "
                 f"dims; got head_size={head_size}, rotary dims={rope_dim}"
             )
-        arch, (decode_tier, prefill_tier) = _arch_tiers()
-        if prefill_tier is None:
-            raise NotImplementedError(
-                f"ROCM_OCTAVE has no native prefill kernel for {arch} yet; see the "
-                "architecture contract in docs/design/rocm_octave.md"
-            )
-        self._use_wmma = decode_tier == "wmma"
+        # The MFMA decode takes up to 256 splits (octave_decode_mfma_cdna.cu).
+        self._split_cap = 256 if _kernel_tier() == "mfma" else None
 
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
@@ -307,7 +316,11 @@ class RocmOctaveAttentionImpl(AttentionImpl):
         workspace, a buffer of this layer's own, allocated once at the
         cudagraph capture size since captured graphs hold its address."""
         shape, splits = _mid_o_shape(
-            num_q, self.num_heads, self.max_num_kv_splits, self._max_capture_size
+            num_q,
+            self.num_heads,
+            self.max_num_kv_splits,
+            self._max_capture_size,
+            self._split_cap,
         )
         if is_workspace_manager_initialized():
             (buf,) = current_workspace_manager().get_simultaneous(
@@ -322,8 +335,8 @@ class RocmOctaveAttentionImpl(AttentionImpl):
                 self._max_capture_size,
             )
             self._mid_o = torch.empty(full, dtype=torch.float32, device=device)
-        if num_q <= self._mid_o.shape[0]:
-            return self._mid_o, splits
+        if math.prod(shape) <= self._mid_o.numel():
+            return self._mid_o.view(-1)[: math.prod(shape)].view(shape), splits
         return torch.empty(shape, dtype=torch.float32, device=device), splits
 
     def do_kv_cache_update(
@@ -429,7 +442,7 @@ class RocmOctaveAttentionImpl(AttentionImpl):
             splits,
             self.fmt.kernel_code,
             4 if md.max_query_len > 1 else 1,
-            self._use_wmma,
+            True,  # native tier; False runs the portable reference kernel
         )
 
     def _prefill(

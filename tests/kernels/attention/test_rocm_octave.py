@@ -11,9 +11,18 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops import rocm_octave as sq
 
+
+def _arch() -> str | None:
+    if not current_platform.is_rocm():
+        return None
+    from vllm.platforms.rocm import on_gfx942, on_gfx1100
+
+    return "gfx1100" if on_gfx1100() else "gfx942" if on_gfx942() else None
+
+
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or not hasattr(torch.ops._C, "octave_decode"),
-    reason="Octave kernels are ROCm-only",
+    _arch() is None or not hasattr(torch.ops._C, "octave_decode"),
+    reason="Octave kernels are validated on gfx1100 and gfx942 only",
 )
 
 HEAD, ROPE, BLOCK = 256, 64, 16
@@ -259,6 +268,7 @@ def _window_tables(entries, hkv, dev):
     )
 
 
+@pytest.mark.skipif(_arch() != "gfx1100", reason="sparse decode is gfx1100-only")
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("hkv,group", [(1, 6), (2, 6)])
 @pytest.mark.parametrize("window", ["off", "on", "evicted"])
