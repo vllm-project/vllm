@@ -41,6 +41,7 @@ If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
 VLLM_USE_PRECOMPILED=1 uv pip install -e .
+vllm download-kernels
 ```
 
 To rebuild only the Rust frontend binary:
@@ -74,7 +75,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.11 to 3.14. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -100,14 +101,6 @@ integration, use the configuration files in `tools/pre_commit/`:
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
-    ```
-
-    ---
-
-    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
-
-    ```bash
-    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -336,9 +329,15 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- If the PR is behind, the bot merges the target branch into your PR branch
+  (like the **Update branch** button) and runs CI on the resulting merge commit.
+  Pull the branch before pushing more changes. This needs **Allow edits by
+  maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
+  the bot reports the count without creating a new build; merge or rebase onto
+  the latest target branch yourself, then rerun the command.
+- PR authors without write access cannot start another full run (including
+  `--allow-stale`) on a commit that already has a CI build. Push new changes,
+  use `/ci retry` to rerun failed jobs, or ask a reviewer with write access.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
@@ -346,9 +345,8 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
-  Direct Buildkite launches are outside this workflow. No additional token is
-  needed.
+- Apart from that merge, these commands do not modify your branch or enforce
+  merge requirements. Direct Buildkite launches are outside this workflow.
 
 Maintainers must configure required Buildkite status checks on the latest PR
 commit and enable GitHub's
