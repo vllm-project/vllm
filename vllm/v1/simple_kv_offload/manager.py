@@ -361,6 +361,16 @@ class SimpleCPUOffloadScheduler:
         if request.skip_reading_prefix_cache:
             return 0, False
 
+        if num_computed_tokens and not self._lazy_mode:
+            # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
+            # but eager stores skip it, so move it to the MRU end here.
+            prefix_hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
+                request.block_hashes, num_computed_tokens
+            )
+            prefix_blocks = [b for grp in prefix_hit for b in grp if not b.is_null]
+            self.cpu_block_pool.touch(prefix_blocks)
+            self.cpu_block_pool.free_blocks(reversed(prefix_blocks))
+
         if num_computed_tokens % self.block_size != 0:
             # Transfers are whole-block copies, so an external suffix cannot
             # start in the middle of a destination block. When the GPU-side
@@ -851,7 +861,6 @@ class SimpleCPUOffloadScheduler:
         request = state.request
         confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
         num_free = self.cpu_block_pool.get_num_free_blocks()
-        already_cached: list[KVCacheBlock] = []
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
             if g not in self.prefix_cacheable_group_ids:
@@ -889,17 +898,10 @@ class SimpleCPUOffloadScheduler:
                         continue
                     gpu_block = recovered
                     gpu_block_id = gpu_block.block_id
-                admission = self._classify_store_candidate(gpu_block)
-                if admission is _StoreAdmission.ALREADY_CACHED:
-                    assert gpu_block.block_hash is not None
-                    cpu_block = (
-                        self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                            gpu_block.block_hash
-                        )
-                    )
-                    assert cpu_block is not None
-                    already_cached.append(cpu_block)
-                if admission is not _StoreAdmission.READY:
+                if (
+                    self._classify_store_candidate(gpu_block)
+                    is not _StoreAdmission.READY
+                ):
                     advanced_per_group[g] += 1
                     continue
                 if len(gpu_block_ids) >= num_free:
@@ -965,10 +967,6 @@ class SimpleCPUOffloadScheduler:
                         )
                     block_meta.append(meta_by_hash)
 
-        # A skipped block counts as stored: move its CPU copy to the MRU end,
-        # or a prefix that keeps hitting on GPU ages out by its first store.
-        self.cpu_block_pool.touch(already_cached)
-        self.cpu_block_pool.free_blocks(reversed(already_cached))
         return gpu_block_ids, advanced_per_group, block_meta
 
     def _classify_store_candidate(self, gpu_block: "KVCacheBlock") -> _StoreAdmission:

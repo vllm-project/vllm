@@ -31,6 +31,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
@@ -1316,8 +1317,7 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
     )
     simulate_store_completion(sched, meta.store_event)
 
-    # req_a's prefix is reused and hits entirely on GPU, so the eager store
-    # finds both blocks already on CPU and stores nothing.
+    # req_a's prefix is reused and hits entirely on GPU.
     req_a2 = Request(
         request_id="req-a2",
         prompt_token_ids=req_a.prompt_token_ids,
@@ -1326,15 +1326,7 @@ def test_gpu_prefix_hit_refreshes_cpu_lru() -> None:
         mm_features=None,
         block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
     )
-    req_a2.num_computed_tokens = 2 * BLOCK_SIZE
-    sched.update_state_after_alloc(req_a2, kv_a, num_external_tokens=0)
-    meta_a2 = sched.build_connector_meta(
-        make_scheduler_output(
-            {req_a2.request_id: 1},
-            new_reqs={req_a2.request_id: kv_a.get_block_ids()},
-        )
-    )
-    assert meta_a2.store_event == -1
+    assert sched.get_num_new_matched_tokens(req_a2, 2 * BLOCK_SIZE) == (0, False)
 
     # Storing 2 new blocks evicts the 2 LRU blocks, which are now req_b's.
     req_c = make_request(num_blocks=2)
@@ -2905,6 +2897,40 @@ def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> Non
     assert attention_blocks[0].block_id in stored
     assert len(stored) == len(set(stored))
     assert len(finish_meta.store_cpu_blocks) == len(stored)
+
+
+def test_gpu_prefix_hit_refreshes_cpu_mamba_boundary() -> None:
+    """A hybrid GPU prefix hit refreshes the CPU attention blocks and the Mamba
+    state at the hit boundary, not older Mamba states."""
+    block_size = 4 * BLOCK_SIZE
+    fix = _make_hybrid_attention_mamba_scheduler(block_size=block_size)
+    sched = fix.scheduler
+    cpu_pool = sched.cpu_block_pool
+    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+    other = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
+
+    def cache_on_cpu(request: Request, group_id: int) -> list[KVCacheBlock]:
+        blocks = cpu_pool.get_new_blocks(2)
+        cpu_pool.cache_full_blocks(
+            request=request,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=2,
+            block_size=sched.group_block_sizes[group_id],
+            kv_cache_group_id=group_id,
+        )
+        return blocks
+
+    attention, mamba = cache_on_cpu(req, 0), cache_on_cpu(req, 1)
+    newer = cache_on_cpu(other, 0)
+    cpu_pool.free_blocks([*attention, *mamba])
+    cpu_pool.free_blocks(newer)
+
+    assert sched.get_num_new_matched_tokens(req, 2 * block_size) == (0, False)
+
+    lru_order = cpu_pool.free_block_queue.get_all_free_blocks()
+    assert lru_order[-3:] == [mamba[1], attention[1], attention[0]]
+    assert lru_order.index(mamba[0]) < lru_order.index(newer[0])
 
 
 def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
