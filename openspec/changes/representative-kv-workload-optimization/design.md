@@ -1,161 +1,370 @@
-# 代表性 KV 实验设计
+# Representative KV Experiment Design
 
 ## Context
 
-本变更延伸进行中的 `programmable-kv-cache`，实验与优化仍归属 [PR #62382](https://github.com/vllm-project/vllm/pull/62382)。接口依据 [RFC #57103 的更新讨论](https://github.com/vllm-project/vllm/issues/57103#issuecomment-5814964446)和本分支 `vllm/v1/kv_hints/README.md`：默认只执行显式指令，本地策略可选，资源审批及物理操作由引擎负责，无 public Pin。RFC 较早正文中的 Pin 描述不作为实现目标。
+This change extends the ongoing `programmable-kv-cache` change within
+[PR #62382](https://github.com/vllm-project/vllm/pull/62382). Its interface follows
+the [updated RFC #57103 discussion](https://github.com/vllm-project/vllm/issues/57103#issuecomment-5814964446)
+and this branch's `vllm/v1/kv_hints/README.md`: the default executes explicit
+commands, local policies are optional, and the engine owns resource approval and
+physical operations. There is no public Pin. Earlier Pin descriptions in the RFC
+body are outside the implementation target.
 
-2026-10-19 本地报告已记录 V4 在 GSM8K 压力回放上相对 Native/quota 的中位吞吐收益，以及容量充足时零搬运的结果。短暂停成本判断、按准入准备、共享容量复核、整组准备保护均已有实现；本轮以实施时实际冻结的源码为起点，验证新负载并定位剩余限制，避免重复实现这些机制。V5 保留 GPU 备份源的候选已撤回，历史单轮不足以证明优劣。
+The local report dated 2026-10-19 already records V4 median throughput gains over
+Native/quota in GSM8K pressure replay, and zero movement when the workload fits.
+Short-pause cost checks, preparation on admission, shared-capacity revalidation,
+and complete-group preparation protection already exist. Start from the actual
+source frozen at implementation time, validate new workloads, and identify
+remaining limitations without reimplementing those mechanisms. The V5 candidate
+that preserved GPU backup sources was withdrawn; historical single runs do not
+establish which alternative is faster.
 
-相邻 TokenMoE 的 20 任务采集包含真实工具执行，工具耗时中位数约 0.34 秒、P95 约 1.65–1.75 秒，适合确定负载形态。其模型、32k 上下文、MoE 路由记录及测量条件不同；复用任务选择和容器适配，当前模型重新采集原始消息与 token 输入。
+The adjacent TokenMoE collection contains 20 tasks with real tools, whose median
+duration is about 0.34 seconds and P95 about 1.65–1.75 seconds. This helps establish
+workload shape. Its model, 32k context, MoE routing capture, and measurement
+conditions differ. Reuse task selection and container adaptation, and collect
+fresh raw messages and token inputs with the current model.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- 三类本地小样本能够形成有证据的缓存竞争，并保留相同部署预算下的容量充足对照。
-- 分别量化调度、显式应用控制和完整协同的贡献，解释实际复用及长短请求等待。
-- 用观测到的限制指导核心修改，通过保留样本和普通计时证明净收益。
-- 所有比较保持模型工作、完成语义和资源条件可审计；中性、失败和退化结果保留。
+- Establish measurable cache contention with three small local workloads, while
+  retaining cache-fit controls at the same deployment budget.
+- Quantify scheduling, explicit application control, and full cooperation
+  separately, explaining actual reuse and long/short request waiting.
+- Use observed limitations to guide core changes and verify net benefits with
+  held-out samples and ordinary timing.
+- Keep model work, completion semantics, and resources auditable across all
+  comparisons; retain neutral, failed, and regressing results.
 
 **Non-Goals:**
 
-- 全量 SWE-bench、完整模型排行榜、多机部署或 RL 训练吞吐。
-- 新 hint 协议、public Pin、上下文编辑、改写模型注意力或将任意文档片段视为前缀命中。
-- 移植旧 TokenCake scheduler、修改 Mooncake 项目、绕过引擎分配器或由策略直接选择抢占对象。
+- Full SWE-bench runs, comprehensive model rankings, multi-machine deployment, or
+  RL training throughput.
+- New hint protocols, public Pin, context editing, modified model attention, or
+  treating arbitrary document fragments as reusable prefixes.
+- Porting the old TokenCake scheduler, changing the Mooncake project, bypassing
+  engine allocation, or letting policies select preemption victims directly.
 
 ## Decisions
 
-### 1. 复用公共测量入口，负载适配保持薄层
+### 1. Reuse shared measurement entry points with thin workload adapters
 
-扩展 `benchmarks/programmable_kv_cache/` 的现有服务管理、`RolloutClient`、回放和分析能力，使负载选择与资源管理分离。必要时增加一个共享负载模块及 mini-swe-agent 适配层，不按工作负载复制服务启动、Store、结果查询、ACK 和清理代码。保留现有 verl CLI 和历史 trace 的兼容读取。
+Extend existing server management, `RolloutClient`, replay, and analysis under
+`benchmarks/programmable_kv_cache/`, separating workload selection from resource
+management. Add a shared workload module and mini-swe-agent adapter only where
+needed. Reuse server startup, Store management, result queries, ACK, and cleanup
+across workloads. Preserve the existing verl CLI and historical trace readers.
 
-mini-swe-agent 固定 2.4.6 或经验证的明确提交，依赖使用 uv 管理。借用相邻项目的任务清单、模型/工具交互方式和容器探测经验，不复制其路由记录器、数据平台或完整 fork。容器使用独立任务目录，保存真实命令、退出码、工具输出与补丁。关闭无关采集可减少 CPU 和 I/O 对性能的影响。
+Pin mini-swe-agent to 2.4.6 or an explicitly verified commit and manage dependencies
+with uv. Reuse the adjacent project's task lists, model/tool interaction patterns,
+and container probes without copying its routing recorder, data platform, or
+complete fork. Give each task an independent container workspace and save actual
+commands, exit codes, tool outputs, and patches. Disable unrelated capture to
+reduce CPU and I/O interference.
 
-采用共享 HTTP 负载入口可统一控制与计时；独立引入第三套 benchmark 框架会增加行为差异及维护量。实现时以最小公共抽取为限。
+A shared HTTP workload entry point keeps control and timing consistent. Adding
+another benchmark framework would increase behavioral differences and maintenance;
+limit implementation to the smallest useful shared extraction.
 
-### 2. 固定小样本与运行上限
+### 2. Fix small samples and execution bounds
 
-以下为起始实验协议，最终有效值在基线校准后写入 manifest；修改规模须产生新协议版本。
+The following settings define the initial protocol. Write effective values to the
+manifest after baseline calibration; changes in scale require a new protocol
+version.
 
-| 负载 | 烟测 / 调优 | 保留验证 | 压力旋钮及限制 |
+| Workload | Smoke / tuning | Held-out validation | Pressure controls and limits |
 | --- | --- | --- | --- |
-| SWE coding agent | 3 个烟测任务；4 个调优任务 | 8 个固定任务，真实 bash/文件/测试操作 | 会话并发 4、8；不足时按预登记顺序加入任务，上限 20 个不同任务、并发 16 |
-| long-doc-qa | 4 个文档；每文档 4 问 | 不同来源的 16 个文档；每文档 4 问 | 文档约 4k/8k/12k token，工作集可增至 32 文档；并发 8、16、32 |
-| coding + short chat | 调优 coding 任务与 32 条聊天 | 保留 coding 任务与 128 条固定聊天 | coding 并发 4、8；聊天开放到达率 0.25、0.5、1 req/s，校准后冻结一个主压力点 |
+| SWE coding agent | 3 smoke tasks; 4 tuning tasks | 8 fixed tasks with real bash, file, and test operations | Session concurrency 4 or 8; add tasks in preregistered order if needed, up to 20 distinct tasks and concurrency 16 |
+| long-doc-qa | 4 documents, 4 questions each | 16 documents from different sources, 4 questions each | About 4k/8k/12k tokens per document; up to 32 documents; concurrency 8, 16, or 32 |
+| coding + short chat | Tuning coding tasks and 32 chats | Held-out coding tasks and 128 fixed chats | Coding concurrency 4 or 8; open-loop chat arrivals at 0.25, 0.5, or 1 req/s; freeze one primary pressure point after calibration |
 
-SWE 默认每任务 20 次模型调用、900 秒会话预算、60 秒工具超时、单次最多 1,024 输出 token；会话时间预算在轮次边界检查，另记真实墙钟耗时。所有对照使用相同限制。基线可用于统一修正明显不合适的输出预算，冻结后不按策略调整。预算耗尽、格式错误、容器错误和正常提交均进入任务分母。
+SWE defaults are 20 model calls per task, a 900-second session budget, a 60-second
+tool timeout, and at most 1,024 output tokens per call. Check the session budget
+at turn boundaries and separately record actual wall time. Apply identical limits
+to all configurations. Baseline checks may justify one common correction to an
+unsuitable output budget before freezing it; do not change it by policy afterward.
+Budget exhaustion, format errors, container errors, and normal submissions all
+remain in the task denominator.
 
-起始任务来自相邻项目 `collection/configs/runs/local-qwen3-full.yaml`。调优任务为 `astropy__astropy-12907`、`django__django-10097`、`matplotlib__matplotlib-13989`、`psf__requests-1142`；保留任务为 `mwaskom__seaborn-3069`、`pallets__flask-5014`、`pydata__xarray-2905`、`pylint-dev__pylint-4551`、`pytest-dev__pytest-10051`、`scikit-learn__scikit-learn-10297`、`sphinx-doc__sphinx-10323`、`sympy__sympy-11618`。校准前验证本地数据版本及任务存在。额外任务的角色在查看协同策略成绩前固定。
+Start from the adjacent project's `collection/configs/runs/local-qwen3-full.yaml`.
+Tuning tasks are `astropy__astropy-12907`, `django__django-10097`,
+`matplotlib__matplotlib-13989`, and `psf__requests-1142`. Held-out tasks are
+`mwaskom__seaborn-3069`, `pallets__flask-5014`, `pydata__xarray-2905`,
+`pylint-dev__pylint-4551`, `pytest-dev__pytest-10051`,
+`scikit-learn__scikit-learn-10297`, `sphinx-doc__sphinx-10323`, and
+`sympy__sympy-11618`. Verify local dataset versions and task availability before
+calibration. Assign roles to additional tasks before inspecting cooperation
+results.
 
-long-doc-qa 使用有来源和哈希的本地自然文本，固定文档后缀问题，保持同文档前缀逐 token 一致。采用随机交错和逐轮交错，主顺序由种子冻结；不把所有同文档问题连续发送作为唯一压力成绩。每文档至少一个问题有可核验答案。纯合成文档或人为等待作为单独诊断协议，不代替主自然文本结果。
+Use local natural text with provenance and hashes for long-doc-qa. Fix questions
+as document suffixes and preserve identical document-prefix token IDs across
+questions. Support random interleaving and round-by-round interleaving, with the
+primary order frozen by seed. Consecutive questions for one document cannot be
+the only pressure result. At least one question per document has a verifiable
+answer. Synthetic documents and artificial waits belong to separate diagnostic
+protocols and do not replace the primary natural-text results.
 
-短聊天选择固定小型 ShareGPT 或已有多轮会话样本，输入 128–512 token、输出 64–128 token；选择规则、ID、上下文预算固定。纯 coding 和混合组中的 coding 子集、采样与上限相同。混合压力通过独立会话和到达形成，不添加与任务无关的超长公共提示。
+Select fixed small ShareGPT or existing multi-turn samples for short chat, with
+128–512 input tokens and 64–128 output tokens. Fix selection rules, IDs, and context
+budgets. Keep the coding subset, sampling, and limits identical between coding
+alone and the mixed workload. Create mixed pressure through independent sessions
+and arrivals without adding unrelated long shared prompts.
 
-### 3. 在 Native 上校准压力，随后冻结
+### 3. Calibrate pressure on Native, then freeze the protocol
 
-固定本地 Qwen3.8-27B BF16、TP=2、GPU 0/3、APC、PCP=DCP=1、batch token budget=4096；`gpu_memory_utilization=0.5`，不设置固定 KV 字节覆盖。起始最大上下文 16,384 token；逐请求检查输入加输出预算，超限不静默截断。若 SWE 需要 32k，先统一验证启动与能力，再为所有对照冻结新的上下文和实际 KV 容量。
+Use local Qwen3.8-27B BF16, TP=2, GPUs 0/3, APC, PCP=DCP=1, and a batch token budget
+of 4096. Set `gpu_memory_utilization=0.5` without a fixed KV-byte override. Start
+with a 16,384-token context and check input plus output budget for every request;
+do not truncate silently. If SWE needs 32k, first verify startup and capabilities,
+then freeze that context and the resulting actual KV capacity for every arm.
 
-记录每个缓存组的块大小、容量、混合状态布局，以及 active/transfer 引用、可回收缓存、排队需求。不能用总 prompt token 数或某一瞬间 100% 占用独立证明压力。压力点应具有超出有效复用容量的独立工作集，并观测到缓存周转导致的重算/加载，或真实容量延期/抢占/持续排队；报告相关时间占比及实际并发。
+Record block size, capacity, and hybrid-state layout for every cache group,
+together with active/transfer references, reclaimable cache, and waiting demand.
+Total prompt tokens or a single 100% occupancy sample cannot independently prove
+pressure. A pressure point needs an independent working set larger than effective
+reuse capacity, together with cache turnover causing recomputation/loads, or
+actual capacity deferral, preemption, or sustained queueing. Report the affected
+time fraction and observed concurrency.
 
-基线按表中有限候选逐步增加工作集和并发，选择达到压力条件的最小配置；另冻结一个低竞争配置。选择只读取 Native 的资源与压力证据，不读取优化配置的速度排名。达到样本上限仍无压力则标为压力未建立，说明受限资源并调整协议，不能作为已完成压力验收。
+Increase working sets and concurrency through the finite baseline candidates in
+the table and select the smallest configuration that establishes pressure. Freeze
+a low-contention point as well. Selection reads only Native resource and pressure
+evidence, without ranking optimized configurations by speed. If the sample cap
+still does not establish pressure, report the limiting resource and revise the
+protocol; pressure acceptance remains incomplete.
 
-GPU 性能轮次串行，使用现有进程归属审计；CPU 回归、模型功能测试和 profiling 也安排在独立窗口。预检核对当前 GPU 占用，资源冲突时等待，不终止其他任务进程。记录 CPU/cgroup、容器限额、Store 容量、传输协议和其他负载；相同 GPU 预算下增加冷层容量的组须明确披露。
+Run GPU performance measurements serially with the existing process-ownership
+audit. Schedule CPU regressions, model functional checks, and profiling in separate
+windows too. Check GPU occupancy before launching; wait on resource conflicts
+without terminating other tasks' processes. Record CPU/cgroup settings, container
+limits, Store capacity, transport protocol, and other load. Disclose extra
+cold-tier capacity used by movement arms at the same GPU budget.
 
-### 4. 真实执行与固定工作量回放分别回答问题
+### 4. Separate live execution from replay with fixed work
 
-真实阶段用本分支模型执行 agent 和工具，收集小样本任务结果。只有完整原始消息、模板、tokenizer、工具结果和引擎输入校验通过的轨迹才转换为回放。跨模型 token ID 不直接复用。
+Execute the branch's model and real tools to collect small-sample task outcomes.
+Convert traces for replay only after validating complete raw messages, templates,
+tokenizers, tool results, and engine inputs. Do not reuse token IDs across models.
 
-固定回放记录每次请求的完整 `prompt_ids`、输出 token 数、会话/类别、依赖、最初到达时间和工具批次时长。回放每轮执行真实模型，后续请求继续使用录制的完整输入，不把新生成内容写入后续固定输入，不重跑工具，不声称产生新的解题分数。模型/模板/输入/输出预算/依赖/暂停/到达共同构成工作量指纹。
+Replay records complete `prompt_ids`, output token counts, session/class,
+dependencies, initial arrivals, and tool-batch durations for every request. Each
+replay executes the real model. Later requests use recorded complete inputs,
+without inserting newly generated content into fixed history or rerunning tools.
+Replay does not produce new task-resolution scores. Model, template, inputs,
+output budgets, dependencies, pauses, and arrivals jointly form the workload
+fingerprint.
 
-每个会话保持“上一轮完成 → 录制工具时长 → 本轮就绪”的依赖；独立短聊天按同一预生成开放到达表就绪。全部原定请求从其就绪时刻计入延迟，客户端容量不足的等待也计入；计时直到所有请求、控制终态及设备搬运完成，防止省略队尾请求。记录 offered、ready、sent、admitted、first-token、finished、cleanup 各阶段，未知阶段为 null 并说明。
+Preserve each session's dependency: previous turn completes → recorded tool
+interval → next turn becomes ready. Independent chats become ready according to
+the same pregenerated open-loop arrival table. Measure every planned request from
+readiness, including waiting for client capacity. Continue timing until every
+request, control terminal result, and device transfer has finished so queue tails
+cannot disappear. Record offered, ready, sent, admitted, first-token, finished,
+and cleanup stages; unknown stages are null with a reason.
 
-固定回放的完成事件包含录制的正常结束、预算耗尽和失败标签。主吞吐为同一冻结工作单位数除以全部排空耗时，另报告输出 token/s；不通过缩短输出或减少工具轮次提高成绩。实时阶段分别报告提交、失败、预算耗尽、补丁和小样本评分，`submitted` 不等于 SWE-bench resolved。
+Fixed replay preserves recorded normal-completion, budget-exhaustion, and failure
+labels. Primary throughput is the same frozen work-unit count divided by time
+through complete draining; also report output tokens/s. Do not improve scores by
+reducing outputs or tool rounds. Live runs separately report submissions,
+failures, exhausted budgets, patches, and small-sample scores; `submitted` does
+not establish SWE-bench resolution.
 
-### 5. 最小主矩阵与局部消融
+### 5. Use a minimal primary matrix and targeted ablations
 
-| 对照 | 配置与目的 |
+| Arm | Configuration and purpose |
 | --- | --- |
-| N: Native APC | 同一源码、关闭控制器/冷层 connector，建立产品部署基线 |
-| B: idle/noop | 启用控制器和相同 connector，关闭本地策略、不发送 hint，隔离启用开销 |
-| D: explicit | 应用发 `SET_PRIORITY`/`COPY_TO`/`MOVE_TO`；无本地策略；引擎可拒绝/延期；应用按有界规则重试 |
-| Q: quota-only | 同一 quota 配置，关闭 retention/movement 与无用信号，量化调度贡献 |
-| C: cooperative | retention + movement + quota，使用应用生命周期与预测，所有操作沿用统一审批和执行 |
-| C0: frozen cooperative | 本轮核心修改前冻结的现有协同源码与配置，用于核对新增修改的净收益 |
+| N: Native APC | Same source, control and cold-tier connector disabled; deployment baseline |
+| B: idle/noop | Control and the same connector enabled, local policies off, no hints; isolate enablement overhead |
+| D: explicit | Application issues `SET_PRIORITY`/`COPY_TO`/`MOVE_TO`, local policies off; engine may reject/defer, with bounded application retries |
+| Q: quota-only | Same quota configuration, retention/movement and unnecessary signals off; quantify scheduling contribution |
+| C: cooperative | Retention + movement + quota using application lifecycle and predictions through shared approval/execution |
+| C0: frozen cooperative | Existing cooperative source/configuration frozen before this round's core changes; verify their incremental net benefit |
 
-三类主压力点运行 N/D/Q/C，各至少 3 轮独立服务重启；轮次内交错配置顺序并记录顺序种子。容量充足点运行 N/B/Q/C，各至少 3 轮。C 的起点采用现有正常成本判断、按准入准备和压力阈值 0.8；Q/C 的 quota 等待上限与老化参数保持一致并记录，避免将 quota 参数调整当作应用信息收益。
+At each of the three primary pressure points, run N/D/Q/C with at least 3
+independent server restarts per arm. Interleave arm order within repetitions and
+record the ordering seed. Run N/B/Q/C at cache-fit points with at least 3
+repetitions each. Start C from the existing normal cost checks, preparation on
+admission, and pressure threshold 0.8. Keep quota waiting limits and aging
+parameters identical for Q/C and record them, so quota parameter changes do not
+masquerade as application-information benefits.
 
-实施前保留 C0 源码快照，核心候选选定后，在目标保留压力点额外运行 C0 至少三轮，与 C 使用同一输入和参数。若修改触及 Native 或 quota 的公共执行路径，相关 N/Q 也在最终源码上重测；历史基线仅在路径与资源条件有等同性证据时复用。
+Preserve a C0 source snapshot before implementation. After selecting a core
+candidate, run C0 at least three times at the target held-out pressure point with
+the same inputs and parameters as C. Rerun affected N/Q baselines on final source
+if changes touch their shared execution paths. Reuse historical baselines only
+with evidence of equivalent paths and resource conditions.
 
-编译和图捕获预热排除在计时外，随后重置 G1 并隔离冷层 namespace/cache salt，验证各轮初始缓存状态一致。正式输入的首次计算、关联/声明建立、控制准备和最终任务清理均计时；若另设预装冷缓存协议，所有相关对照使用相同内容且预装成本单列。固定回放须实际生成约定 token 数，提前结束或少执行请求判为工作量不匹配。
+Exclude compilation and graph-capture warmup from timing, then reset G1 and
+isolate cold-tier namespaces/cache salts. Verify consistent initial cache state.
+Time the first computation of actual workload inputs, association/declaration
+setup, control preparation, and final task cleanup. If a separate prepopulated
+cold-cache protocol is used, all relevant arms start with identical content and
+report population cost separately. Replay must generate the agreed token counts;
+early termination or omitted requests invalidate equal-work comparisons.
 
-D/C 共用相同工具耗时预测器和可获得的生命周期事实。D 只在生命周期边界查询和发指令，对 `deferred` 使用冻结的有界退避；查询、重试、等待和清理全部计入耗时。D/C 使用相同冷层预算和协议。
+D/C share the same tool-duration predictor and available lifecycle facts. D
+queries and issues directives at lifecycle boundaries, retrying `deferred` with
+frozen bounded backoff. Include queries, retries, waits, and cleanup in elapsed
+time. D/C use identical cold-tier budgets and transport.
 
-在一个有明确搬运机会的调优压力点，加做 retention-only、movement-only、去应用预测、去准入协同，以及暂停开始即预取的简单策略。另做 oracle、预测时长 0.5×/2×、错误目标/取消、控制延迟 0/25/100 ms 的定点诊断。oracle 明确标记且不作为主验收成绩；未来实际暂停、输出长度和请求结束时间不进入正常策略。固定回放的输出长度只用于重放控制，不作为预测提示。
+At one tuning pressure point with a measurable movement opportunity, add
+retention-only, movement-only, removal of application prediction, removal of
+admission cooperation, and a simple prefetch-at-pause policy. Run targeted
+oracle, 0.5×/2× duration predictions, wrong-target/cancellation, and 0/25/100 ms
+control-delay diagnostics separately. Label oracle and exclude it from primary
+acceptance. Normal policies cannot read actual future pauses, output lengths, or
+request completion times. Recorded output lengths control replay only; they are
+not predictor hints.
 
-该分层矩阵覆盖机制与策略贡献，同时避免在三类负载上展开所有参数的笛卡尔积。旧 GSM8K 保留一个容量充足和一个压力回归点，不重跑全历史矩阵。
+This staged matrix covers mechanism and policy contributions without taking the
+Cartesian product of every parameter across all workloads. Retain one existing
+GSM8K cache-fit point and one pressure regression point without rerunning the
+entire historical matrix.
 
-### 6. 从实际成本和未复用原因选择核心优化
+### 6. Select core changes from actual costs and failed reuse
 
-每轮分析先回答同一组问题：端到端时间由工具、就绪后等待、控制、prefill、decode、传输及清理中的哪些部分主导；并发重叠区间独立呈现，累计线程/RPC 耗时不直接相加为墙钟时间。
+For each round, establish which portions of end-to-end time are dominated by
+tools, waiting after readiness, control, prefill, decode, transfer, and cleanup.
+Show overlapping intervals separately. Summed thread or RPC durations are not
+wall time.
 
-通过 session/continuation、内容范围、缓存组、engine epoch、operation/transfer ID 关联“预测 → 保存 → 加载 → 所有组发布 → 准入 → 命中/重算 → 释放”。已有信息不足时增加有界、可关闭的诊断事件，不在每个调度步扫描全量会话。
+Correlate prediction → save → load → publication of every group → admission →
+hit/recompute → release using session/continuation, content range, cache group,
+engine epoch, and operation/transfer ID. Add bounded diagnostic events that can
+be disabled where existing observations are insufficient; do not scan every
+session on each scheduler step.
 
-| 待检验的机制限制 | 必要证据 | 证据成立后的修改方向 |
+| Mechanism limitation to test | Required evidence | Change direction if supported |
 | --- | --- | --- |
-| 搬运代价高于避免的重算 | 按实际字节/前缀长度/缓存组测量保存、加载、重算及重叠；工具与就绪时间分开 | 用过去已完成的样本估计重算与非重叠传输成本，在应用已知窗口和当前资源约束下选择保留、存出、加载或重算 |
-| 准备内容未形成可复用整组边界 | 每组 checkpoint/连续范围、部分成功、重复加载、真实前缀查询 | 以共同有效边界选择准备范围，减少不能组成真实命中的搬运；保留已有 all-rank/all-group 发布与引用保护 |
-| 准备过早或持续占用稀缺容量 | 准备完成到实际准入间隔、期间淘汰、转移引用和预留占用 | 将恢复窗口、准入候选、等待需求与在途预算结合，停止无消费者或已过时的准备 |
-| 复用评分造成短聊天等待 | 各类就绪/排队尾延迟、逐任务等待、冷前缀处理、超龄回退 | 在现有 scheduler 扩展内调整有限等待、成本与复用建议，沿用其队列及抢占所有权 |
-| 控制与索引吞掉收益 | 低竞争 CPU/RPC/索引增长与阶段计时 | 合并重复控制、减少无用查询、使用增量状态；明确可观测结果及取消语义保持完整 |
+| Movement costs exceed avoided recomputation | Save/load/recompute timings and overlap by actual bytes, prefix length, and group; separate tool time from readiness | Estimate recompute and non-overlapped transfer costs from completed samples, then choose retention, saving, loading, or recomputation within known application windows and current resources |
+| Prepared content lacks a reusable complete-group boundary | Checkpoints/continuous ranges per group, partial success, repeated loads, actual prefix lookup | Select preparation ranges at common valid boundaries, avoiding transfers that cannot form a real hit while preserving all-rank/all-group publication and reference protection |
+| Preparation is too early or holds scarce capacity | Preparation-to-admission delay, intervening eviction, transfer holds, and reservation occupancy | Combine resume windows, admission candidates, waiting demand, and in-flight budgets; stop preparations with no consumer or stale intent |
+| Reuse scoring delays short chats | Ready/queue tails by class, task waiting, cold-prefix handling, aging fallback | Adjust bounded waiting and cost/reuse advice through the existing scheduler extension while retaining its queue and preemption ownership |
+| Control/index costs consume the gains | Low-contention CPU/RPC/index growth and phase timings | Coalesce duplicate control, remove unnecessary queries, and use incremental state while retaining observable results and cancellation semantics |
 
-“存出多少字节”不等于“释放多少可分配容量”：无引用缓存块可能已在空闲队列中。成本模型必须区分活动引用、可回收映射和在途持有。普通命中与某次加载的归因不足时单列 unknown，不把已有 GPU 命中全部算作搬运收益。
+Bytes saved do not establish additional allocatable capacity: unreferenced cache
+blocks may already be on the free list. Distinguish active references,
+reclaimable mappings, and transfer holds in the cost model. If an ordinary cache
+hit cannot be attributed to a specific load, label its attribution unknown rather
+than counting every existing GPU hit as a movement benefit.
 
-每次核心修改保留：瓶颈证据、可证伪假设、最小失败行为用例、修改点、预期影响及同条件前后结果。单轮只改变一个主要机制，使用调优样本选择候选；冻结候选后在保留任务/文档和三类负载复测。若使用保留结果继续调优，原组转为调优数据，并从预登记的小型备用样本分配新的保留组。只有参数搜索或增加压力不能满足核心优化交付。
+For each core change, retain bottleneck evidence, a falsifiable hypothesis, a
+minimal failing behavioral case, the change, expected effects, and comparable
+before/after results. Change one main mechanism per round and select candidates
+using tuning samples. Freeze the candidate, then validate on held-out tasks and
+documents across all three workloads. If held-out results drive further tuning,
+reclassify that set as tuning data and allocate a new held-out set from the
+preregistered small reserve. Parameter search or increased pressure alone does
+not complete the core-optimization deliverable.
 
-### 7. 指标与验收
+### 7. Metrics and acceptance
 
-每轮保存逐任务/请求数据及汇总：全部工作完成耗时、固定工作单位/s、输出 token/s、TTFT/TPOT/端到端 P50/P95/P99、应用等待和服务排队、重算与命中 token、抢占、存出/加载字节、重复与无消费者搬运、控制 RPC/CPU/索引占用、失败及清理结果。小样本 P99 保留样本数和最大值；不据少量会话宣称总体尾部分布。
+Save per-task/request data and summaries for every run: complete-workload elapsed
+time, fixed work units/s, output tokens/s, TTFT/TPOT/end-to-end P50/P95/P99,
+application waiting and server queueing, recomputed/cached tokens, preemptions,
+saved/loaded bytes, duplicate or unconsumed movement, control RPC/CPU/index costs,
+failures, and cleanup results. Report sample counts and maxima with small-sample
+P99; do not infer a population tail distribution from a few sessions.
 
-混合负载单列 coding 和 chat，报告各类 offered/completed/failed、SLO 内请求/s、任务等待分布及最大等待。SLO 在调优阶段固定；队列在到达停止后继续排空。至少完成一轮各主对照的真实工具小样本运行，保存命令和补丁，并在同一固定 SWE 子集上运行补丁评分；生成轨迹变化时不计算等工作量速度差。long-doc 可核验问答及相同输入的贪心重算/复用检查验证输出，新增模型误差不能由性能结果抵消。
+Separate coding and chat metrics in mixed runs: offered/completed/failed counts,
+requests/s meeting SLO, task waiting distributions, and maximum waiting. Freeze
+SLOs during tuning and drain queues after arrivals stop. Complete at least one
+small live-tool run per primary arm, retain commands and patches, and score
+patches on the same fixed SWE subset. Different generated trajectories do not
+support equal-work speedup claims. Verify long-doc answers and greedy
+recompute/reuse behavior on identical inputs; performance cannot compensate for
+new model errors.
 
-验收分为三个独立状态：
+Track three independent acceptance states:
 
-1. **实验有效**：三类负载都有实际压力和容量充足证据；冻结输入/条件、至少三轮、资源隔离及完整结果均成立。缺失、超时和无效轮有原因，不能静默删除。
-2. **契约通过**：无新增错误复用、提前发布、重复执行、失控等待或资源泄漏；失败/取消有明确结果，功能与相关回归通过。
-3. **性能目标达到**：至少一个保留压力点 C 相对 N 的中位固定工作吞吐提升至少 25%、相对 Q 至少 10%、相对 C0 至少 5%，且至少两轮同向；容量充足 C 相对 N 的中位耗时退化不超过 5%；混合组短聊天 P95 就绪至完成延迟不超过同组 N 的 1.10 倍，完成数相同、无新增非任务本身错误。所有场景仍逐项报告。
+1. **Valid experiment:** All three workloads establish pressure and cache-fit
+   controls with frozen inputs/conditions, at least three repetitions, resource
+   isolation, and complete results. Missing, timed-out, and invalid runs retain
+   reasons and cannot be silently removed.
+2. **Contract checks pass:** No new incorrect reuse, early publication, duplicate
+   execution, unbounded waiting, or resource leaks. Failures/cancellations have
+   explicit outcomes, and functional/regression checks pass.
+3. **Performance targets met:** At one or more held-out pressure points, median
+   fixed-work throughput for C improves at least 25% over N, 10% over Q, and 5%
+   over C0, with gains in the same direction in at least two repetitions.
+   Cache-fit median elapsed-time regression for C against N stays within 5%.
+   Mixed short-chat P95 readiness-to-completion latency is at most 1.10 times N
+   in that same workload, with equal completion counts and no new errors outside
+   the task outcomes themselves. Report every scenario separately.
 
-25% 延续原变更的性能目标；10%、5% 和 1.10 为本方案的局部工程验收阈值，不构成通用性能承诺。C0 对照要求新增核心修改有收益，单纯再次验证已有收益不足以完成优化任务。未达到则性能任务保持未完成，报告限制收益的证据、已排除的方案和具体后续修改；不得把选择性速度数字写成验收通过。
+The 25% target carries forward the original change's performance objective.
+The 10%, 5%, and 1.10 thresholds are local engineering acceptance criteria for
+this proposal, not general performance guarantees. C0 verifies that the new core
+change adds benefit; merely reproducing existing gains does not complete the
+optimization task. If targets remain unmet, leave performance acceptance
+incomplete and report the limiting evidence, rejected approaches, and concrete
+next change. Selected speed figures cannot substitute for passing acceptance.
 
-### 8. PR/RFC 边界与回归范围
+### 8. PR/RFC boundaries and regression coverage
 
-| 设计约束 | 实验或修改的对应要求 |
+| Design constraint | Experiment/change requirement |
 | --- | --- |
-| 默认机制模式、可选本地策略 | D/B 无策略，C/Q 显式启动配置；无消费者的 signal 无副作用 |
-| 显式命令语义稳定 | D/C 使用相同原语；策略只提出建议，引擎可延期/拒绝，不改写调用方命令 |
-| 一个资源审批与执行路径 | 继续使用 KVCacheManager/BlockPool、CPU/Mooncake adapter；共享传输只计一次物理资源 |
-| 关联完成及整组可用 | 结果携带作用范围；完成后核对实际命中，失败可重算，ACK 不掩盖失败 |
-| 逻辑状态独立于物理副本 | 任务结束不清除外部共享内容；保留声明和正在执行的引用独立处理 |
-| scheduler 管理队列和抢占 | 策略输出有界建议，不替换 scheduler 或直接决定牺牲请求 |
-| 布局/权重兼容 | 同一权重版本内比较，发现能力/对齐限制明确报告，KVCR 不透明转发保留 |
+| Mechanism-only default, optional local policies | D/B have no local policies; C/Q use explicit startup configuration; unconsumed signals have no effects |
+| Stable explicit-command semantics | D/C use the same primitives; policies propose and the engine may defer/reject without rewriting caller commands |
+| Shared resource approval and execution | Reuse KVCacheManager/BlockPool and CPU/Mooncake adapters; charge shared physical transfers once |
+| Correlated completion and complete-group availability | Results report actual scope; verify real hits after completion, permit recomputation after failure, and preserve failures through ACK |
+| Logical state independent of physical copies | Task completion preserves externally shared content; retention declarations and active references remain independent |
+| Scheduler owns queues and preemption | Policies return bounded guidance without replacing the scheduler or selecting victims directly |
+| Layout/weight compatibility | Compare within one weight version, report capability/alignment limits explicitly, and preserve opaque KVCR forwarding |
 
-复用 `test_kv_hint_control.py`、`test_kv_hint_state.py`、engine/HTTP 控制、prefix/scheduler 和 connector 的相邻套件。先确定模块 I/O 与失败行为，再加入最便宜的有效检查；驱动适配使用现有 HTTP 控制测试夹具，回放指纹和遗漏请求等纯逻辑无需 GPU。实际字节、整组发布与输出复用使用已有 GPU/真实服务入口。新增 spec scenario 是验收契约，不要求每条都建一个测试文件。
+Reuse nearby `test_kv_hint_control.py`, `test_kv_hint_state.py`, engine/HTTP control,
+prefix/scheduler, and connector suites. Define module I/O and failure behavior
+before adding the cheapest effective check. Driver adapters use existing HTTP
+control fixtures; replay fingerprints and missing-request checks need no GPU.
+Actual bytes, complete-group publication, and model reuse use existing GPU and
+real-server entry points. Specification scenarios define acceptance contracts
+without requiring a new test file for each one.
 
-本变更不替代原变更尚未完成的跨 engine、故障恢复或权重版本验收；修改涉及这些路径时重跑对应现有检查。所有 Python 命令使用 `.venv/bin/python`，依赖使用 `uv pip`；实施后运行受影响完整 suite、相关 GPU 检查、pre-commit、Python 3.12 mypy 和 OpenSpec strict validation。
+This change does not replace incomplete cross-engine, recovery, or weight-version
+acceptance in the original change. Rerun corresponding existing checks when
+modifying those paths. Use `.venv/bin/python` for every Python command and
+`uv pip` for dependencies. After implementation, run affected complete suites,
+relevant GPU checks, pre-commit, Python 3.12 mypy, and strict OpenSpec validation.
 
 ## Risks / Trade-offs
 
-- 小样本未形成稳定压力 → 用 Native 的工作集/引用/周转证据选择点，设置本地规模上限，未达到如实保留。
-- coding 轨迹与工具耗时随采样和 CPU 争用变化 → 固定回放用于归因，实时结果单列，所有组固定容器和 CPU 限额。
-- 16k 输入限制改变任务难度 → 记录超限，统一调整配置并重新采集；不删消息、不静默截断。
-- profiling 和回归影响普通计时 → 串行独立窗口、进程归属检查和源码指纹；无效轮保留并补测。
-- 把资源差异误当作策略增益 → 披露冷层资源，以 D/C 的相同资源及 Q/C 的相同 quota 进一步分解。
-- 追逐单一吞吐牺牲任务结果或短聊天 → 固定工作量、开放到达、队尾排空与分类尾延迟门槛共同验收。
-- 与另一活动变更同时编辑公共文件 → 实施前记录工作区差异与冻结版本；只纳入明确归属的修改，测量期间源码变化使该轮失效。
+- Small samples may not establish stable pressure → Select points using Native
+  working-set/reference/turnover evidence, retain local scale caps, and report
+  unmet pressure requirements.
+- Coding trajectories/tool times vary with sampling and CPU contention → Use
+  fixed replay for attribution, report live results separately, and fix
+  container/CPU limits across arms.
+- A 16k context may change task difficulty → Report over-limit requests, revise
+  all configurations together, and recollect without dropping history or silently
+  truncating inputs.
+- Profiling/regressions can distort ordinary timing → Use separate serial
+  windows, process audits, and source fingerprints; retain and replace invalid
+  runs.
+- Resource differences may be mistaken for policy gains → Disclose cold-tier
+  resources and separate contributions through resource-matched D/C and
+  quota-matched Q/C comparisons.
+- Aggregate throughput may improve at the expense of task outcomes or chat tails
+  → Enforce equal work, open-loop arrivals, full draining, and latency gates by
+  class together.
+- Another active change may edit shared files → Record working-tree ownership
+  and frozen versions before implementation; include only clearly owned edits,
+  and invalidate a measurement if source changes during it.
 
 ## Migration Plan
 
-本次提案只创建 OpenSpec 文档。实施时按资源/工作量预检、薄适配与烟测、基线校准、诊断归因、核心修改、冻结验证、报告与本地提交推进。新增 workload 选择保持可选；既有 verl 命令继续工作。没有证据支持的候选从最终代码撤回，失败记录和原始结果保留。运行期开关在启动时选择，不引入策略热切换。
+This proposal creates OpenSpec documents only. Implementation proceeds through
+resource/workload preflight, thin adapters and smoke checks, baseline calibration,
+diagnosis, core changes, frozen validation, reporting, and local commits. New
+workload selection remains optional and existing verl commands continue working.
+Withdraw final code candidates without confirmed benefits while retaining failed
+experiments and raw data. Select runtime configuration at startup without adding
+policy hot swapping.
 
 ## Open Questions
 
-无需等待用户补充才能实施。尚待实测确定的是当前模型容纳 SWE 轨迹的上下文、最小压力规模、短聊天 SLO 和占主导的机制限制；这些由预检与 Native 校准解决并写入冻结协议，不按优化成绩选择。
+No additional user input is required to start implementation. Preflight and Native
+calibration must determine the context needed for SWE trajectories, minimum
+pressure scale, short-chat SLO, and dominant mechanism limitation. Freeze these
+choices in the protocol without selecting them by optimized performance.

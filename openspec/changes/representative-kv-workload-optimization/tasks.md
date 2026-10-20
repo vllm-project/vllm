@@ -1,52 +1,52 @@
-# 代表性 KV 负载与核心优化任务
+# Representative KV Workloads and Core Optimization Tasks
 
-## 1. 冻结协议与资源预检
+## 1. Freeze the protocol and inspect resources
 
-- [ ] 1.1 核对当前 PR/RFC 更新边界、原变更未完成验收及工作区归属，记录实施基点和 C0 源码/配置快照；不覆盖其他活动工作的修改。
-- [ ] 1.2 固定 SWE 的 4 个调优/8 个保留任务、备用顺序、自然文档和短聊天输入，验证本地资产/任务 ID/版本并保存哈希；为三类负载生成可 dry-run 的有界计划。
-- [ ] 1.3 验证 GPU 0/3、当前模型、缓存组、16k/必要时 32k 上下文、CPU/容器限额与 Mooncake 能力，记录实际资源；只补齐缺失的指定依赖/数据，不运行全量下载。
-- [ ] 1.4 固定 N/B/D/Q/C 的服务参数、冷层预算、采样、任务上限、初始缓存状态和计时范围；定义三个独立验收状态及报告字段。
+- [ ] 1.1 Check the current PR/RFC boundaries, incomplete acceptance in the original change, and ownership of working-tree edits. Record the implementation baseline and C0 source/configuration snapshot without overwriting other active work.
+- [ ] 1.2 Fix the 4 tuning and 8 held-out SWE tasks, reserve ordering, natural documents, and short-chat inputs. Verify local assets, task IDs, and versions; save hashes and generate bounded plans for all three workloads with dry-run support.
+- [ ] 1.3 Verify GPUs 0/3, the current model, cache groups, 16k or necessary 32k context, CPU/container limits, and Mooncake capabilities. Record actual resources and prepare only missing, explicitly selected dependencies/data without full downloads.
+- [ ] 1.4 Fix N/B/D/Q/C serving parameters, cold-tier budgets, sampling, task limits, initial cache state, and timing boundaries. Define three separate acceptance states and their report fields.
 
-## 2. 三类负载的薄适配
+## 2. Add thin adapters for the three workloads
 
-- [ ] 2.1 在现有矩阵/客户端入口增加工作负载选择及共同 manifest，复用服务、Store、进程归属、控制结果和清理逻辑，保持 verl 命令及旧 trace 兼容。
-- [ ] 2.2 接入明确版本的 mini-swe-agent，复用容器经验，真实执行模型和工具并保存消息、命令/退出码、时间、补丁及失败；关闭无关的 MoE 路由采集。
-- [ ] 2.3 实现有来源/哈希的 long-doc-qa 小样本、同文档前缀、多问、交错顺序和可核验问题，记录实际 token 长度及复用距离。
-- [ ] 2.4 实现 coding 与短聊天混合驱动、固定开放到达表及分类统计，从计划就绪时刻计时，包含客户端等待并排空全部请求。
-- [ ] 2.5 用三类最小烟测验证请求/会话关联、原语结果、错误处理和清理；按模块 I/O 和实际失败行为扩展现有 HTTP/控制测试，避免复制测试框架。
+- [ ] 2.1 Add workload selection and a shared manifest to the existing matrix/client entry points. Reuse server/Store management, process ownership, control results, and cleanup while preserving verl commands and historical trace compatibility.
+- [ ] 2.2 Integrate a pinned mini-swe-agent version using existing container experience. Execute real model/tool calls and retain messages, commands/exit codes, timings, patches, and failures; disable unrelated MoE routing capture.
+- [ ] 2.3 Implement a small long-doc-qa workload with source/hash provenance, shared document prefixes, multiple questions, interleaved ordering, and verifiable questions. Record actual token lengths and reuse distances.
+- [ ] 2.4 Implement mixed coding/chat execution with fixed open-loop arrivals and statistics by class. Measure latency from scheduled readiness, include client waiting, and drain every planned request.
+- [ ] 2.5 Use minimal smoke runs for all three workloads to verify request/session association, primitive outcomes, error handling, and cleanup. Extend existing HTTP/control tests around module I/O and observed failures without duplicating the test framework.
 
-## 3. 等工作量与比较有效性
+## 3. Preserve equal work and valid comparisons
 
-- [ ] 3.1 将当前模型的真实轨迹转换为固定完整输入、输出 token 数、依赖、到达及工具间隔；保留拒绝/失败来源，禁止跨模型 token ID 直用或回填新生成历史。
-- [ ] 3.2 扩展工作量指纹及结果审计，检测少请求、输出长度改变、上下文截断、队尾遗漏和未排空；用现有轻量夹具验证这些失败会使比较无效。
-- [ ] 3.3 实现 D 显式指令无策略对照及有界延期重试，与 C 共用已知应用信息和预测器；普通预测不得读取录制的未来实际值。
-- [ ] 3.4 实现交错轮次、独立重启、预热后重置/冷层隔离、源码与 GPU/CPU 活动审计；profile 和功能/回归窗口与普通计时分开。
+- [ ] 3.1 Convert real traces from the current model into fixed complete inputs, output token counts, dependencies, arrivals, and tool intervals. Retain rejection/failure provenance; do not reuse token IDs across models or feed new generation into recorded history.
+- [ ] 3.2 Extend workload fingerprints and result audits to detect omitted requests, changed output lengths, context truncation, missing queue tails, and incomplete draining. Use existing lightweight fixtures to verify that these failures invalidate comparisons.
+- [ ] 3.3 Implement D, the explicit-directive baseline without local policies, including bounded deferral retries. Share available application information and the predictor with C; normal prediction must not read recorded future outcomes.
+- [ ] 3.4 Implement interleaved run ordering, independent restarts, post-warmup resets/cold-tier isolation, source identities, and GPU/CPU activity audits. Separate profiling and functional/regression windows from ordinary timing.
 
-## 4. 基线校准与机制诊断
+## 4. Calibrate baselines and diagnose mechanisms
 
-- [ ] 4.1 只用 Native 在预登记的有限候选上校准三类压力点与容量充足点，记录实际容量、引用、工作集、缓存周转及排队证据；冻结规模和短聊天 SLO，压力未建立时保持对应验收未完成。
-- [ ] 4.2 在调优样本先执行一轮 N/D/Q/C 和一个 N/B 容量充足对照，分解工具、就绪后等待、控制、prefill/decode、传输及清理，识别主限制后再展开最终重复矩阵。
-- [ ] 4.3 按会话/内容/缓存组/操作关联保存、发布、准入与实际命中，量化无效准备、覆盖缺口、重算、搬运成本和分类等待；观测不足时增加有界可关闭事件，保留 unknown。
-- [ ] 4.4 在一个定点补单项策略、去预测/去准入协同、简单暂停即预取、oracle、0.5×/2× 预测、错误目标/取消和 0/25/100 ms 控制延迟诊断，保存全部正负结果。
+- [ ] 4.1 Use only Native and the preregistered finite candidates to calibrate pressure and cache-fit points for all three workloads. Record actual capacity, references, working sets, cache turnover, and queueing evidence. Freeze scale and the short-chat SLO; keep acceptance incomplete when pressure is not established.
+- [ ] 4.2 Run one N/D/Q/C comparison and one cache-fit N/B comparison on tuning samples. Break down tools, waiting after readiness, control, prefill/decode, transfer, and cleanup; identify the main limitation before expanding the final repeated matrix.
+- [ ] 4.3 Correlate saving, publication, admission, and actual hits by session/content/cache group/operation. Quantify unused preparation, coverage gaps, recomputation, movement costs, and waiting by class; add bounded, disableable events where needed and retain unknown causes.
+- [ ] 4.4 At one diagnostic point, run component policies, removal of prediction/admission cooperation, simple prefetch-at-pause, oracle, 0.5×/2× predictions, wrong-target/cancellation cases, and 0/25/100 ms control delays. Preserve positive and negative results.
 
-## 5. 证据驱动的核心优化
+## 5. Implement core changes supported by evidence
 
-- [ ] 5.1 根据诊断选择一个主限制，写出证据、可证伪假设、最小失败行为和预期影响；核对既有 V4/V5 结果，避免重复实施已有机制或无依据增加开关。
-- [ ] 5.2 在现有应用控制/可选策略/引擎协作点实现所选核心修改，针对成本、整组有效范围、准入时机、无效搬运或长短请求干扰解决实际问题，保留统一审批和执行契约。
-- [ ] 5.3 在相邻控制/prefix/scheduler/connector suite 添加最小行为回归，并运行受影响完整文件及必要真实 GPU/服务检查，验证引用、整组发布、共享容量、取消/失败回退和输出复用。
-- [ ] 5.4 在调优样本比较修改前后因果指标和净耗时，撤回无确认收益的候选；若限制仍在，按新证据继续修改。选定候选后冻结源码、参数和保留输入，性能验证前不继续调参。
+- [ ] 5.1 Select a main limitation from the diagnostics and record evidence, a falsifiable hypothesis, minimal failing behavior, and expected effects. Check existing V4/V5 results to avoid reimplementing existing mechanisms or adding unsupported switches.
+- [ ] 5.2 Implement the selected core change within existing application control, optional policies, or engine cooperation. Address measured cost, complete-group coverage, admission timing, wasted movement, or long/short interference while preserving shared approval and execution contracts.
+- [ ] 5.3 Add minimal behavioral regressions to nearby control/prefix/scheduler/connector suites. Run affected complete files and necessary real GPU/serving checks for references, group publication, shared capacity, cancellation/failure fallback, and output reuse.
+- [ ] 5.4 Compare causal metrics and net elapsed time before and after the change on tuning samples; withdraw candidates without confirmed benefits. Continue from new evidence if the limitation remains. Freeze source, parameters, and held-out inputs once a candidate is selected, before performance validation.
 
-## 6. 保留样本的完整验证
+## 6. Validate on held-out samples
 
-- [ ] 6.1 三类保留压力点各运行 N/D/Q/C 至少三轮交错普通计时；最终源码触及基线路径时重跑相应 N/Q，保存所有有效与无效轮次。
-- [ ] 6.2 三类容量充足点各运行 N/B/Q/C 至少三轮，核对初始缓存、同工作量及低竞争成本；保留一组既有 GSM8K 容量充足/压力回归点。
-- [ ] 6.3 在目标保留压力点运行 C0 至少三轮，与 C 用同输入和配置比较，核对新增核心修改的净收益；保留组用于进一步调优时更换预登记验证样本。
-- [ ] 6.4 对 N/D/Q/C 各完成至少一轮真实工具小样本，记录完整任务结果和补丁并运行同一子集评分；完成 long-doc 可核验问答及贪心重算/复用检查，分别报告 live 和 replay。
-- [ ] 6.5 审计三类工作量、分类完成数、短聊天 P95/SLO、最长等待、实际命中、传输与资源排空，区分实验有效、契约通过和性能目标状态。
-- [ ] 6.6 验证至少一个保留压力点 C 的中位吞吐相对 N/Q/C0 分别达到 +25%/+10%/+5%，至少两轮同向；同时满足容量充足耗时退化 ≤5% 和混合短聊天 P95 ≤1.10× Native。未达标则本项保持未完成，并带着具体限制返回第 5 组。
+- [ ] 6.1 Run at least three interleaved ordinary-timing repetitions of N/D/Q/C at each held-out pressure point. Rerun affected N/Q baselines when final source changes touch their paths; preserve valid and invalid runs.
+- [ ] 6.2 Run at least three repetitions of N/B/Q/C at each cache-fit point. Check initial cache state, equal work, and low-contention costs; retain one existing GSM8K cache-fit/pressure regression pair.
+- [ ] 6.3 Run C0 at least three times at the target held-out pressure point, using the same inputs/configuration as C to verify the net benefit of the new core change. Replace preregistered validation samples if the held-out set becomes tuning data.
+- [ ] 6.4 Complete at least one live-tool small-sample run for each of N/D/Q/C, retain full task outcomes and patches, and score the same subset. Complete verifiable long-doc QA and greedy recompute/reuse checks; report live and replay separately.
+- [ ] 6.5 Audit work performed, completions by class, short-chat P95/SLO, maximum waiting, actual hits, transfers, and resource draining for all three workloads. Report measurement validity, contract checks, and performance targets separately.
+- [ ] 6.6 Verify median C throughput gains of at least +25%/+10%/+5% over N/Q/C0 at one or more held-out pressure points, with gains in the same direction in at least two repetitions. Also require cache-fit elapsed-time regression ≤5% and mixed short-chat P95 ≤1.10× Native. Keep this task incomplete if unmet and return to group 5 with a specific limitation.
 
-## 7. 可复现交付与检查
+## 7. Deliver reproducible evidence and checks
 
-- [ ] 7.1 更新公共实验 README 与本轮报告，保存命令、协议/源码/输入哈希、原始结果路径、机制分析、收益范围和负面结论，不用文件存在或单轮速度替代验收。
-- [ ] 7.2 关联原 `programmable-kv-cache` 的覆盖与验证记录，保留其未完成项目；说明本轮符合 PR/RFC 的机制/策略边界及新增证据范围，不创建独立 PR。
-- [ ] 7.3 运行最终受影响测试、必要 GPU/模型检查、pre-commit、Python 3.12 mypy 和本变更 OpenSpec strict validation；记录实际结果及未执行范围，检查通过后仅本地提交明确归属的修改并添加要求的署名。
+- [ ] 7.1 Update the shared experiment README and this round's report with commands, protocol/source/input hashes, raw result paths, mechanism analysis, measured scope, and negative conclusions. File presence or one fast run does not satisfy acceptance.
+- [ ] 7.2 Link the original programmable-kv-cache coverage and validation records while preserving incomplete items. Explain alignment with the PR/RFC mechanism/policy boundaries and the scope of new evidence; do not create a separate PR.
+- [ ] 7.3 Run final affected tests, necessary GPU/model checks, pre-commit, Python 3.12 mypy, and strict OpenSpec validation for this change. Record actual results and unexecuted coverage; after checks pass, commit only clearly owned changes locally with the required attribution.
