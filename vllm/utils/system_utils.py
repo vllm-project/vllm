@@ -72,7 +72,8 @@ def suppress_stdout():
         yield
         return
 
-    stdout_fd = sys.stdout.fileno()
+    # C libraries write to fd 1, whatever sys.stdout is bound to.
+    stdout_fd = 1
     stdout_dup = os.dup(stdout_fd)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
 
@@ -220,7 +221,7 @@ def kill_process_tree(pid: int):
 
     # Send SIGKILL to all children first
     for child in children:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, psutil.NoSuchProcess):
             logger.warning(
                 "[shutdown] force killing sub process %s pid %d",
                 child.name(),
