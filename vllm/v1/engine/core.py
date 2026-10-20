@@ -1269,6 +1269,15 @@ class EngineCore:
                 request.mm_features
             )
 
+        if request.mm_features:
+            missing_mm_hashes = [
+                feature.mm_hash or feature.identifier
+                for feature in request.mm_features
+                if feature.data is None
+            ]
+            if missing_mm_hashes:
+                raise MultiModalCacheMissError(missing_mm_hashes)
+
         watermark_config = self.vllm_config.watermark_config
         params = request.sampling_params
         # Greedy decoding and trace replay cannot be watermarked; leave their
