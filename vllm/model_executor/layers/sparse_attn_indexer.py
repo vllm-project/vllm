@@ -31,6 +31,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.kernels.attention.dsa.candidate_paged_logits import (
     candidate_paged_decode_available,
+    candidate_paged_prepare,
     candidate_paged_score_decode,
     candidate_paged_workspace_specs,
 )
@@ -939,6 +940,32 @@ def sparse_attn_indexer(
                     "indexers score candidate blocks in place."
                 )
                 topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                # The candidate expansion is a deterministic function of the
+                # step-level candidate buffer and seq_lens, identical for
+                # every consumer layer, so compute it once per step and let
+                # the later layers reuse it (bit-identical memoization, as
+                # the SM100 path does with its kernel metadata). The decode
+                # metadata is rebuilt every step, so the cached plan cannot
+                # go stale, and during graph replay this host logic does not
+                # run while the recorded expansion kernel refreshes the
+                # builder-owned buffers.
+                plan = decode_metadata.candidate_plan
+                plan_buffers = decode_metadata.candidate_plan_buffers
+                if (
+                    plan is None
+                    and plan_buffers is not None
+                    and num_padded_tokens <= plan_buffers[0].shape[0]
+                ):
+                    candidate_paged_prepare(
+                        seq_lens,
+                        candidate_blocks,
+                        candidate_block_size,
+                        next_n,
+                        num_padded_tokens,
+                        out=plan_buffers,
+                    )
+                    plan = plan_buffers
+                    decode_metadata.candidate_plan = plan
                 candidate_paged_score_decode(
                     padded_q_quant_decode_tokens.view(
                         num_padded_tokens, *q_quant.shape[1:]
@@ -956,6 +983,7 @@ def sparse_attn_indexer(
                     topk_backend,
                     topk_indices,
                     head_dim,
+                    plan=plan,
                 )
                 logits = None
             else:

@@ -27,6 +27,7 @@ import torch
 from vllm.model_executor.kernels.attention.dsa.candidate_paged_logits import (
     INDEXER_SCALE_BYTES,
     candidate_paged_decode_available,
+    candidate_paged_prepare,
     candidate_paged_score_decode,
     candidate_paged_workspace_specs,
     paged_candidate_logits,
@@ -395,6 +396,52 @@ def test_selection_stays_inside_the_candidate_blocks(ws):
         # The candidate set is smaller than the context, so the row fills
         # its top-k from the candidates alone.
         assert len(picked) == min(s["topk"], len(allowed))
+
+
+@requires_sm90
+@torch.inference_mode()
+def test_shared_plan_matches_fresh_plan(ws):
+    """Consumer layers share one expansion plan per step: scoring with the
+    reused plan must select the same set as scoring with a freshly computed
+    one. Selection is a set: fp8 scores tie often and the top-k backends do
+    not promise a stable order across buffer layouts."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    s = _setup(device, rows=6, num_candidates=128, causal_len=4096, topk=TOPK, seed=5)
+    _reserve(ws, s)
+
+    rows, num_candidates = s["candidate_blocks"].shape
+    plan = (
+        torch.empty(rows, dtype=torch.int32, device=device),
+        torch.empty(rows, dtype=torch.int32, device=device),
+        torch.empty(rows, num_candidates, dtype=torch.int32, device=device),
+        torch.empty(rows, dtype=torch.int32, device=device),
+    )
+    candidate_paged_prepare(
+        s["seq_lens"], s["candidate_blocks"], s["block_size"], 1, rows, out=plan
+    )
+
+    _run(s)
+    torch.cuda.synchronize()
+    fresh = s["topk_indices"].clone()
+
+    s["topk_indices"].fill_(-7)
+    candidate_paged_score_decode(
+        s["q"],
+        s["cache"].tensor,
+        s["weights"],
+        s["seq_lens"],
+        s["block_table"],
+        s["candidate_blocks"],
+        s["block_size"],
+        1,
+        s["topk"],
+        "persistent",
+        s["topk_indices"],
+        HEAD_DIM,
+        plan=plan,
+    )
+    torch.cuda.synchronize()
+    assert _as_sets(fresh) == _as_sets(s["topk_indices"])
 
 
 # ---------------------------------------------------------------------------

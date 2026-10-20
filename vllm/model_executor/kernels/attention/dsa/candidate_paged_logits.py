@@ -25,8 +25,8 @@ Two properties keep replays correct under full CUDA-graph capture:
 * **K is read in place.** Unlike a scheme that gathers candidate K into a
   scratch buffer first, no K data is copied that the dense path would not
   also read. The only extra work is per-row candidate bookkeeping (expansion
-  and sorting of block ids), index arithmetic paid only while the path is
-  active.
+  and sorting of block ids), computed once per step and shared by the
+  candidate-consuming layers, whose inputs are the same step-level tensors.
 
 Numerics follow the decode reference (``fp8_paged_mqa_logits``): dot, relu,
 head weights, sum over heads, then one dequantization multiply per column.
@@ -137,10 +137,22 @@ def _paged_candidate_logits_kernel(
     row's causal length all become ``-inf`` so the top-k never selects them.
     """
     row = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    tile_start = tl.program_id(1) * BLOCK_N
+    cols = tile_start + tl.arange(0, BLOCK_N)
     in_bounds = cols < width
 
     end = tl.load(end_ptr + row)
+    if tile_start >= end:
+        # Dead tile: the top-k bounds never read past ``end``, but keep the
+        # -inf contract for the whole buffer without paying for the gather
+        # and MMA. The grid stays width-sized, so this is CUDA-graph safe.
+        tl.store(
+            out_ptr + row * stride_out_row + cols,
+            tl.full((BLOCK_N,), -float("inf"), tl.float32),
+            mask=in_bounds,
+        )
+        return
+
     causal = tl.load(causal_ptr + row)
     live = in_bounds & (cols < end)
 
@@ -336,6 +348,45 @@ def candidate_paged_workspace_specs(
     ]
 
 
+def candidate_paged_prepare(
+    seq_lens: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    candidate_block_size: int,
+    next_n: int,
+    rows: int,
+    out: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> None:
+    """Expand the step's shared candidate blocks into a per-row scoring plan.
+
+    ``out`` is ``(row_ks, causal_lens, sorted_blocks, end)``, each sized for at
+    least ``rows``. The inputs are step-level, so every candidate-consuming
+    layer sees an identical plan; the caller computes it once per step and
+    the later layers reuse it.
+    """
+    row_ks, causal_lens, sorted_blocks, end = (t[:rows] for t in out)
+    assert candidate_blocks.shape[0] >= rows, (candidate_blocks.shape[0], rows)
+    _prepare_candidate_rows_kernel[(triton.cdiv(rows, 128),)](
+        seq_lens,
+        row_ks,
+        causal_lens,
+        rows,
+        next_n=next_n,
+        per_row_lens=seq_lens.numel() == rows,
+        BLOCK=128,
+    )
+    # Sorting the candidate ids makes the valid columns a prefix, which is
+    # what the top-k backends' per-row bounds require. ``end`` accounts for a
+    # partial final block.
+    candidate_blocks_to_sparse_indices(
+        candidate_blocks[:rows],
+        row_ks,
+        causal_lens,
+        candidate_block_size,
+        candidate_block_size,
+        out=(sorted_blocks, end),
+    )
+
+
 def candidate_paged_score_decode(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -349,6 +400,7 @@ def candidate_paged_score_decode(
     topk_backend: str,
     topk_indices: torch.Tensor,
     head_dim: int,
+    plan: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Select each decode row's top-k inside its candidate blocks.
 
@@ -370,6 +422,9 @@ def candidate_paged_score_decode(
         topk_backend: Decode top-k backend, see ``get_indexer_topk``.
         topk_indices: [rows, topk_tokens] int32 output.
         head_dim: Indexer head dim.
+        plan: Optional ``(row_ks, causal_lens, sorted_blocks, end)`` from
+            ``candidate_paged_prepare``. All candidate-consuming layers in a
+            step share one plan, so callers pass it to skip the expansion.
 
     """
     rows = q.shape[0]
@@ -377,49 +432,45 @@ def candidate_paged_score_decode(
     width = num_candidates * candidate_block_size
     # The candidate buffer is indexed per decode row, like the logits the
     # dense path masks, and may be a longer buffer view than this step needs.
-    # It can also hold one row per request, in which case the expansion
-    # repeats each request's candidates over its speculative rows.
     # Candidates are indexed per decode row, matching the dense path's mask
     # (``candidates + row * stride_row``); only the causal lengths are shared
     # across a request's speculative rows. The buffer is sized for
     # max_num_batched_tokens, so it is usually longer than this step needs.
     assert candidate_blocks.shape[0] >= rows, (candidate_blocks.shape[0], rows)
-    candidate_blocks = candidate_blocks[:rows]
 
-    (
-        _radix_reserve,
-        row_ks,
-        causal_lens,
-        sorted_blocks,
-        end,
-        logits,
-        local_topk,
-    ) = current_workspace_manager().get_simultaneous(
-        *candidate_paged_workspace_specs(
-            rows, num_candidates, candidate_block_size, topk_tokens
+    ws_manager = current_workspace_manager()
+    if plan is None:
+        (
+            _radix_reserve,
+            row_ks,
+            causal_lens,
+            sorted_blocks,
+            end,
+            logits,
+            local_topk,
+        ) = ws_manager.get_simultaneous(
+            *candidate_paged_workspace_specs(
+                rows, num_candidates, candidate_block_size, topk_tokens
+            )
         )
-    )
+        candidate_paged_prepare(
+            seq_lens,
+            candidate_blocks,
+            candidate_block_size,
+            next_n,
+            rows,
+            out=(row_ks, causal_lens, sorted_blocks, end),
+        )
+    else:
+        row_ks, causal_lens, sorted_blocks, end = (t[:rows] for t in plan)
+        assert sorted_blocks.shape == (rows, num_candidates)
+        assert end.shape == (rows,) and end.dtype == torch.int32
+        _radix_reserve, logits, local_topk = ws_manager.get_simultaneous(
+            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            ((rows, width), torch.float32),
+            ((rows, topk_tokens), torch.int32),
+        )
 
-    _prepare_candidate_rows_kernel[(triton.cdiv(rows, 128),)](
-        seq_lens,
-        row_ks,
-        causal_lens,
-        rows,
-        next_n=next_n,
-        per_row_lens=seq_lens.numel() == rows,
-        BLOCK=128,
-    )
-    # Sorting the candidate ids makes the valid columns a prefix, which is
-    # what the top-k backends' per-row bounds require. ``end`` accounts for a
-    # partial final block.
-    candidate_blocks_to_sparse_indices(
-        candidate_blocks,
-        row_ks,
-        causal_lens,
-        candidate_block_size,
-        candidate_block_size,
-        out=(sorted_blocks, end),
-    )
     paged_candidate_logits(
         q,
         kv_cache,

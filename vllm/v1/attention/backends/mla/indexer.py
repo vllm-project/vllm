@@ -727,6 +727,19 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    # SM90 candidate-only decode: builder-owned scratch for the per-step
+    # candidate expansion (row_ks, causal_lens, sorted_blocks, end). Every
+    # candidate-consuming layer expands the same step-level inputs, so the
+    # first one computes the plan and the rest reuse it via candidate_plan.
+    # The metadata object is rebuilt every step, so a stale plan cannot
+    # survive, and during CUDA graph replay this host logic does not run while
+    # the recorded expansion kernel refreshes the buffers.
+    candidate_plan_buffers: (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+    ) = None
+    candidate_plan: (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+    ) = None
 
 
 @dataclass
@@ -1044,6 +1057,25 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.offsets_buffer = torch.arange(
             next_n, device=self.device, dtype=torch.int32
         )
+        # Persistent scratch for the SM90 candidate-only decode expansion,
+        # allocated here so the buffers outlive CUDA graph capture. Only
+        # DSv4.1-style configs carry candidates.
+        self.candidate_plan_buffers = None
+        hf_config = self.vllm_config.model_config.hf_config
+        num_candidates = getattr(hf_config, "candidate_topk_blocks", 0)
+        if num_candidates > 0 and getattr(hf_config, "candidate_block_size", 0) > 0:
+            max_decode_rows = scheduler_config.max_num_seqs * next_n
+            self.candidate_plan_buffers = (
+                torch.zeros(max_decode_rows, dtype=torch.int32, device=self.device),
+                torch.zeros(max_decode_rows, dtype=torch.int32, device=self.device),
+                torch.zeros(
+                    max_decode_rows,
+                    num_candidates,
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+                torch.zeros(max_decode_rows, dtype=torch.int32, device=self.device),
+            )
         self.decode_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -1761,6 +1793,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                candidate_plan_buffers=self.candidate_plan_buffers,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
