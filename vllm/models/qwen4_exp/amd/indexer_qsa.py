@@ -11,7 +11,12 @@ from torch import nn
 from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.profile import IndexerSource
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSink,
+    configure_indexer_capture,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -112,6 +117,20 @@ class QSAIndexer(nn.Module):
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
         self.skip_topk = False
+        self.indexer_capture: IndexerCaptureSink | None = None
+        if vllm_config.aux_output_config.enable_return_indexer_topk:
+            configure_indexer_capture(
+                self,
+                vllm_config,
+                IndexerSource(
+                    self.layer_id,
+                    (self.token_topk + self.compress_ratio - 1,),
+                    "logical_token_id",
+                    ratio=self.compress_ratio,
+                    topk=self.token_topk,
+                    consumer_layer_ids=(self.layer_id,),
+                ),
+            )
 
         self.index_qk_proj = ReplicatedLinear(
             int(config.hidden_size),
@@ -414,7 +433,10 @@ class QSAIndexer(nn.Module):
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out, main_outputs
-        return self._select(q, compressed_metadata, out), main_outputs
+        result = self._select(q, compressed_metadata, out)
+        if self.indexer_capture is not None:
+            self.indexer_capture.capture(result)
+        return result, main_outputs
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

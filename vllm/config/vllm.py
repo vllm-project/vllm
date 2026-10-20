@@ -1178,8 +1178,11 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
-        if not self.model_config.is_moe:
-            raise ValueError("AuxOutput Connector only supports MoE models.")
+        if (
+            self.aux_output_config.enable_return_routed_experts
+            and not self.model_config.is_moe
+        ):
+            raise ValueError("Routed-experts AuxOutput only supports MoE models.")
         if not self.cache_config.enable_prefix_caching:
             raise ValueError("AuxOutput Connector requires prefix caching.")
         if (
@@ -1187,12 +1190,12 @@ class VllmConfig:
             and self.speculative_config.enable_adaptive_verification
         ):
             raise ValueError(
-                "--enable-return-routed-experts is incompatible with "
+                "AuxOutput Connector is incompatible with "
                 "adaptive speculative verification."
             )
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError(
-                "--enable-return-routed-experts is incompatible with "
+                "AuxOutput Connector is incompatible with "
                 "pipeline parallelism (PP > 1)."
             )
         if (
@@ -1200,7 +1203,7 @@ class VllmConfig:
             or self.parallel_config.prefill_context_parallel_size > 1
         ):
             raise ValueError(
-                "--enable-return-routed-experts is incompatible with "
+                "AuxOutput Connector is incompatible with "
                 "context parallelism (DCP/PCP > 1)."
             )
 
@@ -1215,7 +1218,7 @@ class VllmConfig:
             ):
                 if kv_transfer_config.has_connector(connector_name):
                     raise ValueError(
-                        "--enable-return-routed-experts is incompatible with "
+                        "AuxOutput Connector is incompatible with "
                         f"{connector_name}; PD auxiliary output is not supported."
                     )
 

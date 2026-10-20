@@ -13,7 +13,12 @@ from vllm.config import (
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.aux_output_connector.profile import IndexerSource
 from vllm.logger import init_logger
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSink,
+    configure_indexer_capture,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -213,6 +218,37 @@ class Indexer(nn.Module):
         self.head_dim = config.index_head_dim  # 128
         self.rope_dim = config.qk_rope_head_dim  # 64
         self.index_kpool = config.index_kpool
+        self.indexer_capture: IndexerCaptureSink | None = None
+        if vllm_config.aux_output_config.enable_return_indexer_topk:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            layer_id = extract_layer_index(prefix)
+            r = self.index_kpool
+            compact = (
+                vllm_config.aux_output_config.indexer_encoding == "compact"
+                and 1 < r <= 8
+            )
+            if (
+                compact
+                and (vllm_config.model_config.max_model_len // r + 1) << r >= 2**31
+            ):
+                compact = False
+            width = (
+                self.topk_tokens // r + r - 1 if compact else self.topk_tokens + r - 1
+            )
+            configure_indexer_capture(
+                self,
+                vllm_config,
+                IndexerSource(
+                    layer_id,
+                    (width,),
+                    "pool_id_with_validity" if compact else "logical_token_id",
+                    codec="pool_mask" if compact else "int32",
+                    ratio=r,
+                    topk=self.topk_tokens,
+                    consumer_layer_ids=(layer_id,),
+                ),
+            )
         self.q_lora_rank = q_lora_rank  # 1536
 
         # kpool
@@ -370,7 +406,7 @@ class Indexer(nn.Module):
             q_fp8 = _pad_indexer_heads(q_fp8, pad)
             weights = _pad_indexer_heads(weights, pad)
 
-        return self.indexer_op(
+        result = self.indexer_op(
             hidden_states,
             q_fp8,
             k,
@@ -380,6 +416,14 @@ class Indexer(nn.Module):
             index_kpool=self.index_kpool,
             positions=positions,
         )
+        if self.indexer_capture is not None:
+            if self.indexer_capture.source.codec == "pool_mask":
+                self.indexer_capture.capture_pools(result[: len(hidden_states)])
+            else:
+                self.indexer_capture.capture(
+                    result[: len(hidden_states), : self.indexer_capture.source.width]
+                )
+        return result
 
 
 class Glm5NextMLAAttention(nn.Module):

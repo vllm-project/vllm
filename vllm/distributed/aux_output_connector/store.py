@@ -161,6 +161,8 @@ class BlockObjectStore:
         arena = self._arena
         if arena is None:
             raise RuntimeError("auxiliary output store is closed")
+        if any(len(obj.payload) != self.object_nbytes for obj in objects):
+            raise ValueError("AuxOutput payload length does not match fixed slot size")
         unique = {obj.key: obj for obj in objects}
         self._retain(retain_keys)
         terminal_order = self._release(release_keys)

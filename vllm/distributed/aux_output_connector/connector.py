@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -39,12 +39,22 @@ class AuxOutputConnectorMetadata:
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+    indexer_rows: np.ndarray | None = None
+    indexer_profile: dict[str, Any] | None = None
 
 
 class AuxOutputSchedulerConnector:
     """Build worker metadata without owning auxiliary output payloads or stores."""
 
-    def __init__(self, hash_block_size: int) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        *,
+        enable_routed_experts: bool = True,
+        enable_indexer: bool = False,
+    ) -> None:
+        self._enable_routed_experts = enable_routed_experts
+        self._enable_indexer = enable_indexer
         self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
@@ -70,11 +80,13 @@ class AuxOutputSchedulerConnector:
                 block_hashes_by_request[request_id] = packed
             assert request.sampling_params is not None
             # A P/D prefiller may cut the prompt short of the requested start.
+            starts = []
+            if self._enable_routed_experts:
+                starts.append(request.sampling_params.routed_experts_prompt_start)
+            if self._enable_indexer:
+                starts.append(request.sampling_params.indexer_topk_prompt_start)
             scheduled_requests[request_id] = max(
-                min(
-                    request.sampling_params.routed_experts_prompt_start,
-                    request.num_prompt_tokens,
-                ),
+                min(min(starts), request.num_prompt_tokens),
                 0 if request.num_output_tokens == 0 else request.num_tokens - 1,
             )
         # A settled token can complete a hash block after the next async schedule
@@ -130,7 +142,43 @@ class AuxOutputSchedulerConnector:
             f"output_start={request_output.token_start}, "
             f"output_end={request_output.token_start + len(request_output.rows)}"
         )
-        return request_output.rows[:local_end]
+        if not self._enable_routed_experts:
+            return None
+        assert request.sampling_params is not None
+        start = max(
+            0,
+            min(
+                request.sampling_params.routed_experts_prompt_start,
+                request.num_prompt_tokens,
+            )
+            - request_output.token_start,
+        )
+        return request_output.rows[start:local_end]
+
+    def take_indexer_output(
+        self,
+        request: Request,
+        output: dict[str, AuxRequestOutput] | None,
+    ) -> tuple[np.ndarray | None, dict[str, Any] | None]:
+        if not self._enable_indexer:
+            return None, None
+        assert output is not None
+        value = output[request.request_id]
+        assert value.indexer_rows is not None and value.indexer_profile is not None
+        assert request.sampling_params is not None
+        start = max(
+            0,
+            min(
+                request.sampling_params.indexer_topk_prompt_start,
+                request.num_prompt_tokens,
+            )
+            - value.token_start,
+        )
+        end = request.num_tokens - 1 - value.token_start
+        if end < 0:
+            return None, None
+        assert end <= len(value.indexer_rows), "Indexer output exceeds accepted range"
+        return value.indexer_rows[start:end], value.indexer_profile
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

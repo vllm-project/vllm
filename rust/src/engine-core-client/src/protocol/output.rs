@@ -149,6 +149,17 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Compact indexer rows, described by the versioned artifact profile.
+    #[serde(default)]
+    pub indexer_rows: Option<Box<WireNdArray>>,
+    #[serde(default)]
+    pub indexer_profile: Option<OpaqueValue>,
+    #[serde(default = "default_indexer_output_format")]
+    pub indexer_output_format: String,
+}
+
+fn default_indexer_output_format() -> String {
+    "raw".to_owned()
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -214,6 +225,11 @@ impl EngineCoreOutput {
             value
                 .resolve_aux_frame(frames)
                 .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
+        }
+        if let Some(value) = self.indexer_rows.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("indexer_rows: {message}"))?;
         }
         if let Some(value) = self.routed_experts.as_mut() {
             value
@@ -582,6 +598,9 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            indexer_rows: None,
+                            indexer_profile: None,
+                            indexer_output_format: "raw",
                         },
                     ],
                     scheduler_stats: None,
