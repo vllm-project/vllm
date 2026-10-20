@@ -397,22 +397,25 @@ class BaseRenderer(ABC, Generic[_T]):
     def queue_mm_cache_invalidations(self, mm_hashes: Sequence[str]) -> None:
         """Coalesce stale sender entries without interrupting processing."""
         cache = self.mm_processor_cache
-        if cache is not None:
-            pending = {h for h in mm_hashes if cache.is_cached_item(h)}
-            with self._mm_cache_invalidation_lock:
-                self._pending_mm_cache_invalidations.update(pending)
+        if cache is None:
+            return
+        pending = {h for h in mm_hashes if cache.is_cached_item(h)}
+        with self._mm_cache_invalidation_lock:
+            self._pending_mm_cache_invalidations.update(pending)
 
     def _drain_mm_cache_invalidations(self) -> None:
+        cache = self.mm_processor_cache
+        if cache is None:
+            return
+
         with self._mm_cache_invalidation_lock:
             pending = self._pending_mm_cache_invalidations
             self._pending_mm_cache_invalidations = set()
 
-        cache = self.mm_processor_cache
         while pending:
             mm_hash = pending.pop()
             try:
-                if cache is not None:
-                    cache.invalidate(mm_hash)
+                cache.invalidate(mm_hash)
             except Exception:
                 pending.add(mm_hash)
                 with self._mm_cache_invalidation_lock:
