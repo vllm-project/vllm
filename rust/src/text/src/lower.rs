@@ -8,7 +8,7 @@ pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs};
-use sampling::validate_resolved_sampling_params;
+use sampling::{SamplingParamsError, validate_resolved_sampling_params};
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -123,6 +123,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         structured_outputs,
         skip_reading_prefix_cache,
+        routed_experts_prompt_start,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -136,6 +137,20 @@ pub fn lower_sampling_params(
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
+    // Python validates against the (multimodal-expanded) prompt length.
+    let routed_experts_prompt_start = routed_experts_prompt_start.unwrap_or(0);
+    if routed_experts_prompt_start > prompt_len {
+        return Err(SamplingParamsError::RoutedExpertsPromptStartOutOfRange {
+            value: routed_experts_prompt_start,
+            prompt_len,
+        }
+        .into());
+    }
+    // Validate the final constraint: chat may have replaced the user's
+    // constraint with a parser-built output grammar.
+    if let Some(structured_outputs) = &structured_outputs {
+        structured_outputs.validate()?;
+    }
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -214,7 +229,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
-        routed_experts_prompt_start: 0,
+        routed_experts_prompt_start,
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -346,9 +361,13 @@ mod tests {
     use std::num::NonZeroU32;
 
     use serial_test::file_serial;
+    use thiserror_ext::AsReport as _;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::multimodal::{
         MmFeatureSpec, MmModality, PlaceholderRange,
+    };
+    use vllm_engine_core_client::protocol::structured_outputs::{
+        StructuredOutputBackend, StructuredOutputsParams,
     };
     use vllm_engine_core_client::protocol::tensor::WireNdArray;
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -416,6 +435,26 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_validates_routed_experts_prompt_start() {
+        let lower = |start: Option<u32>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    routed_experts_prompt_start: start,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+            .map(|params| params.routed_experts_prompt_start)
+        };
+        // The prompt has 3 tokens; like Python, accept [0, prompt_len].
+        assert_eq!(lower(None).unwrap(), 0);
+        assert_eq!(lower(Some(3)).unwrap(), 3);
+        let error = lower(Some(4)).unwrap_err();
+        assert!(error.is_request_validation_error());
+        assert!(error.to_string().contains("routed_experts_prompt_start"));
+    }
+
+    #[test]
     fn lower_sampling_params_normalizes_thinking_token_budget() {
         let lower = |budget: Option<i64>| {
             lower_sampling_params_with_limits(
@@ -478,6 +517,28 @@ mod tests {
         .expect("lower zero min_tokens");
 
         assert_eq!(params.min_tokens, 0);
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_schema_xgrammar_cannot_enforce() {
+        let structured_outputs = StructuredOutputsParams {
+            backend: StructuredOutputBackend::Xgrammar,
+            ..StructuredOutputsParams::json(serde_json::json!({
+                "type": "integer",
+                "multipleOf": 2,
+            }))
+        };
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                structured_outputs: Some(structured_outputs),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.is_request_validation_error());
+        assert!(error.to_report_string().contains("not supported by xgrammar"));
     }
 
     #[test]
@@ -1336,6 +1397,47 @@ mod tests {
             error,
             Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_enforces_bad_words_limits() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("blocked", 300)
+            .with_regular_token(" blocked", 301);
+        let lower = |bad_words: Option<Vec<String>>, bad_words_token_ids: Vec<Vec<u32>>| {
+            lower_sampling_params(
+                SamplingParams {
+                    bad_words,
+                    bad_words_token_ids: Some(bad_words_token_ids),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                3,
+                &tokenizer,
+            )
+        };
+
+        lower(None, vec![vec![7; 8]; 128]).unwrap();
+        for (bad_words, raw, expected) in [
+            (
+                None,
+                vec![vec![7]; 129],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                Some(vec!["blocked".to_string()]),
+                vec![vec![7]; 127],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                None,
+                vec![vec![7; 1025]],
+                "Too many total bad word tokens: 1025. The max is 1024.",
+            ),
+        ] {
+            assert_eq!(lower(bad_words, raw).unwrap_err().to_string(), expected);
+        }
     }
 
     #[test]
