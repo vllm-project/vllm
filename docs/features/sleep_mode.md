@@ -269,8 +269,13 @@ checkpoint/restore of TP2/TP4 engines with the default communication stack
 (FlashInfer `trtllm`, custom all-reduce, symmetric-memory all-reduce, and
 NCCL NVLS all enabled) passed 20/20 rounds on UMD 610.57.04 (TP2 and TP4) and
 UMD 615.71.09 (TP2), with CUDA graphs preserved. This executor's combined
-sleep-then-checkpoint flow has not yet been validated on UMD 595 or later, so
-the restrictions above remain required until that validation is done. When
+sleep-then-checkpoint flow has since been validated on UMD 610.57.04: with
+the stock restrictions, TP2 passed 20/20 sleep/wake rounds with CUDA graphs
+preserved; with the restrictions lifted (full default communication stack,
+with and without NCCL communicator suspend), freeze hangs at the Checkpoint
+call while a worker holds live multicast groups. The restrictions therefore
+remain required regardless of UMD version until freeze-time multicast
+teardown exists. When
 running a newer UMD from a cuda-compat package, the host-side checkpoint
 tooling must not stay on the 580 UMD while the worker processes run a newer
 one; a 580 CLI against newer-UMD workers hangs at freeze. Performance costs
