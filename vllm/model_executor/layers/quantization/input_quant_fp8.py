@@ -142,7 +142,9 @@ class QuantFP8(CustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
         use_aiter_per_tensor_quant = (
-            use_aiter_quant and self.group_shape.is_per_tensor()
+            use_aiter_quant
+            and self.group_shape.is_per_tensor()
+            and not current_platform.is_fp8_fnuz()
         )
         use_aiter_per_token_quant = use_aiter_quant and self.group_shape.is_per_token()
 
