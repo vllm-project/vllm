@@ -108,6 +108,7 @@ class FrontBuild:
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
     swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
+    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
 
 
 def plus(t0, v):
@@ -538,6 +539,7 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "d": d,
         "ratio": key.ratio,
         "swa_width": key.swa_width,
+        "tuned": key.tuned,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),

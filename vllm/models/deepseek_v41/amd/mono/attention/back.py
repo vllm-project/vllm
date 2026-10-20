@@ -104,6 +104,7 @@ class BackBuild:
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
 
 
 def plus(t0, v):
@@ -779,6 +780,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "xsl": gml.xsl.ptr,
         "d": d,
         "ratio": key.ratio,
+        "tuned": key.tuned,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},

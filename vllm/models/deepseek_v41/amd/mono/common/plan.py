@@ -24,11 +24,15 @@ THREADS = 512
 WAVES = THREADS // 64
 
 
-def first_task(bid, base):
+def first_task(bid, base, mask=False):
     """CTA ``bid``'s first task of a stage placed from CTA ``base`` (any count of
     CTAs past 0: placements that add task counts run past the grid), then every
-    BLOCKS-th."""
-    return (bid - base % BLOCKS + BLOCKS) % BLOCKS
+    BLOCKS-th. ``mask``: the remainder of the traced value (in [1, 2 BLOCKS))
+    as a mask, not a signed remainder."""
+    v = bid - base % BLOCKS + BLOCKS
+    if mask and not isinstance(v, int):
+        return v & (BLOCKS - 1)
+    return v % BLOCKS
 
 
 # ---------------------------------------------------------------- mailbox layouts

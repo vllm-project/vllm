@@ -75,6 +75,7 @@ class RouteShape:
     # closer together: faster at the draft's widths (40 rows -4 us), slower at
     # the target's (48 rows +3 us; the runners pick)
     ug_groups: int = 2
+    tuned: bool = False  # ``MoeBuild.tuned``
 
     @property
     def dims(self) -> Dims:
@@ -234,4 +235,6 @@ class RouteShape:
 
 
 def route_shape(key: MoeBuild) -> RouteShape:
-    return RouteShape(key.experts, key.topk, key.tokens, key.tp, key.ug_groups)
+    return RouteShape(
+        key.experts, key.topk, key.tokens, key.tp, key.ug_groups, key.tuned
+    )

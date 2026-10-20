@@ -20,6 +20,7 @@ from flydsl.expr.typing import T
 
 from ..common.arch import GFX942
 from ..common.gfx942 import mfma_fp8_scaled, pair_i64, pin_acc
+from ..common.mx import udiv, umod
 from .device import THREADS, WAVES, mfma_scaled, rsrc, tile_map, traced
 
 # a token's LDS row of MXFP8 words / E8M0 codes, padded by 16 B so 16 rows read
@@ -67,9 +68,11 @@ def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
     lo = fx.Vector(bo.buffer_load(r_w, base // 4, vec_width=4, dtype=T.i32))
     hi = fx.Vector(bo.buffer_load(r_w, (base + 64) // 4, vec_width=4, dtype=T.i32))
     kg = k // 32
-    wsi = (row0 // 32) * kg + st * 4 + j
-    word = fx.Int32(bo.buffer_load(r_ws, wsi // 4, vec_width=1, dtype=T.i32))
-    return lo, hi, (word >> (wsi % 4 * 8)) & 0xFF
+    # row0, st >= 0: a tuned build's index math as shifts and masks
+    tuned = c.get("tuned", False)
+    wsi = udiv(row0, 32, tuned) * kg + st * 4 + j
+    word = fx.Int32(bo.buffer_load(r_ws, udiv(wsi, 4, tuned), vec_width=1, dtype=T.i32))
+    return lo, hi, (word >> (umod(wsi, 4, tuned) * 8)) & 0xFF
 
 
 def _step_load_942(r_w, r_ws, k, row0, lane, st):

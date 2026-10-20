@@ -67,6 +67,9 @@ from vllm.models.deepseek_v41.amd.mono.common.mx import (
     mfma_scaled,
     rcp_pow2,
     scale_index,
+    scale_index_sm,
+    udiv,
+    umod,
 )
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_DEV,
@@ -681,6 +684,7 @@ def gemv_fp4_pair(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, scale_cols, col):
     a task share x, so a wave a tile over all of K read it once a tile.
     """
     lane, wave = c["lane"], c["wave"]
+    tuned = c["rs"].tuned
     sl = c["wsl"] + wave * wsl_words(c["d"])
     slices = c["rs"].ug_k_slices
     rounds = ug_rounds(k, ks, slices)
@@ -700,10 +704,11 @@ def gemv_fp4_pair(c, w, ws, e, n_rows, k, rg0, ks, xl, xsl, scale_cols, col):
             [
                 lds_u8(
                     sl,
-                    scale_index(
+                    (scale_index_sm if tuned else scale_index)(
                         t * 16 + lane % 16, (st0 + i) * 4 + lane // 16, scale_cols
                     )
                     - 128 * sc0,
+                    tuned,
                 )
                 for i in range(n)
             ]
@@ -748,7 +753,7 @@ def fp4_pair_loads(c, w, ws, e, n_rows, k, rg0, scale_cols, sc0, st0, n, sc_step
     a lane) and both tiles' weight operands of steps st0 .. st0 + n. Loads
     only."""
     lane = c["lane"]
-    block = (e * n_rows + rg0 * 16) // 32 * (scale_cols * 8)
+    block = udiv(e * n_rows + rg0 * 16, 32, c["rs"].tuned) * (scale_cols * 8)
     words = sc_steps // 2
     sv = bo.buffer_load(
         rsrc(ws),
@@ -804,21 +809,48 @@ def scale_block_store(c, svs, sl):
         fx.ptr_store(svs[i], sl + (256 * i + lane * 4))
 
 
-def lds_scales(sl, local_row, lane, st0, blk, scale_cols):
+def lds_scales(sl, local_row, lane, st0, blk, scale_cols, sm=False):
     """K steps st0 .. st0 + blk's scale bytes of this lane's row from a 32-row
     scale block in LDS (``local_row`` its row in the block). An even step and
     the next are bytes 2 apart of one word (``scale_index``'s d): a read a
-    pair, not a step (down: 3 reads a slot, not 5)."""
+    pair, not a step (down: 3 reads a slot, not 5). ``sm``: the byte index in
+    shifts and masks (``scale_index_sm``)."""
+    index = scale_index_sm if sm else scale_index
     out, word = [], None
     for i in range(blk):
-        idx = scale_index(local_row, (st0 + i) * 4 + lane // 16, scale_cols)
+        idx = index(local_row, (st0 + i) * 4 + lane // 16, scale_cols)
         if (st0 + i) % 2 == 0 or word is None:
             word = fx.ptr_load(sl + idx // 4)
         out.append((word >> (idx % 4 * 8)) & 0xFF)
     return out
 
 
-def lds_u8(ptr, i):
+def lds_scales_half(sl, half, lane, blk):
+    """``lds_scales(sl, half * 16 + lane % 16, lane, 0, blk, cols)`` bit for bit:
+    row half * 16 + b < 32 (r32 0, a = half), so step i's byte is byte
+    (i % 2) * 2 + half of word 64 (i // 2) + 16 (lane >> 4) + (lane & 15): the
+    word at an immediate offset from one lane address, a shift by a held 8 half
+    (no division a step)."""
+    at = sl + ((lane >> 4) * 16 + (lane & 15))
+    sh = half * 8
+    out, word = [], None
+    for i in range(blk):
+        if i % 2 == 0:
+            word = fx.ptr_load(at + (i // 2) * 64)
+        out.append((word >> ((i % 2) * 16 + sh)) & 0xFF)
+    return out
+
+
+def task_half(task):
+    """``task % 2`` of a task id >= 0 (traced: a mask, not a signed remainder)."""
+    return task % 2 if isinstance(task, int) else task & 1
+
+
+def lds_u8(ptr, i, sm=False):
+    """Byte ``i`` of LDS words ``ptr``; ``sm``: its word and shift in shifts and
+    masks (Python's floor ``//`` and ``%`` by 4 for any sign)."""
+    if sm:
+        return (fx.ptr_load(ptr + (i >> 2)) >> ((i & 3) * 8)) & 0xFF
     return (fx.ptr_load(ptr + i // 4) >> (i % 4 * 8)) & 0xFF
 
 
@@ -853,7 +885,7 @@ def fp4_pair_mfma(c, k, xl, xsl, st0, n, avs, sas, accs, col):
     lane = c["lane"]
     x_row = lds_row(k // 4)
     s_row = lds_row(k // 32)
-    j = lane // 16
+    j = udiv(lane, 16, c["rs"].tuned)
     accs = list(accs)
     for i in range_constexpr(n):
         bv = fp8_operand(
@@ -917,16 +949,23 @@ def stage_ug(c, task):
     epilogue and the stage-2 input quant). Past one: ``stage_ug_tile``."""
     s, tid, lane, tab = c["S"], c["tid"], c["lane"], c["tab"]
     rs = c["rs"]
-    ug_parts = rs.ug_parts
-    u = task // ug_parts
+    ug_parts, tuned = rs.ug_parts, rs.tuned
+    u = udiv(task, ug_parts, tuned)
     if u < c["rs"].n_union(tab, s):
         e = c["rs"].union_expert(tab, s, u)
         # the slot's picks, a column each (a column past them repeats the last);
         # every token's row is in LDS: a column reads its pick's token's
         first = c["rs"].slot_first(tab, u)
         count = c["rs"].slot_first(tab, u + 1) - first
-        pick = c["rs"].pick_at(tab, first + fx.min(lane % 16, count - 1))
-        ug_pass(c, e, task % ug_parts * rs.ug_groups, first, count, pick // rs.topk)
+        pick = c["rs"].pick_at(tab, first + fx.min(umod(lane, 16, tuned), count - 1))
+        ug_pass(
+            c,
+            e,
+            umod(task, ug_parts, tuned) * rs.ug_groups,
+            first,
+            count,
+            udiv(pick, rs.topk, tuned),
+        )
         publish(c["put"], c["ugf"], task, 1, tid == 0)
     gpu.barrier()
 
@@ -938,9 +977,12 @@ def ug_wave_pair(c, part0):
     tile; b = 2 (part0 + p) + bb), one 32-row scale block -- over K slice ks =
     wave / 2 % slices (``gemv_fp4_pair``): (p, 2 b, ks, whether the group is in
     the real width)."""
-    wave, slices = c["wave"], c["rs"].ug_k_slices
-    p = wave // (2 * slices)
-    b = (part0 + p) * 2 + wave % 2
+    wave, slices, tuned = c["wave"], c["rs"].ug_k_slices, c["rs"].tuned
+    p = udiv(wave, 2 * slices, tuned)
+    b = (part0 + p) * 2 + umod(wave, 2, tuned)
+    if const_expr(tuned):
+        ks = umod(udiv(wave, 2), slices)
+        return p, 2 * b, ks, part0 + p < c["d"].inter_real // UG_PART
     return p, 2 * b, wave // 2 % slices, part0 + p < c["d"].inter_real // UG_PART
 
 
@@ -1039,7 +1081,7 @@ def ug_pass(c, e, part0, first, count, col):
             col,
         )
     for t in range_constexpr(2):
-        slot = ug_red_slot(rs, p, wave % 2, ks, t)
+        slot = ug_red_slot(rs, p, umod(wave, 2, rs.tuned), ks, t)
         fx.ptr_store(
             fx.Vector.from_elements([acc[4 * t + q] for q in range(4)], fx.Float32),
             red + (slot * 64 + lane) * 4,
@@ -1065,22 +1107,25 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
     if tid < TILE:
         c["poll"]([(c["x8rdy"], token_of(fx.min(tid, live - 1)), 1)])
     gpu.barrier()
+    tuned = c["rs"].tuned
     for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
         quads = width // 4
         for i in range_constexpr(-(-TILE * quads // THREADS)):
             q = tid + THREADS * i
-            row = q // quads
+            row = udiv(q, quads, tuned)
             if (q < TILE * quads) & (row < live):
                 v = fx.Vector(
                     bo.buffer_load(
                         rsrc(c[mb].value),
-                        token_of(row) * width + q % quads * 4,
+                        token_of(row) * width + umod(q, quads, tuned) * 4,
                         vec_width=4,
                         dtype=T.i32,
                         cache_modifier=CM_DEV,
                     )
                 )
-                fx.ptr_store(v, dst + (row * lds_row(width) + q % quads * 4))
+                fx.ptr_store(
+                    v, dst + (row * lds_row(width) + umod(q, quads, tuned) * 4)
+                )
     gpu.barrier()
 
 
@@ -1091,7 +1136,8 @@ def gather_x8r(c, first, count):
     tab, topk = c["tab"], c["rs"].topk
 
     def token(j):
-        return c["rs"].pick_at(tab, first + fx.min(j, count - 1)) // topk
+        pick = c["rs"].pick_at(tab, first + fx.min(j, count - 1))
+        return udiv(pick, topk, c["rs"].tuned)
 
     load_x8_rows(c, "x8r", "x8rs", c["x8rl"], c["x8rsl"], token, fx.min(count, TILE))
 
@@ -1102,18 +1148,18 @@ def ug_epilogue(c, part0, idx, first, count):
     column), the group's MXFP8 scale, its byte of MID (the pick's row, ``first``
     + j in the pick order)."""
     lane, red, d, rs = c["lane"], c["red"], c["d"], c["rs"]
-    cols = rs.tile_picks
+    cols, tuned = rs.tile_picks, rs.tuned
     if idx < rs.ug_groups * cols * UG_PART:
-        p = idx // (cols * UG_PART)
+        p = udiv(idx, cols * UG_PART, tuned)
         part = part0 + p
-        t = idx % (cols * UG_PART) // UG_PART
-        i = idx % UG_PART
-        tile = i // 16
-        r = i % 16
+        t = udiv(umod(idx, cols * UG_PART, tuned), UG_PART, tuned)
+        i = umod(idx, UG_PART, tuned)
+        tile = udiv(i, 16, tuned)
+        r = umod(i, 16, tuned)
         if const_expr(GFX942):
             g, up = ug_gate_up_942(red, rs, p, tile, r, t)
         else:
-            at = (16 * (r // 4) + t) * 4 + r % 4
+            at = (16 * udiv(r, 4, tuned) + t) * 4 + umod(r, 4, tuned)
             g, up = [
                 pairwise_sum(
                     [
@@ -1145,10 +1191,10 @@ def ug_epilogue(c, part0, idx, first, count):
             ]
             # 4 threads' bytes -> one word
             word = fp8_pack4(q8, *nb)
-            if (i % 4 == 0) & (t < count):
-                st_dev(word, c["mid"], row * d.mid_words + part * 8 + i // 4)
+            if (umod(i, 4, tuned) == 0) & (t < count):
+                st_dev(word, c["mid"], row * d.mid_words + part * 8 + udiv(i, 4, tuned))
             if (i == 0) & (t < count):
-                st_dev(code, c["mids"], mid_code_index(d, row, part))
+                st_dev(code, c["mids"], mid_code_index(d, row, part, tuned))
 
 
 # ---------------------------------------------------------------- gfx942 routed
@@ -1654,9 +1700,9 @@ def mid_operands(c, first, count):
     lane % 16 the pick, past them the last): each K step's two 16-byte halves
     of the lane's MID row and its group's code, loaded at device scope straight into
     registers -- no LDS block a slot, so a round holds more slots."""
-    lane, d = c["lane"], c["d"]
-    j = lane // 16
-    row = first + fx.min(lane % 16, count - 1)
+    lane, d, tuned = c["lane"], c["d"], c["rs"].tuned
+    j = udiv(lane, 16, tuned)
+    row = first + fx.min(umod(lane, 16, tuned), count - 1)
     steps = d.inter // 128
     # the step's constant after an opaque lane word folds into the immediate
     # offset; summed with j * 4 it was a hoisted VGPR a step (spill)
@@ -1687,7 +1733,7 @@ def mid_operands(c, first, count):
     # this lane's codes, one a K step: contiguous in MIDS (``mid_code_index``),
     # 4 a load -- a load a step was 5 of a slot's 16 load instructions, and the
     # stage is load-issue bound (probe ``harness/down_probe.py``: -8 %)
-    base = mid_code_index(d, row, j)
+    base = mid_code_index(d, row, j, tuned)
     sbs = []
     for w0 in range_constexpr(0, steps, 4):
         n = min(4, steps - w0)
@@ -1711,12 +1757,17 @@ def mid_operands(c, first, count):
     return bvs, sbs
 
 
-def mid_code_index(d, row, group):
+def mid_code_index(d, row, group, unsigned=False):
     """MIDS word of pick row ``row``'s MXFP8 group ``group`` (32 columns): a K
     step's 4 groups apart, so the steps of one group % 4 lie together
-    (``mid_operands``' lane j reads groups j, j + 4, ..)."""
+    (``mid_operands``' lane j reads groups j, j + 4, ..). ``unsigned``: the
+    index math as shifts and masks (``udiv``)."""
     steps = d.inter // 128
-    return row * (d.inter // 32) + group % 4 * steps + group // 4
+    return (
+        row * (d.inter // 32)
+        + umod(group, 4, unsigned) * steps
+        + udiv(group, 4, unsigned)
+    )
 
 
 def down_ug_flags(c, ucs):
@@ -1736,17 +1787,19 @@ def down_ug_flags(c, ucs):
 
 def _down_ug_flag(c, ucs, f, per_slot):
     rs, tab = c["rs"], c["tab"]
-    ug_parts = rs.ug_parts
+    ug_parts, tuned = rs.ug_parts, rs.tuned
     mine = ucs[0]
     for i in range_constexpr(1, len(ucs)):
-        mine = (f // per_slot == i).select(ucs[i], mine)
+        mine = (udiv(f, per_slot, tuned) == i).select(ucs[i], mine)
     if const_expr(not rs.multi):
-        return mplan.ug_flag(mine, f % ug_parts, ug_parts)
+        return mplan.ug_flag(mine, umod(f, ug_parts, tuned), ug_parts)
     tile0 = rs.tile_first(tab, mine)
     tiles = rs.tile_first(tab, mine + 1) - tile0
     return mplan.ug_flag(
-        mplan.polled_tile(tile0, tiles, f % per_slot // ug_parts),
-        f % ug_parts,
+        mplan.polled_tile(
+            tile0, tiles, udiv(umod(f, per_slot, tuned), ug_parts, tuned)
+        ),
+        umod(f, ug_parts, tuned),
         ug_parts,
     )
 
@@ -1771,8 +1824,13 @@ def down_shared(c, tasks):
             )
             gpu.barrier()
             if tid < ROWS * nn:
-                v = row_sum(red, tid % ROWS, tid // ROWS)
-                at = (j * s + plus(t0, tid // ROWS)) * ROWS + tid % ROWS
+                if const_expr(c["rs"].tuned):
+                    rr, tt = umod(tid, ROWS), udiv(tid, ROWS)
+                    v = row_sum(red, rr, tt)
+                    at = (j * s + plus(t0, tt)) * ROWS + rr
+                else:
+                    v = row_sum(red, tid % ROWS, tid // ROWS)
+                    at = (j * s + plus(t0, tid // ROWS)) * ROWS + tid % ROWS
                 fx.ptr_store(bf16_round(v).bitcast(fx.Int32), c["sdl"] + at)
             gpu.barrier()
 
@@ -1783,10 +1841,10 @@ def down_combine(c, task, j, t0, n):
     contributions summed in bf16 in each token's top-k order, plus the shared expert's
     (``down_shared``), the sum pushed to every rank."""
     s, tid, d, tab = c["S"], c["tid"], c["d"], c["tab"]
-    topk = c["rs"].topk
+    topk, tuned = c["rs"].topk, c["rs"].tuned
     if tid < ROWS * n:
-        r = tid % ROWS
-        tl = tid // ROWS
+        r = umod(tid, ROWS, tuned)
+        tl = udiv(tid, ROWS, tuned)
         t = plus(t0, tl)
         shared = fx.ptr_load(c["sdl"] + ((j * s + t) * ROWS + r)).bitcast(fx.Float32)
         # aiter's stage 2 adds each bf16(v * w) into a bf16 buffer: a rounding
@@ -1803,8 +1861,8 @@ def down_combine(c, task, j, t0, n):
         fx.ptr_store(bf16_round(routed + shared), c["pair"] + tid)
     gpu.barrier()
     if tid < ROWS * n // 2:
-        rp = tid % (ROWS // 2)
-        tl = tid // (ROWS // 2)
+        rp = umod(tid, ROWS // 2, tuned)
+        tl = udiv(tid, ROWS // 2, tuned)
         t = plus(t0, tl)
         v0 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp))
         v1 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp + 1))
@@ -1821,10 +1879,14 @@ def down_mfma(c, j, task, sl, mid, first, count, av, live):
     picks first .. first + min(count, 16) (their B operands ``mid``:
     ``mid_operands``; the scale block in ``sl``), each pick's contribution."""
     lane, tab, d = c["lane"], c["tab"], c["d"]
-    sas = lds_scales(
-        sl, task % 2 * 16 + lane % 16, lane, 0, d.inter // 128, d.down_scale_cols
-    )
-    jj = lane % 16
+    if const_expr(c["rs"].tuned):
+        sas = lds_scales_half(sl, task_half(task), lane, d.inter // 128)
+        jj = umod(lane, 16)
+    else:
+        sas = lds_scales(
+            sl, task % 2 * 16 + lane % 16, lane, 0, d.inter // 128, d.down_scale_cols
+        )
+        jj = lane % 16
     col = fx.min(jj, count - 1)
     bvs, sbs = mid
     # the K steps on DOWN_CHAINS accumulators in turn, summed in order: one
@@ -1913,8 +1975,9 @@ def reduce_pair(c, task, idx):
     s, tp = c["S"], c["d"].tp
     a = c["args"]
     if idx < s * RED_COLS // 2:
-        t = idx // (RED_COLS // 2)
-        col = task * RED_COLS + 2 * (idx % (RED_COLS // 2))
+        tuned = c["rs"].tuned
+        t = udiv(idx, RED_COLS // 2, tuned)
+        col = task * RED_COLS + 2 * umod(idx, RED_COLS // 2, tuned)
         own = preg(c["sym"], c["ffn_off"], "ffn")
         acc0, acc1 = sum_partials(
             c["poll"], own, lambda src: region_pair(src, t, s, col), tp
@@ -2050,17 +2113,19 @@ def run_moe(c, key, bid, tls, tl0):
     route0, shared0 = c["rs"].route0, c["rs"].shared0
     shared_tasks = c["d"].shared_tasks
     ug_tasks = c["rs"].max_u * c["rs"].ug_parts
-    for t in range(first_task(bid, XQ0), s, BLOCKS):
+    for t in range(first_task(bid, XQ0, key.tuned), s, BLOCKS):
         await_x(c, [t])
         stage_xq(c, t)
         publish(c["put"], c["x8rdy"], t, 1, tid == 0)
     stamp(timeline, tls, tid, tl0 + 1)
     multi = len(token_tiles(s)) > 1
-    for task in range(first_task(bid, c["rs"].router0), router_tasks, BLOCKS):
+    for task in range(
+        first_task(bid, c["rs"].router0, key.tuned), router_tasks, BLOCKS
+    ):
         await_x(c, list(range(s)))
         stage_router(c, task)
     stamp(timeline, tls, tid, tl0 + 2)
-    for t in range(first_task(bid, route0), s, BLOCKS):
+    for t in range(first_task(bid, route0, key.tuned), s, BLOCKS):
         stage_route(c, t)
     stamp(timeline, tls, tid, tl0 + 3)
     c["xl"], c["xsl"] = c["x8l"], c["x8sl"]
@@ -2069,7 +2134,7 @@ def run_moe(c, key, bid, tls, tl0):
     # a task loop (spills). A task's tiles in series on one CTA put three tiles'
     # latency on the path down waits on (the weights read again a tile: L2 hits)
     assert c["rs"].shared_units <= BLOCKS
-    unit = first_task(bid, shared0)
+    unit = first_task(bid, shared0, key.tuned)
     if unit < c["rs"].shared_units:
         # the gate weights in flight before x's wait
         a = c["args"]
@@ -2094,13 +2159,13 @@ def run_moe(c, key, bid, tls, tl0):
         load_route(c, c["tab"])
         n_tiles = c["rs"].tile_first(c["tab"], c["rs"].n_union(c["tab"], s))
         ug_total = mplan.ug_tasks(n_tiles, c["rs"].ug_parts)
-        task = first_task(bid, c["rs"].ug0)
+        task = first_task(bid, c["rs"].ug0, key.tuned)
         while task < ug_total:
             task = stage_ug_tile(c, task, ug_total)
     else:
         # one token tile: every task placed (its x in LDS once a CTA)
         loaded = fx.Int32(0)
-        for task in range(first_task(bid, c["rs"].ug0), ug_tasks, BLOCKS):
+        for task in range(first_task(bid, c["rs"].ug0, key.tuned), ug_tasks, BLOCKS):
             if loaded == 0:
                 # X8R (ready long before the routing) first: after the routing
                 # lands only its own poll remains
@@ -2121,14 +2186,14 @@ def run_moe(c, key, bid, tls, tl0):
     # every CTA its tile; the first DOWN_TASKS - BLOCKS to get here an extra
     # one too: the CTAs whose ug ended first (by bid, those ending last held
     # two tiles and ended the stage)
-    down_task = first_task(bid, DOWN0)
+    down_task = first_task(bid, DOWN0, key.tuned)
     rank = take_down_rank(c)
     if rank < DOWN_TASKS - BLOCKS:
         stage_down(c, [down_task, BLOCKS + rank])
     else:
         stage_down(c, [down_task])
     stamp(timeline, tls, tid, tl0 + 6)
-    for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
+    for task in range(first_task(bid, RED0, key.tuned), RED_TASKS, BLOCKS):
         stage_reduce(c, task)
     stamp(timeline, tls, tid, tl0 + 7)
 

@@ -130,7 +130,7 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width
+        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width, key.tuned
     )
 
 
@@ -149,7 +149,7 @@ def _symbol_params(key: MonoBuild) -> dict:
 
 
 def _back_key(key: MonoBuild):
-    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline, key.tuned)
 
 
 def scratch_layout(
@@ -408,7 +408,7 @@ def build_mono_k1(key: MonoBuild):
             c["tl"], c["tl_points"] = tl, mb_front.FRONT_POINTS
 
         def seam_slice():
-            for task in range(first_task(bid, 0), SLICES, BLOCKS):
+            for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
                 seam.stage_slice(ca, task)
             gpu.barrier()
 
@@ -418,10 +418,10 @@ def build_mono_k1(key: MonoBuild):
                 store_normed(normed_out, *v)
 
         def seam_rest():
-            for t in range(first_task(bid, NORM0), s, BLOCKS):
+            for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
                 seam.stage_norm(ca, t, store)
                 publish_x8(c, t)
-            for t in range(first_task(bid, GATE0), s, BLOCKS):
+            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
                 seam.stage_gate(ca, t)
             gpu.barrier()
 
@@ -664,16 +664,16 @@ def run_ffn(
     # attention, so it stamps its own start here.
     if const_expr(part is not None):
         mark(0)
-    for task in range(first_task(bid, 0), SLICES, BLOCKS):
+    for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
         if const_expr(part is not None):
             seam.stage_push(ca, task, part)
         seam.stage_reduce(ca, task)
         seam.stage_slice(ca, task)
     mark(K2_SEAM_POINT)
-    for t in range(first_task(bid, GATE0), s, BLOCKS):
+    for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
         seam.stage_gate(ca, t)
     mark(K2_SEAM_POINT + 1)
-    for t in range(first_task(bid, NORM0), s, BLOCKS):
+    for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
         seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
         publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
     gpu.barrier()
@@ -853,7 +853,7 @@ def build_mono_k2(key: MonoBuild):
                 },
             }
             c["krdy"] = sreg(scratch, layout["krdy"][0], "krdy")
-            for t in range(first_task(bid, BLOCKS - s), s, BLOCKS):
+            for t in range(first_task(bid, BLOCKS - s, key.tuned), s, BLOCKS):
                 mb_front.stage_kt(ckt, t)
                 mb_back.publish(c, c["krdy"], t)
         mb_back.run_back(c, bkey, bid)
