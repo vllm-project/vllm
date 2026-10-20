@@ -813,6 +813,8 @@ def _maybe_convert_weights_for_experts(
     """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
@@ -856,10 +858,15 @@ def _maybe_convert_weights_for_experts(
 
     # AITER's prebuilt modules carry a gfx950 instance table even on gfx942 and reject
     # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
-    # and per-token schemes. Those keep JIT-compiling until
+    # and per-token schemes. Those shapes keep JIT-compiling until
     # https://github.com/ROCm/aiter/issues/5766 is fixed.
     if issubclass(fe_type, AiterExperts) and (
-        config.quant_dtype is None or config.quant_block_shape is not None
+        config.quant_dtype is None
+        or config.quant_block_shape is not None
+        or (
+            issubclass(fe_type, (AiterFp8TensorExperts, AiterFp8ChannelExperts))
+            and rank_weights.w2.size(-1) % 256 == 0
+        )
     ):
         return _shuffle_weights_for_aiter(rank_weights)
 
