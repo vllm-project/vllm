@@ -631,6 +631,7 @@ mod tests {
 
     const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
+    const STEP5_VL_TEMPLATE: &str = include_str!("../../../tests/templates/step5_vl.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
@@ -1608,6 +1609,71 @@ mod tests {
         expect![[r#"
             Text(
                 "<|im_start|>user\na<|vision_start|><|image_pad|><|vision_end|>b<|im_end|>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    fn render_step5_vl(
+        request: &ChatRequest,
+        content_format: ChatTemplateContentFormatOption,
+    ) -> Result<crate::RenderedPrompt> {
+        HfChatRenderer::new(
+            Some(STEP5_VL_TEMPLATE.to_string()),
+            HashMap::new(),
+            content_format,
+        )?
+        .with_special_tokens(Some(HfSpecialTokens {
+            bos_token: Some(NamedSpecialToken::Text(
+                "<｜begin▁of▁sentence｜>".to_string(),
+            )),
+            ..Default::default()
+        }))
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<im_patch>".to_string()),
+            ..Default::default()
+        }))
+        .render(request)
+    }
+
+    fn step5_vl_image_request() -> ChatRequest {
+        sample_request(vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user(vec![
+                ChatContentPart::text("Describe this image:"),
+                ChatContentPart::image_url("data:image/png;base64,test"),
+                ChatContentPart::text("What is in it?"),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn step5_vl_template_places_im_patch_at_image_part_position_openai_format() {
+        let rendered = render_step5_vl(
+            &step5_vl_image_request(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:<im_patch>What is in it?<|EOT|><|BOT|>assistant\n<think>\n",
+            )
+        "#]]
+        .assert_debug_eq(&rendered.prompt);
+    }
+
+    #[test]
+    fn step5_vl_template_places_im_patch_at_image_part_position_string_format() {
+        let rendered = render_step5_vl(
+            &step5_vl_image_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        expect![[r#"
+            Text(
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:<im_patch>What is in it?<|EOT|><|BOT|>assistant\n<think>\n",
             )
         "#]]
         .assert_debug_eq(&rendered.prompt);

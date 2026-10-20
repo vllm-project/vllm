@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, ModernVBertConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -34,7 +34,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.hf import HfTokenizer
-from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -59,12 +58,12 @@ class ColModernVBertConnector(nn.Module):
     encoder's hidden size with a single bias-free linear layer.
     """
 
-    def __init__(self, config: ColModernVBertConfig):
+    def __init__(self, config: ModernVBertConfig):
         super().__init__()
         self.pixel_shuffle_factor = config.pixel_shuffle_factor
         vision_hidden_size = config.vision_config.hidden_size
         input_size = vision_hidden_size * (self.pixel_shuffle_factor**2)
-        output_size = config.hidden_size
+        output_size = config.text_config.hidden_size
         self.proj = nn.Linear(input_size, output_size, bias=False)
 
     def pixel_shuffle(self, features: torch.Tensor) -> torch.Tensor:
@@ -105,8 +104,13 @@ class ColModernVBertConnector(nn.Module):
 
 
 class ColModernVBertProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> ColModernVBertConfig:
-        return self.ctx.get_hf_config(ColModernVBertConfig)
+    def get_hf_config(self) -> ModernVBertConfig:
+        return self.ctx.get_hf_config(ModernVBertConfig)
+
+    def get_image_seq_len(self) -> int:
+        config = self.get_hf_config()
+        patches = config.vision_config.image_size // config.vision_config.patch_size
+        return patches**2 // config.pixel_shuffle_factor**2
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -122,7 +126,7 @@ class ColModernVBertProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
-        return self.get_hf_config().image_seq_len
+        return self.get_image_seq_len()
 
 
 class ColModernVBertDummyInputsBuilder(
@@ -211,7 +215,7 @@ class ColModernVBertMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         config = self.info.get_hf_config()
         image_token_id = config.image_token_id
-        num_tokens = config.image_seq_len
+        num_tokens = self.info.get_image_seq_len()
 
         def get_replacement(item_idx: int):
             return [image_token_id] * num_tokens
@@ -255,7 +259,7 @@ class ColModernVBertForRetrieval(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: ColModernVBertConfig = vllm_config.model_config.hf_config
+        config: ModernVBertConfig = vllm_config.model_config.hf_config
         self.config = config
         text_config = config.text_config
         quant_config = vllm_config.quant_config
@@ -274,7 +278,7 @@ class ColModernVBertForRetrieval(
         # We build the components individually rather than wrapping
         # ``ModernBertModel`` because ``ModernBertEncoderLayer`` reads
         # ``vllm_config.model_config.hf_config`` which would be
-        # ``ColModernVBertConfig``, not ``ModernBertConfig``.
+        # ``ModernVBertConfig``, not ``ModernBertConfig``.
         self.text_embeddings = ModernBertEmbeddings(text_config)
         self.text_layers = nn.ModuleList(
             [
@@ -295,7 +299,7 @@ class ColModernVBertForRetrieval(
         # --- ColBERT projection (768 -> 128, with bias) ---
         self.custom_text_proj = nn.Linear(
             text_config.hidden_size,
-            config.embedding_dim,
+            getattr(config, "embedding_dim", 128),
             bias=True,
             dtype=vllm_config.model_config.head_dtype,
         )
