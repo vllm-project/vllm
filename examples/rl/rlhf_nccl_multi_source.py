@@ -81,8 +81,10 @@ class StageSource(WeightSource):
         ]
 
     def __iter__(self):
-        for name, param in self.model.named_parameters():
-            if self._owner(name) == self.stage_rank:
+        params = dict(self.model.named_parameters())
+        for group in self.groups():
+            for name in group:
+                param = params[name] if self._owner(name) == self.stage_rank else None
                 yield name, param
 
 
