@@ -114,6 +114,13 @@ needs synchronous scheduling, eager execution or full decode graphs, and no
 prefix caching, KV transfer, DBO, context, data or pipeline parallelism, or
 recurrent replay/recovery; draft weights and KV capacity stay allocated.
 
+To verify fewer drafts than were scheduled (for example, a width chosen per
+step from measured costs), a speculator overrides
+`verify_budget(req_ids, num_draft_tokens)`. It returns how many of its scheduled
+drafts each request verifies this step; the remaining drafts count as rejected.
+The default verifies all of them. Built-in adaptive verification sets its own
+budget and takes precedence.
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON

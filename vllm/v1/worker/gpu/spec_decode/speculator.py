@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +126,21 @@ class BaseSpeculator(ABC):
         """
         return False
 
+    def verify_budget(
+        self, req_ids: Sequence[str], num_draft_tokens: np.ndarray
+    ) -> np.ndarray:
+        """How many of its scheduled drafts each request verifies this step.
+
+        Called once per scheduled batch that carries drafts, before its inputs
+        are built, unless adaptive verification (which sets its own budget) is
+        enabled. ``num_draft_tokens[i]`` is the number of drafts scheduled for
+        ``req_ids[i]``. Return an array of the same shape with values in
+        ``[0, num_draft_tokens[i]]``: request ``i`` verifies its first that
+        many drafts, and the rest count as rejected. Runs on the host and must
+        not read device tensors. The default verifies every scheduled draft.
+        """
+        return num_draft_tokens
+
     def make_rejection_sampler(self, sampler: "Sampler") -> "RejectionSampler | None":
         """Return the sampler that verifies this speculator's drafts.
 
@@ -192,7 +207,7 @@ class BaseSpeculator(ABC):
         runner reads them once and skips the no-op defaults on every step."""
         return frozenset(
             name
-            for name in ("prepare_verify_inputs", "post_accept")
+            for name in ("verify_budget", "prepare_verify_inputs", "post_accept")
             if getattr(type(self), name) is not getattr(BaseSpeculator, name)
         )
 
