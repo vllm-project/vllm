@@ -1,12 +1,14 @@
 ---
-description: Cycle surveillance vllm 6h (prod read-only + G: + sécurité IP + coordination + clôture) — la spec versionnée du cron
+description: Cycle surveillance vllm 2h (PROVISOIRE, fenêtre pilote haiku→swift ~23/10) puis retour 6h — la spec versionnée du cron
 ---
 
-# Cycle surveillance vLLM (6 h) — spec versionnée
+# Cycle surveillance vLLM (2 h PROVISOIRE → 6 h) — spec versionnée
 
 **Le cron ne porte qu'une ligne : `/vllm-surveillance`** (+ fallback chemin ci-dessous). Tout changement de spec passe par un commit/PR sur ce fichier — plus de spec volumineuse inline dans le prompt cron. Convention flotte 07-08/10/2026 (« la spec vit dans le dépôt »), fermée à 3/3 sièges.
 
-Fallback si le skill ne charge pas : lire ce fichier (`d:/vllm/.claude/commands/vllm-surveillance.md`) et l'exécuter tel quel. **Fin de cycle : re- armer le cron** (`CronCreate`, cadence 6 h à :17, session-only) et vérifier par `CronList`.
+Fallback si le skill ne charge pas : lire ce fichier (`d:/vllm/.claude/commands/vllm-surveillance.md`) et l'exécuter tel quel. **Fin de cycle : re-armer le cron** (`CronCreate`, **cadence 2 h à :17 PROVISOIRE**, session-only) et vérifier par `CronList`.
+
+**⏱ CADENCE PROVISOIRE 2 h (user 20/10, ~23→26/10) — pendant le pilote haiku→swift** : charge nouvelle (po-2027+po-2028, ~582 req/h) sur une config qui n'a tenu que le régime nocturne. À chaque cycle : watch §5quater (prefix-hit, preemptions, re-prefill) + **marge commit hôte (§3, seuil 85 %)**. **Retour à 6 h** une fois la fenêtre Minimax passée et la charge stabilisée (reset quota 25/10) : remettre la ligne cadence à « 6 h à :17 » et cette note en ligne de changelog.
 
 ## Prod concernée (état 2026-10-09)
 
