@@ -34,6 +34,10 @@ type Result<T> = std::result::Result<T, TemplateError>;
 /// one unit of fuel; when depleted, rendering aborts with an error.
 const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
 
+fn supports_developer_role(template: &str) -> bool {
+    template.contains("\"developer\"") || template.contains("'developer'")
+}
+
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
@@ -148,12 +152,14 @@ pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
     content_format: ChatTemplateContentFormat,
+    supports_developer_role: bool,
 }
 
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
     pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
+        let supports_developer_role = supports_developer_role(&template);
         let content_format = match content_format {
             ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
@@ -163,6 +169,7 @@ impl CompiledChatTemplate {
         Ok(Self {
             env,
             content_format,
+            supports_developer_role,
         })
     }
 
@@ -175,6 +182,10 @@ impl CompiledChatTemplate {
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
         self.content_format
+    }
+
+    pub fn supports_developer_role(&self) -> bool {
+        self.supports_developer_role
     }
 }
 
