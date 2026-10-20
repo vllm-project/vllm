@@ -1844,7 +1844,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_w4a8_decode_rdna3.cu")
   endif()
 
-  # RDNA3.5 attention kernels (gfx1150, gfx1151, gfx1152, gfx1153).
+  # RDNA attention kernels (gfx1150, gfx1151, gfx1152, gfx1153; RDNA4: gfx1200,
+  # gfx1201).
   set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
   include(cmake/rocm_rdna_attn.cmake)
   rdna_attn_targets(VLLM_RDNA_ATTN_TARGETS)
