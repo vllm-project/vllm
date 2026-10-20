@@ -303,17 +303,17 @@ mod tests {
     }
 
     #[test]
-    fn truncate_exceeds_budget_maps_to_invalid_request() {
-        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+    fn truncate_exceeds_max_model_len_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsMaxModelLen {
             value: 8000,
-            budget: 4000,
+            max_model_len: 4000,
         };
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
-        assert!(response.error.message.contains("max_tokens = 4000"));
+        assert!(response.error.message.contains("max_model_len = 4000"));
     }
 
     #[test]
