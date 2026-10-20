@@ -4535,10 +4535,12 @@ def rocm_sparse_attn_decode(
 ) -> int:
     """Run sparse MLA decode into ``output``.
 
-    Passing ``inv_rope_positions`` folds the inverse RoPE into the reduce
-    epilogue. Returns how many leading rows of ``output`` came back rotated,
-    so a caller mixing in a decode path that does not fuse still knows what it
-    owes the standalone pass. Read it from the eager attention segment only.
+    Passing ``inv_rope_positions`` asks the reduce epilogue to fold in the
+    inverse RoPE. Only the split-K reduce (gfx942 / gfx950) does that; the
+    fallback kernel on other GPUs ignores the positions. Returns how many
+    leading rows of ``output`` came back rotated (every row when the reduce
+    folded the RoPE, 0 otherwise), so the caller knows which rows still owe
+    the standalone pass. Read it from the eager attention segment only.
 
     ``output_mxfp8 = (data, scale)`` replaces ``output``: the reduce also
     MXFP8-quantizes the rotated rows for the FP8 wo_a (see
