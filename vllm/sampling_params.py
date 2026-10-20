@@ -436,6 +436,9 @@ class SamplingParams(
     and terminate early, saving time and tokens."""
 
     # Debugging / RL-specific parameters. Not intended for production serving.
+    indexer_topk_prompt_start: int = 0
+    """Skip this many prompt positions in returned indexer selections."""
+
     routed_experts_prompt_start: int = 0
     """When enable_return_routed_experts is active, skip the first
     routed_experts_prompt_start prompt tokens from the returned routing
@@ -485,6 +488,7 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        indexer_topk_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
@@ -553,6 +557,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            indexer_topk_prompt_start=indexer_topk_prompt_start,
             trace_decode_token_ids=trace_decode_token_ids,
         )
 

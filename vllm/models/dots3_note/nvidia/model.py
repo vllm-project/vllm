@@ -193,6 +193,12 @@ def _forward_note_mla(
 
     if attention.indexer and attention.is_sparse and not attention.skip_topk:
         attention.indexer(hidden_states, q_c, positions, attention.indexer_rope_emb)
+    capture = getattr(attention, "indexer_capture", None)
+    if capture is not None:
+        assert attention.topk_indices_buffer is not None
+        capture.capture(
+            attention.topk_indices_buffer[: len(hidden_states), : capture.source.width]
+        )
     if llama_4_scaling is not None:
         q *= llama_4_scaling
 

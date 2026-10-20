@@ -13,6 +13,7 @@ from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.indexer_capture import IndexerCaptureSink
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
@@ -80,6 +81,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         super().__init__()
+        self.indexer_capture: IndexerCaptureSink | None = None
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -231,6 +233,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        capture = getattr(self, "indexer_capture", None)
+        if capture is not None:
+            assert self.topk_indices_buffer is not None
+            capture.capture(
+                self.topk_indices_buffer[: len(hidden_states), : capture.source.width]
+            )
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 

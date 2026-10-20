@@ -820,6 +820,7 @@ def test_completion_request_forwards_routed_experts_prompt_start():
         prompt="Hello",
         max_tokens=10,
         routed_experts_prompt_start=3,
+        indexer_topk_prompt_start=1,
     )
 
     sampling_params = request.to_sampling_params(
@@ -828,3 +829,4 @@ def test_completion_request_forwards_routed_experts_prompt_start():
     )
 
     assert sampling_params.routed_experts_prompt_start == 3
+    assert sampling_params.indexer_topk_prompt_start == 1

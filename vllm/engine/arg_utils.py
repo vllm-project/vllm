@@ -486,6 +486,7 @@ class EngineArgs:
     # Public compatibility argument. Canonical runtime state lives in
     # AuxOutputConfig.
     enable_return_routed_experts: bool = False
+    enable_return_indexer_topk: bool = False
     return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
@@ -877,6 +878,8 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.aux_output_config, dict):
             self.aux_output_config = AuxOutputConfig(**self.aux_output_config)
+        if self.enable_return_indexer_topk:
+            self.aux_output_config.enable_return_indexer_topk = True
         if self.enable_return_routed_experts:
             self.aux_output_config.enable_return_routed_experts = True
         if isinstance(self.engram_config, dict):
@@ -988,6 +991,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-return-routed-experts",
             **aux_output_kwargs["enable_return_routed_experts"],
+        )
+        model_group.add_argument(
+            "--enable-return-indexer-topk",
+            **aux_output_kwargs["enable_return_indexer_topk"],
         )
         model_group.add_argument(
             "--return-sampling-mask",

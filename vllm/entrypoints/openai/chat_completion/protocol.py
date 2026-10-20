@@ -130,6 +130,17 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    # vLLM extension; populated only on the terminal response/chunk.
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
 
@@ -160,6 +171,16 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
+    # vLLM extension; populated only on the terminal response/chunk.
+    indexer_topk: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_payload: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    indexer_profile: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     index: int
     # ``SerializeAsAny`` lets pydantic honor subclasses of ``DeltaMessage``
     # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereDeltaMessage``)
@@ -443,6 +464,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "When streaming, only the last chunk of each choice includes it. "
             "Beam search does not return it."
         ),
+    )
+    indexer_topk_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description="Skip the first N prompt positions from indexer selections.",
     )
     routed_experts_prompt_start: int = Field(
         default=0,
@@ -798,6 +824,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
+            indexer_topk_prompt_start=self.indexer_topk_prompt_start,
         )
 
     @model_validator(mode="before")

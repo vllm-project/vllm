@@ -461,6 +461,13 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
+            if not 0 <= sampling_params.indexer_topk_prompt_start <= prompt_len:
+                raise VLLMValidationError(
+                    f"indexer_topk_prompt_start must be between 0 and "
+                    f"the prompt length ({prompt_len}), inclusive.",
+                    parameter="indexer_topk_prompt_start",
+                    value=sampling_params.indexer_topk_prompt_start,
+                )
             rows = sampling_params.prompt_logprob_token_ids
             if rows is not None:
                 start = sampling_params.prompt_logprob_start or 0

@@ -17,6 +17,10 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.profile import (
+    AuxOutputProfile,
+    IndexerSource,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -165,8 +169,16 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
+    indexer_profile: AuxOutputProfile | None = None,
+    enable_r3: bool = True,
 ) -> AuxOutputWorkerConnector:
-    object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
+    r3_nbytes = int(np.prod(_SHAPE)) if enable_r3 else 0
+    shape = (
+        (r3_nbytes + indexer_profile.fixed_bytes_per_token,)
+        if indexer_profile
+        else _SHAPE
+    )
+    object_nbytes = _BLOCK_SIZE * int(np.prod(shape))
     store = _make_store(
         max_bytes=(
             1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
@@ -174,10 +186,24 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._indexer = (
+        SimpleNamespace(
+            profile=indexer_profile,
+            profile_metadata=indexer_profile.to_dict(),
+            begin_step=lambda: None,
+            release_snapshot=lambda slot: None,
+            close=lambda: None,
+        )
+        if indexer_profile
+        else None
+    )
+    worker._r3_nbytes = r3_nbytes
+    worker._r3_dtype = _DTYPE
+    worker._r3_shape = _SHAPE
     worker._store = store
     worker._buffer = RoutedExpertsBuffer(
         _DTYPE,
-        _SHAPE,
+        shape,
         _BLOCK_SIZE,
         max_num_seqs,
         max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
@@ -227,6 +253,7 @@ def _input_batch(request_ids, token_starts, query_start_loc):
 
 def test_non_output_rank_skips_capture_snapshot():
     worker = object.__new__(AuxOutputWorkerConnector)
+    worker._indexer = None
     worker._store = None
     worker._buffer = None
     worker._capturer = Mock()
@@ -379,14 +406,23 @@ def _process_output(
     token_starts=None,
     num_tokens=None,
     query_start_loc=None,
+    indexer_rows=None,
 ):
     if num_sampled is None:
         num_sampled = np.ones(len(request_ids), dtype=np.int32)
     if token_starts is None or num_tokens is None:
         assert isinstance(step, _WorkerStep)
         token_starts, num_tokens = _execution_ranges(step, request_ids)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    worker._capturer = None
+    if worker._r3_nbytes:
+        worker._capturer = Mock()
+        worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    if worker._indexer is not None:
+        worker._indexer.snapshot = lambda n: SimpleNamespace(
+            rows=torch.from_numpy(indexer_rows[:n].copy()),
+            valid=torch.ones((n, 1), dtype=torch.bool),
+            slot=0,
+        )
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -1769,7 +1805,7 @@ def test_scheduler_connector_recreates_preempted_request_state():
 
 def test_scheduler_consumes_ordered_stale_aux_outputs():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=6)
+    request = _scheduler_request("request", [], num_tokens=6, num_output_tokens=0)
     connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]),
         {request.request_id: request},
@@ -1969,3 +2005,82 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+@pytest.mark.parametrize("enable_r3", [False, True])
+def test_indexer_shares_spec_acceptance_and_shm_prefix_lifecycle(enable_r3):
+    profile = AuxOutputProfile("model", (IndexerSource(2, (2,), "logical_token_id"),))
+    worker = _make_worker(2, indexer_profile=profile, enable_r3=enable_r3)
+    indexer = np.arange(12, dtype=np.int32).reshape(6, 2)
+    routing = np.arange(36, dtype=np.uint8).reshape(6, *_SHAPE)
+    first = _metadata(0, [_request_metadata("producer", 0, 6, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        first,
+        routing,
+        ["producer"],
+        np.array([2]),
+        indexer_rows=indexer,
+    )["producer"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:4])
+    assert len(output.rows) == 4
+    if enable_r3:
+        np.testing.assert_array_equal(output.rows, routing[:4])
+    else:
+        assert output.rows.shape == (4, 0)
+    # A different request skips the cached prefix's forward entirely.
+    cached = _metadata(0, [_request_metadata("cached", 4, 1, 0, [b"a" * 32])], {})
+    output = _process_output(
+        worker,
+        cached,
+        routing[4:5],
+        ["cached"],
+        np.array([0]),
+        indexer_rows=indexer[4:5],
+    )["cached"]
+    np.testing.assert_array_equal(output.indexer_rows, indexer[:5])
+    assert output.indexer_profile == profile.to_dict()
+    if enable_r3:
+        np.testing.assert_array_equal(output.rows, routing[:5])
+    worker.close()
+
+
+def test_preemption_rewinds_an_unpublished_partial_block():
+    worker = _make_worker(1)
+    rows = np.arange(30, dtype=np.uint8).reshape(5, *_SHAPE)
+    first = _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {})
+    _process_output(worker, first, rows[:3], ["request"], np.array([0]))
+    replay = _metadata(0, [_request_metadata("request", 1, 4, 0, [b"a" * 32])], {})
+    output = _process_output(worker, replay, rows[1:], ["request"], np.array([0]))[
+        "request"
+    ]
+    assert output.token_start == 3
+    np.testing.assert_array_equal(output.rows, rows[3:])
+    worker.close()
+
+
+def test_indexer_and_routing_prompt_offsets_are_independent():
+    connector = AuxOutputSchedulerConnector(_BLOCK_SIZE, enable_indexer=True)
+    request = _scheduler_request("request", [], num_tokens=6)
+    request.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=3,
+        indexer_topk_prompt_start=1,
+    )
+    metadata = connector.build_connector_meta(
+        _step_output(["request"], [0], [5]), {"request": request}
+    )
+    assert metadata.requests["request"] == 1
+    routing = np.arange(24, dtype=np.uint8).reshape(4, *_SHAPE)
+    indexer = np.arange(8, dtype=np.int32).reshape(4, 2)
+    outputs = {"request": AuxRequestOutput(1, routing, indexer, {"codec_version": 1})}
+    np.testing.assert_array_equal(connector.take_output(request, outputs), routing[2:])
+    selections, _ = connector.take_indexer_output(request, outputs)
+    np.testing.assert_array_equal(selections, indexer)
+
+
+def test_fixed_store_rejects_payload_size_before_retaining_keys():
+    store = BlockObjectStore(max_bytes=16, object_nbytes=8)
+    with pytest.raises(ValueError, match="fixed slot size"):
+        store.put([BlockObject("bad", b"short")], retain_keys=["bad"])
+    assert not store._references
+    store.close()
