@@ -30,6 +30,7 @@ def _prepared_model(
     *,
     draft_dtype: torch.dtype | None = None,
     model: torch.nn.Module | None = None,
+    draft_model: torch.nn.Module | None = None,
 ) -> torch.nn.Module:
     config = SimpleNamespace(
         rotation_config={
@@ -54,7 +55,11 @@ def _prepared_model(
         hf_config=config, dtype=torch.bfloat16, is_submodel_config=False
     )
     speculative_config = (
-        SimpleNamespace(draft_model_config=SimpleNamespace(dtype=draft_dtype))
+        SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                dtype=draft_dtype, is_submodel_config=False
+            )
+        )
         if draft_dtype is not None
         else None
     )
@@ -68,6 +73,11 @@ def _prepared_model(
         model = torch.nn.Module()
         model.add_module("norm", RMSNorm(16))
     prepare_rotation_transforms(model, vllm_config, vllm_config.model_config)
+    if draft_model is not None:
+        assert speculative_config is not None
+        prepare_rotation_transforms(
+            draft_model, vllm_config, speculative_config.draft_model_config
+        )
     with torch.no_grad():
         model.rotations["final"].sign.fill_(1)
         model.rotations["final"].hk.fill_(1)
@@ -131,6 +141,49 @@ def test_main_norm_binds_without_optional_mtp_model(caplog_vllm):
     assert model.norm.rotation is model.rotations["final"]
     assert "Skipping unresolved rotation targets" in caplog_vllm.text
     assert "model.layers.45.shared_head.norm" in caplog_vllm.text
+
+
+def test_main_and_mtp_share_one_checkpoint_rotation():
+    """Draft preparation reuses the target's parameters without registering copies."""
+    draft = torch.nn.Module()
+    draft.add_module("mtp_norm", RMSNorm(16))
+    model = _prepared_model(
+        ["norm", "mtp_norm"], draft_dtype=torch.bfloat16, draft_model=draft
+    )
+    bind_rotation_transforms(model, draft)
+
+    assert model.norm.rotation is draft.mtp_norm.rotation is model.rotations["final"]
+    assert not hasattr(draft, "rotations")
+    assert set(dict(draft.named_parameters())) == {"mtp_norm.weight"}
+
+
+@torch.inference_mode()
+def test_norm_returns_inverse_rotated_residual():
+    """Both returned tensors use the restored coordinates of hidden plus residual."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = _prepared_model(["norm"]).to(device=device, dtype=torch.float32)
+    model.rotations["final"].sign[1::2] = -1
+    model.norm.weight.copy_(
+        torch.linspace(0.5, 1.5, 16, device=device, dtype=torch.float32)
+    )
+    bind_rotation_transforms(model)
+
+    x = torch.arange(32, device=device, dtype=torch.float32).reshape(2, 16) / 16
+    residual = torch.linspace(
+        -0.5, 0.5, 32, device=device, dtype=torch.float32
+    ).reshape(2, 16)
+    restored = model.rotations["final"](x + residual, inverse=True)
+    expected = (
+        restored
+        * torch.rsqrt(
+            restored.square().mean(dim=-1, keepdim=True) + model.norm.variance_epsilon
+        )
+        * model.norm.weight
+    )
+
+    actual, actual_residual = model.norm(x, residual)
+    torch.testing.assert_close(actual_residual, restored)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.usefixtures("disable_log_dedup")
