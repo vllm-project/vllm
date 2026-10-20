@@ -150,7 +150,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
     if kv_cache.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
         # The FP8 cache stores value / scale as e4m3fnuz codes. Compare
         # against a torch-side conversion: the C++ cache-update reference
-        # mis-encodes fnuz destinations on gfx950, so it cannot referee.
+        # encodes fnuz destinations incorrectly on gfx950, so it cannot referee.
         slot = main["main_slot_mapping"]
         valid = slot >= 0
         blocks = (slot[valid] // MAIN_PAGE).long()
@@ -171,7 +171,7 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
         # comparison's RTOL/ATOL (rope and norm rounding), which FP8
         # denormal quantization amplifies into a few code steps at small
         # magnitudes. Accept the BF16-equivalent tolerance, or 2 codes for
-        # cast-boundary flips; a mis-scale still fails at the large
+        # cast-boundary flips; an incorrect scale still fails at the large
         # magnitudes the batch always covers.
         def _assert_codes_match(actual, expected):
             code_diff = (

@@ -59,7 +59,7 @@ from .indexer_qsa import QSAIndexer
 
 # The KV cache dtypes the QSA path supports; shared by the backend's
 # supported_kv_cache_dtypes and the init gates so they cannot drift.
-_QSA_KV_CACHE_DTYPES = ("auto", "bfloat16", "fp8", "fp8_e4m3")
+_QSA_KV_CACHE_DTYPES: tuple[CacheDType, ...] = ("auto", "bfloat16", "fp8", "fp8_e4m3")
 logger = init_logger(__name__)
 
 
