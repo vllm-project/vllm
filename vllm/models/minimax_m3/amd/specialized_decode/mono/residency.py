@@ -33,7 +33,32 @@ def code_object(ir_text: str) -> bytes:
 
 @functools.cache
 def _hip():
-    return ctypes.CDLL("libamdhip64.so")
+    hip = ctypes.CDLL("libamdhip64.so")
+    ptr, out = ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
+    hip.hipModuleLoadData.argtypes = [out, ctypes.c_char_p]
+    hip.hipModuleGetFunction.argtypes = [out, ptr, ctypes.c_char_p]
+    hip.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ptr,
+        ctypes.c_int,
+        ctypes.c_size_t,
+    ]
+    hip.hipModuleUnload.argtypes = [ptr]
+    hip.hipGetErrorName.argtypes = [ctypes.c_int]
+    hip.hipGetErrorName.restype = ctypes.c_char_p
+    for f in (
+        hip.hipModuleLoadData,
+        hip.hipModuleGetFunction,
+        hip.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor,
+        hip.hipModuleUnload,
+    ):
+        f.restype = ctypes.c_int
+    return hip
+
+
+def _check(rc: int, what: str) -> None:
+    if rc != 0:
+        raise RuntimeError(f"{what}: {_hip().hipGetErrorName(rc).decode()}")
 
 
 def active_workgroups_per_cu(compiled, name: str, threads: int) -> int:
@@ -41,18 +66,18 @@ def active_workgroups_per_cu(compiled, name: str, threads: int) -> int:
     hip = _hip()
     module, func, count = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_int()
     image = code_object(compiled._keepalive._ir_text)
-    if hip.hipModuleLoadData(ctypes.byref(module), image) != 0:
-        raise RuntimeError(f"hipModuleLoadData failed for {name}")
+    _check(hip.hipModuleLoadData(ctypes.byref(module), image), f"load {name}")
     try:
-        if hip.hipModuleGetFunction(ctypes.byref(func), module, name.encode()) != 0:
-            raise RuntimeError(f"hipModuleGetFunction failed for {name}")
-        rc = hip.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(
-            ctypes.byref(count), func, threads, 0
+        _check(
+            hip.hipModuleGetFunction(ctypes.byref(func), module, name.encode()),
+            f"find {name}",
         )
-        if rc != 0:
-            raise RuntimeError(
-                f"hipModuleOccupancyMaxActiveBlocksPerMultiprocessor: {rc}"
-            )
+        _check(
+            hip.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(
+                ctypes.byref(count), func, threads, 0
+            ),
+            f"occupancy of {name}",
+        )
     finally:
         hip.hipModuleUnload(module)
     return count.value

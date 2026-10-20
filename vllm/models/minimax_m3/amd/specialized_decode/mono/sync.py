@@ -1,39 +1,111 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bounded tagged hand-offs and the sticky error word.
+"""Bounded tagged hand-offs and the sticky error word, on the LLVM AMDGPU
+memory model (AMDGPUUsage, "Memory Model GFX942"; GFX950 uses its code
+sequences).
 
-Pairs are DS V4.1's ``Mailbox`` (value + epoch tag in one 8-byte store). A poll
-here gives up after ``WAIT_TICKS`` of the 100 MHz clock or as soon as any rank
-has set the error word; a timeout sets ``[1, rank, epoch, site]`` on every
-rank. A failed launch still runs to completion; the host checks the word
-before the step's hidden states are used.
+A pair is one naturally aligned 64-bit LLVM atomic, (value | tag << 32), stored
+and loaded ``monotonic`` at its space's scope: ``agent`` for this GPU's scratch,
+system for the peer buffers. An atomic access may not be split (LLVM Atomics,
+"Unordered": "a load cannot see a value which was never stored"), so a load
+that sees a pair's tag sees that store's value; the value needs no further
+ordering. They lower to one ``global_store/load_dwordx2`` with ``sc1``
+(agent) or ``sc0 sc1`` (system). The peer buffers are fine-grained uncached
+(MTYPE UC) allocations, which bypass the L2.
+
+Plain data a pair announces (``publish``) is ordered by a release fence at the
+pair's scope before its store (``buffer_wbl2``, ``s_waitcnt vmcnt(0)``) and
+read after an acquire fence following the poll (``s_waitcnt vmcnt(0)``,
+``buffer_inv``). CTA-wide hand-offs drain every wave's stores and barrier
+before the one publishing store (``cta_sync``).
+
+A poll gives up after ``ticks`` of the 100 MHz clock or once any rank has set
+the error word; a timeout sets ``[1, rank, epoch, site]`` on every rank.
 """
 
 import flydsl.expr as fx
-from aiter.ops.flydsl.kernels import buffer_ops as bo
-from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.mono.common.ops import (
-    CM_SYS,
-    memrealtime,
-    rsrc,
-    traced,
-)
-from vllm.models.deepseek_v41.amd.mono.common.sync import (
-    _SCOPE_CM,
-    POLL_MAX,
-    Mailbox,
-)
+from vllm.models.deepseek_v41.amd.mono.common.ops import memrealtime, traced
+from vllm.models.deepseek_v41.amd.mono.common.sync import Space
 
 WAIT_TICKS = 1_000_000_000  # 10 s
 ERROR_WORDS = 4
+POLL_MAX = 12
+
+_SCOPE = {Space.SCRATCH: "agent", Space.PEER: None}
+
+
+def _ptr(addr, i, bits=64):
+    """The global pointer to element i (of ``bits``) of address ``addr``."""
+    at = addr + fx.Int64(i) * (bits // 8)
+    return fx.inttoptr(
+        fx.PointerType.get(
+            T.i64 if bits == 64 else T.i32, fx.AddressSpace.Global, bits // 8
+        ),
+        at,
+    )
+
+
+def store64(addr, i, word, scope):
+    fx.generic_store(
+        _ptr(addr, i), word, memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope
+    )
+
+
+def load64(addr, i, scope):
+    return fx.generic_load(
+        _ptr(addr, i),
+        dtype=fx.Int64,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=scope,
+    )
+
+
+def store32(addr, i, word, scope):
+    fx.generic_store(
+        _ptr(addr, i, 32),
+        fx.Int32(word),
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=scope,
+    )
+
+
+def load32(addr, i, scope):
+    return fx.generic_load(
+        _ptr(addr, i, 32),
+        dtype=fx.Int32,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope=scope,
+    )
+
+
+def release(scope):
+    fx.memory_fence(syncscope=scope, ordering=fx.AtomicOrdering.Release)
+
+
+def acquire_fence(scope):
+    fx.memory_fence(syncscope=scope, ordering=fx.AtomicOrdering.Acquire)
+
+
+def cta_sync(drain=False):
+    """A workgroup barrier that orders memory both ways (HIP's
+    ``__syncthreads``). ``drain``: every wave's stores complete first, so one
+    thread's release afterwards covers the whole CTA's."""
+    if const_expr(drain):
+        rocdl.s_waitcnt(vmcnt=0)
+    release("workgroup")
+    gpu.barrier()
+    acquire_fence("workgroup")
 
 
 def error_word(base):
-    return fx.Int32(
-        bo.buffer_load(rsrc(base), 0, vec_width=1, dtype=T.i32, cache_modifier=CM_SYS)
-    )
+    return load32(base, 0, None)
+
+
+def pack(word, tag):
+    return (fx.Int64(tag) << 32) | fx.Int64(fx.Uint32(fx.Int32(word)))
 
 
 @traced
@@ -56,26 +128,50 @@ def _fail_if(timed_out, fail, site):
         fail(site)
 
 
-class BoundedMailbox(Mailbox):
-    """``Mailbox`` whose polls are bounded; ``fail(site)`` raises the error."""
+class Mailbox:
+    """Tagged pairs of one launch (``tag``), every address an ``Addr``."""
 
     def __init__(self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS):
-        super().__init__(tag)
-        self.ticks = ticks
+        self.tag = tag
         self.err_base = err_base
         self.peer_bases = peer_bases
         self.rank = rank
         self.epoch = epoch
+        self.ticks = ticks
+
+    def put(self, a, i, v):
+        """Pair i of ``a`` := (v, tag), monotonic: a value no other data hangs on."""
+        bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
+        store64(a.value, i, pack(bits, self.tag), _SCOPE[a.space])
+
+    def put_words(self, a, i, words):
+        for k in range_constexpr(len(words)):
+            store64(a.value, i + k, pack(words[k], self.tag), _SCOPE[a.space])
+
+    def publish(self, a, i, v):
+        """Pair i of ``a`` := (v, tag) after a release fence at its scope: the
+        calling thread's earlier stores (and, past a ``cta_sync``, its CTA's)
+        are visible to whoever acquires after seeing the tag."""
+        release(_SCOPE[a.space])
+        self.put(a, i, v)
+
+    def acquire(self, space):
+        """After a poll of published pairs: their data is visible."""
+        acquire_fence(_SCOPE[space])
 
     def fail(self, site):
-        words = fx.Vector.from_elements(
-            [fx.Int32(1), fx.Int32(self.rank), fx.Int32(self.epoch), fx.Int32(site)],
-            fx.Int32,
+        lo = (fx.Int64(fx.Int32(self.rank)) << 32) | fx.Int64(1)
+        hi = (fx.Int64(fx.Int32(site)) << 32) | fx.Int64(
+            fx.Uint32(fx.Int32(self.epoch))
         )
         for base in self.peer_bases:
-            bo.buffer_store(words, rsrc(base), 0, cache_modifier=CM_SYS)
+            store64(base, 1, hi, None)
+            store64(base, 0, lo, None)
 
     def poll(self, specs, batch=POLL_MAX, site=0):
+        """Pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})], all of one
+        space, re-loaded together until every tag is this launch's. Returns the
+        value words."""
         if const_expr(len(specs) == 0):
             return []
         if const_expr(len(specs) > batch):
@@ -84,23 +180,15 @@ class BoundedMailbox(Mailbox):
             )
         spaces = {a.space for a, _, _ in specs}
         assert len(spaces) == 1, f"one poll batch spans {spaces}"
-        cm = _SCOPE_CM[spaces.pop()]
-        bases = [a.value for a, _, _ in specs]
+        scope = _SCOPE[spaces.pop()]
         tag = self.tag
 
         def load_all():
             words = []
-            for b, (_, i, n) in zip(bases, specs):
-                w = fx.Vector(
-                    bo.buffer_load(
-                        rsrc(b),
-                        fx.Int32(i) * 2,
-                        vec_width=2 * n,
-                        dtype=T.i32,
-                        cache_modifier=cm,
-                    )
-                )
-                words += [w[e] for e in range(2 * n)]
+            for a, i, n in specs:
+                for q in range(n):
+                    w = load64(a.value, fx.Int32(i) + q, scope)
+                    words += [fx.Int32(w), fx.Int32(w >> 32)]
             return fx.Vector.from_elements(words, fx.Int32)
 
         nw = sum(2 * n for _, _, n in specs)

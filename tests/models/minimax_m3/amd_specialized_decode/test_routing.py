@@ -51,7 +51,6 @@ def test_decode_widths_route_uniformly(width: int):
     [
         (DECODE_CONFIG.max_rows + 1, CUDAGraphMode.NONE, _metadata(1)),
         (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
-        (1, CUDAGraphMode.PIECEWISE, _metadata(1)),
         (1, CUDAGraphMode.NONE, None),
         (1, CUDAGraphMode.NONE, _metadata(1, prefills=1)),
         (1, CUDAGraphMode.NONE, _metadata(1, decode_tokens=2)),

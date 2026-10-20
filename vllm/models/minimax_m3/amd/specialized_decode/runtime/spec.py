@@ -14,7 +14,7 @@ class DecodeConfig:
     tp_size: int = 4
     blocks: int = 256
     max_rows: int = 16
-    # eager steps are not padded: every row count up to max_rows
+    # every physical row count up to max_rows: eager steps and FULL capture sizes
     widths: tuple[int, ...] = tuple(range(1, 17))
     first_layer: int = 3
     last_layer: int = 59

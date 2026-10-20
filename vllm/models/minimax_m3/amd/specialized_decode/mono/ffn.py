@@ -57,11 +57,20 @@ from vllm.models.deepseek_v41.amd.mono.common.plan import (
     key_tuple,
     pair_layout,
 )
-from vllm.models.deepseek_v41.amd.mono.common.sync import preg, sreg
+from vllm.models.deepseek_v41.amd.mono.common.sync import Space, preg, sreg
 
 from .a16w4 import scale_f32, scale_loads, step_mfma, weight_loads
 from .sources import SOURCES
-from .sync import ERROR_WORDS, WAIT_TICKS, BoundedMailbox
+from .sync import (
+    ERROR_WORDS,
+    WAIT_TICKS,
+    Mailbox,
+    cta_sync,
+    error_word,
+    load32,
+    release,
+    store32,
+)
 
 _STREAM = fx.Stream(None)
 HIDDEN = 6144
@@ -93,12 +102,13 @@ ROUTER0 = NORM0 + MAX_TOKENS
 SHARED0 = (ROUTER0 + ROUTER_TASKS) % BLOCKS
 ROUTED0 = SHARED0 + UP_TILES
 
-ERROR_BYTES = 256  # the error word's line, ahead of the two parity halves
+ERROR_BYTES = 256  # the error line, ahead of the two parity halves
+HANDSHAKE_BYTES = 64  # the step-end handshake's pairs in the error line, one a rank
 
 # sites of a timed-out wait (the error word's fourth field)
 SITE_REDUCE, SITE_NORM, SITE_ROUTER, SITE_ROUTE = 1, 2, 3, 4
 SITE_TABLE, SITE_UP, SITE_DOWN, SITE_FINAL, SITE_EPOCH = 5, 6, 7, 8, 9
-SITE_WRAP = 10
+SITE_WRAP, SITE_HANDSHAKE, SITE_INJECT, SITE_PEER = 10, 11, 12, 13
 # launches before the 32-bit tag could repeat a stale pair: fail-stop instead
 EPOCH_LIMIT = (1 << 31) - (1 << 24)
 
@@ -213,11 +223,10 @@ def put_word(c, addr, i, word):
 
 @traced
 def flag_after_stores(c, addr, i, who):
-    """This CTA's plain stores drained, then pair i := 1 (thread ``who``)."""
-    rocdl.s_waitcnt(vmcnt=0)
-    gpu.barrier()
+    """Pair i := 1 (thread ``who``), released after the CTA's earlier stores."""
+    cta_sync(drain=True)
     if who:
-        put_word(c, addr, i, fx.Int32(1))
+        c["mb"].publish(addr, i, fx.Int32(1))
 
 
 def attn_pair(c, src, t, colpair):
@@ -266,6 +275,7 @@ def stage_reduce(c, task):
     all-reduce's bf16), + residual in f32 -> residual out, the f32 sum (SRES)
     and the task's sum of squares (SSQ, a pair a token)."""
     s, tid, a = c["S"], c["tid"], c["args"]
+    sq = fx.Float32(0.0)
     if tid < s * COLS // 2:
         t = tid // (COLS // 2)
         cp = task * (COLS // 2) + tid % (COLS // 2)
@@ -296,9 +306,10 @@ def stage_reduce(c, task):
             t * HIDDEN + 2 * cp,
         )
         sq = butterfly(sl * sl + sh * sh, (8, 4, 2, 1))
-        rocdl.s_waitcnt(vmcnt=0)
-        if tid % (COLS // 2) == 0:
-            c["mb"].put(c["ssq"], t * SEAM_TASKS + task, sq)
+    cta_sync(drain=True)
+    if (tid < s * COLS // 2) & (tid % (COLS // 2) == 0):
+        t = tid // (COLS // 2)
+        c["mb"].publish(c["ssq"], t * SEAM_TASKS + task, sq)
 
 
 @traced
@@ -309,6 +320,8 @@ def stage_norm(c, t):
     if tid < SEAM_TASKS:
         got = c["mb"].poll([(c["ssq"], t * SEAM_TASKS + tid, 1)], site=SITE_NORM)
         part = got[0][0].bitcast(fx.Float32)
+        c["mb"].acquire(Space.SCRATCH)
+    cta_sync()
     var = block_sum(c, part, 0) / fx.Float32(HIDDEN)
     rstd = fx.Float32(1.0) / fx.Float32(fmath.sqrt(var + fx.Float32(EPS)))
     per = HIDDEN // THREADS  # 12
@@ -335,7 +348,8 @@ def await_x(c, tokens_n):
     tid = c["tid"]
     if tid < tokens_n:
         c["mb"].poll([(c["xrdy"], tid, 1)], site=SITE_ROUTER)
-    gpu.barrier()
+        c["mb"].acquire(Space.SCRATCH)
+    cta_sync()
 
 
 # ---------------------------------------------------------------- router
@@ -687,6 +701,8 @@ def stage_down(c, tasks):
         c["mb"].poll(
             [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
         )
+        # the wave's polls are complete (the loop exits for all lanes at once)
+        c["mb"].acquire(Space.SCRATCH)
         col = slot_col(c, cnt)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)
@@ -852,6 +868,8 @@ def build_ffn(key: FfnBuild):
         peers: Int64,
         rank: Int32,
         epoch: Int64,
+        handshake: Int32,
+        inject: Int64,
         mode: Int32,
     ):
         _ = keyed
@@ -859,15 +877,11 @@ def build_ffn(key: FfnBuild):
             bid = fx.block_idx.x
             tid = fx.thread_idx.x
             lds = fx.SharedAllocator().allocate(Lds).peek()
-            ep = fx.Int32(bo.buffer_load(rsrc(epoch), 0, vec_width=1, dtype=T.i32))
+            ep = load32(epoch, 0, "agent")
             tag = ep + 1
-            if (tid == 0) & (bid != key.drop_mark):
-                bo.buffer_store(
-                    tag, rsrc(epoch), EPOCH_MARKS + bid, cache_modifier=CM_DEV
-                )
             raw = peer_bases(peers, tp)
             par = fx.Int64(ep & 1) * fx.Int64(half) + fx.Int64(ERROR_BYTES)
-            mb = BoundedMailbox(tag, sym, raw, rank, ep, key.wait_ticks)
+            mb = Mailbox(tag, sym, raw, rank, ep, key.wait_ticks)
             c = {
                 "S": s,
                 "tp": tp,
@@ -903,7 +917,7 @@ def build_ffn(key: FfnBuild):
             c["vmask"] = valid_mask(c)
             refuse_wrap(c, ep)
             run_ffn(c, bid)
-            epoch_end(c, epoch, tag)
+            finish(c, key, epoch, tag, handshake, inject, raw)
             stamp(c, 11)
 
     @flyc.jit
@@ -925,6 +939,8 @@ def build_ffn(key: FfnBuild):
         peers: Int64,
         rank: Int32,
         epoch: Int64,
+        handshake: Int32,
+        inject: Int64,
         mode: Int32,
         stream: fx.Stream = _STREAM,
     ):
@@ -947,6 +963,8 @@ def build_ffn(key: FfnBuild):
             peers,
             rank,
             epoch,
+            handshake,
+            inject,
             mode,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
@@ -960,6 +978,52 @@ def refuse_wrap(c, ep):
 
 
 @traced
+def finish(c, key, epoch, tag, handshake, inject, peers):
+    """Every CTA marks the launch done after its work; CTA 0 waits for the
+    marks, then moves the epoch on. The step's last launch (``handshake``)
+    then trades every rank's failure flag over the peers: a fault anywhere in
+    the step is in every rank's error word before this launch ends."""
+    tid, bid = c["tid"], fx.block_idx.x
+    if (handshake != 0) & (bid == 0) & (tid == 0):
+        injected_fault(c, inject)
+    cta_sync(drain=True)
+    if (tid == 0) & (bid != key.drop_mark):
+        release("agent")
+        store32(epoch, EPOCH_MARKS + bid, tag, "agent")
+    epoch_end(c, epoch, tag)
+    if (handshake != 0) & (bid == 0) & (tid == 0):
+        trade_faults(c, tag, peers)
+
+
+@traced
+def injected_fault(c, inject):
+    """Fault injection (qualification): rank ``inject[0] - 1`` fails after
+    ``inject[1]`` ticks at the end of the step's last launch."""
+    target = load32(inject, 0, "agent")
+    if target == c["rank"] + 1:
+        ticks = fx.Int64(load32(inject, 1, "agent"))
+        t0 = memrealtime()
+        while memrealtime() - t0 < ticks:
+            rocdl.s_sleep(8)
+        c["mb"].fail(SITE_INJECT)
+
+
+@traced
+def trade_faults(c, tag, peers):
+    mb = c["mb"]
+    failed = fx.Int32((error_word(mb.err_base) != 0).select(1, 0))
+    hs = [preg(b, HANDSHAKE_BYTES, "handshake") for b in peers]
+    own = preg(mb.err_base, HANDSHAKE_BYTES, "handshake")
+    for p in range_constexpr(c["tp"]):
+        mb.publish(hs[p], c["rank"], failed)
+    got = mb.poll([(own, p, 1) for p in range(c["tp"])], site=SITE_HANDSHAKE)
+    mb.acquire(Space.PEER)
+    for p in range_constexpr(c["tp"]):
+        if (got[p][0] != 0) & (error_word(mb.err_base) == 0):
+            Mailbox(tag, mb.err_base, [mb.err_base], p, mb.epoch).fail(SITE_PEER)
+
+
+@traced
 def epoch_end(c, epoch, tag):
     """CTA 0, once every CTA marked this launch: the epoch moves on. A mark
     missing past the wait bound sets the error word instead; the epoch stays."""
@@ -970,18 +1034,18 @@ def epoch_end(c, epoch, tag):
         gpu.barrier()
         if tid < BLOCKS:
             t0 = memrealtime()
-            mark = fx.Int32(ld_dev(epoch, EPOCH_MARKS + tid))
+            mark = load32(epoch, EPOCH_MARKS + tid, "agent")
             late = fx.Int64(0)
             while (mark != tag) & (late < c["mb"].ticks):
                 rocdl.s_sleep(1)
-                mark = fx.Int32(ld_dev(epoch, EPOCH_MARKS + tid))
+                mark = load32(epoch, EPOCH_MARKS + tid, "agent")
                 late = memrealtime() - t0
             if mark != tag:
                 fx.ptr_store(fx.Int32(1).bitcast(fx.Float32), red)
-        gpu.barrier()
+        cta_sync()
         if tid == 0:
             if fx.ptr_load(red).bitcast(fx.Int32) == 0:
-                bo.buffer_store(tag, rsrc(epoch), 0, cache_modifier=CM_DEV)
+                store32(epoch, 0, tag, "agent")
             else:
                 c["mb"].fail(SITE_EPOCH)
 

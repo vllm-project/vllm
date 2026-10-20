@@ -67,6 +67,8 @@ class FfnRunner:
         if epoch is None:
             epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=device)
         self.epoch = epoch
+        # fault injection (qualification): [rank + 1, delay ticks], 0 = off
+        self.inject = torch.zeros(2, dtype=torch.int32, device=device)
         self.scratch = {
             s: torch.zeros(scratch_bytes(s), dtype=torch.uint8, device=device)
             for s in widths
@@ -76,7 +78,7 @@ class FfnRunner:
         # every width's driver-reported resident CTAs per CU
         self.residency: dict[int, int] = {}
 
-    def _args(self, s, part, res_in, res_out, out, slots, w, mode):
+    def _args(self, s, part, res_in, res_out, out, slots, w, mode, final=False):
         return (
             part.data_ptr(),
             res_in.data_ptr(),
@@ -95,6 +97,8 @@ class FfnRunner:
             self.peers.data_ptr(),
             self.rank,
             self.epoch.data_ptr(),
+            int(final),
+            self.inject.data_ptr(),
             mode,
             torch.cuda.current_stream(),
         )
@@ -125,11 +129,14 @@ class FfnRunner:
         residual: torch.Tensor,
         weights,
         slots: torch.Tensor,
+        final: bool = False,
     ):
         """``part``: this rank's unreduced o_proj output; ``slots``: the step's
-        int64 slot mapping (-1: a padded row, which routes nowhere and returns
-        zeros). Returns the reduced MoE output and the residual after
-        attention."""
+        int64 slot mapping. A row with a negative slot (padding) still runs the
+        seam (its residual output is unspecified) but joins no expert and its
+        MoE output is zero. Returns the reduced MoE output and the residual after
+        attention. ``final``: the step's last launch, which ends in the TP
+        fault handshake."""
         s = part.shape[0]
         assert part.is_contiguous() and residual.is_contiguous()
         assert (
@@ -137,9 +144,15 @@ class FfnRunner:
         )
         out = torch.empty_like(part)
         res_out = torch.empty_like(residual)
-        args = self._args(s, part, residual, res_out, out, slots, weights, 1)
+        args = self._args(s, part, residual, res_out, out, slots, weights, 1, final)
         self._compiled[s](*args)
         return out, res_out
+
+    def reset(self) -> None:
+        """Every width's scratch and the epoch cleared (no launch in flight)."""
+        for buf in self.scratch.values():
+            buf.zero_()
+        self.epoch.zero_()
 
     def region(self, s: int, name: str) -> torch.Tensor:
         off, nbytes = scratch_layout(s)[name]

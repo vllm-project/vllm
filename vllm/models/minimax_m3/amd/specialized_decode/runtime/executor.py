@@ -20,6 +20,8 @@ from .weights import MonoLayerWeights
 logger = init_logger(__name__)
 
 COVERAGE_LOG_EVERY = 1024
+# a collective reset well before the kernels' 32-bit tag limit (EPOCH_LIMIT)
+RESET_LAUNCHES = 1 << 30
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class FfnExecutor:
         weights: dict[int, MonoLayerWeights],
         widths: tuple[int, ...],
         tp: int,
+        reset_launches: int = RESET_LAUNCHES,
     ) -> None:
         from vllm.models.deepseek_v41.amd.mono.common.peer_memory import PeerBuffer
 
@@ -83,6 +86,11 @@ class FfnExecutor:
         self.launches = dict.fromkeys(self._layers, 0)
         self.steps = 0
         self.outputs = 0
+        self.resets = 0
+        self._since_reset = 0
+        self._reset_launches = reset_launches
+        self._epoch_host = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+        self._epoch_event: torch.cuda.Event | None = None
         self._slots: torch.Tensor | None = None
         self._kernels = {
             layer_id: self._layer_kernel(layer_id) for layer_id in self._layers
@@ -94,12 +102,14 @@ class FfnExecutor:
         runner = self.runner
         launches = self.launches
 
+        final = layer_id == max(self._layers)
+
         def run(positions, hidden_states, residual):
             hidden_states, residual = layer.input_layernorm(hidden_states, residual)
             part = layer.self_attn(positions=positions, hidden_states=hidden_states)
             launches[layer_id] += 1
             assert self._slots is not None
-            return runner(part, residual, weights, self._slots)
+            return runner(part, residual, weights, self._slots, final)
 
         return run
 
@@ -135,17 +145,42 @@ class FfnExecutor:
         self.steps += 1
 
     def output_step(self) -> None:
-        """Every step's output (eager or replayed): launch coverage now and then
-        from the kernels' own epoch, which counts launches."""
+        """Every rank, every sampled step (eager or replayed): the epoch reset
+        when the launches since the last one could near the tag limit, and
+        launch coverage now and then, read without a host sync."""
         self.outputs += 1
-        if self.outputs % COVERAGE_LOG_EVERY == 0 and self.rank == 0:
+        self._since_reset += 1
+        if self._since_reset * len(self._layers) >= self._reset_launches:
+            self.reset_epoch()
+        if self.outputs % COVERAGE_LOG_EVERY:
+            return
+        done = self._epoch_event is not None and self._epoch_event.query()
+        if done and self.rank == 0:
             logger.info(
-                "MiniMax-M3 FFN launch: %d output steps, %d launches "
-                "(%d sparse layers each)",
+                "MiniMax-M3 FFN launch: %d output steps, %d launches since "
+                "reset %d (%d sparse layers each)",
                 self.outputs,
-                int(self.runner.epoch[0].item()),
+                int(self._epoch_host[0]),
+                self.resets,
                 len(self._layers),
             )
+        self._epoch_host.copy_(self.runner.epoch[:1], non_blocking=True)
+        self._epoch_event = torch.cuda.Event()
+        self._epoch_event.record()
+
+    def reset_epoch(self) -> None:
+        """Between steps, on every rank together: no launch in flight, every
+        mailbox region and the epoch cleared, so tags restart from one. The
+        sticky error word is kept."""
+        torch.accelerator.synchronize()
+        tp_agree(True)
+        self.peer.bytes[4 * ERROR_WORDS :].zero_()
+        self.runner.reset()
+        torch.accelerator.synchronize()
+        tp_agree(True)
+        self._since_reset = 0
+        self.resets += 1
+        logger.info("MiniMax-M3 FFN launch: epoch reset %d", self.resets)
 
     def close(self) -> None:
         self.peer.close()

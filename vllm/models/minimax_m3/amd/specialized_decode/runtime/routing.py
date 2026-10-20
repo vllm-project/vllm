@@ -28,8 +28,10 @@ def decide_step(
 ) -> StepDecision:
     if rows not in spec.widths:
         return StepDecision(False, f"unsupported physical row count {rows}")
+    # A FULL capture runs the forward with mode NONE inside the capture, and its
+    # replays never plan; PIECEWISE is keyed by token count alone and replays
+    # mixed steps, so it stays stock.
     if graph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL):
-        # a PIECEWISE capture is keyed by token count alone and replays mixed steps
         return StepDecision(False, f"{graph_mode.name} graph step")
     if not isinstance(metadata, MiniMaxM3SparseMetadata):
         return StepDecision(False, "sparse attention metadata missing")

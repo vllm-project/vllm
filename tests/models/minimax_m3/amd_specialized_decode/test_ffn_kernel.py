@@ -3,6 +3,11 @@
 """Single-GPU stage parity of the FFN launch (a TP=1 build) against vLLM's and
 AITER's native ops, with MXFP4 weights from vLLM's real post-load path."""
 
+import glob
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -350,3 +355,114 @@ def test_graph_replay_is_bit_stable(weights):
     torch.accelerator.synchronize()
     assert _error(peer)[0] == 0
     assert runner.epoch[0].item() > 300 * len(widths)
+
+
+def _slots(s):
+    return torch.arange(s, dtype=torch.int64, device="cuda")
+
+
+def test_final_launch_handshake_completes(weights):
+    runner = _runner(weights, 2)
+    inputs = _inputs(2)
+    plain = runner(*inputs, weights, _slots(2))[0].clone()
+    final = runner(*inputs, weights, _slots(2), final=True)[0]
+    torch.accelerator.synchronize()
+    assert _error(runner.peer_bufs[0])[0] == 0
+    assert torch.equal(plain, final)
+
+
+def test_injected_late_fault_reaches_the_error_word(weights):
+    runner = _runner(weights, 1)
+    runner.inject.copy_(torch.tensor([1, 100_000], dtype=torch.int32))
+    runner(*_inputs(1), weights, _slots(1), final=True)
+    torch.accelerator.synchronize()
+    assert _error(runner.peer_bufs[0]) == [1, 0, 0, ffn.SITE_INJECT]
+
+
+def test_epoch_limit_is_a_fail_stop_backstop(weights):
+    runner = _runner(weights, 1)
+    runner.epoch[0] = ffn.EPOCH_LIMIT
+    runner(*_inputs(1), weights, _slots(1))
+    torch.accelerator.synchronize()
+    assert _error(runner.peer_bufs[0])[3] == ffn.SITE_WRAP
+
+
+def test_forced_epoch_reset_clears_and_resumes(weights, monkeypatch):
+    """The executor's step hook resets every region and the epoch once the
+    launches since the last reset reach its bound; launches then resume from
+    tag one with the same results, the error word kept."""
+    from vllm.models.minimax_m3.amd.specialized_decode.runtime import executor as ex
+
+    monkeypatch.setattr(ex, "tp_agree", lambda ok: ok)
+    runner = _runner(weights, 2)
+    inputs = _inputs(2)
+    before = runner(*inputs, weights, _slots(2))[0].clone()
+    executor = object.__new__(ex.FfnExecutor)
+    executor.rank, executor.runner, executor.resets = 0, runner, 0
+    executor.peer = SimpleNamespace(bytes=runner.peer_bufs[0])
+    executor._layers = dict.fromkeys(range(3, 60))
+    executor.outputs, executor._since_reset = 0, 0
+    executor._reset_launches = 3 * len(executor._layers)
+    executor._epoch_event = None
+    executor._epoch_host = torch.zeros(1, dtype=torch.int32)
+    runner.peer_bufs[0][4] = 7  # an error-word field the reset must keep
+    for _ in range(3):
+        runner(*inputs, weights, _slots(2))
+        executor.output_step()
+    torch.accelerator.synchronize()
+    assert executor.resets == 1 and runner.epoch[0].item() == 0
+    assert runner.peer_bufs[0][4].item() == 7
+    assert not runner.peer_bufs[0][4 * ffn.ERROR_WORDS :].any()
+    assert not any(buf.any() for buf in runner.scratch.values())
+    runner.peer_bufs[0][4] = 0
+    after = runner(*inputs, weights, _slots(2))[0]
+    torch.accelerator.synchronize()
+    assert torch.equal(before, after) and _error(runner.peer_bufs[0])[0] == 0
+
+
+OBJDUMP = shutil.which("llvm-objdump") or next(
+    iter(
+        glob.glob(
+            "/usr/local/lib/python3.12/dist-packages/_rocm_sdk_*/lib/llvm/bin/llvm-objdump"
+        )
+    ),
+    None,
+)
+
+
+@pytest.mark.skipif(OBJDUMP is None, reason="needs llvm-objdump")
+def test_isa_encodes_the_mailbox_contract(weights):
+    """Every system-scope access is one aligned 64-bit pair (or the 32-bit
+    error word); every release is a cache write-back then a drain before its
+    store, every acquire a drain then an invalidate (LLVM AMDGPU GFX942
+    memory-model code sequences)."""
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
+        code_object,
+    )
+
+    dev = torch.device("cuda")
+    peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
+    peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
+    runner = FfnRunner(4, 0, peer.data_ptr(), peers, dev, (1,))
+    runner.warm(weights)
+    elf = Path(tempfile.mkdtemp()) / "ffn.elf"
+    elf.write_bytes(code_object(runner._compiled[1]._keepalive._ir_text))
+    assert OBJDUMP is not None
+    isa = subprocess.run(
+        [OBJDUMP, "-d", "--mcpu=gfx950", str(elf)], capture_output=True, text=True
+    ).stdout
+    ops = [line.split("//")[0].split() for line in isa.splitlines() if "\t" in line]
+    ops = [op for op in ops if op]
+    system = [op[0] for op in ops if "sc0" in op and "sc1" in op]
+    assert {o for o in system if "store" in o} == {"global_store_dwordx2"}
+    assert {o for o in system if "load" in o} <= {
+        "global_load_dwordx2",
+        "global_load_dword",
+    }
+    for i, op in enumerate(ops):
+        if op[0] == "buffer_wbl2":
+            assert ops[i + 1][:2] == ["s_waitcnt", "vmcnt(0)"]
+        if op[0] == "buffer_inv":
+            assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
+    kinds = {" ".join(op) for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")}
+    assert {"buffer_wbl2 sc1", "buffer_wbl2 sc0 sc1", "buffer_inv sc1"} <= kinds
