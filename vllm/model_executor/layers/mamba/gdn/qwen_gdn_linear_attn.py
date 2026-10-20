@@ -762,6 +762,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # with the out_proj input quantization.
             return "out_proj is quantized"
         return None
+
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return self._checkpoint_alignment
 
