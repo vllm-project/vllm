@@ -10,6 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
+from typing import Literal
 
 import pytest
 import torch
@@ -26,6 +27,7 @@ from vllm.model_executor.layers.attention import mla_attention as mla_attention_
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonBaseImpl,
+    MLACommonMetadataBuilder,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
     _use_masked_mha,
@@ -35,7 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
@@ -46,6 +48,9 @@ from vllm.v1.attention.backends.mla.prefill import (
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
+)
+from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+    is_cute_dsl_mla_prefill_supported,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
@@ -221,6 +226,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         attn_backend=flashmla_module.FlashMLABackend,
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        topk_buffer_width=None,
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
@@ -269,7 +275,8 @@ def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
         [17],
         [24],
     ]
-    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+    # set on every chunk when dcp_world_size > 1
+    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [  # type: ignore[union-attr]
         [0, 17],
         [0, 24],
     ]
@@ -782,9 +789,14 @@ class MockMLAAttentionLayer(MLAAttention):
     in static_forward_context, which fights what the test sets up below.
     """
 
+    # AttentionLayerBase declares ``impl`` as the dense AttentionImpl; an MLA
+    # layer holds an MLAAttentionImpl (vLLM's own MLAAttention.__init__ ignores
+    # the same mismatch).
+    impl: MLAAttentionImpl
+
     def __init__(
         self,
-        impl,
+        impl: MLAAttentionImpl,
         num_heads: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
@@ -839,7 +851,8 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_kv_cache_spec(self, vllm_config):
         raise NotImplementedError
 
-    def forward_impl(
+    # test replica takes only the arguments the test passes
+    def forward_impl(  # type: ignore[override]
         self,
         q: torch.Tensor,
         kv_c: torch.Tensor,
@@ -1344,6 +1357,7 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
             metadata,
             SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0),
         )
+        assert lse is not None
         # Empty-shard normalization belongs to the downstream DCP combine path.
         mask_dcp_empty_shards_(
             lse,
@@ -1359,7 +1373,9 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
     # the same way MLADCPManager does before comparing to the unsharded result.
     merged = _lse_weighted_combine(
         torch.stack(partial_outputs), torch.stack(partial_lses), is_lse_base_on_e=False
-    ).unsqueeze(0)
+    )
+    assert not isinstance(merged, tuple)
+    merged = merged.unsqueeze(0)
     # FP8 attention rounds differently when KV is partitioned across DCP ranks.
     torch.testing.assert_close(merged, reference.float(), atol=1e-2, rtol=1e-2)
 
@@ -1480,9 +1496,12 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
     builder_cls, impl_cls = try_get_attention_backend(backend)
+    # Every MLA backend's impl derives from MLAAttentionImpl.
+    assert issubclass(impl_cls, MLAAttentionImpl)
 
     # Force the prefill backend selection (None means auto-select).
     vllm_config.attention_config.mla_prefill_backend = prefill_backend
+    mla_attention_module.backend_supports_prefill_query_quantization.cache_clear()
 
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
@@ -1565,6 +1584,7 @@ def run_attention_backend(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if chunked_prefill_workspace_size is not None:
+            assert isinstance(builder, MLACommonMetadataBuilder)
             builder.chunked_prefill_workspace_size = chunked_prefill_workspace_size
             builder.chunked_prefill_workspace = (
                 builder.chunked_prefill_workspace.new_empty(
@@ -1641,6 +1661,8 @@ def _run_backend_correctness(
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
     adaptive_verification: bool = False,
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"] = "trtllm-gen",
+    use_prefill_query_quantization: bool = False,
 ):
     """Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -1720,6 +1742,10 @@ def _run_backend_correctness(
             hf_config_override["num_attention_heads"]
         )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.attention_config.trtllm_ragged_backend = trtllm_ragged_backend
+    vllm_config.attention_config.use_prefill_query_quantization = (
+        use_prefill_query_quantization
+    )
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
@@ -1910,6 +1936,11 @@ def _run_backend_correctness(
         q_mha = torch.cat([q_nope, q_pe], dim=-1)  # [q_len, num_heads, total_dim]
         k_pe_full_expanded = k_pe_prefill.expand(-1, num_q_heads, -1)
         k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
+        if use_prefill_query_quantization:
+            fp8_dtype = current_platform.fp8_dtype()
+            q_mha = q_mha.to(fp8_dtype).to(dtype)
+            k_full = k_full.to(fp8_dtype).to(dtype)
+            v_full = v_full.to(fp8_dtype).to(dtype)
 
         # Create custom attention mask:
         # - Query tokens can attend to all context tokens
@@ -2184,6 +2215,8 @@ def test_backend_correctness(
     _prefill_backend_dimension_params(),
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("trtllm_ragged_backend", ["trtllm-gen", "cute-dsl"])
+@pytest.mark.parametrize("use_prefill_query_quantization", [False, True])
 def test_chunked_context_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -2192,8 +2225,26 @@ def test_chunked_context_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     kv_cache_dtype: str,
+    trtllm_ragged_backend: Literal["trtllm-gen", "cute-dsl"],
+    use_prefill_query_quantization: bool,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
+    if prefill_backend != MLAPrefillBackendEnum.TRTLLM_RAGGED and (
+        trtllm_ragged_backend == "cute-dsl" or use_prefill_query_quantization
+    ):
+        pytest.skip("TRTLLM ragged-specific test configuration")
+    if use_prefill_query_quantization and kv_cache_dtype == "auto":
+        pytest.skip("FP8 prefill queries require an FP8 KV cache")
+    if trtllm_ragged_backend == "cute-dsl":
+        query_dtype = (
+            current_platform.fp8_dtype()
+            if use_prefill_query_quantization
+            else torch.bfloat16
+        )
+        if not is_cute_dsl_mla_prefill_supported(
+            qk_nope_head_dim + 64, v_head_dim, query_dtype
+        ):
+            pytest.skip("Unsupported CuTe DSL prefill dimensions or query dtype")
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
@@ -2208,6 +2259,8 @@ def test_chunked_context_backend_correctness(
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
+        trtllm_ragged_backend=trtllm_ragged_backend,
+        use_prefill_query_quantization=use_prefill_query_quantization,
     )
 
 
