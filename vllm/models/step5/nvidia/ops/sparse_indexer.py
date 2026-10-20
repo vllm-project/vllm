@@ -461,16 +461,8 @@ def _selection_output(rows, capacity, device, out, history_only):
     width = capacity + int(not history_only)
     if out is None:
         return torch.empty((rows, width), device=device, dtype=torch.int64)
-    if (
-        out.ndim != 2
-        or out.shape[0] != rows
-        or out.shape[1] < width
-        or (not history_only and out.shape[1] != width)
-        or out.stride(1) != 1
-        or out.dtype not in (torch.int32, torch.int64)
-        or out.device != device
-    ):
-        raise ValueError("selection output must match the rows, capacity and device")
+    if out.shape[0] != rows:
+        raise ValueError("selection output must match the number of rows")
     return out
 
 
