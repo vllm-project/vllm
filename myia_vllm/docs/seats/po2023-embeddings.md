@@ -57,6 +57,28 @@
   runbook po-2026 = procédure prête). Vigie : alerte >85 °C (registre Q-P2023-1).
 - Qdrant prod : `https://qdrant.myia.io` + LAN `http://192.168.0.47:6333` (distant .47).
 
+## Fix keep-alive sidecar (2026-10-20, PR #134)
+
+Les `ServerDisconnectedError` dans les logs du sidecar (9 111 du 13 au 20/10,
+uniquement au call site du forward amont) ont deux causes :
+
+- **98 % = fenêtres mortes vLLM** : Docker publie `:8005` dès le start du
+  conteneur alors que l'APIServer vLLM n'écoute qu'après boot complet (~2-3 min).
+  Chaque requête IIS dans la fenêtre = accept-then-close → 500 consommateur.
+  Corrélé 1:1 aux 11 boots vLLM de la semaine (15/10 ×3 : 5 622 erreurs 13-14h ;
+  incident disque 19/10 22h : 3 092 ; reboot user 20/10 : 231). Baromètre Qdrant
+  (2 547 977 → 2 593 672 pts sur la période) : les retries indexateurs ont tout
+  comblé, zéro perte.
+- **~2 % = course keep-alive** : uvicorn ferme ses connexions idle pendant que
+  le pool `ClientSession` du sidecar les réutilise (~25/j de bruit de fond).
+
+Fix déployé 20/10 13:05Z : `TCPConnector(force_close=True)` (connexion fraîche
+par requête, localhost) + retry 1× sur `ServerDisconnectedError` (PR #134,
+script repo = script prod, monté read-only dans le conteneur). Les fenêtres
+mortes réelles restent des erreurs légitimes après épuisement du retry —
+signature normale d'un boot vLLM sous trafic, pas une régression. Capture jsonl
+préservée avant restart : `embedding_requests.pre-fix-20261020T1500Z.jsonl`.
+
 ## Gaps de migration (consignés au registre du siège)
 
 1. Gouverneur thermique non migré (Q-P2023-1) — surveillance manuelle à chaque cycle.
