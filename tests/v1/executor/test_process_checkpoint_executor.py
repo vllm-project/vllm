@@ -191,13 +191,15 @@ def test_failed_executor_never_acknowledges_pause(executor):
         ("0", True, False, True, "mnnvl"),
     ],
 )
-def test_p2p_requires_suspension_and_no_nvls(
-    monkeypatch, nvls, suspend, accepted, fusion, backend
+@pytest.mark.parametrize("p2p,shm", [("0", "1"), ("0", "0"), ("1", "0"), (None, None)])
+@pytest.mark.parametrize("tp", [2, 3, 8])
+def test_transport_requires_suspension_and_no_nvls(
+    monkeypatch, nvls, suspend, accepted, fusion, backend, p2p, shm, tp
 ):
     monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
     env = {
-        "NCCL_P2P_DISABLE": "0",
-        "NCCL_SHM_DISABLE": "1",
+        "NCCL_P2P_DISABLE": p2p,
+        "NCCL_SHM_DISABLE": shm,
         "NCCL_IB_DISABLE": "1",
         "NCCL_CUMEM_ENABLE": "1",
         "NCCL_CUMEM_HOST_ENABLE": "0",
@@ -208,7 +210,10 @@ def test_p2p_requires_suspension_and_no_nvls(
         "VLLM_USE_NCCL_SYMM_MEM": "0",
     }
     for key, value in env.items():
-        monkeypatch.setenv(key, value)
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
     monkeypatch.delenv("VLLM_FLASHINFER_ALLREDUCE_BACKEND", raising=False)
     if backend is not None:
         monkeypatch.setenv("VLLM_FLASHINFER_ALLREDUCE_BACKEND", backend)
@@ -218,13 +223,13 @@ def test_p2p_requires_suspension_and_no_nvls(
             pass_config=SimpleNamespace(fuse_allreduce_rms=fusion),
         ),
         parallel_config=SimpleNamespace(
-            tensor_parallel_size=2,
+            tensor_parallel_size=tp,
             nnodes=1,
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=1,
-            world_size=2,
+            world_size=tp,
             disable_custom_all_reduce=True,
             enable_expert_parallel=False,
             worker_cls="vllm.v1.worker.gpu_worker.Worker",
@@ -351,6 +356,9 @@ def test_kv_first_partial_wake_then_sleep_preserves_parent_noop(executor):
 @pytest.mark.parametrize(
     "component,field,value",
     [
+        ("parallel_config", "tensor_parallel_size", 0),
+        ("parallel_config", "tensor_parallel_size", -1),
+        ("parallel_config", "nnodes", 2),
         ("parallel_config", "enable_expert_parallel", True),
         ("parallel_config", "worker_cls", "custom.Worker"),
         ("model_config", "sleep_mode_backend", "custom"),
@@ -402,3 +410,25 @@ def test_unsupported_checkpoint_configuration_fails_before_workers(
     ):
         ProcessCheckpointExecutor(config)
     initialize.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        ("cuda_checkpoint_executor", "CUDACheckpointExecutor"),
+        ("process_checkpoint_executor", "ProcessCheckpointExecutor"),
+    ],
+)
+@pytest.mark.parametrize("use_class", [False, True])
+def test_checkpoint_executor_names_resolve(module, name, use_class):
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.executor.abstract import Executor
+    from vllm.v1.executor.cuda_checkpoint_executor import CUDACheckpointExecutor
+
+    backend = f"vllm.v1.executor.{module}.{name}"
+    if use_class:
+        backend = resolve_obj_by_qualname(backend)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(distributed_executor_backend=backend)
+    )
+    assert Executor.get_class(config) is CUDACheckpointExecutor
