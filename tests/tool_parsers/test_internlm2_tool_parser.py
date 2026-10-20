@@ -115,13 +115,25 @@ class TestInternLM2ToolParser(ToolParserTests):
                     "content instead of None - streaming/non-streaming inconsistency"
                 ),
             },
-            xfail_nonstreaming={
-                "test_malformed_input": (
-                    "InternLM2 parser raises JSONDecodeError on malformed JSON "
-                    "instead of gracefully handling it"
-                ),
-            },
         )
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        '<|action_start|><|plugin|>{"name": "func", "parameters": {',
+        "<|action_start|><|plugin|>not json<|action_end|>",
+        "<|action_start|><|plugin|>",
+    ],
+)
+def test_malformed_nonstreaming_output_is_content(model_output: str) -> None:
+    parser = Internlm2ToolParser(MagicMock())
+
+    result = parser.extract_tool_calls(model_output, request=MagicMock())
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == model_output
 
 
 def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -> None:
