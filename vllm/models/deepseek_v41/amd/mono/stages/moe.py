@@ -164,6 +164,12 @@ DOWN_SPLIT_PARTS = 3
 # a round past the block's picks reads them into registers, its next weights
 # after its MFMAs)
 DOWN_PIPE_N = (2,)
+# tuned, past DOWN_LDS_PICKS: the shared expert's down rows of a two-task CTA's
+# tiles (its own and its extra) computed by the one-task CTAs that reach the
+# down stage next (arrival ranks extra .. 3 extra), handed over through SDX
+# (tagged pairs); a two-task CTA polls them into LDS at its sum. A row's result
+# is the same whichever CTA computes it (``down_shared``)
+DSH_UNITS = 2 * (DOWN_TASKS - BLOCKS)
 # a reduce task's columns: at 128 a thread polled 6 pairs at 48 rows, each
 # pass a round trip in series (32: 1-2 passes, S=48 -1 us)
 RED_COLS = 32
@@ -248,6 +254,10 @@ def scratch_layout(key: MoeBuild) -> dict[str, tuple[int, int]]:
         # a split extra down tile's contributions, [tile][pick][16 rows]
         # (``stage_down_split``)
         pairs["dxc"] = (DOWN_TASKS - BLOCKS) * rs.picks * ROWS
+        # an offloaded shared down unit's rows, [unit][token][16 rows], and
+        # each two-task CTA's own tile by its rank (``dsh_offload``)
+        pairs["sdx"] = DSH_UNITS * tokens * ROWS
+        pairs["dpb"] = DOWN_TASKS - BLOCKS
     return pair_layout(pairs.items())
 
 
@@ -677,7 +687,7 @@ def _silu_mul(g, u):
 
 
 @traced
-def stage_shared(c, task, gops, t0, n):
+def stage_shared(c, task, gops, t0, n, uops=None):
     """Gate rows 16 task .. (weights ``gops``), up rows 576 + 16 task .. against
     tokens t0 .. t0 + n (their x in LDS; ``n`` traced: a tile a CTA picks at run
     time) -> bf16 -> silu x up -> SMID; an odd task then quantizes its group of
@@ -691,9 +701,10 @@ def stage_shared(c, task, gops, t0, n):
     if tid < ROWS * n:
         gate = row_sum(red, tid % ROWS, tid // ROWS)
     gpu.barrier()
-    uops = gemv_fp8_loads(
-        c, a["sgu"], a["sgu_s"], HIDDEN, d.shared_tasks + task, row_major=True
-    )
+    if const_expr(uops is None):
+        uops = gemv_fp8_loads(
+            c, a["sgu"], a["sgu_s"], HIDDEN, d.shared_tasks + task, row_major=True
+        )
     gemv_fp8_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, uops, rows=rows)
     gpu.barrier()
     if tid < ROWS * n:
@@ -2460,11 +2471,15 @@ def _down_ug_flag(c, ucs, f, per_slot):
 
 
 @traced
-def down_shared(c, tasks):
+def down_shared(c, tasks, put_unit=None):
     """Each of ``tasks``' rows of the shared expert's down projection
     (its MXFP8 intermediate, ``load_smid_tile``) for every
     token, bf16 -> LDS ``sdl[task][token][16 rows]`` (``down_combine``):
-    every task's weights in flight first."""
+    every task's weights in flight first. ``put_unit``: the last task's rows
+    also to SDX unit ``put_unit`` (``dsh_offload``). With ``dsh_skip`` set the
+    caller ran it already."""
+    if const_expr(c.get("dsh_skip") and put_unit is None):
+        return
     s, tid, red, d = c["S"], c["tid"], c["red"], c["d"]
     a = c["args"]
     shops = [
@@ -2487,6 +2502,12 @@ def down_shared(c, tasks):
                     v = row_sum(red, tid % ROWS, tid // ROWS)
                     at = (j * s + plus(t0, tid // ROWS)) * ROWS + tid % ROWS
                 fx.ptr_store(bf16_round(v).bitcast(fx.Int32), c["sdl"] + at)
+                if const_expr(put_unit is not None and j == len(tasks) - 1):
+                    c["put"](
+                        c["sdx"],
+                        (put_unit * s + plus(t0, tt)) * ROWS + rr,
+                        bf16_round(v),
+                    )
             gpu.barrier()
 
 
@@ -2497,6 +2518,8 @@ def down_combine(c, task, j, t0, n):
     (``down_shared``), the sum pushed to every rank."""
     s, tid, d, tab = c["S"], c["tid"], c["d"], c["tab"]
     topk, tuned = c["rs"].topk, c["rs"].tuned
+    if const_expr(c.get("dsh_rank") is not None and j == 0 and t0 == 0):
+        dsh_fill(c, c["dsh_rank"])
     if tid < ROWS * n:
         r = umod(tid, ROWS, tuned)
         tl = udiv(tid, ROWS, tuned)
@@ -2558,6 +2581,64 @@ def down_mfma(c, j, task, sl, mid, first, count, av, live):
         r = 4 * (lane // 16) + q
         if live & (jj < count):
             contrib_store(c, j, pick * 16 + r, acc[q])
+
+
+@traced
+def dsh_fill(c, rank):
+    """A two-task CTA (arrival ``rank`` < extra) of the shared offload: both its
+    tiles' shared rows (its own: unit extra + rank, its extra: unit rank) polled
+    from SDX into LDS ``sdl`` [j][token][16 rows], one batch."""
+    s, tid = c["S"], c["tid"]
+    extra = DOWN_TASKS - BLOCKS
+    per = s * ROWS
+    if rank < extra:
+        idxs = [plus(pas, tid) for pas in range(0, 2 * per, THREADS)]
+        specs = []
+        for idx in idxs:
+            ic = fx.min(idx, 2 * per - 1)
+            unit = (ic < per).select(rank + extra, rank)
+            specs.append((c["sdx"], unit * per + umod(ic, per), 1))
+        got = c["poll"](specs)
+        for i in range_constexpr(len(idxs)):
+            if idxs[i] < 2 * per:
+                fx.ptr_store(fx.Int32(got[i][0]), c["sdl"] + idxs[i])
+    gpu.barrier()
+
+
+@traced
+def dsh_offload(c, own, rank):
+    """The shared offload's roles past the arrival (tuned, past
+    ``DOWN_LDS_PICKS``): a two-task CTA publishes its own
+    tile (DPB); a one-task CTA of rank extra .. 3 extra runs its own tile's
+    shared rows with offloaded unit rank - extra (an extra tile, or a two-task
+    CTA's own tile) -> SDX; the rest its own only."""
+    tid = c["tid"]
+    extra = DOWN_TASKS - BLOCKS
+    u = rank - extra
+    if rank < extra:
+        if tid == 0:
+            c["put"](c["dpb"], rank, own)
+    elif u < DSH_UNITS:
+        if tid == 0:
+            fx.ptr_store((fx.Int32(BLOCKS) + u).bitcast(fx.Float32), c["pair"])
+        if u >= extra:
+            got = c["poll"]([(c["dpb"], fx.max(u - extra, 0), 1)])
+            if tid == 0:
+                fx.ptr_store(got[0][0].bitcast(fx.Float32), c["pair"])
+        gpu.barrier()
+        off = fx.ptr_load(c["pair"]).bitcast(fx.Int32)
+        gpu.barrier()
+        down_shared(c, [own, off], put_unit=u)
+    else:
+        down_shared_own(c, own)
+
+
+def down_shared_own(c, own):
+    """``down_shared`` of the CTA's own tile alone (past ``dsh_skip``)."""
+    skip = c["dsh_skip"]
+    c["dsh_skip"] = False
+    down_shared(c, [own])
+    c["dsh_skip"] = skip
 
 
 def contrib_store(c, j, i, v):
@@ -2875,14 +2956,26 @@ def run_moe(c, key, bid, tls, tl0):
         gops = gemv_fp8_loads(
             c, a["sgu"], a["sgu_s"], HIDDEN, unit % shared_tasks, row_major=True
         )
+        uops = None
+        if const_expr(key.tuned and multi):
+            # the up rows' too: the gate's and up's HBM latency overlapped,
+            # not in series
+            uops = gemv_fp8_loads(
+                c,
+                a["sgu"],
+                a["sgu_s"],
+                HIDDEN,
+                shared_tasks + unit % shared_tasks,
+                row_major=True,
+            )
         if const_expr(not multi):
             load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j: j, s)
-            stage_shared(c, unit, gops, 0, s)
+            stage_shared(c, unit, gops, 0, s, uops)
         else:
             t0 = unit // shared_tasks * TILE
             n = fx.min(fx.Int32(TILE), s - t0)
             load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j: t0 + j, n)
-            stage_shared(c, unit % shared_tasks, gops, t0, n)
+            stage_shared(c, unit % shared_tasks, gops, t0, n, uops)
     stamp(timeline, tls, tid, tl0 + 4)
     c["xl"], c["xsl"] = c["x8rl"], c["x8rsl"]
     if const_expr(multi):
@@ -2932,6 +3025,17 @@ def run_moe(c, key, bid, tls, tl0):
             )
         else:
             stage_down_split(c, down_task, None, 0, 0)
+    elif const_expr(key.tuned):
+        # the two-task CTAs' shared rows offloaded (``dsh_offload``)
+        c["dsh_skip"] = True
+        dsh_offload(c, down_task, rank)
+        c["dsh_rank"] = rank
+        if rank < extra:
+            stage_down(c, [down_task, BLOCKS + rank])
+        else:
+            stage_down(c, [down_task])
+        c["dsh_rank"] = None
+        c["dsh_skip"] = False
     elif rank < extra:
         stage_down(c, [down_task, BLOCKS + rank])
     else:
