@@ -256,17 +256,7 @@ def set_dummy_context(
     num_reqs = input_batch.num_reqs
     query_lens = input_batch.max_query_len or input_batch.num_scheduled_tokens
     if mamba_group_ids and decode_query_len is not None:
-        prefills = input_batch.num_scheduled_tokens > decode_query_len
-        input_batch.is_prefilling_np[:] = prefills
-        input_batch.has_prefill = bool(prefills.any())
-        input_batch.decode_graph_eligible = not input_batch.has_prefill
-        input_batch.prefill_len_np[:] = np.where(
-            prefills, input_batch.num_scheduled_tokens, 0
-        )
-        input_batch.num_draft_tokens_per_req = np.where(
-            prefills, 0, input_batch.num_scheduled_tokens - 1
-        ).astype(np.int32)
-        input_batch.num_draft_tokens = int(input_batch.num_draft_tokens_per_req.sum())
+        set_dummy_mamba_metadata(input_batch, decode_query_len)
     context_lens = np.minimum(context_len, max_model_len - query_lens).clip(min=0)
     context_lens = np.where(input_batch.is_prefilling_np, 0, context_lens)
     context_tensor = torch.from_numpy(context_lens)
@@ -284,32 +274,38 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(positions))
 
     seq_len = int(input_batch.seq_lens_cpu_upper_bound.max())
+    max_query_len = int(input_batch.num_scheduled_tokens.max())
     for group_id, (block_table, block_size) in enumerate(
         zip(input_block_tables, block_tables.block_sizes)
     ):
-        num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
-        first_block = 0
-        if group_id in mamba_group_ids:
-            # Verification selects an accepted state and writes one state per query.
-            num_blocks = min(
-                num_blocks + int(input_batch.num_scheduled_tokens.max()) - 1,
-                block_table.shape[1],
-            )
-            first_block = 1
-            if num_kv_blocks <= 1:
-                raise ValueError("Dummy Mamba context requires a non-null state block")
+        is_mamba = group_id in mamba_group_ids
+        num_blocks = cdiv(seq_len, block_size)
+        if is_mamba:
+            num_blocks += max_query_len - 1
+        num_blocks = min(num_blocks, block_table.shape[1])
+        first_block = int(is_mamba)
+        if is_mamba and num_kv_blocks <= 1:
+            raise ValueError("Dummy Mamba context requires a non-null state block")
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = (
-            torch.arange(
-                num_reqs * num_blocks,
-                dtype=block_table.dtype,
-                device=block_table.device,
-            )
-            % (num_kv_blocks - first_block)
-            + first_block
+        block_ids = torch.arange(
+            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
         )
+        block_ids %= num_kv_blocks - first_block
+        block_ids += first_block
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
+
+
+def set_dummy_mamba_metadata(batch: InputBatch, decode_query_len: int) -> None:
+    query_lens = batch.num_scheduled_tokens
+    prefills = query_lens > decode_query_len
+    drafts = np.where(prefills, 0, query_lens - 1).astype(np.int32)
+    batch.is_prefilling_np[:] = prefills
+    batch.has_prefill = bool(prefills.any())
+    batch.decode_graph_eligible = not batch.has_prefill
+    batch.prefill_len_np[:] = np.where(prefills, query_lens, 0)
+    batch.num_draft_tokens_per_req = drafts
+    batch.num_draft_tokens = int(drafts.sum())
 
 
 @triton.jit

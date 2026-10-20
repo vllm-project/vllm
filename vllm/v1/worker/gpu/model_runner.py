@@ -1913,9 +1913,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         mamba_group_ids=[
                             i
                             for i, groups in enumerate(self.attn_groups)
-                            if any(
-                                isinstance(g.kv_cache_spec, MambaSpec) for g in groups
-                            )
+                            if groups and isinstance(groups[0].kv_cache_spec, MambaSpec)
                         ],
                         decode_query_len=self.decode_query_len,
                     )
