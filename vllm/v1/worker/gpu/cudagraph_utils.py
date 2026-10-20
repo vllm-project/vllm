@@ -323,6 +323,7 @@ class CudaGraphManager:
             # Varlen decode graphs take any mix of 1..decode_query_len tokens per
             # request, worst case 1 token per request (or max_num_reqs)
             if capture_varlen_decode and num_tokens <= max_decode_tokens:
+                _maxq = self.decode_query_len
                 for _r, _maxq_rung in varlen_descriptor_rungs(
                     num_tokens, _maxq, self.max_num_reqs
                 ):

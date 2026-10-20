@@ -369,6 +369,12 @@ def test_manager_gate_accepts_varlen_decode_support(monkeypatch):
     monkeypatch.setattr(
         av, "AdaptiveVerificationManager", lambda *args, **kwargs: sentinel
     )
+    # GDN varlen work is not in this branch; mock the mismatch capability.
+    monkeypatch.setattr(
+        GDNAttentionBackend,
+        "supports_device_cpu_query_lens_mismatch",
+        classmethod(lambda cls: True),
+    )
     mock_builder = SimpleNamespace(
         get_cudagraph_support=lambda vc, spec: AttentionCGSupport.UNIFORM_BATCH,
         get_varlen_cudagraph_max_query_len=lambda vc, spec: 8,
@@ -403,6 +409,12 @@ def test_manager_gate_rejects_below_varlen_decode_support(monkeypatch):
     from vllm.v1.worker.gpu.spec_decode import adaptive_verification as av
 
     monkeypatch.setattr(av, "AdaptiveVerificationManager", lambda *args, **kwargs: None)
+    # GDN varlen work is not in this branch; mock the mismatch capability.
+    monkeypatch.setattr(
+        GDNAttentionBackend,
+        "supports_device_cpu_query_lens_mismatch",
+        classmethod(lambda cls: True),
+    )
     mock_builder = SimpleNamespace(
         get_cudagraph_support=lambda vc, spec: AttentionCGSupport.UNIFORM_BATCH,
         get_varlen_cudagraph_max_query_len=lambda vc, spec: None,
