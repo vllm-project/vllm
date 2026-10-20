@@ -3,11 +3,21 @@
 
 """Tests for the /derender endpoints (postprocessing counterpart to /render)."""
 
+from unittest.mock import MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateTokensResponse,
+    GenerateTokensStreamResponse,
+)
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -110,6 +120,68 @@ async def test_derender_chat_roundtrip(client):
     assert len(data["choices"]) == 1
     assert data["choices"][0]["message"]["content"]
     assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_passes_stop_reason_through(client):
+    """The coupled server reports the stop string or token id that ended
+    generation; derender must carry the generate value through unchanged."""
+    gen_req = await _render_chat(client)
+    generate_response = _make_generate_response(gen_req["token_ids"][:3])
+    generate_response["choices"][0]["stop_reason"] = "\n\n"
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"model": MODEL_NAME, "generate_response": generate_response},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == "\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_chat_returns_requested_prompt_token_ids(
+    client, return_token_ids, stream
+):
+    """Like the coupled endpoint, prompt_token_ids is returned only on request."""
+    gen_req = await _render_chat(client)
+    prompt_ids = gen_req["token_ids"]
+    generate_response = _make_generate_response(prompt_ids[:3])
+    generate_response["prompt_token_ids"] = prompt_ids
+    chat_request = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "return_token_ids": return_token_ids,
+    }
+    body: dict = {"model": MODEL_NAME, "chat_request": chat_request}
+    if stream:
+        body["stream"] = True
+        body["generate_chunk"] = generate_response
+    else:
+        body["generate_response"] = generate_response
+
+    response = await client.post("/v1/chat/completions/derender", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["chunk"] if stream else response.json()
+    assert data.get("prompt_token_ids") == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_passes_stop_reason_through(client):
+    gen_req = await _render_completion(client, "Hello world")
+    generate_response = _make_completion_generate_response(
+        gen_req["token_ids"][:3], "gen-stop"
+    )
+    generate_response["choices"][0]["stop_reason"] = 151645
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={"model": MODEL_NAME, "generate_responses": [generate_response]},
+    )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["stop_reason"] == 151645
 
 
 @pytest.mark.asyncio
@@ -1095,6 +1167,50 @@ async def test_e2e_parsed_reasoning(parser_client, parser_tokenizer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_reasoning", [True, False])
+async def test_e2e_parsed_logprobs_follow_include_reasoning(
+    parser_client, parser_tokenizer, include_reasoning
+):
+    """With a parser configured, batch derender returns logprobs only when
+    reasoning is shown. Hidden reasoning drops them, as the coupled chat
+    endpoint does, because decoded logprob tokens would reveal it."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
+    output_ids = _require_markers_survive(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "</think>"
+    )
+    generate_response = _e2e_generate_response(output_ids)
+    generate_response["choices"][0]["logprobs"] = {
+        "content": [
+            {"token_id": tid, "logprob": -0.5, "rank": 1, "top_logprobs": []}
+            for tid in output_ids
+        ]
+    }
+    resp = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": PARSER_MODEL,
+            "generate_response": generate_response,
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": PARSER_MODEL,
+                "messages": messages,
+                "include_reasoning": include_reasoning,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    choice = resp.json()["choices"][0]
+    assert choice["message"]["content"] == "Five."
+    if include_reasoning:
+        assert choice["message"]["reasoning"]
+        assert len(choice["logprobs"]["content"]) == len(output_ids)
+    else:
+        assert choice["message"]["reasoning"] is None
+        assert choice["logprobs"] is None
+
+
+@pytest.mark.asyncio
 async def test_e2e_parsed_tool_call(parser_client, parser_tokenizer):
     """<tool_call> extracted into tool_calls field."""
     messages = [{"role": "user", "content": "Weather in Paris?"}]
@@ -1400,3 +1516,140 @@ async def test_e2e_harmony_reasoning(harmony_client, harmony_tokenizer):
     assert msg["reasoning"] is not None
     assert reasoning_text in msg["reasoning"]
     assert answer_text in (msg["content"] or "")
+
+
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tool_call>'
+)
+
+
+def _derender_hermes_chat(
+    text: str,
+    tool_choice: str = "auto",
+    engine_finish_reason: str = "stop",
+    parser_cls: type | None = None,
+):
+    tokenizer = get_tokenizer(MODEL_NAME)
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    model_config = MagicMock()
+    model_config.model = MODEL_NAME
+    model_config.hf_config.model_type = "llama"
+    derenderer = OnlineDerenderer(
+        model_config,
+        renderer,
+        request_logger=None,
+        chat_template="{{ messages }}",
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+        tool_parser="hermes",
+    )
+    if parser_cls is not None:
+        derenderer.parser = parser_cls
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Weather in Paris?"}],
+        tools=_E2E_TOOLS,
+        tool_choice=tool_choice,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(text, add_special_tokens=False),
+            finish_reason=engine_finish_reason,
+        )
+    )
+
+    (choice,) = derenderer._derender_chat(response, request)
+    return choice
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello there", "stop", "stop"),
+    ],
+)
+def test_derender_chat_finish_reason_matches_chat_completion(
+    tool_choice, text, engine_finish_reason, expected_finish_reason
+):
+    """/derender applies the same finish_reason rule as the coupled chat
+    path: ``tool_calls`` only for a real call at a natural stop."""
+    choice = _derender_hermes_chat(text, tool_choice, engine_finish_reason)
+
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text == _HERMES_TOOL_CALL_TEXT)
+
+
+def test_derender_chat_tool_call_id_matches_chat_completion():
+    """Batch /derender uses the coupled chat's default tool call ID format."""
+    choice = _derender_hermes_chat(_HERMES_TOOL_CALL_TEXT)
+
+    (tool_call,) = choice.message.tool_calls
+    assert tool_call.id.startswith("chatcmpl-tool-")
+
+
+def test_derender_chat_keeps_parser_tool_call_id():
+    """Batch /derender keeps the parser's tool call ID (Kimi K2 style
+    ``functions.<name>:<idx>``), since chat templates reference it in
+    multi-turn history."""
+
+    class _KimiIdParser:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse(self, model_output, request, **kwargs):
+            call = FunctionCall(
+                id="functions.get_weather:1",
+                name="get_weather",
+                arguments='{"city": "Paris"}',
+            )
+            return None, None, [call]
+
+    choice = _derender_hermes_chat(_HERMES_TOOL_CALL_TEXT, parser_cls=_KimiIdParser)
+
+    (tool_call,) = choice.message.tool_calls
+    assert tool_call.id == "functions.get_weather:1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [None, False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_completion_preserves_requested_token_ids(
+    tokenizer, return_token_ids, stream
+):
+    renderer = MagicMock()
+    renderer.get_tokenizer.return_value = tokenizer
+    renderer._executor = None
+    model_config = MagicMock()
+    model_config.model = MODEL_NAME
+    model_config.hf_config.model_type = "llama"
+    derenderer = OnlineDerenderer(
+        model_config,
+        renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="string",
+    )
+    token_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+    request = CompletionRequest(
+        model=MODEL_NAME, prompt="Hi", return_token_ids=return_token_ids
+    )
+    prompt_ids = tokenizer.encode("Hi")
+    payload = _make_generate_response(token_ids, finish_reason="length")
+    payload["prompt_token_ids"] = prompt_ids
+    if stream:
+        response, _ = await derenderer.derender_completion_stream(
+            MODEL_NAME,
+            GenerateTokensStreamResponse.model_validate(payload),
+            completion_request=request,
+        )
+        choices = response.choices
+    else:
+        choices, _, _ = await derenderer.derender_completion(
+            [GenerateTokensResponse.model_validate(payload)],
+            completion_request=request,
+        )
+    assert choices[0].token_ids == (token_ids if return_token_ids else None)
+    assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)

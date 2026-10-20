@@ -2,7 +2,7 @@ group: Samplers Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: Samplers Test (XPU Kernel)
+- label: ":intel: (BMG) Samplers Test (XPU Kernel)"
   key: samplers-test-xpu-kernel-intel
   timeout_in_minutes: 40
   device: intel_gpu
@@ -29,7 +29,7 @@ steps:
       VLLM_XPU_USE_SAMPLER_KERNEL=1 pytest -v -s samplers
       --ignore=samplers/test_beam_search.py'
 
-- label: Samplers Beam Search Test (XPU Kernel)
+- label: ":intel: (BMG) Samplers Beam Search Test (XPU Kernel)"
   key: samplers-beam-search-test-xpu-kernel-intel
   timeout_in_minutes: 40
   device: intel_gpu

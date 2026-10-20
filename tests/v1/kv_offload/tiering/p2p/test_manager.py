@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,9 +24,15 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import (
+    JobResult,
+    TieringOffloadingMetrics,
+    TransferJob,
+)
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
+    _RECONNECT_MAX_BACKOFF_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -36,6 +43,8 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     SessionPollResult,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -110,11 +119,15 @@ def _job_metadata(
 def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
+    mgr.tier_type = "p2p"
+    mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._reconnect_backoff = {}
+    mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
     mgr._reaped_stores = {}
@@ -524,6 +537,66 @@ class TestSubmitLoad:
 
 
 # ---------------------------------------------------------------------------
+# Tests for promotion latency metrics
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionLatency:
+    def test_p2p_load_without_transfer_time_records_promotion_latency(self):
+        """P2P load results omit transfer_time; the manager records promotion
+        latency from job creation to completion."""
+        p2p_tier = _make_manager()
+        primary_kv_view = memoryview(np.zeros((5, 16), dtype=np.uint8))
+
+        primary_tier = SimpleNamespace(
+            _num_chunks=5,
+            get_kv_memoryview=lambda: primary_kv_view,
+            complete_write=lambda *args: None,
+            get_stats=lambda: None,
+        )
+        tiering_manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[p2p_tier],
+            tier_poll_interval_s=0.0,
+        )
+        job = TransferJob(
+            job_id=42,
+            keys=[b"key1"],
+            chunk_ids=np.array([0]),
+            is_promotion=True,
+            req_context=_req_context(_remote_prefiller_kv_params()),
+        )
+        tiering_manager._register_job(job, tier_idx=0)
+
+        session = _FakeSession(
+            peer_id="10.0.0.1:8000",
+            loads=[LoadResult(job_id=42, kv_request_id="req-1", success=True)],
+        )
+        p2p_tier._sessions[session.peer_id] = session
+        p2p_tier._control = SimpleNamespace(poll=lambda: [])
+        reported_results: list[JobResult] = []
+        get_finished_jobs = p2p_tier.get_finished_jobs
+
+        def capture_finished_jobs():
+            results = list(get_finished_jobs())
+            reported_results.extend(results)
+            return results
+
+        p2p_tier.get_finished_jobs = capture_finished_jobs
+        p2p_tier.submit_load(job)
+        assert session.requests == [(42, "req-1")]
+
+        tiering_manager._process_finished_jobs()
+
+        assert reported_results == [JobResult(job_id=42, success=True)]
+        assert reported_results[0].transfer_time is None
+        stats = tiering_manager.get_stats()
+        assert stats is not None
+        observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
+        assert len(observations[("1:p2p", "success")]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Tests for on_request_finished
 # ---------------------------------------------------------------------------
 
@@ -653,6 +726,8 @@ class _FakeSession:
         self.alive = alive
         self.connected = connected
         self.ready = True
+        self.death_reason = "control connection lost"
+        self.data_plane_fault: str | None = None
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []
@@ -1111,6 +1186,14 @@ class _FakeData:
             "block_len": block_len,
         }
 
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ):
+        future: Future[None] = Future()
+        self.add_remote_peer(peer_id, agent_metadata, base_addr, num_blocks, block_len)
+        future.set_result(None)
+        return future
+
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
 
@@ -1162,6 +1245,108 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
+        mgr_a, mgr_b = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        for _ in range(3):
+            list(mgr_a.get_finished_jobs())
+            list(mgr_b.get_finished_jobs())
+        assert mgr_a._sessions["B:2"].ready
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+
+        # Stop the server's progress without closing its live connection.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        assert "B:2" not in mgr_a._sessions
+        assert "B:2" not in mgr_a._data._remote_peers
+
+        # A replacement session must not restart the expired request's probes.
+        mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_request_finished(ctx)
+        assert "req-1" not in mgr_a._failed_req_ids
+
+    def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
+        """The peer must retire the timed-out session before a new handshake."""
+        import zmq
+        from zmq.utils.monitor import recv_monitor_message
+
+        from .test_zmq_transport import _make_transport
+
+        managers = []
+        monitors = []
+        try:
+            for _ in range(2):
+                mgr = _make_manager()
+                mgr._control, port = _make_transport()
+                mgr._local_id = f"127.0.0.1:{port}"
+                mgr._data = _FakeData(mgr._local_id)
+                managers.append(mgr)
+                monitors.append(
+                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)
+                )
+            mgr_a, mgr_b = managers
+            peer_a, peer_b = mgr_a._local_id, mgr_b._local_id
+            port_b = int(peer_b.rsplit(":", 1)[1])
+
+            def poll_until(condition):
+                deadline = time.perf_counter() + 5.0
+                while time.perf_counter() < deadline:
+                    list(mgr_a.get_finished_jobs())
+                    list(mgr_b.get_finished_jobs())
+                    if condition():
+                        return
+                    time.sleep(0.005)
+                pytest.fail("P2P session did not reach the expected state")
+
+            def both_ready():
+                return (
+                    peer_b in mgr_a._sessions
+                    and peer_a in mgr_b._sessions
+                    and mgr_a._sessions[peer_b].ready
+                    and mgr_b._sessions[peer_a].ready
+                )
+
+            ctx = _req_context(_remote_kv_source_kv_params("127.0.0.1", port_b))
+            mgr_a.on_new_request(ctx)
+            poll_until(both_ready)
+            old_peer_session = mgr_b._sessions[peer_a]
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+            mgr_a.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+            lookup_clock.now = _LOOKUP_TIMEOUT_S
+            list(mgr_a.get_finished_jobs())
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+            assert peer_b not in mgr_a._sessions
+            poll_until(lambda: peer_a not in mgr_b._sessions)
+            # Wait for old TCP identities to retire before reconnecting.
+            for monitor in monitors:
+                assert monitor.poll(5000), "old TCP connection did not disconnect"
+                assert recv_monitor_message(monitor)["event"] == zmq.EVENT_DISCONNECTED
+
+            new_ctx = _req_context(
+                _remote_kv_source_kv_params("127.0.0.1", port_b, "req-2")
+            )
+            mgr_a.on_new_request(new_ctx)
+            poll_until(both_ready)
+            assert mgr_b._sessions[peer_a] is not old_peer_session
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        finally:
+            for monitor in monitors:
+                monitor.close(linger=0)
+            # Avoid queuing shutdown messages to an already closed peer.
+            for mgr in managers:
+                mgr._control.close()
+                mgr.shutdown()
 
     def test_both_loads_succeed(self):
         mgr_a, mgr_b = _build_paired_managers()
@@ -1367,6 +1552,11 @@ class TestAcceptNewPeers:
 
             def add_remote_peer(self, *args, **kwargs):
                 pass
+
+            def add_remote_peer_async(self, *args, **kwargs):
+                future: Future[None] = Future()
+                future.set_result(None)
+                return future
 
         mgr = _make_manager()
         mgr._data = FakeData()
@@ -2117,3 +2307,118 @@ class TestIdleSessionEviction:
 
         mgr._reap_idle_sessions()
         assert "old:1" in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Reconnect backoff after a data-plane fault
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectBackoff:
+    """A peer whose session ended on a data-plane fault reconnects at once the
+    first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, mgr: P2PSecondaryTierManager, fault: str | None) -> None:
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._data = FakeData()  # type: ignore[assignment]
+        session = _FakeSession(peer_id=self.PEER, alive=False, connected=True)
+        session.data_plane_fault = fault
+        mgr._sessions[self.PEER] = session  # type: ignore[assignment]
+        mgr._reap_dead_sessions()
+
+    def test_backoff_doubles_up_to_max(self):
+        mgr = _make_manager()
+        waits = []
+        for _ in range(9):
+            self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+            waits.append(mgr._reconnect_backoff[self.PEER][0])
+        assert waits == [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+        assert waits[-1] == _RECONNECT_MAX_BACKOFF_S
+
+    def test_first_fault_reconnects_at_once(self):
+        mgr = _make_manager()
+        self._reap(mgr, "NIXL_ERR_REMOTE_DISCONNECT")
+        assert mgr._reconnect_wait(self.PEER) <= 0
+
+    def test_control_plane_death_does_not_back_off(self):
+        mgr = _make_manager()
+        for _ in range(3):
+            self._reap(mgr, None)
+        assert self.PEER not in mgr._reconnect_backoff
+
+    def test_healthy_peer_resets_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        assert backoff == 1.0
+        # The previous wait then expired more than the max ago (no fault
+        # since; no successful transfer is required).
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        assert mgr._reconnect_backoff[self.PEER][0] == 0.0
+
+    def test_peer_down_log_counts_faults_across_backoff_reset(self, monkeypatch):
+        warnings: list[str] = []
+
+        def record_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(manager_module.logger, "warning", record_warning)
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+        # Let the backoff expire: the count must keep growing regardless.
+        backoff, _ = mgr._reconnect_backoff[self.PEER]
+        mgr._reconnect_backoff[self.PEER] = (
+            backoff,
+            time.monotonic() - _RECONNECT_MAX_BACKOFF_S - 1.0,
+        )
+        self._reap(mgr, "fault")
+        self._reap(mgr, None)
+
+        assert mgr._data_plane_faults[self.PEER] == 3
+        assert warnings[0].endswith("; data-plane fault #1")
+        assert warnings[1].endswith("; data-plane fault #2; reconnect backoff 1s")
+        assert warnings[2].endswith("; data-plane fault #3")
+        # A control-plane death neither counts nor reports a fault.
+        assert "data-plane fault" not in warnings[3]
+
+    def test_outbound_connect_is_skipped_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() during reconnect backoff")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+    def test_inbound_is_told_to_disconnect_during_backoff(self):
+        mgr = _make_manager()
+        self._reap(mgr, "fault")
+        self._reap(mgr, "fault")
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions
