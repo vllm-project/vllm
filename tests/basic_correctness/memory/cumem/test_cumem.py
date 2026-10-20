@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import gc
 
 import pytest
@@ -354,6 +355,54 @@ def test_runtime_state_survives_sleep(level):
     backend.resume(tags=["kv_cache"])
     kv.fill_(1)
     assert int(kv.sum()) == kv.numel()
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Symmetric memory")
+def test_symm_mem_handle_outside_weights_pool_survives_level2():
+    """Symmetric-memory pointer tables survive level 2 only outside the pool.
+
+    rendezvous allocates the tables barrier() reads from the current pool; the
+    DS4.1 Engram peer exchange rendezvouses during model init.
+    """
+    import ctypes
+
+    import torch.distributed as dist
+    import torch.distributed._symmetric_memory as symm_mem
+
+    from vllm.utils.network_utils import get_open_port
+
+    dist.init_process_group(
+        "nccl", init_method=f"tcp://127.0.0.1:{get_open_port()}", rank=0, world_size=1
+    )
+    allocator = get_mem_allocator_instance()
+
+    def pointer_table(nested: bool):
+        with allocator.use_memory_pool("weights"):
+            buffer = symm_mem.empty(1024, dtype=torch.int32, device=DEVICE_TYPE)
+            pool = torch.cuda.MemPool() if nested else None
+            with torch.cuda.use_mem_pool(pool) if nested else contextlib.nullcontext():
+                handle = symm_mem.rendezvous(buffer, dist.group.WORLD)
+        return handle, pool
+
+    libcuda = ctypes.CDLL("libcuda.so.1")
+
+    def read(ptr: int) -> int:
+        out = ctypes.c_int64()
+        libcuda.cuMemcpyDtoH_v2(ctypes.byref(out), ctypes.c_uint64(ptr), 8)
+        return out.value
+
+    plain, _ = pointer_table(nested=False)
+    nested, pool = pointer_table(nested=True)
+    before = read(plain.signal_pad_ptrs_dev), read(nested.signal_pad_ptrs_dev)
+    allocator.sleep(offload_tags=())
+    allocator.wake_up(None)
+    torch.accelerator.synchronize()
+
+    assert read(nested.signal_pad_ptrs_dev) == before[1] != 0
+    assert read(plain.signal_pad_ptrs_dev) != before[0]
+    nested.barrier()
+    dist.destroy_process_group()
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

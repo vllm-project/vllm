@@ -99,8 +99,13 @@ class EngramPeerExchange(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
-        self.id_handle = symm_mem.rendezvous(self.ids, group.device_group)
-        self.row_handle = symm_mem.rendezvous(self.rows, group.device_group)
+        # rendezvous allocates the handles' device pointer tables, which
+        # barrier() reads, from the current pool. Model init runs in the
+        # sleep-mode weights pool, whose level-2 sleep discards them.
+        self._handle_pool = torch.cuda.MemPool()
+        with torch.cuda.use_mem_pool(self._handle_pool):
+            self.id_handle = symm_mem.rendezvous(self.ids, group.device_group)
+            self.row_handle = symm_mem.rendezvous(self.rows, group.device_group)
         metadata = []
         for layer in layers:
             table = layer.embed_tokens
