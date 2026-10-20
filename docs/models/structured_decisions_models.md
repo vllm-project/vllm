@@ -271,8 +271,13 @@ examples above. `choice`, `noul` and `score` questions are supported.
 - Text and JSON states use the checkpoint's fixed prompt. JSON is compact
   with sorted keys. `instructions` returns 400; `chat_template_kwargs`
   has no effect.
-- The state is truncated to fit 16,384 tokens, or `max_model_len` if smaller.
-  A schema that exceeds this bound returns 400.
+- The complete prompt must fit the engine's resolved `max_model_len`, including
+  the fixed prompt, state, all questions/options and expanded image/video tokens.
+  There is no additional 16,384-token cap or generated-token reservation.
+  An oversized prompt returns 400 before inference; inputs are not truncated.
+  Clients that previously relied on automatic state truncation must shorten or
+  split their inputs, or configure a larger context supported by the model and
+  hardware. Clef-Omni retains its separate reference cap and truncation policy.
 - `images` and `videos` are placed before the state. Videos are sampled at
   2 fps and processed by the Qwen3.5 vision processor. Audio inputs return
   400, and video soundtracks are ignored.

@@ -5,6 +5,7 @@ import json
 import logging
 import math
 from argparse import Namespace
+from copy import deepcopy
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
@@ -18,8 +19,11 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from PIL import Image
 from starlette.datastructures import State
+from transformers import Qwen3_5Config
+from transformers.models.qwen2_vl import Qwen2VLImageProcessor
+from transformers.models.qwen3_vl import Qwen3VLProcessor, Qwen3VLVideoProcessor
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
@@ -63,6 +67,12 @@ from vllm.entrypoints.serve.exception_handling.register import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import mm_input, tokens_input
 from vllm.logprobs import Logprob
+from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
+    LruKeyReplicatedSenderCache,
+    MultiModalProcessorOnlyCache,
+)
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
     CompletionOutput,
@@ -600,6 +610,7 @@ async def test_joint_schema_rejects_instructions(joint_schema):
     engine.encode.assert_not_called()
 
 
+@pytest.mark.parametrize("joint_schema", [JointSchemaStrategy], indirect=True)
 def test_joint_schema_truncates_the_state(joint_schema):
     serving, _, _ = joint_schema
     strategy = serving.strategy
@@ -617,6 +628,84 @@ def test_joint_schema_truncates_the_state(joint_schema):
         strategy.encode(questions, "word")
 
 
+@pytest.mark.parametrize("max_model_len", [8192, 16384, 32768, 65536])
+def test_joint_schema_context_limit(joint_schema, max_model_len):
+    handler, engine, _ = joint_schema
+    engine.model_config.max_model_len = max_model_len
+    strategy = type(handler.strategy)(handler.strategy.context)
+    expected = (
+        max_model_len
+        if isinstance(strategy, ClefFlashStrategy)
+        else min(64000, max_model_len)
+    )
+    assert strategy.max_length == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("joint_schema", [ClefFlashStrategy], indirect=True)
+async def test_clef_reads_complete_state_above_16k(joint_schema):
+    handler, engine, tokenizer = joint_schema
+    engine.model_config.max_model_len = 32768
+    handler.strategy = ClefFlashStrategy(handler.strategy.context)
+    strategy = handler.strategy
+    state = "word " * 18000 + "TAIL SENTINEL"
+    state_ids = tokenizer.encode(state, add_special_tokens=False)
+    assert 16384 < len(state_ids) < 32768
+    request = StructuredDecisionRequest(**{**JOINT_SCHEMA_REQUEST, "state": state})
+    questions = parse_questions(request, strategy.limits())
+    fixed, schema, _ = strategy.encode(questions, "")
+
+    response = await handler.create_decision(request)
+
+    assert isinstance(response, StructuredDecisionResponse)
+    engine.encode.assert_called_once()
+    prompt, params = engine.encode.call_args.args[:2]
+    ids = prompt["prompt_token_ids"]
+    assert ids == strategy.prefix + state_ids + fixed[len(strategy.prefix) :]
+    assert params.extra_kwargs["joint_schema"] == schema
+    assert response.usage.input_tokens == len(ids)
+    assert response.usage.output_tokens == 0
+    assert response.answers["team"]["probabilities"] == pytest.approx(
+        {"shipping": 0.2, "billing": 0.7, "security": 0.1}
+    )
+
+
+@pytest.mark.parametrize("joint_schema", [ClefFlashStrategy], indirect=True)
+@pytest.mark.parametrize("state", ["word " * 100, {"text": "日本語" * 100}, ""])
+@pytest.mark.parametrize("spare_tokens", [-1, 0, 1])
+def test_clef_context_boundary_returns_http_400(joint_schema, state, spare_tokens):
+    handler, engine, _ = joint_schema
+    request = StructuredDecisionRequest(**{**JOINT_SCHEMA_REQUEST, "state": state})
+    strategy = handler.strategy
+    questions = parse_questions(request, strategy.limits())
+    expected, _, _ = strategy.encode(questions, strategy.render_state(state))
+    engine.model_config.max_model_len = len(expected) + spare_tokens
+    handler.strategy = ClefFlashStrategy(strategy.context)
+    app = FastAPI()
+    app.state.args = Namespace(log_error_stack=False)
+    app.state.serving_structured_decisions = handler
+    init_exception_handler(app)
+    register_structured_decisions_api_router(app)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/systemone", json=request.model_dump())
+
+    if spare_tokens < 0:
+        assert response.status_code == 400
+        message = response.json()["error"]["message"]
+        assert f"complete prompt takes {len(expected)} tokens" in message
+        assert f"max_model_len={engine.model_config.max_model_len}" in message
+        engine.encode.assert_not_called()
+    else:
+        assert response.status_code == 200
+        engine.encode.assert_called_once()
+        assert engine.encode.call_args.args[0]["prompt_token_ids"] == expected
+        assert response.json()["usage"] == {
+            "input_tokens": len(expected),
+            "output_tokens": 0,
+        }
+
+
 @pytest.mark.asyncio
 async def test_media_needs_a_model_that_takes_it(serving_and_engine):
     serving, engine = serving_and_engine
@@ -630,6 +719,129 @@ async def test_media_needs_a_model_that_takes_it(serving_and_engine):
     engine.generate.assert_not_called()
 
 
+@pytest.mark.parametrize("joint_schema", [ClefFlashStrategy], indirect=True)
+def test_clef_cold_image_cache_survives_first_request_overflow(joint_schema, tmp_path):
+    """A rejected first image must not leave P0 trusting an empty P1 cache."""
+    _, engine, tokenizer = joint_schema
+    tokenizer = deepcopy(tokenizer)
+    hf_processor = Qwen3VLProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(
+            patch_size=16,
+            size={"shortest_edge": 4096, "longest_edge": 4096},
+        ),
+        video_processor=Qwen3VLVideoProcessor(patch_size=16),
+    )
+    # Local configuration and the existing tokenizer need no model weights.
+    hf_processor.save_pretrained(tmp_path)
+    Qwen3_5Config(
+        architectures=["ClefFlashForJointSchema"],
+        image_token_id=tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+        video_token_id=tokenizer.convert_tokens_to_ids("<|video_pad|>"),
+        vision_start_token_id=tokenizer.convert_tokens_to_ids("<|vision_start|>"),
+        vision_end_token_id=tokenizer.convert_tokens_to_ids("<|vision_end|>"),
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=1024,
+            mm_processor_cache_gb=0.01,
+            mm_processor_cache_type="lru",
+            limit_mm_per_prompt={"image": 1, "video": 0},
+        ),
+    )
+    renderer = HfRenderer(config, tokenizer)
+    try:
+        assert isinstance(renderer.mm_processor_cache, LruKeyReplicatedSenderCache)
+        processor_cache = renderer._mm_processor_only_cache
+        assert isinstance(processor_cache, MultiModalProcessorOnlyCache)
+        assert processor_cache.make_stats().total == 0
+        assert renderer.mm_processor_cache.make_stats().total == 0
+        receiver = LruKeyReplicatedReceiverCache(config.model_config)
+        engine.model_config = config.model_config
+        engine.renderer = renderer
+        online = OnlineRenderer(
+            config.model_config,
+            renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+        handler = serving(
+            engine, ClefFlashStrategy(ReadContext(engine, online, None, "auto", {}))
+        )
+        encode = engine.encode.side_effect
+        received = []
+
+        async def receive_and_encode(prompt, params, request_id, **kwargs):
+            mm_hash = prompt["mm_hashes"]["image"][0]
+            payload = prompt["mm_kwargs"]["image"][0]
+            features = receiver.get_and_update_features(
+                [
+                    MultiModalFeatureSpec(
+                        data=payload,
+                        modality="image",
+                        identifier=mm_hash,
+                        mm_hash=mm_hash,
+                        mm_position=prompt["mm_placeholders"]["image"][0],
+                    )
+                ]
+            )
+            assert payload is not None
+            item = features[0].data
+            assert item is not None
+            pixels = item["pixel_values"].data
+            assert isinstance(pixels, torch.Tensor)
+            assert pixels.device.type == "cpu"
+            assert torch.unique(pixels).tolist() == [0, 255]
+            assert torch.count_nonzero(pixels) == pixels.numel() // 3
+            received.append((mm_hash, pixels.clone(), list(prompt["prompt_token_ids"])))
+            async for result in encode(prompt, params, request_id, **kwargs):
+                yield result
+
+        engine.encode.side_effect = receive_and_encode
+        app = FastAPI()
+        app.state.args = Namespace(log_error_stack=False)
+        app.state.serving_structured_decisions = handler
+        init_exception_handler(app)
+        register_structured_decisions_api_router(app)
+        buffer = BytesIO()
+        Image.new("RGB", (64, 64), "red").save(buffer, format="PNG")
+        image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+        with TestClient(app) as client:
+            # This unseen image is first processed by the overflowing request.
+            response = client.post(
+                "/v1/systemone",
+                json={
+                    **JOINT_SCHEMA_REQUEST,
+                    "state": "word " * 1024,
+                    "images": [image],
+                },
+            )
+            assert response.status_code == 400
+            assert "complete prompt takes" in response.json()["error"]["message"]
+            engine.encode.assert_not_called()
+            assert received == []
+            for _ in range(2):
+                response = client.post(
+                    "/v1/systemone",
+                    json={**JOINT_SCHEMA_REQUEST, "state": "short", "images": [image]},
+                )
+                assert response.status_code == 200
+                assert response.json()["usage"]["input_tokens"] == len(received[-1][2])
+
+        assert engine.encode.call_count == 2
+        assert received[0][0] == received[1][0]
+        torch.testing.assert_close(received[0][1], received[1][1])
+        assert received[0][2] == received[1][2]
+        assert processor_cache.make_stats().total == 3
+        assert processor_cache.make_stats().hits == 2
+    finally:
+        renderer.shutdown()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("num_images", [1, 2])
 async def test_joint_schema_reads_media_before_the_state(
@@ -641,8 +853,9 @@ async def test_joint_schema_reads_media_before_the_state(
     image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
     rendered: dict[str, Any] = {}
 
-    async def process_for_engine_async(prompt, arrival_time):
+    async def process_for_engine_async(prompt, arrival_time, *, skip_mm_cache=False):
         rendered.update(prompt)
+        rendered["skip_mm_cache"] = skip_mm_cache
         # The image's placeholder expands to three tokens.
         ids = [
             token
@@ -662,8 +875,10 @@ async def test_joint_schema_reads_media_before_the_state(
     assert isinstance(response, StructuredDecisionResponse)
 
     if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["skip_mm_cache"] is True
         media_text = "<|vision_start|><|image_pad|><|vision_end|>" * num_images + "\n"
     else:
+        assert rendered["skip_mm_cache"] is False
         media_text = "<|vision_start|><|image_pad|><|vision_end|>\n" * num_images
     placeholder = tokenizer.encode(media_text, add_special_tokens=False)
     assert rendered["prompt_token_ids"] == strategy.prefix + placeholder
@@ -685,6 +900,31 @@ async def test_joint_schema_reads_media_before_the_state(
     assert tokenizer.decode(ids[expanded:]) == state_and_questions
     assert response.answers["team"]["choice"] == "billing"
     assert response.usage.input_tokens == len(ids)
+
+    if isinstance(strategy, ClefFlashStrategy):
+        # The expanded images push this prompt one token over the limit.
+        strategy.max_length = len(ids) - 1
+        engine.encode.reset_mock()
+        rejected = await serving.create_decision(
+            StructuredDecisionRequest(
+                **JOINT_SCHEMA_REQUEST, images=[image] * num_images
+            )
+        )
+        assert isinstance(rejected, ErrorResponse)
+        assert rejected.error.code == 400
+        assert f"complete prompt takes {len(ids)} tokens" in rejected.error.message
+        engine.encode.assert_not_called()
+
+        # Reusing the same media still supplies the complete engine input.
+        strategy.max_length = len(ids)
+        retried = await serving.create_decision(
+            StructuredDecisionRequest(
+                **JOINT_SCHEMA_REQUEST, images=[image] * num_images
+            )
+        )
+        assert isinstance(retried, StructuredDecisionResponse)
+        engine.encode.assert_called_once()
+        assert engine.encode.call_args.args[0]["prompt_token_ids"] == ids
 
 
 @pytest.mark.asyncio
@@ -714,10 +954,17 @@ async def test_joint_schema_video_audio_follows_model_modalities(
 
     strategy.__dict__["_connector"] = FakeConnector()
 
-    async def process_for_engine_async(prompt, arrival_time):
+    async def process_for_engine_async(prompt, arrival_time, *, skip_mm_cache=False):
         rendered.clear()
         rendered.update(prompt)
-        return mm_input(prompt["prompt_token_ids"], {}, {}, {})
+        rendered["skip_mm_cache"] = skip_mm_cache
+        video_pad = tokenizer.convert_tokens_to_ids("<|video_pad|>")
+        ids = [
+            token
+            for pad in prompt["prompt_token_ids"]
+            for token in ([pad] * 3 if pad == video_pad else [pad])
+        ]
+        return mm_input(ids, {}, {}, {})
 
     renderer = strategy.context.online_renderer.renderer
     monkeypatch.setattr(renderer, "process_for_engine_async", process_for_engine_async)
@@ -729,16 +976,41 @@ async def test_joint_schema_video_audio_follows_model_modalities(
     )
     assert isinstance(response, StructuredDecisionResponse)
     if isinstance(strategy, ClefFlashStrategy):
+        assert rendered["skip_mm_cache"] is True
         assert rendered["multi_modal_data"] == {"video": [video]}
         assert rendered["mm_processor_kwargs"] == {
             "videos_kwargs": {"do_sample_frames": False}
         }
     else:
+        assert rendered["skip_mm_cache"] is False
         assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
         assert rendered["mm_processor_kwargs"] == {
             "images_kwargs": {"size": strategy.IMAGE_SIZE},
             "use_audio_in_video": True,
         }
+
+    if isinstance(strategy, ClefFlashStrategy):
+        ids = engine.encode.call_args.args[0]["prompt_token_ids"]
+        assert ids.count(tokenizer.convert_tokens_to_ids("<|video_pad|>")) == 3
+        strategy.max_length = len(ids) - 1
+        engine.encode.reset_mock()
+        rejected = await serving.create_decision(
+            StructuredDecisionRequest(
+                **JOINT_SCHEMA_REQUEST, videos=["https://example.org/talking.mp4"]
+            )
+        )
+        assert isinstance(rejected, ErrorResponse)
+        assert rejected.error.code == 400
+        engine.encode.assert_not_called()
+        strategy.max_length = len(ids)
+        retried = await serving.create_decision(
+            StructuredDecisionRequest(
+                **JOINT_SCHEMA_REQUEST, videos=["https://example.org/talking.mp4"]
+            )
+        )
+        assert isinstance(retried, StructuredDecisionResponse)
+        engine.encode.assert_called_once()
+        assert engine.encode.call_args.args[0]["prompt_token_ids"] == ids
 
     # A video without a decodable soundtrack is watched silently.
     response = await serving.create_decision(
