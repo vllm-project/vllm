@@ -237,6 +237,20 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_request_chat_template_maps_to_invalid_request() {
+        let api_error = chat_submit_error(
+            "tokenize failed",
+            vllm_chat::Error::UntrustedRequestChatTemplate,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.message,
+            "Chat template is passed with request, but --trust-request-chat-template is not set. \
+             Refused request with untrusted chat template."
+        );
+    }
+
+    #[test]
     fn chat_template_render_failure_stays_internal() {
         let error = vllm_chat::Error::ChatTemplate(
             "failed to render jinja template: unknown function".to_string(),

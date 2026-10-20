@@ -394,17 +394,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// Whether to trust the chat template provided in the request. If False,
-    /// the server will always use the chat template specified by
-    /// `--chat-template` or the ones from tokenizer.
-    #[arg(
-        long,
-        visible_alias = "no-trust-request-chat-template",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub trust_request_chat_template: Option<Unsupported>,
-
     /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
     /// and `media_io_kwargs`). If False, the server rejects non-empty values
     /// because they can change multimodal preprocessing resource usage.

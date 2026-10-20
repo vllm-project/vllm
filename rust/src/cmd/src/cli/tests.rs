@@ -194,6 +194,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -1097,6 +1098,7 @@ fn frontend_args_accept_json() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -1769,6 +1771,7 @@ fn serve_args_accept_handshake_aliases() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        trust_request_chat_template: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -1924,6 +1927,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
@@ -2019,6 +2023,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
@@ -2099,6 +2104,28 @@ fn serve_frontend_config_does_not_manage_engine_without_local_engines() {
 }
 
 #[test]
+fn frontend_config_trusts_request_chat_template_from_args_json() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","trust_request_chat_template":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().trust_request_chat_template);
+}
+
+#[test]
 fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -2158,6 +2185,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            trust_request_chat_template: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
