@@ -91,10 +91,10 @@ print(response["choices"][0]["token_ids"])
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
-- `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs` and `token_ids` are dropped so they don't expose it.
+- `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - `stream: true` isn't supported yet.
-- `/cohere/v2/chat/render` drops the Cohere document map from `parse_context`, so citations come back without their document sources.
+- Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
 
 ### Logprobs
 

@@ -528,7 +528,7 @@ class ServingTokens(GenerateBaseServing):
             except (ValueError, VLLMValidationError) as e:
                 return self.create_error_response(e)
             # Like coupled chat, hide per-token metadata when a parser hides
-            # the reasoning: logprobs or token IDs would leak it.
+            # the reasoning: logprobs, token IDs or sampling masks would leak it.
             hide_metadata = (
                 derender_request is not None and not derender_request.include_reasoning
             )
@@ -539,6 +539,7 @@ class ServingTokens(GenerateBaseServing):
                 if hide_metadata:
                     fields["logprobs"] = None
                     fields["token_ids"] = None
+                    fields["sampling_mask"] = None
                 derender_choices.append(
                     GenerateDerenderChoice(message=message, **fields)
                 )
