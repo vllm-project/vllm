@@ -1144,6 +1144,8 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
+            # Restarting at token 0: offer every chunk again.
+            group_state.next_stored_chunk_idx = 0
 
         if req_status.transfer_jobs:
             logger.debug(

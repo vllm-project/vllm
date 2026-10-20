@@ -1429,7 +1429,9 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_request_preemption(request_runner, async_scheduling: bool):
+@pytest.mark.parametrize("cpu_hit", [True, False])
+def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: bool):
+    """Resume reloads the chunks, or re-stores them if the CPU tier lost them."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -1480,16 +1482,23 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     free_block_queue.num_free_blocks = num_free_blocks_empty
     runner.scheduler.reset_prefix_cache()
 
-    # request should now return from preemption
-    # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 3
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(
-        decoded_tokens=[0] * block_size,
-        expected_loaded=(0, 1, 2, 3, 4, 5, 6, 7, 8),
-    )
+    if cpu_hit:
+        # request should now return from preemption
+        # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
+        runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 3
+        runner.run(
+            decoded_tokens=[0] * block_size,
+            expected_loaded=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        )
+    else:
+        # lookup misses: recompute and re-store [0, ..., 8], then store [9, 10, 11]
+        runner.run(
+            decoded_tokens=[0] * block_size,
+            expected_stored=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        )
 
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
