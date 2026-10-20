@@ -52,12 +52,11 @@ from vllm.utils.flashinfer import (
     use_trtllm_attention,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
-    is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
     nvfp4_split_data_scale,
@@ -84,6 +83,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.dcp import (
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
+    mask_dcp_empty_shards_,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
@@ -91,6 +91,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    is_quantized_kv_cache,
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -315,18 +316,104 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
+class TrtllmDCPContextWrapper:
+    """trtllm-gen stand-in for the native wrapper in the DCP context pass."""
+
+    # Plan state checked by FlashInferImpl.forward(), as on the native wrapper.
+    _window_left = -1
+    _logits_soft_cap = 0.0
+    _causal = False
+
+    @staticmethod
+    def fits_workspace(qo_indptr_cpu: torch.Tensor, num_qo_heads: int) -> bool:
+        # Mirrors the LSE softmax-stats carve-out in FlashInfer's trtllm-gen
+        # launcher: heads * batch * round_up(max_q_len, 256) float2s + 1 MiB.
+        batch_size = qo_indptr_cpu.shape[0] - 1
+        max_q_len = int((qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).max())
+        stats_bytes = num_qo_heads * batch_size * round_up(max_q_len, 256) * 8
+        return stats_bytes + (1 << 20) <= _get_trtllm_workspace_buffer().nbytes
+
+    def plan(
+        self,
+        *,
+        qo_indptr: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        causal: bool,
+        sm_scale: float,
+        window_left: int,
+        logits_soft_cap: float | None,
+        **kwargs,
+    ) -> None:
+        assert not causal and window_left == -1 and not logits_soft_cap
+        device = block_tables.device
+        self._block_tables = block_tables
+        self._seq_lens = seq_lens.to(device, non_blocking=True)
+        self._cum_seq_lens_q = qo_indptr.to(device, non_blocking=True)
+        self._cum_seq_lens_kv = paged_kv_indptr.to(device, non_blocking=True)
+        self._max_q_len = int((qo_indptr[1:] - qo_indptr[:-1]).max())
+        self._max_kv_len = int(seq_lens.max())
+        self._has_empty_ctx = bool((seq_lens == 0).any())
+        self._sm_scale = sm_scale
+
+    def run(
+        self,
+        q: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
+        k_scale: float,
+        v_scale: float,
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert return_lse
+        q = canonicalize_singleton_dim_strides(q.contiguous())
+        # trtllm-gen writes neither the output nor the LSE of requests without
+        # local context; the combine weights them by 0, so the output must be
+        # finite and the LSE -inf.
+        out = torch.zeros_like(q) if self._has_empty_ctx else torch.empty_like(q)
+        lse = torch.empty(q.shape[:2], dtype=torch.float32, device=q.device)
+        if self._max_kv_len > 0:
+            trtllm_batch_context_with_kv_cache(
+                query=q,
+                kv_cache=kv_cache,
+                workspace_buffer=_get_trtllm_workspace_buffer(),
+                block_tables=self._block_tables,
+                seq_lens=self._seq_lens,
+                max_q_len=self._max_q_len,
+                max_kv_len=self._max_kv_len,
+                bmm1_scale=self._sm_scale * k_scale,
+                bmm2_scale=v_scale,
+                batch_size=self._seq_lens.shape[0],
+                cum_seq_lens_q=self._cum_seq_lens_q,
+                cum_seq_lens_kv=self._cum_seq_lens_kv,
+                causal=False,
+                return_lse=True,
+                lse=lse,
+                out=out,
+            )
+        if self._has_empty_ctx:
+            mask_dcp_empty_shards_(lse, self._seq_lens, self._cum_seq_lens_q)
+        return out, lse
+
+
 class BatchDCPPrefillWrapper:
     def __init__(
         self,
         kv_layout: str,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
+        use_trtllm_context: bool = False,
     ):
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        self._context = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
+        self._native_context = BatchPrefillWithPagedKVCacheWrapper(
+            workspace_buffer, kv_layout
+        )
+        self._trtllm_context = TrtllmDCPContextWrapper() if use_trtllm_context else None
+        # The context-pass wrapper planned for this step.
+        self._context: BatchPrefillWithPagedKVCacheWrapper | TrtllmDCPContextWrapper
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
 
     def plan(
@@ -348,8 +435,16 @@ class BatchDCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
+        block_tables: torch.Tensor,
     ):
         """Plan the prefill operation with given parameters."""
+        self._context = self._native_context
+        if self._trtllm_context is not None and (
+            TrtllmDCPContextWrapper.fits_workspace(
+                qo_indptr_cpu, num_qo_heads * dcp_world_size
+            )
+        ):
+            self._context = self._trtllm_context
         self._context.plan(
             qo_indptr=qo_indptr_cpu,
             paged_kv_indptr=paged_kv_indptr_cpu,
@@ -368,6 +463,7 @@ class BatchDCPPrefillWrapper:
             kv_data_type=kv_cache_dtype,
             fixed_split_size=prefill_fixed_split_size,
             disable_split_kv=disable_split_kv,
+            block_tables=block_tables,
         )
         self._new_tokens.plan(
             qo_indptr=qo_indptr_cpu,
@@ -949,6 +1045,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.sm_scale = self.global_hyperparameters.sm_scale
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
+        # The DCP prefill context pass runs on trtllm-gen when available, with
+        # an unquantized KV cache and no sliding window or soft-capping.
+        self.use_trtllm_dcp_prefill = (
+            self.use_dcp
+            and can_use_trtllm_attention(
+                self.num_qo_heads, self.num_kv_heads, is_prefill=True
+            )
+            and self.kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and self.window_left == -1
+            and not self.logits_soft_cap
+        )
+        if self.use_trtllm_dcp_prefill:
+            logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
         if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
             raise NotImplementedError(
@@ -1278,6 +1387,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
+                    use_trtllm_context=self.use_trtllm_dcp_prefill,
                 )
             else:
                 if self.has_sinks and (
@@ -1693,6 +1803,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_cache_dtype=self.kv_cache_dtype,
                         prefill_fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
+                        block_tables=block_table_tensor[prefill_start:],
                     )
                 else:
                     assert isinstance(
