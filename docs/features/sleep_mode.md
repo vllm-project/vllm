@@ -226,6 +226,9 @@ resource restrictions still apply; see the
 The experimental configuration was tested on NVIDIA H20 with driver
 580.126.09, NCCL 2.29.7, and FlashInfer 0.6.18.post1. This does not establish
 compatibility with other GPU, driver, or communication-library combinations.
+Follow-up validation on a 4x H20 host with the 580.126.09 kernel-mode driver
+retained passed 20/20 whole-process checkpoint/restore rounds at TP2 and TP4
+on UMD 610.57.04 and at TP2 on UMD 615.71.09; see the PR discussion.
 
 Only a single node with tensor parallel size 1, 2, or 4 is accepted. Pipeline,
 data, and context parallelism, external cache transfer, and sleep level 2
@@ -257,8 +260,21 @@ When that pass is enabled, the same backend restriction and workspace hooks
 apply. A configuration using only NCCL must also disable that compiler pass.
 The FlashInfer `mnnvl` backend is not accepted:
 its multicast reconstruction failed after driver restoration in driver 580
-tests. NCCL NVLS is also disabled because its persistent shared allocations
-prevented driver checkpoint in those tests. Performance costs of these
+tests. NVIDIA reports this is a user-mode driver (UMD) defect in release 580
+that should be fixed in release 595 and above; the kernel-mode driver may
+stay at 580 (see ai-dynamo/snapshot#510). NCCL NVLS is also disabled because
+its persistent shared allocations prevented driver checkpoint in those tests.
+In a whole-process checkpoint setup (live engine, no sleep stage),
+checkpoint/restore of TP2/TP4 engines with the default communication stack
+(FlashInfer `trtllm`, custom all-reduce, symmetric-memory all-reduce, and
+NCCL NVLS all enabled) passed 20/20 rounds on UMD 610.57.04 (TP2 and TP4) and
+UMD 615.71.09 (TP2), with CUDA graphs preserved. This executor's combined
+sleep-then-checkpoint flow has not yet been validated on UMD 595 or later, so
+the restrictions above remain required until that validation is done. When
+running a newer UMD from a cuda-compat package, the host-side checkpoint
+tooling must not stay on the 580 UMD while the worker processes run a newer
+one; a 580 CLI against newer-UMD workers hangs at freeze. Performance costs
+of these
 restrictions must be measured against the workload's default communication
 configuration; retaining GPU peer-to-peer communication alone does not establish
 unchanged inference performance.
