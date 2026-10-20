@@ -91,15 +91,6 @@ class LayeredPrefillScheduler(Scheduler):
             ),
             num_scheduled_tokens=tokens,
             total_num_scheduled_tokens=sum(tokens.values()),
-            block_table_updates=(
-                {
-                    req_id: blocks
-                    for req_id, blocks in output.block_table_updates.items()
-                    if req_id in req_ids
-                }
-                if output.block_table_updates is not None
-                else None
-            ),
         )
 
     def _enqueue_batch(self, output: SchedulerOutput) -> None:
@@ -116,7 +107,6 @@ class LayeredPrefillScheduler(Scheduler):
         )
         first = replace(
             output,
-            num_common_prefix_blocks=[0] * len(output.num_common_prefix_blocks),
             finished_req_ids=set(),
             preempted_req_ids=set(),
             new_block_ids_to_zero=None,
@@ -334,7 +324,6 @@ class LayeredPrefillScheduler(Scheduler):
                 decode.has_structured_output_requests
                 or prefill.has_structured_output_requests
             ),
-            block_table_updates=None,
         )
 
     def get_grammar_bitmask(

@@ -37,8 +37,10 @@ from vllm.v1.kv_cache_interface import (
 from .utils import (
     create_request,
     create_vllm_config,
+    expand_strided_descs,
     make_kv_cache_config,
     make_nixl_scheduler,
+    maybe_update_block_size,
 )
 
 
@@ -62,6 +64,7 @@ def region_pull_worker():
     worker._recving_transfers = {}
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -694,6 +697,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
+    worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
     worker._recving_transfers = {}
@@ -1027,7 +1031,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         kv_connector="NixlConnector",
         kv_role="kv_consumer",
     )
-    block_size = 16
+    block_size = maybe_update_block_size(16)
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
@@ -2200,7 +2204,8 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         )
         for block in range(count)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    local_descs = expand_strided_descs(worker.src_blocks_data)
+    assert local_descs[:, 0].tolist() == expected_addrs
 
 
 @pytest.mark.cpu_test
@@ -2283,19 +2288,21 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker.num_regions == 2 and worker.num_descs == 24
     # Kernel-granularity block lens; TP-independent for MLA hybrids.
     assert worker.block_len_per_layer == [unified_page // 3] * 2
-    # Split handles must replicate every FA descriptor (MLA isn't head-sharded).
-    assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
-    # FA descs: 2 regions x 12 kernel blocks, page stride = kernel page.
-    # Mamba descs: 2 regions x (3 conv sub-projections + 1 ssm) x 4 blocks.
-    assert worker.src_blocks_data.shape == (24 + 32, 3)
-    fa_descs = worker.src_blocks_data[:24]
+    # FA runs: one per region x 12 kernel blocks, page stride = block_stride.
+    # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
+    assert worker.src_blocks_data.shape == (2 + 8, 5)
+    fa_runs = worker.src_blocks_data[:2]
+    assert fa_runs[:, 1].tolist() == [unified_page // 3] * 2
+    assert fa_runs[:, 3].tolist() == [block_stride] * 2
+    assert fa_runs[:, 4].tolist() == [12] * 2
+    assert worker.src_blocks_data[2:, 4].tolist() == [4] * 8
     expected_addrs = [
         tensor.data_ptr() + block * block_stride
         for tensor in tensors
         for block in range(12)
     ]
+    fa_descs = expand_strided_descs(fa_runs)
     assert fa_descs[:, 0].tolist() == expected_addrs
-    assert all(size == unified_page // 3 for size in fa_descs[:, 1])
     worker.nixl_wrapper.register_memory.assert_called_once()
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
