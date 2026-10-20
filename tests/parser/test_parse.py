@@ -631,3 +631,37 @@ def test_prompt_closed_streaming_count_parses_once(tokenizer, case, monkeypatch)
 
     assert count == expected
     assert single_passes == 1
+
+
+# Byte-level BPE splits these characters across several tokens.
+MULTIBYTE_REASONED_OUTPUT = (
+    "<think>\nlet me think about 𝔘𝔫𝔦𝔠𝔬𝔡𝔢\n</think>\n\n" + PLAIN_TEXT
+)
+
+
+def test_incremental_count_matches_single_pass(tokenizer):
+    output_ids = encode(tokenizer, MULTIBYTE_REASONED_OUTPUT)
+    expected = reasoning_parser(tokenizer).count_reasoning_tokens(output_ids)
+    assert expected > 0
+
+    parser = reasoning_parser(tokenizer)
+    for i in range(1, len(output_ids) + 1):
+        count = parser.count_reasoning_tokens(tuple(output_ids[:i]))
+
+    assert count == expected
+
+
+def test_incremental_count_holds_split_character_after_single_pass(tokenizer):
+    """A delta ending mid-character right after a single-pass parse must
+    keep the previous count instead of resetting the counting engine."""
+    output_ids = encode(tokenizer, MULTIBYTE_REASONED_OUTPUT)
+    split = next(
+        i
+        for i in range(2, len(output_ids))
+        if tokenizer.decode(output_ids[:i]).endswith("\ufffd")
+    )
+    parser = reasoning_parser(tokenizer)
+    before = parser.count_reasoning_tokens(tuple(output_ids[: split - 1]))
+    assert before > 0
+
+    assert parser.count_reasoning_tokens(tuple(output_ids[:split])) == before
