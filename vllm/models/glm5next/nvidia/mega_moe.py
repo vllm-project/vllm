@@ -107,14 +107,14 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         weight_block_size: tuple[int, int],
         **kwargs,
     ):
-        self.weight_block_size = tuple(weight_block_size)
+        block_m, block_k = weight_block_size
+        self.weight_block_size = (block_m, block_k)
         # Shards holding raw block-FP8 values: (local expert, shard) and
         # shared-expert shards. Filled by the loaders, drained by requantize.
         self._raw_shards: set[tuple[int, str]] = set()
         self._raw_shared_shards: set[str] = set()
         self._shared_block_fp8 = False
         super().__init__(vllm_config, weight_format=MEGA_MOE_MXFP8, **kwargs)
-        block_m, block_k = self.weight_block_size
         h, i = self.hidden_size, self.intermediate_size
         if h % block_m or h % block_k or i % block_m or i % block_k:
             raise ValueError(

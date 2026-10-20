@@ -20,6 +20,8 @@ from vllm.models.glm5next.nvidia.mega_moe import (
 BLOCK = (128, 128)
 HIDDEN, INTER = 256, 128
 FP8 = torch.float8_e4m3fn
+# Global ids of the experts _experts() places on this rank.
+LOCAL_EXPERTS = slice(2, 4)
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +184,8 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
     )
 
 
-def _expected_routed(ckpt, local=slice(2, 4)):
+def _expected_routed(ckpt):
+    local = LOCAL_EXPERTS
     w13, s13 = requant_block_fp8_to_ue8m0(
         ckpt["w13_weight"][local], ckpt["w13_weight_scale_inv"][local]
     )
