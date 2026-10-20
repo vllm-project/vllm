@@ -89,6 +89,8 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    # See CommonAttentionMetadata.span_ranges.
+    span_ranges: torch.Tensor | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -258,6 +260,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            span_ranges=common_attn_metadata.span_ranges,
         )
         if self.max_seqs_64_segments > 0 and (
             self.max_seqs_64_segments < seq_lens.shape[0]
@@ -718,6 +721,7 @@ class TritonAttentionImpl(AttentionImpl):
             mm_prefix_range=mm_prefix_range_tensor,
             rswa_prefix_lens=attn_metadata.rswa_prefix_lens,
             rswa_window=attn_metadata.rswa_window,
+            span_ranges=attn_metadata.span_ranges,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,

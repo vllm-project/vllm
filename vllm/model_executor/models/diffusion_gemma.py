@@ -27,6 +27,7 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoModel, DiffusionGemmaConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
@@ -738,6 +739,47 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
+        # Logprobs computed on a block's converging step, emitted on its
+        # commit step. Filled by DiffusionSampler; kept here so a canvas-swap
+        # stash can carry them.
+        self.pending_logprobs: dict[int, LogprobsTensors] = {}
+
+        # Canvas swap: a preempted request's in-flight block is stashed in
+        # host memory and restored after its re-prefill, resuming at the saved
+        # step. Its committed prefix comes back through the re-prefill.
+        self.canvas_swap = envs.VLLM_DIFFUSION_CANVAS_SWAP
+        self.swap_cap = envs.VLLM_DIFFUSION_CANVAS_SWAP_CAP
+        self.canvas_stash: dict[str, dict[str, Any]] = {}
+        self.pending_restore: dict[int, str] = {}  # slot -> req_id
+        self.preempted_ids: set[str] = set()
+
+    # The in-flight block. The rest of a slot's state is rebuilt from the
+    # request when it is re-added.
+    _SWAP_FIELDS = (
+        "canvas",
+        "argmax_canvas",
+        "step",
+        "is_encoder_phase",
+        "confident",
+        "accepted_canvas_history",
+        "accepted_canvas_history_len",
+        "self_conditioning_embeds",
+    )
+
+    def stash_slot(self, slot_idx: int) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            f: getattr(self, f)[slot_idx].to("cpu", copy=True)
+            for f in self._SWAP_FIELDS
+        }
+        entry["logprobs"] = self.pending_logprobs.get(slot_idx)
+        return entry
+
+    def restore_slot(self, slot_idx: int, entry: dict[str, Any]) -> None:
+        for f in self._SWAP_FIELDS:
+            getattr(self, f)[slot_idx].copy_(entry[f])
+        if entry["logprobs"] is not None:
+            self.pending_logprobs[slot_idx] = entry["logprobs"]
+
     def init_canvas(self, slot_indices: torch.Tensor) -> None:
         """Initialize canvas with random tokens for the given slots.
 
@@ -837,6 +879,30 @@ class DiffusionGemmaRequestStates:
         )
 
 
+def _parse_pack_spans(
+    value: str, canvas_length: int
+) -> tuple[bool, tuple[int, int, int] | None, bool]:
+    """Parse VLLM_DIFFUSION_PACK_SPANS into (armed, (lenA, lenB, split),
+    selective). An inert setting is armed with no layout."""
+    if value in ("", "0"):
+        return False, None, False
+    if value == "inert":
+        return True, None, False
+    parts = value.split(",")
+    if len(parts) not in (3, 4) or (len(parts) == 4 and parts[3] != "selective"):
+        raise ValueError(
+            "VLLM_DIFFUSION_PACK_SPANS must be 'inert' or "
+            f"'<lenA>,<lenB>,<split>[,selective]', got {value!r}"
+        )
+    len_a, len_b, split = (int(x) for x in parts[:3])
+    if len_a <= 0 or len_b <= 0 or not 0 < split < canvas_length:
+        raise ValueError(
+            f"VLLM_DIFFUSION_PACK_SPANS={value!r}: need lenA, lenB > 0 and "
+            f"0 < split < {canvas_length}"
+        )
+    return True, (len_a, len_b, split), len(parts) == 4
+
+
 class DiffusionGemmaModelState(ModelState):
     """ModelState for DiffusionGemma.
 
@@ -881,6 +947,11 @@ class DiffusionGemmaModelState(ModelState):
             # the current step, so we add 1 to match the same behavior.
             stability_threshold=self.gen_config["stability_threshold"] + 1,
         )
+        if self.diffusion_states.canvas_swap:
+            logger.info(
+                "DiffusionGemma canvas swap enabled (up to %d stashed canvases).",
+                self.diffusion_states.swap_cap,
+            )
         # compute_logits reads the step's shared allowed set from here.
         self.model.diffusion_states = self.diffusion_states
         self._req_id_to_index: dict[str, int] = {}
@@ -893,6 +964,26 @@ class DiffusionGemmaModelState(ModelState):
         self._causal_buf = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
+
+        # Canvas packing (VLLM_DIFFUSION_PACK_SPANS, see envs.py). Each packed
+        # slot carries (start, end, owner) ranges for both tenants' prompts
+        # and canvas spans. Positions past the first canvas are unowned, so
+        # packed requests must fit in one canvas (max_tokens <= canvas_length).
+        self._pack_armed, self._pack_cfg, self._pack_selective = _parse_pack_spans(
+            envs.VLLM_DIFFUSION_PACK_SPANS, canvas_length
+        )
+        self._pack_backend_checked = False
+        if self._pack_armed:
+            # Slot-indexed table, gathered each step into the batch-ordered
+            # persistent buffer the kernel reads (like _causal_buf).
+            self._span_master = torch.zeros(
+                self.max_num_reqs, 4, 3, dtype=torch.int32, device=device
+            )
+            self._span_buf = torch.zeros_like(self._span_master)
+            logger.info(
+                "DiffusionGemma canvas packing enabled (%s).",
+                self._pack_cfg if self._pack_cfg is not None else "inert",
+            )
 
         # Persistent inputs_embeds buffer — required so FULL CUDA graph
         # capture and runtime point at the SAME memory address.
@@ -946,16 +1037,86 @@ class DiffusionGemmaModelState(ModelState):
         pass
 
     def add_request(self, req_index: int, new_req_data: Any) -> None:
-        self._req_id_to_index[new_req_data.req_id] = req_index
-        self.diffusion_states.add_request(req_index)
-        if not new_req_data.req_id.startswith("_warmup_"):
+        req_id = new_req_data.req_id
+        self._req_id_to_index[req_id] = req_index
+        states = self.diffusion_states
+        states.add_request(req_index)
+        prompt_len: int | None = None
+        if not req_id.startswith("_warmup_"):
             prompt_len = len(new_req_data.prompt_token_ids)
-            self.diffusion_states.prompt_len[req_index].fill_(prompt_len)
+            states.prompt_len[req_index].fill_(prompt_len)
+        if self._pack_armed:
+            self._set_span_ranges(req_index, req_id, prompt_len)
+        if states.canvas_swap:
+            # Restored in DiffusionSampler._finish_prefills, after the
+            # re-prefill rebuilds the committed prefix.
+            states.pending_restore.pop(req_index, None)
+            if req_id in states.canvas_stash:
+                states.pending_restore[req_index] = req_id
+
+    def _set_span_ranges(
+        self, req_index: int, req_id: str, prompt_len: int | None
+    ) -> None:
+        self._span_master[req_index] = 0
+        if self._pack_cfg is None or prompt_len is None:
+            return
+        len_a, len_b, split = self._pack_cfg
+        if prompt_len != len_a + len_b:
+            if self._pack_selective:
+                # Runs unpacked. Membership depends only on the prompt length,
+                # so a resumed request gets the same layout back.
+                return
+            raise ValueError(
+                f"VLLM_DIFFUSION_PACK_SPANS expects prompts of lenA + lenB = "
+                f"{len_a + len_b} tokens, but request {req_id} has {prompt_len}"
+            )
+        cl = self.diffusion_states.canvas_length
+        self._span_master[req_index] = async_tensor_h2d(
+            [
+                (0, len_a, 0),
+                (len_a, prompt_len, 1),
+                (prompt_len, prompt_len + split, 0),
+                (prompt_len + split, prompt_len + cl, 1),
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    def note_preempted(self, req_ids: set[str]) -> None:
+        if self.diffusion_states.canvas_swap:
+            self.diffusion_states.preempted_ids.update(req_ids)
 
     def remove_request(self, req_id: str) -> None:
         idx = self._req_id_to_index.pop(req_id, None)
+        states = self.diffusion_states
+        if states.canvas_swap:
+            preempted = req_id in states.preempted_ids
+            states.preempted_ids.discard(req_id)
+            if idx is not None:
+                states.pending_restore.pop(idx, None)
+                if preempted:
+                    self._stash_canvas(req_id, idx)
+                else:
+                    states.canvas_stash.pop(req_id, None)
         if idx is not None:
-            self.diffusion_states.remove_request(idx)
+            states.remove_request(idx)
+            if self._pack_armed:
+                self._span_master[idx] = 0
+
+    def _stash_canvas(self, req_id: str, idx: int) -> None:
+        states = self.diffusion_states
+        entry = states.stash_slot(idx)
+        # A slot still in its (re-)prefill has no block progress yet. Stashing
+        # it would overwrite this request's stash from an earlier preemption.
+        if bool(entry["is_encoder_phase"]) and int(entry["step"]) == 0:
+            return
+        states.canvas_stash.pop(req_id, None)
+        if states.swap_cap <= 0:
+            return
+        while len(states.canvas_stash) >= states.swap_cap:
+            # FIFO eviction: the evicted request restarts its block.
+            states.canvas_stash.pop(next(iter(states.canvas_stash)))
+        states.canvas_stash[req_id] = entry
 
     def prepare_inputs_embeds(
         self,
@@ -1103,6 +1264,23 @@ class DiffusionGemmaModelState(ModelState):
             self._causal_buf[actual_num_reqs:num_reqs] = 0
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
+        span_ranges: torch.Tensor | None = None
+        if self._pack_armed:
+            if not self._pack_backend_checked:
+                names = {g.backend.get_name() for gs in attn_groups for g in gs}
+                if names != {"TRITON_ATTN"}:
+                    raise ValueError(
+                        "VLLM_DIFFUSION_PACK_SPANS requires the TRITON_ATTN "
+                        f"attention backend, got {sorted(names)}"
+                    )
+                self._pack_backend_checked = True
+            self._span_buf[:actual_num_reqs] = self._span_master[slots]
+            if actual_num_reqs < num_reqs:
+                self._span_buf[actual_num_reqs:num_reqs] = 0
+            span_ranges = self._span_buf[:num_reqs]
+            if self._pack_cfg is not None:
+                self._remap_packed_positions(input_batch, actual_num_reqs)
+
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -1116,7 +1294,45 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+            span_ranges=span_ranges,
         )
+
+    def _remap_packed_positions(self, input_batch, actual_num_reqs: int) -> None:
+        """Rewrite RoPE positions of packed slots so each tenant sees the
+        geometry of a solo request: B's prompt starts at 0, and each canvas
+        span continues its own tenant's prompt. Without this the model reads
+        the positional gap as already-generated text.
+
+        Runs after the slot mappings are built from the original positions.
+        The attention mask works on KV offsets, not on this tensor.
+        """
+        assert self._pack_cfg is not None
+        if actual_num_reqs == 0:
+            return
+        len_a, len_b, split = self._pack_cfg
+        p_end = len_a + len_b
+        cl = self.diffusion_states.canvas_length
+        pos = input_batch.positions
+        tok_idx = torch.arange(pos.shape[0], device=pos.device)
+        rows = torch.searchsorted(
+            input_batch.query_start_loc[1 : actual_num_reqs + 1],
+            tok_idx,
+            right=True,
+        ).clamp_(max=actual_num_reqs - 1)
+        span = self._span_buf[:actual_num_reqs]
+        packed = (span[:, :, 0] < span[:, :, 1]).any(dim=-1)[rows]
+        tok_valid = tok_idx < input_batch.num_tokens
+        packed &= tok_valid
+        new_pos = torch.where(packed & (pos >= len_a) & (pos < p_end), pos - len_a, pos)
+        new_pos = torch.where(
+            packed & (pos >= p_end) & (pos < p_end + split), pos - len_b, new_pos
+        )
+        new_pos = torch.where(
+            packed & (pos >= p_end + split) & (pos < p_end + cl),
+            pos - len_a - split,
+            new_pos,
+        )
+        pos.copy_(new_pos)
 
     num_new_sampled_tokens_per_step: int = 0
 
@@ -1199,7 +1415,7 @@ class DiffusionSampler:
         # Per-slot stash for logprobs computed on the converging denoise step.
         # Populated after the post-sample kernel detects convergence; consumed
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
-        self._pending_logprobs: dict[int, LogprobsTensors] = {}
+        self._pending_logprobs = diffusion_states.pending_logprobs
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -1291,10 +1507,37 @@ class DiffusionSampler:
         )
         states.init_canvas(ps_gpu)
         states.apply_seed_canvases(ps, ps_gpu)
+        resume_commit = self._restore_stashed_canvases(ps)
         self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
             ps_gpu
         ]
         states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+        if resume_commit:
+            states.is_encoder_phase[
+                async_tensor_h2d(
+                    resume_commit,
+                    dtype=torch.int64,
+                    device=states.is_encoder_phase.device,
+                )
+            ] = True
+
+    def _restore_stashed_canvases(self, slots_np: np.ndarray) -> list[int]:
+        """Overwrite the fresh canvas of resumed requests with their stashed
+        block. Returns the slots that were preempted after converging, which
+        must run their commit pass next."""
+        states = self.diffusion_states
+        if not states.pending_restore:
+            return []
+        resume_commit: list[int] = []
+        for slot in slots_np.tolist():
+            req_id = states.pending_restore.pop(slot, None)
+            entry = states.canvas_stash.pop(req_id, None) if req_id else None
+            if entry is None:
+                continue
+            states.restore_slot(slot, entry)
+            if bool(entry["is_encoder_phase"]):
+                resume_commit.append(slot)
+        return resume_commit
 
     def _handle_prefill(
         self,

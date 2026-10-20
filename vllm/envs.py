@@ -91,6 +91,9 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
+    VLLM_DIFFUSION_PACK_SPANS: str = ""
+    VLLM_DIFFUSION_CANVAS_SWAP: bool = False
+    VLLM_DIFFUSION_CANVAS_SWAP_CAP: int = 64
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -644,6 +647,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
+    ),
+    # DiffusionGemma canvas packing: two tenants share one canvas behind a
+    # span-isolated attention mask (TRITON_ATTN only). Unset disables it.
+    # "inert" arms the plumbing with an all-zero span table (a no-op).
+    # "<lenA>,<lenB>,<split>" packs every request whose prompt is the two
+    # tenants' prompts concatenated (lenA + lenB tokens); tenant A owns the
+    # first `split` canvas positions and tenant B the rest. A fourth field
+    # "selective" lets prompts of any other length run unpacked instead of
+    # raising.
+    "VLLM_DIFFUSION_PACK_SPANS": lambda: os.getenv(
+        "VLLM_DIFFUSION_PACK_SPANS", ""
+    ).strip(),
+    # DiffusionGemma canvas swap: on preemption, stash a request's in-flight
+    # denoising state in host RAM and restore it after the re-prefill, so the
+    # block resumes at its saved step instead of restarting.
+    "VLLM_DIFFUSION_CANVAS_SWAP": lambda: bool(
+        int(os.getenv("VLLM_DIFFUSION_CANVAS_SWAP", "0"))
+    ),
+    # Maximum number of stashed canvases (FIFO-evicted). Each entry holds about
+    # canvas_length * hidden_size * 4 bytes, ~2.3 MB at canvas_length=256.
+    "VLLM_DIFFUSION_CANVAS_SWAP_CAP": lambda: int(
+        os.getenv("VLLM_DIFFUSION_CANVAS_SWAP_CAP", "64")
     ),
     # If set, enable GPU<->CPU synchronization checking around the worker's
     # `execute_model` and `sample_tokens` calls, via PyTorch's sync debug mode

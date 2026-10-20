@@ -465,6 +465,15 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
+    span_ranges: torch.Tensor | None = None
+    """(batch_size, max_span_ranges, 3) int32 ``(start, end, owner)`` ranges
+    over absolute positions, for DiffusionGemma canvas packing. A query inside
+    an owned range attends only to keys that are unowned or have the same
+    owner; queries outside every range are unrestricted. Rows with
+    ``start >= end`` are inert. The tensor must be a persistent buffer
+    updated in place so FULL CUDA graph replay sees the latest values.
+    None disables. TRITON_ATTN only."""
+
     replayssm_decode_base_cpu: torch.Tensor | None = None
     """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
     at the current decode run's last full-state write. write_pos counts from
