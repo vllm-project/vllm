@@ -36,14 +36,14 @@ For multi-GPU inference, set `tensor_parallel_size` in the `LLM` class to the de
 
 ```python
 from vllm import LLM
-llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
+llm = LLM("Qwen/Qwen3-0.6B", tensor_parallel_size=4)
 output = llm.generate("San Francisco is a")
 ```
 
 For multi-GPU serving, include `--tensor-parallel-size` when starting the server. For example, to run the API server on 4 GPUs:
 
 ```bash
-vllm serve facebook/opt-13b \
+vllm serve Qwen/Qwen3-0.6B \
      --tensor-parallel-size 4
 ```
 
