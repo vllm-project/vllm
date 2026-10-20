@@ -1909,10 +1909,9 @@ class MoRIIOConnectorWorker:
         # In-progress READ transfers: req_id -> {layer_name: [statuses]}.
         # A KDA layer posts two reads (conv + ssm), so a layer maps to a list.
         self._recving_transfers: defaultdict[ReqId, dict] = defaultdict(dict)
-        # Values are (remote_host, remote_notify_port, transfer_id).
-        # (host, notify port(s) of the prefill ranks to release, transfer id).
+        # (host, notify ports of the prefill ranks to release, transfer id).
         self._recving_transfers_callback_addr: dict[
-            ReqId, tuple[str, str | tuple[str, ...], str]
+            ReqId, tuple[str, tuple[str, ...], str]
         ] = {}
         # Monotonic-clock start times for each in-flight recv transfer.
         # Used by _pop_done_transfers to abort transfers whose RDMA
@@ -2970,9 +2969,9 @@ class MoRIIOConnectorWorker:
                 ]
                 state = self.moriio_wrapper.poll_transfer_batch(statuses)
                 if statuses and state is TransferBatchState.DONE:
-                    host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
+                    host, ports, xfer_id = self._recving_transfers_callback_addr[req_id]
                     done_req_ids.add(xfer_id)
-                    self._send_read_release(xfer_id, host, port)
+                    self._send_read_release(xfer_id, host, ports)
                     to_remove.append(req_id)
                 elif state is TransferBatchState.FAILED:
                     failed_status = next(
@@ -2987,9 +2986,9 @@ class MoRIIOConnectorWorker:
                         failed_status.Code() if failed_status else "unknown",
                     )
                     self._record_failed_recv(req_id)
-                    host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
+                    host, ports, xfer_id = self._recving_transfers_callback_addr[req_id]
                     try:
-                        self._send_read_release(xfer_id, host, port)
+                        self._send_read_release(xfer_id, host, ports)
                     except Exception:
                         logger.exception(
                             "Failed to send error notification for request %s",
@@ -4150,15 +4149,15 @@ class MoRIIOConnectorWorker:
                     self._mamba_reads_this_step.extend(statuses)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
-                    notify_ports[0] if len(notify_ports) == 1 else notify_ports,
+                    notify_ports,
                     transfer_id,
                 )
 
     def _send_read_release(
-        self, transfer_id: str, host: str, ports: str | tuple[str, ...]
+        self, transfer_id: str, host: str, ports: tuple[str, ...]
     ) -> None:
         """Release a READ's blocks on every prefill rank that holds them."""
-        for port in (ports,) if isinstance(ports, str) else ports:
+        for port in ports:
             self.moriio_wrapper.send_notify(
                 transfer_id,
                 host,
