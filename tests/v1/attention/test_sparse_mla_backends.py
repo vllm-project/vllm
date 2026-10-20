@@ -3921,18 +3921,18 @@ def test_sparse_mqa_hisparse_lanes(
 
 @pytest.mark.parametrize(
     ("num_decode_tokens", "max_swap_rows"),
-    [(2, 1), (1, 4)],
+    [(3, 1), (1, 4)],
     ids=["over_capacity", "mixed"],
 )
 def test_hisparse_resident_prefill_reads_residency_by_state_row(
     num_decode_tokens, max_swap_rows
 ):
     """Resident prefill conversion reads each request's residency row through
-    its state slot, at the attention block stride."""
-    topk = torch.zeros((2, 128), dtype=torch.int32, device=DEVICE_TYPE)
-    # [state slots, resident groups, pages]; the leader reads group 1.
+    its state slot, at the attention block stride. An unset slot reads slot 0."""
+    topk = torch.zeros((3, 128), dtype=torch.int32, device=DEVICE_TYPE)
+    # [resident groups, state slots, pages]; the leader reads group 1.
     residency = torch.tensor(
-        [[[7], [3]], [[8], [5]]], dtype=torch.int32, device=DEVICE_TYPE
+        [[[7], [8]], [[3], [5]]], dtype=torch.int32, device=DEVICE_TYPE
     )
     runtime = SimpleNamespace(
         is_group_leader=True,
@@ -3940,16 +3940,16 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
         eager_host_mirror=True,
         max_swap_rows=max_swap_rows,
         request_state_indices=torch.tensor(
-            [1, 0], dtype=torch.int32, device=DEVICE_TYPE
+            [1, 0, -1], dtype=torch.int32, device=DEVICE_TYPE
         ),
     )
     cache = HiSparseCacheHandle(runtime)
     cache.view = SimpleNamespace(block_size=64, attention_block_stride=832)
-    cache.block_table = residency[:, 1]
+    cache.block_table = residency[1]
     group = HiSparseMLAIndexGroup(
         logical_topk_indices=topk,
         physical_topk_indices=torch.empty_like(topk),
-        valid_topk_counts=torch.empty(2, dtype=torch.int32, device=DEVICE_TYPE),
+        valid_topk_counts=torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE),
         side_stream=torch.Stream(),
         logical_topk_ready=torch.Event(),
         physical_topk_ready=torch.Event(),
@@ -3957,11 +3957,11 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
         caches=[cache],
     )
     metadata = SimpleNamespace(
-        num_actual_tokens=2,
+        num_actual_tokens=3,
         num_decode_tokens=num_decode_tokens,
-        max_query_len=1 if num_decode_tokens == 2 else 2,
-        num_reqs=2,
-        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE),
+        max_query_len=1 if num_decode_tokens == 3 else 2,
+        num_reqs=3,
+        req_id_per_token=torch.tensor([0, 1, 2], dtype=torch.int32, device=DEVICE_TYPE),
     )
 
     # Repeat after compilation so its host delay cannot hide a stream race, and
@@ -3969,8 +3969,9 @@ def test_hisparse_resident_prefill_reads_residency_by_state_row(
     for step in range(2):
         residency.add_(step * 10)
         expected = torch.tensor(
-            [[(5 + step * 10) * 832], [(3 + step * 10) * 832]], device=DEVICE_TYPE
+            [[5 + step * 10], [3 + step * 10], [3 + step * 10]], device=DEVICE_TYPE
         )
+        expected *= 832
         torch.accelerator.synchronize()
         group.prepare_for_batch(0, metadata)
         group.set_logical_topk_ready(0)

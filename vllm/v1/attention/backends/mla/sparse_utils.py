@@ -566,6 +566,7 @@ def triton_convert_req_index_to_global_index(
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
+    block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
     # Only multi-tile compaction needs separate padding initialization.
     if out is None:
@@ -608,7 +609,7 @@ def triton_convert_req_index_to_global_index(
 
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
-        block_table,
+        block_table_c,
         token_indices_c,
         out,
         valid_counts,

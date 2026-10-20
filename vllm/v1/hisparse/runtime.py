@@ -1143,13 +1143,13 @@ def update_hisparse_residency(
 ) -> None:
     """Apply scheduled requests' residency changes.
 
-    ``residency`` is ``[state rows, resident groups, pages]``: the GPU block of
+    ``residency`` is ``[resident groups, state rows, pages]``: the GPU block of
     each page, or block 0 when the page is read from the host.
     """
     if not updates:
         return
     batch_rows = {request_id: row for row, request_id in enumerate(request_ids)}
-    num_groups = residency.shape[1]
+    num_groups = residency.shape[0]
     rows: list[int] = []
     pages: list[int] = []
     block_ids: list[list[int]] = [[] for _ in range(num_groups)]
@@ -1170,7 +1170,7 @@ def update_hisparse_residency(
         host_values, device=request_state_indices.device, dtype=torch.int32
     )
     state_rows = request_state_indices[values[:, 0]]
-    residency[state_rows, :, values[:, 1]] = values[:, 2:]
+    residency[:, state_rows, values[:, 1]] = values[:, 2:].T
 
 
 class HiSparseCacheHandle:
