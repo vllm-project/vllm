@@ -82,6 +82,9 @@ pub struct CompletionRequest {
     /// The suffix that comes after a completion of inserted text
     pub suffix: Option<String>,
 
+    /// Prompt embeddings to generate from. Not supported yet.
+    pub prompt_embeds: Option<Value>,
+
     /// What sampling temperature to use, between 0 and 2
     pub temperature: Option<f32>,
 
@@ -196,6 +199,10 @@ pub struct CompletionRequest {
 
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
+
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]

@@ -176,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_accepts_python_extra_args() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"extra_args": {"custom": 1}},
+            "kv_transfer_params": {"connector": "x"}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare request");
+
+        let xargs = prepared.text_request.sampling_params.vllm_xargs.expect("xargs");
+        assert_eq!(xargs.get("custom"), Some(&json!(1)));
+        assert_eq!(
+            xargs.get("kv_transfer_params"),
+            Some(&json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
     fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
         for watermarking in [None, Some(true), Some(false)] {
             let mut body = json!({

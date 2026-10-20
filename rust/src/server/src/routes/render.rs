@@ -97,6 +97,9 @@ fn lower_render_request(
         token_ids,
         sampling_params: GenerateSamplingParams {
             n: None,
+            stop: None,
+            include_stop_str_in_output: None,
+            trace_decode_token_ids: None,
             inner: text_request.sampling_params,
         },
         stream,
@@ -107,6 +110,7 @@ fn lower_render_request(
         ec_transfer_params: None,
         content_parts: None,
         return_token_ids: None,
+        output_mode: None,
         // Carry what the chat route would pass to the engine, so the engine
         // gates structured outputs the same way on `/inference/v1/generate`.
         reasoning_ended: text_request.reasoning_ended,
