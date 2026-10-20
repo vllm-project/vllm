@@ -59,6 +59,7 @@ Models of any architecture can be converted into embedding models using `--conve
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----- | ----------------- | ------------------------------ | ------------------------------------------ |
 | `ColModernVBertForRetrieval` | ColModernVBERT | T / I | `ModernVBERT/colmodernvbert-merged` | | |
+| `ColUltraVBertForRetrieval` | ColUltraVBERT | T / I | `athrael-soju/ColUltraVBERT` | | |
 | `ColPaliForRetrieval` | ColPali | T / I | `vidore/colpali-v1.3-hf` | | |
 | `ColQwen3` | Qwen3-VL | T / I | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` | | |
 | `ColQwen3_5` | ColQwen3.5 | T + I + V | `athrael-soju/colqwen3.5-4.5B-v3`, `vultr/VultronRetrieverPrime-Qwen3.5-8B` | | |
@@ -90,6 +91,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 ```python
 --8<-- "vllm/pooling_params.py:common-pooling-params"
 --8<-- "vllm/pooling_params.py:embed-pooling-params"
+--8<-- "vllm/pooling_params.py:token-embed-pooling-params"
 ```
 
 ### `LLM.encode`
@@ -106,6 +108,39 @@ llm = LLM(model="answerdotai/answerai-colbert-small-v1", runner="pooling")
 
 data = output.outputs.data
 print(f"Data: {data!r}")
+```
+
+### Fixed-length late chunking
+
+Late chunking encodes the full input before averaging contextual token representations within each chunk. The chunk means pass through the model's embedding head, including its projection and optional normalization.
+
+This mode is currently available through the offline `LLM.encode` API for plain-text input. With an instance configured for `token_embed`, enable it per request:
+
+```python
+from vllm import PoolingParams
+from vllm.pooling_params import LateChunkingParams
+
+outputs = llm.encode(
+    [document],
+    pooling_task="token_embed",
+    pooling_params=PoolingParams(
+        late_chunking_params=LateChunkingParams(chunk_size=256)
+    ),
+)
+vectors = outputs[0].outputs.data  # [num_chunks, embedding_dimension]
+chunks = outputs[0].late_chunking.chunks
+```
+
+For `N` model-input tokens and chunk size `C`, the output contains `ceil(N / C)` vectors. The last chunk uses its actual length. Special tokens and instruction prefixes count toward both chunk boundaries and means. Omitting `late_chunking_params` preserves ordinary token embeddings.
+
+Each vector row corresponds to one entry in `chunks`. Its `token_range` and `char_range` are zero-based, half-open ranges. Character ranges index the submitted Python string; use `document[start:end]` to retrieve the source text. A chunk containing only special tokens has `char_range=None`.
+
+Use nonempty text within the model's context window and a fast tokenizer that provides aligned source offsets. Input truncation, explicit padding and renderer text normalization are not supported. The custom document/query outputs of `JinaForRanking` are also unsupported. Late chunking does not extend the model's context window or reduce its attention computation.
+
+The [offline example](../../../examples/pooling/token_embed/late_chunking_offline.py) loads an E5 model and prints the vector shape, token ranges and source excerpts for two documents:
+
+```bash
+python examples/pooling/token_embed/late_chunking_offline.py --chunk-size 16
 ```
 
 ### `LLM.score`

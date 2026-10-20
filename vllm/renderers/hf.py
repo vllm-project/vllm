@@ -22,7 +22,7 @@ import torch
 from typing_extensions import override
 
 from vllm import envs
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -41,7 +41,6 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.renderers.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatTemplateResolutionError,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
