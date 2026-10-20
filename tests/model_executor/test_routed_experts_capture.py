@@ -357,15 +357,24 @@ def test_platform_rows_override_preserves_tensor_results(monkeypatch, rows, top_
 
 
 def test_platform_rows_none_restores_default_layout(monkeypatch):
-    """The default platform hook still trims gathered TP padding."""
+    """The default hook still gathers and trims TP shards."""
     capturer = _capturer_with_buffer(tp_size=2)
-    topk = torch.arange(8, dtype=torch.int32).reshape(4, 2)
-    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
+    local_shard = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
+    gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
+    ctx = _forward_context(
+        dp_metadata=DPMetadata(num_tokens_across_dp_cpu=torch.tensor([3]))
+    )
     monkeypatch.setattr(f"{_REC_MODULE}.current_platform", Platform())
-    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
-        capturer.capture(0, topk)
+    tp_group = Mock()
+    tp_group.all_gather.return_value = gathered
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
+    ):
+        capturer.capture(0, local_shard)
 
-    torch.testing.assert_close(capturer.device_buffer[:3, 0], topk[:3])
+    tp_group.all_gather.assert_called_once()
+    torch.testing.assert_close(capturer.device_buffer[:3, 0], gathered[:3])
     assert (capturer.device_buffer[3:] == -1).all()
 
 
@@ -374,17 +383,38 @@ def test_capture_rejects_rows_exceeding_buffer(monkeypatch, platform_override):
     """Oversized routing results fail before writing any capture rows."""
     capturer = _capturer_with_buffer(max_tokens=2)
     rows = torch.zeros(3, 2, dtype=torch.int32)
-    platform = (
-        SimpleNamespace(get_routed_experts_local_rows=lambda *args: rows)
-        if platform_override
-        else Platform()
-    )
+
+    class OversizedPlatform(Platform):
+        @classmethod
+        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
+            return rows
+
+    platform = OversizedPlatform() if platform_override else Platform()
     monkeypatch.setattr(f"{_REC_MODULE}.current_platform", platform)
     with (
         patch(f"{_REC_MODULE}.get_forward_context", return_value=_forward_context()),
         pytest.raises(ValueError, match="returned 3 rows for a 2-row buffer"),
     ):
         capturer.capture(0, rows)
+    assert (capturer.device_buffer == -1).all()
+
+
+def test_capture_rejects_non_2d_platform_rows(monkeypatch):
+    """Platform rows must keep the (rows, experts_per_token) shape."""
+    capturer = _capturer_with_buffer(max_tokens=4)
+    flat_rows = torch.zeros(6, dtype=torch.int32)
+
+    class FlatPlatform(Platform):
+        @classmethod
+        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
+            return flat_rows
+
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", FlatPlatform())
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=_forward_context()),
+        pytest.raises(ValueError, match="must return a 2-D"),
+    ):
+        capturer.capture(0, torch.zeros(3, 2, dtype=torch.int32))
     assert (capturer.device_buffer == -1).all()
 
 

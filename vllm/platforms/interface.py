@@ -1436,12 +1436,12 @@ class Platform:
         dp_rank: int,
         tp_size: int,
     ) -> torch.Tensor | None:
-        """Restore this DP rank's routing rows after platform-specific MoE prepare.
+        """Return this DP rank's routing rows after a platform-specific prepare.
 
         Overrides must choose collectives using rank-invariant state so all
-        participating ranks follow the same plan, including idle ranks.
-        Device operations and row layouts must support graph capture/replay
-        without introducing host reads of device tensor values.
+        participating ranks follow the same plan, including idle ranks. Device
+        operations must be issued on the current stream and must support graph
+        capture/replay without host reads of device tensor values.
 
         Args:
             topk_ids: Logical expert IDs in the router's input row order.
@@ -1450,9 +1450,11 @@ class Platform:
             tp_size: Tensor-parallel group size.
 
         Returns:
-            One row per local token, in token order, preserving the expert
-            axis, dtype and device. Empty tensors are valid. Return ``None``
-            to use the capturer's default DP/TP layout restoration.
+            A 2-D tensor of rows for this DP rank in token order, preserving
+            the expert axis, dtype and device. Empty tensors are valid. Rows
+            past the step's local token count are written but never read, so
+            the row count must not exceed the capturer's buffer capacity.
+            Return ``None`` to use the capturer's default DP/TP restoration.
 
         """
         return None

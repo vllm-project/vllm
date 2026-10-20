@@ -97,6 +97,12 @@ class RoutedExpertsCapturer:
         )
         if local_topk_ids is None:
             local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        elif local_topk_ids.ndim != 2:
+            raise ValueError(
+                f"{type(current_platform).__name__}.get_routed_experts_local_rows "
+                "must return a 2-D (rows, experts_per_token) tensor, got shape "
+                f"{tuple(local_topk_ids.shape)}"
+            )
         if local_topk_ids.shape[0] > self.device_buffer.shape[0]:
             raise ValueError(
                 f"routed-experts capture returned {local_topk_ids.shape[0]} rows "
