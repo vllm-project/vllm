@@ -179,6 +179,8 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    KV_LOAD_STARTED = 4
+    KV_LOAD_FINISHED = 5
 
 
 class EngineCoreEvent(msgspec.Struct):
