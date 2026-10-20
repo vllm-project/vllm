@@ -25,6 +25,60 @@ def test_b12x_warmup_token_counts_cover_serving_regimes() -> None:
     ) == (1, 2, 8, 128, 2048)
 
 
+@pytest.mark.parametrize("is_embedding", [False, True])
+def test_b12x_block_quant_warmup_covers_each_layers_plans(monkeypatch, is_embedding):
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+    from vllm.model_executor.warmup.b12x_warmup import _collect_warmup_units
+
+    method = object.__new__(ModelOptBlockQuantLinearMethod)
+    method.codec = "q8_0"
+    method.is_embedding = is_embedding
+    model = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+    calls = []
+    monkeypatch.setattr(
+        method, "apply", lambda layer, x: calls.append((layer, x.shape, x.dtype))
+    )
+    monkeypatch.setattr(
+        method,
+        "embedding",
+        lambda layer, ids: calls.append((layer, ids.shape, ids.dtype)),
+    )
+    for index, layer in enumerate(model):
+        layer.b12x_warmup_provider = method
+        if is_embedding:
+            layer.weight = torch.nn.Parameter(
+                torch.empty((8, 8, 34), dtype=torch.uint8), requires_grad=False
+            )
+            layer.b12x_embedding_plans = {
+                dtype: SimpleNamespace(
+                    handle=2 * index + offset, query=SimpleNamespace(max_rows=32)
+                )
+                for offset, dtype in enumerate((torch.int32, torch.int64))
+            }
+        else:
+            layer.b12x_block_weight = SimpleNamespace(
+                in_features=256, values=torch.empty(1)
+            )
+            layer.b12x_block_plan = SimpleNamespace(
+                handle=index, token_counts=(1, 4, 32)
+            )
+
+    units = list(_collect_warmup_units(model, (1, 17, 32), torch.bfloat16))
+    assert len(units) == 2
+    for unit in units:
+        unit.compile()
+    expected = (
+        [((32,), torch.int32), ((32,), torch.int64)]
+        if is_embedding
+        else [((rows, 256), torch.bfloat16) for rows in (1, 4, 17, 32)]
+    )
+    assert calls == [
+        (layer, shape, dtype) for layer in model for shape, dtype in expected
+    ]
+
+
 @pytest.mark.parametrize(
     ("kernel_cls", "module_name", "call_name", "layer", "name"),
     [

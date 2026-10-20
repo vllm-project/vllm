@@ -152,13 +152,17 @@ def test_deep_sleep_lora(gpu_memory_cleared):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
-def _lora_logits_mapping_present(model) -> bool:
+def _lora_logits_mapping_correct(model) -> bool:
     from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
 
-    return any(
-        isinstance(m, LogitsProcessorWithLoRA)
-        and m.sharded_to_full_mapping_gpu is not None
-        for m in model.modules()
+    processors = [m for m in model.modules() if isinstance(m, LogitsProcessorWithLoRA)]
+    return bool(processors) and all(
+        m.sharded_to_full_mapping_gpu is not None
+        and torch.equal(
+            m.sharded_to_full_mapping_gpu,
+            m.sharded_to_full_mapping_gpu.new_tensor(m.sharded_to_full_mapping),
+        )
+        for m in processors
     )
 
 
@@ -168,9 +172,8 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     With TP > 1 the LoRA logits processor carries
     ``sharded_to_full_mapping_gpu``, a permanent index mapping used to
-    reorder gathered logits. Like the LoRA stacked tensors it is a plain
-    attribute allocated in the sleep-mode pool, so level-2 sleep destroys
-    its contents — it must be restored after reload.
+    reorder gathered logits. Level-2 sleep must preserve it, like the rest
+    of the LoRA state.
     """
     # Needed for apply_model to reach the multiproc TP workers below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -187,7 +190,7 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     # Guard against this test silently not exercising the TP>1 reindex
     # path (e.g. if lm_head wrapping conditions change).
-    assert all(llm.apply_model(_lora_logits_mapping_present))
+    assert all(llm.apply_model(_lora_logits_mapping_correct))
 
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
@@ -195,6 +198,8 @@ def test_deep_sleep_lora_tp2(monkeypatch):
 
     llm.sleep(level=2)
     llm.wake_up(tags=["weights"])
+    # Check before reload_weights, which also resets the mapping.
+    assert all(llm.apply_model(_lora_logits_mapping_correct))
     llm.collective_rpc("reload_weights")
     llm.wake_up(tags=["kv_cache"])
     output2 = llm.generate(prompt, sampling_params)
@@ -209,8 +214,20 @@ def _cudagraph_bytes(worker) -> int:
 def _custom_ar_active(worker) -> bool:
     from vllm.distributed.parallel_state import get_tp_group
 
-    ca_comm = get_tp_group().device_communicator.ca_comm
-    return ca_comm is not None and not ca_comm.disabled
+    comm = get_tp_group().device_communicator
+    return any(
+        c is not None and not c.disabled for c in (comm.ca_comm, comm.aiter_ar_comm)
+    )
+
+
+def _capture_registers_buffers(worker) -> bool:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    comm = get_tp_group().device_communicator
+    ca, aiter = comm.ca_comm, comm.aiter_ar_comm
+    return (ca is not None and ca._capture_registered) or (
+        aiter is not None and aiter.aiter_ca.enable_register_for_capturing
+    )
 
 
 @pytest.mark.parametrize(
@@ -227,7 +244,9 @@ def _custom_ar_active(worker) -> bool:
     ids=["full", "piecewise", "breakable", "custom-ar-tp2", "off-by-default"],
 )
 @create_new_process_for_each_test()
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     """Each capture site uses the pool, exact across sleeps; TP=2 needs
     unregistered custom AR; off changes nothing."""
@@ -255,8 +274,10 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     assert all(graph_bytes) if offload else not any(graph_bytes)
     if not offload:
         return
-    if tp > 1 and not all(llm.collective_rpc(_custom_ar_active)):
-        pytest.skip("Custom allreduce is unavailable on these GPUs")
+    if tp > 1:
+        if not all(llm.collective_rpc(_custom_ar_active)):
+            pytest.skip("Custom allreduce is unavailable on these GPUs")
+        assert not any(llm.collective_rpc(_capture_registers_buffers))
     prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
     expected = llm.generate(prompt, params)[0].outputs[0].text
     for level in (1, 2):
@@ -266,6 +287,42 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
             llm.collective_rpc("reload_weights")
         llm.wake_up(tags=["kv_cache"])
         assert llm.generate(prompt, params)[0].outputs[0].text == expected
+
+
+@multi_gpu_test(num_gpus=2)
+@create_new_process_for_each_test()
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER fused allreduce")
+def test_sleep_cudagraph_pool_aiter_fused_ar_group_quant(monkeypatch):
+    """The fused AITER AR + RMSNorm + per-group FP8 quant captures into the
+    cuMem pool without IPC-registering its input, across sleeps."""
+    for name, value in [
+        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
+        ("VLLM_ROCM_USE_AITER", "1"),
+        ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
+    ]:
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
+    llm = LLM(
+        "Qwen/Qwen3-0.6B-FP8",
+        enable_sleep_mode=True,
+        sleep_mode_offload_cudagraph=True,
+        tensor_parallel_size=2,
+        max_model_len=1024,
+        compilation_config={"pass_config": {"fuse_allreduce_rms": True}},
+    )
+    if not all(llm.collective_rpc(_custom_ar_active)):
+        pytest.skip("AITER custom allreduce is unavailable on these GPUs")
+    assert not any(llm.collective_rpc(_capture_registers_buffers))
+    assert all(llm.collective_rpc(_cudagraph_bytes))
+    prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
+    assert llm.generate(prompt, params)[0].outputs[0].text
+    for level in (1, 2):
+        llm.sleep(level=level)
+        llm.wake_up(tags=["weights"])
+        if level == 2:
+            llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+        assert llm.generate(prompt, params)[0].outputs[0].text
 
 
 @create_new_process_for_each_test()
@@ -359,15 +416,9 @@ def test_deep_sleep_compressed_tensors_kv_scales(
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1(
-    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
-):
-    # Regression test for https://github.com/vllm-project/vllm/pull/28783.
-    # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
-    # to restore correct output after level-2 sleep.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    envs.disable_envs_cache()
-
+def test_deep_sleep_fp8_kvcache(gpu_memory_cleared):
+    # Regression test for https://github.com/vllm-project/vllm/pull/28783:
+    # fp8 KV cache output must be restored correctly after level-2 sleep.
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
@@ -402,10 +453,9 @@ def test_deep_sleep_fp8_kvcache_mrv1(
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
+def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     envs.disable_envs_cache()
 
