@@ -95,11 +95,11 @@ FA4_DENSE_MAX_SEQLEN_K = 8192
 
 
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
-    """Warm paged, causal FA4 on Blackwell and Hopper."""
+    """Warm paged FA4 on Blackwell and Hopper."""
 
     @dataclass(frozen=True)
     class CompileKey:
-        q_stage: int
+        max_seqlen_q: int
         dtype: torch.dtype
         qhead_per_kvhead: int
         head_dim: int
@@ -107,8 +107,9 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         has_window_left: bool
         has_window_right: bool
         softcap: float
-        is_single_batch: bool
+        batch_size: int
         num_splits: int
+        causal: bool
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -118,7 +119,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
     def dispatch(  # type: ignore[override]
         self,
         *,
-        q_stage: int,
+        max_seqlen_q: int,
         dtype: torch.dtype,
         num_qo_heads: int,
         num_kv_heads: int,
@@ -126,11 +127,12 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         page_size: int,
         window_size: tuple[int, int],
         softcap: float,
-        is_single_batch: bool = True,
+        batch_size: int = 1,
         num_splits: int = 1,
+        causal: bool = True,
     ) -> CompileKey:
         return self.CompileKey(
-            q_stage=q_stage,
+            max_seqlen_q=max_seqlen_q,
             dtype=dtype,
             qhead_per_kvhead=num_qo_heads // num_kv_heads,
             head_dim=head_dim,
@@ -138,8 +140,9 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             has_window_left=window_size[0] >= 0,
             has_window_right=window_size[1] >= 0,
             softcap=softcap,
-            is_single_batch=is_single_batch,
+            batch_size=batch_size,
             num_splits=num_splits,
+            causal=causal,
         )
 
     def get_warmup_keys(
@@ -157,6 +160,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
             or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
             or not isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))
+            or kv_cache_spec.head_size_v not in (None, kv_cache_spec.head_size)
         ):
             return []
         head_dim = kv_cache_spec.head_size
@@ -171,29 +175,43 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             )
             or 0
         )
+        causal_modes = WarmupChoices(True)
         if (
             major in (10, 11)
             and uses_fa4_hd256_kernel(head_dim)
             and page_size == FA4_HD256_PAGE_SIZE
         ):
-            q_stages = WarmupChoices(1, 2)
-            single_batches = WarmupChoices(True, False)
+            query_lengths = WarmupChoices(1, FA4_DENSE_Q_TILE + 1)
+            batch_sizes = WarmupChoices(1, 2)
             split_counts = WarmupChoices(1)
+        elif major in (10, 11) and 8 <= head_dim <= 128:
+            qhead_per_kvhead = num_qo_heads // kv_cache_spec.num_kv_heads
+            # FA4 changes Q staging at one packed tile and persistence at two.
+            query_lengths = WarmupChoices(
+                1,
+                FA4_DENSE_Q_TILE // qhead_per_kvhead + 1,
+                2 * FA4_DENSE_Q_TILE // qhead_per_kvhead + 1,
+            )
+            # Large batches use a separate varlen batch-lookup specialization.
+            batch_sizes = WarmupChoices(2, vllm_config.scheduler_config.max_num_seqs)
+            split_counts = WarmupChoices(1, 2)
+            causal_modes = WarmupChoices(True, False)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
             # SM90 forward has split/non-split variants; its transitive
             # combine specializes at 32/64/128/256 splits.
-            q_stages = WarmupChoices(1)
-            single_batches = WarmupChoices(False)
+            query_lengths = WarmupChoices(1)
+            batch_sizes = WarmupChoices(2)
             split_counts = WarmupChoices(1, 32, 64, 128, 256)
         else:
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            q_stage=q_stages,
-            is_single_batch=single_batches,
+            max_seqlen_q=query_lengths,
+            batch_size=batch_sizes,
             num_splits=split_counts,
+            causal=causal_modes,
             dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
             num_kv_heads=kv_cache_spec.num_kv_heads,
@@ -205,8 +223,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
-        max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
-        batch_size = 1 if compile_key.is_single_batch else 2
+        max_seqlen_q = compile_key.max_seqlen_q
+        batch_size = compile_key.batch_size
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
             compile_key.page_size,
@@ -238,7 +256,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
-            causal=True,
+            causal=compile_key.causal,
             window_size=[
                 1 if compile_key.has_window_left else -1,
                 1 if compile_key.has_window_right else -1,
@@ -712,11 +730,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.headdim, head_size_v
         )
 
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
-            and fa_version == 4
-        ):
+        if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
             _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
                 vllm_config=vllm_config,
                 kv_cache_spec=kv_cache_spec,
