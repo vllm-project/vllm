@@ -56,12 +56,13 @@ _GFX1201_2D_CONFIGS = {
 # gfx1201 2D decode (batches above the 3D threshold): padded head size ->
 # (TILE_SIZE, num_warps, num_stages).
 _GFX1201_2D_DECODE_CONFIGS = {
+    64: (16, 1, 1),
     128: (16, 2, 1),
     256: (16, 2, 1),
     512: (16, 8, 1),
 }
-# gfx1201 3D (split-KV) decode: padded head size -> most segments per request.
-_GFX1201_3D_MAX_SEGMENTS = {64: 128, 128: 128, 256: 64}
+# gfx1201 3D (split-KV) decode: padded head sizes that choose their segment count.
+_GFX1201_3D_HEADS = (64, 128, 256)
 
 is_gfx1100 = False
 if current_platform.is_rocm():
@@ -1292,47 +1293,53 @@ def unified_attention(
         vs_blk = vs_slot = vs_head = None
         k_scale_ptr = None
         v_scale_ptr = None
-    # gfx1201: with few requests x KV heads, 16 split-KV segments leave most CUs
-    # idle (1 request x 2 KV heads = 32 programs on 32 CUs). Use the largest
-    # power of two <= max_segments / (requests x KV heads), keeping the same
-    # scratch as fewer rows x more segments. Up to 2x for one long request.
-    # At GQA >= 12 (head 128, 16-bit query, no window), 16 segments run faster
-    # with 2 warps.
-    # 3D sweep: no batch slower than 0.96x. Skipped for windows < 2048.
+    # gfx1201 split-KV decode: about 128 programs (requests x KV heads x segments)
+    # on the 32 CUs. Few requests: more than 16 segments (16 leave most CUs idle;
+    # up to 2.5x for one long request). Many requests (16-bit query): fewer, as
+    # short segments are mostly split / merge overhead. The scratch is reused as
+    # rows x segments. Sliding windows < 2048 keep 16 segments.
     if (
         is_gfx1201
         and use_3d
-        and gfx1201_head_size in _GFX1201_3D_MAX_SEGMENTS
-        and (sliding_window_val == 0 or sliding_window_val >= 2048)
+        and gfx1201_head_size in _GFX1201_3D_HEADS
         and not is_batch_invariant
     ):
-        max_segments = _GFX1201_3D_MAX_SEGMENTS[gfx1201_head_size]
-        segments = num_par_softmax_segments
-        while segments * 2 * num_seqs * num_kv_heads <= max_segments:
-            segments *= 2
-        rows = softmax_segm_max.shape[0] * num_par_softmax_segments // segments
-        if segments > num_par_softmax_segments and rows >= q.shape[0]:
-            num_par_softmax_segments = segments
-            softmax_segm_output = softmax_segm_output.view(-1)[
-                : rows * num_query_heads * segments * head_size_padded
-            ].view(rows, num_query_heads, segments, head_size_padded)
-            softmax_segm_max = softmax_segm_max.view(-1)[
-                : rows * num_query_heads * segments
-            ].view(rows, num_query_heads, segments)
-            softmax_segm_expsum = softmax_segm_expsum.view(-1)[
-                : rows * num_query_heads * segments
-            ].view(rows, num_query_heads, segments)
-            # the reduce kernel splits segments by the same TILE_SIZE_DECODE
-            TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
-                (32, 4, 2) if q.element_size() == 1 else (16, 4, 1)
-            )
-        elif (
-            num_queries_per_kv >= 12
-            and gfx1201_head_size == 128
-            and sliding_window_val == 0
-            and q.element_size() == 2
-        ):
-            TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = 16, 2, 1
+        fp8_query = q.element_size() == 1
+        if sliding_window_val == 0 or sliding_window_val >= 2048:
+            grid_fill = num_seqs * num_kv_heads
+            segments = num_par_softmax_segments
+            programs = 64 if fp8_query and gfx1201_head_size == 256 else 128
+            while segments < 128 and segments * 2 * grid_fill <= programs:
+                segments *= 2
+            while not fp8_query and segments > 4 and segments * grid_fill > 128:
+                segments //= 2
+            rows = softmax_segm_max.shape[0] * num_par_softmax_segments // segments
+            if segments != num_par_softmax_segments and rows >= q.shape[0]:
+                num_par_softmax_segments = segments
+                softmax_segm_output = softmax_segm_output.view(-1)[
+                    : rows * num_query_heads * segments * head_size_padded
+                ].view(rows, num_query_heads, segments, head_size_padded)
+                softmax_segm_max = softmax_segm_max.view(-1)[
+                    : rows * num_query_heads * segments
+                ].view(rows, num_query_heads, segments)
+                softmax_segm_expsum = softmax_segm_expsum.view(-1)[
+                    : rows * num_query_heads * segments
+                ].view(rows, num_query_heads, segments)
+        # (TILE_SIZE, num_warps, num_stages); reduce_segments uses the same TILE_SIZE
+        launch = None
+        if fp8_query:
+            if gfx1201_head_size == 64:
+                launch = (32, 1, 1)
+            elif num_par_softmax_segments > 16:
+                launch = (32, 4, 2)
+        elif sliding_window_val == 0 or sliding_window_val >= 2048:
+            launch = (16, 2, 1)
+        elif gfx1201_head_size == 64:
+            launch = (32, 1, 1)
+        elif gfx1201_head_size == 128:
+            launch = (16, 1, 1)
+        if launch is not None:
+            TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = launch
 
     # 3D needs real segm tensors; 2D never touches them.  Pass ``None`` in
     # 2D mode so Triton can skip materialising these pointer arguments.
