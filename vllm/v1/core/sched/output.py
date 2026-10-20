@@ -263,6 +263,7 @@ class SchedulerOutput:
     free_encoder_mm_hashes: list[str]
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    iteration_metrics_id: int | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
