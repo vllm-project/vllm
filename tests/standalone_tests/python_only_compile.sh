@@ -205,10 +205,12 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     source /tmp/python-only-venv/bin/activate
     # --torch-backend would restrict torch-ecosystem packages to the stable index,
     # which has neither torch 2.15.0 (a release candidate) nor cu132 torchaudio; the
-    # test channel has the whole stack.
+    # test channel has the whole stack. It also lists non-torch packages (e.g.
+    # outlines-core) at older versions, so let uv take the best version across indexes.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
         VLLM_PRECOMPILED_WHEEL_VARIANT="${precompiled_variant}" \
-        uv pip install -e . --extra-index-url "https://download.pytorch.org/whl/test/${cuda_variant}"
+        uv pip install -e . --index-strategy unsafe-best-match \
+        --extra-index-url "https://download.pytorch.org/whl/test/${cuda_variant}"
 else
     # RELEASE-ONLY: torch==2.15.0 is a pre-release that is not on PyPI yet, so pull
     # it from the PyTorch test channel. Drop this once torch 2.15.0 is published to PyPI.
