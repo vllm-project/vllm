@@ -76,6 +76,7 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_NT,
     _hw_f32,
     ballot,
+    bf2_f32,
     bf16_pair,
     bf16_round,
     bf_hi,
@@ -135,7 +136,14 @@ from vllm.models.deepseek_v41.amd.mono.stages.router import (
     router_weight_loads,
     router_x_loads,
 )
-from vllm.models.deepseek_v41.amd.mono.stages.seam import HIDDEN, attn_peer_bytes
+from vllm.models.deepseek_v41.amd.mono.stages.seam import (
+    HIDDEN,
+    TILE_WORDS,
+    UNIT_WORDS,
+    attn_peer_bytes,
+    attn_unit,
+    attn_units,
+)
 
 # a pick tile is a token tile's MFMA N: ``gather_x8r`` fills one from the other
 assert mplan.TILE == TILE
@@ -2220,7 +2228,7 @@ def down_combine_x(c, task, t0, n):
     """``down_combine`` of the owner's extra tile ``task`` (its j 1 shared
     rows): every pick's contribution polled from DXC (the owner's half and the
     helper's), summed in the same order."""
-    s, tid, d, tab = c["S"], c["tid"], c["d"], c["tab"]
+    s, tid, tab = c["S"], c["tid"], c["tab"]
     topk = c["rs"].topk
     j = 1
     if tid < ROWS * n:
@@ -2238,16 +2246,7 @@ def down_combine_x(c, task, t0, n):
             routed = bf16_round(routed + bf16_round(v * w))
         fx.ptr_store(bf16_round(routed + shared), c["pair"] + tid)
     gpu.barrier()
-    if tid < ROWS * n // 2:
-        rp = umod(tid, ROWS // 2)
-        tl = udiv(tid, ROWS // 2)
-        t = plus(t0, tl)
-        v0 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp))
-        v1 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp + 1))
-        col = task * ROWS + 2 * rp
-        for p in range_constexpr(d.tp):
-            dst = preg(c["peer_addr"](p), c["ffn_off"], "ffn")
-            c["put_bf"](dst, 2 * region_pair(c["rank"], t, s, col), [v0, v1])
+    ffn_push(c, task, t0, n)
     gpu.barrier()
 
 
@@ -2538,9 +2537,11 @@ def down_combine(c, task, j, t0, n):
             routed = bf16_round(routed + vw)
         fx.ptr_store(bf16_round(routed + shared), c["pair"] + tid)
     gpu.barrier()
-    if tid < ROWS * n // 2:
-        rp = umod(tid, ROWS // 2, tuned)
-        tl = udiv(tid, ROWS // 2, tuned)
+    if const_expr(tuned):
+        ffn_push(c, task, t0, n)
+    elif tid < ROWS * n // 2:
+        rp = tid % (ROWS // 2)
+        tl = tid // (ROWS // 2)
         t = plus(t0, tl)
         v0 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp))
         v1 = fx.ptr_load(c["pair"] + (tl * ROWS + 2 * rp + 1))
@@ -2549,6 +2550,30 @@ def down_combine(c, task, j, t0, n):
             dst = preg(c["peer_addr"](p), c["ffn_off"], "ffn")
             c["put_bf"](dst, 2 * region_pair(c["rank"], t, s, col), [v0, v1])
     gpu.barrier()
+
+
+@traced
+def ffn_push(c, task, t0, n):
+    """Down task ``task``'s bf16 rows (LDS ``pair``, [token][16 rows]) of
+    tokens t0 .. t0 + n to every rank's FFN region as 16 B units of three
+    bf16-pair words and the tag (``Mailbox.put_unit``, the ATTN region's
+    ``attn_unit`` layout with the down task as the wo_b tile): a quarter of
+    the xGMI bytes tags, not half. Word f of the tile is LDS ``pair`` 2 f,
+    2 f + 1 (token f // 8, rows 2 (f % 8) ..)."""
+    tid, tp = c["tid"], c["d"].tp
+    units = attn_units(n)
+    assert t0 % TILE == 0 and units <= THREADS
+    if tid < units:
+        words = []
+        for q in range_constexpr(UNIT_WORDS):
+            # a last unit's spare slot repeats its last word (never read)
+            f = fx.min(tid * UNIT_WORDS + q, TILE_WORDS * n - 1)
+            v0 = fx.ptr_load(c["pair"] + 2 * f)
+            v1 = fx.ptr_load(c["pair"] + (2 * f + 1))
+            words.append(bf16_pair(v0, v1).bitcast(fx.Int32))
+        u = attn_unit(c["rank"], t0 // TILE, units, task, tid, tp)
+        for p in range_constexpr(tp):
+            c["put_unit"](preg(c["peer_addr"](p), c["ffn_off"], "ffn"), u, words)
 
 
 @traced
@@ -2701,8 +2726,67 @@ def stage_reduce(c, task):
     """Columns RED_COLS (32) task ..: the TP ranks' partials, summed in fp32 in
     rank order 0 .. tp - 1 on every rank (``sum_partials``) -> bf16 -> ``out``."""
     s, tid = c["S"], c["tid"]
-    for pas in range_constexpr(0, s * RED_COLS // 2, THREADS):
-        reduce_pair(c, task, pas + tid)
+    if const_expr(c["rs"].tuned):
+        # a thread a FFN unit (three words of every rank, one poll), not a
+        # word (``ffn_push``)
+        for pas in range_constexpr(0, reduce_unit_count(s), THREADS):
+            reduce_unit(c, task, pas + tid)
+    else:
+        for pas in range_constexpr(0, s * RED_COLS // 2, THREADS):
+            reduce_pair(c, task, pas + tid)
+
+
+def reduce_unit_count(s):
+    """A reduce task's FFN units: its two down tiles' (``ffn_push``) of every
+    token tile."""
+    return sum(2 * attn_units(n) for _, n in token_tiles(s))
+
+
+@traced
+def reduce_unit(c, task, g):
+    """Thread unit ``g`` of reduce task ``task``: one FFN unit (three words) of
+    every rank, polled together, each word's two columns summed in rank order
+    (``sum_partials``' order) fp32 -> bf16 pair -> ``out``. Units in [token
+    tile][down tile 2 task, 2 task + 1][unit] order."""
+    s, tp = c["S"], c["d"].tp
+    a = c["args"]
+    tiles = token_tiles(s)
+    if g < reduce_unit_count(s):
+        base = fx.Int32(0)
+        units = fx.Int32(attn_units(tiles[0][1]))
+        nw = fx.Int32(TILE_WORDS * tiles[0][1])
+        ti = fx.Int32(0)
+        b = 2 * attn_units(tiles[0][1])
+        for i in range_constexpr(1, len(tiles)):
+            ui = attn_units(tiles[i][1])
+            hit = g >= b
+            base = hit.select(fx.Int32(b), base)
+            units = hit.select(fx.Int32(ui), units)
+            nw = hit.select(fx.Int32(TILE_WORDS * tiles[i][1]), nw)
+            ti = hit.select(fx.Int32(i), ti)
+            b += 2 * ui
+        loc = g - base
+        k = (loc >= units).select(fx.Int32(1), fx.Int32(0))
+        j = loc - k * units
+        wt = 2 * task + k
+        own = preg(c["sym"], c["ffn_off"], "ffn")
+        vs = c["poll_units"](
+            [(own, attn_unit(src, ti, units, wt, j, tp)) for src in range(tp)]
+        )
+        for q in range_constexpr(UNIT_WORDS):
+            f = j * UNIT_WORDS + q
+            acc0, acc1 = bf2_f32(vs[0][q])
+            for src in range_constexpr(1, tp):
+                lo, hi = bf2_f32(vs[src][q])
+                acc0 = acc0 + lo
+                acc1 = acc1 + hi
+            if f < nw:
+                t = ti * TILE + f // TILE_WORDS
+                col = wt * ROWS + 2 * (f % TILE_WORDS)
+                bo.buffer_store(acc0.to(fx.BFloat16), rsrc(a["out"]), t * HIDDEN + col)
+                bo.buffer_store(
+                    acc1.to(fx.BFloat16), rsrc(a["out"]), t * HIDDEN + col + 1
+                )
 
 
 @traced
@@ -2866,7 +2950,9 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
         "put": mb.put,
         "put_bf": mb.put_bf,
         "put_words": mb.put_words,
+        "put_unit": mb.put_unit,
         "poll": mb.poll,
+        "poll_units": mb.poll_units,
         "tag": mb.tag,
         "peer_addr": lambda p: bases[p],
         "rank": rank,
