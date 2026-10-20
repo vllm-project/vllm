@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
@@ -101,11 +102,22 @@ class ServingRender(BaseServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
+        engine_chat_template_kwargs: (
+            Callable[[dict[str, Any]], dict[str, Any]] | None
+        ) = None,
     ) -> GenerateRequest | ErrorResponse:
         """Validate the model and preprocess a chat completion request.
 
         This is the authoritative implementation used directly by the
         GPU-less render server and delegated to by OpenAIServingChat.
+
+        Args:
+            request: The chat completion request.
+            raw_request: The incoming HTTP request, if any.
+            engine_chat_template_kwargs: The calling handler's
+                `_engine_chat_template_kwargs`, applied to the kwargs put in
+                `parse_context` to drop API server only state.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -189,7 +201,12 @@ class ServingRender(BaseServing):
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
-            parse_context=self._build_parse_context(request, chat_template_kwargs),
+            parse_context=self._build_parse_context(
+                request,
+                engine_chat_template_kwargs(chat_template_kwargs)
+                if engine_chat_template_kwargs is not None
+                else chat_template_kwargs,
+            ),
         )
 
     def _build_parse_context(

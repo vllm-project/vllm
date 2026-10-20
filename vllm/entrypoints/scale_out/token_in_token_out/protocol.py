@@ -7,6 +7,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    JsonValue,
     NonNegativeInt,
     PrivateAttr,
     Tag,
@@ -34,11 +35,14 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 ####### Tokens IN <> Tokens OUT #######
 
@@ -49,10 +53,11 @@ class ParseContext(BaseModel):
     """Chat request context the generate server needs to parse output.
 
     Built by `/render` from the post-`adjust_request` chat request and read
-    only when `output_mode="derender"`.
+    only when `output_mode="derender"`. Unknown fields from a newer `/render`
+    are kept so `GenerateRequest` can reject them only in that mode.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     tools: list[ChatCompletionToolsParam] | None = None
     tool_choice: (
@@ -60,8 +65,9 @@ class ParseContext(BaseModel):
     ) = "none"
     parallel_tool_calls: bool | None = True
     include_reasoning: bool = True
-    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
-    """Template kwargs with the render server's defaults already applied."""
+    chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
+    """Template kwargs with the render server's defaults already applied,
+    without the API server only entries a handler keeps out of the engine."""
     history_tool_call_cnt: int = Field(default=0, ge=0)
     """Tool calls already in the rendered conversation, for sequential IDs."""
 
@@ -390,6 +396,25 @@ class GenerateRequest(BaseModel):
                 f"output_mode={self.output_mode!r} requires "
                 "sampling_params.detokenize to be true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_parse_context_fields(self) -> "GenerateRequest":
+        """Fail on fields from a newer `/render` only where they are read."""
+        if self.parse_context is None or not (
+            unknown := sorted(self.parse_context.model_extra or ())
+        ):
+            return self
+        if self.output_mode == "derender":
+            raise ValueError(
+                f"Unknown parse_context fields {unknown}; the render server "
+                "is newer than this generate server"
+            )
+        logger.warning_once(
+            "Ignoring unknown parse_context fields %s at output_mode=%r",
+            ", ".join(unknown),
+            self.output_mode,
+        )
         return self
 
     @model_validator(mode="after")

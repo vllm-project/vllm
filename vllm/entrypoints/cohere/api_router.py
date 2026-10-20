@@ -190,7 +190,12 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            result = await render_handler.render_chat_request(chat_request)
+            # Citations from derender mode lack document sources: the
+            # position-to-source map can't go over JSON.
+            result = await render_handler.render_chat_request(
+                chat_request,
+                engine_chat_template_kwargs=handler._engine_chat_template_kwargs,
+            )
         except Exception as e:
             logger.exception("Error in /cohere/v2/chat/render: %s", e)
             return _error_response(create_error_response(e), raw_request)
@@ -201,12 +206,6 @@ if _SDK_AVAILABLE:
         if (kwargs := result.reasoning_parser_kwargs) is not None:
             kwargs.chat_template_kwargs = handler._engine_chat_template_kwargs(
                 kwargs.chat_template_kwargs
-            )
-        # Citations from derender mode lack document sources: the
-        # position-to-source map can't go over JSON.
-        if (parse_context := result.parse_context) is not None:
-            parse_context.chat_template_kwargs = handler._engine_chat_template_kwargs(
-                parse_context.chat_template_kwargs
             )
 
         return JSONResponse(content=result.model_dump())

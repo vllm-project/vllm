@@ -180,11 +180,19 @@ def test_parse_context_is_accepted_at_other_levels():
     assert GenerateRequest.model_validate(payload).output_mode == "tokens"
 
 
-def test_parse_context_rejects_unknown_fields():
-    """A misspelled field would otherwise be dropped and parse silently wrong."""
+def test_parse_context_unknown_fields_rejected_only_in_derender_mode():
+    """An unknown field from a newer /render must fail derender which would
+    parse without it but not the levels that never read the context."""
     payload = {**_base_payload(), "parse_context": {"tool_choise": "auto"}}
+    assert GenerateRequest.model_validate(payload).output_mode == "tokens"
     with pytest.raises(ValidationError, match="tool_choise"):
-        GenerateRequest.model_validate(payload)
+        GenerateRequest.model_validate({**payload, "output_mode": "derender"})
+
+
+def test_parse_context_rejects_non_json_template_kwargs():
+    """Render internal state must not become part of the wire shape."""
+    with pytest.raises(ValidationError, match="chat_template_kwargs"):
+        ParseContext(chat_template_kwargs={"_position_to_source": {(0, 0): "x"}})
 
 
 @pytest.mark.parametrize("tools", [None, []])

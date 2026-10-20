@@ -38,7 +38,6 @@ from vllm.entrypoints.cohere.serving import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
-    ParseContext,
     ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
@@ -123,9 +122,11 @@ class _RenderHandler:
     def __init__(self, result):
         self.result = result
         self.seen_request = None
+        self.seen_kwargs_filter = None
 
-    async def render_chat_request(self, request):
+    async def render_chat_request(self, request, engine_chat_template_kwargs=None):
         self.seen_request = request
+        self.seen_kwargs_filter = engine_chat_template_kwargs
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -500,17 +501,16 @@ class TestRenderEndpoint:
         result.reasoning_parser_kwargs = ReasoningParserKwargs(
             chat_template_kwargs=kwargs
         )
-        result.parse_context = ParseContext(chat_template_kwargs=kwargs)
-        app = _build_render_app(_RenderChatHandler(), _RenderHandler(result))
+        render_handler = _RenderHandler(result)
+        app = _build_render_app(_RenderChatHandler(), render_handler)
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
         assert r.status_code == HTTPStatus.OK
         assert r.json()["reasoning_parser_kwargs"] == {
             "chat_template_kwargs": {"safety_mode": "strict"}
         }
-        assert r.json()["parse_context"]["chat_template_kwargs"] == {
-            "safety_mode": "strict"
-        }
+        assert render_handler.seen_kwargs_filter is not None
+        assert render_handler.seen_kwargs_filter(kwargs) == {"safety_mode": "strict"}
 
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))
