@@ -30,7 +30,10 @@ from vllm.models.step5.common.csa_attention import step5_csa_attention
 from vllm.models.step5.common.csa_cache import Step5CSASummaryCacheLayer
 from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing
 from vllm.models.step5.nvidia.layernorm import get_step5_norm_dtype
-from vllm.models.step5.nvidia.model import _validate_step5_dsa_parallel_geometry
+from vllm.models.step5.nvidia.model import (
+    _validate_step5_dsa_parallel_geometry,
+    _verify_step5_dsa_kv_transfer_compatibility,
+)
 from vllm.models.step5.nvidia.ops.indexer_norm_rope import indexer_norm_rope
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx1250
@@ -232,15 +235,7 @@ class Step5Attention(Step3p5Attention):
                 "Step-5 sparse attention does not support dual-batch overlap or "
                 "microbatching yet. Disable --enable-dbo and set --ubatch-size 1."
             )
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise NotImplementedError(
-                "Step-5 sparse attention on ROCm cannot transfer its CSA caches "
-                "through a KV connector yet."
-            )
+        _verify_step5_dsa_kv_transfer_compatibility(vllm_config)
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and on_gfx1250():
             raise NotImplementedError(
                 "Step-5 sparse attention reads the unshuffled KV cache layout."
