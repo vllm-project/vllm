@@ -45,7 +45,7 @@ from .attention.plan import (
 )
 from .common.arch import GFX942
 from .common.mx import clamp_fp8
-from .common.ops import butterfly, fp8_pack4, peer_bases, traced
+from .common.ops import bf16_pair, butterfly, fp8_pack4, peer_bases, traced
 from .common.plan import WAVES, first_task, key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
@@ -68,6 +68,8 @@ COUNTERS = ("ugq", "dq")
 # lines of their own the MoE's counters
 EPOCH_COUNTERS = -(-(mb_back.EPOCH_MARKS + BLOCKS) // 64) * 64
 EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
+# tuned: step widths whose router polls x as pairs (``run_ffn``)
+ROUTER_X_PAIRS = 16
 # A timeline build of K2 stamps the clock into one record of K2_POINTS i64 a
 # CTA. The attention back uses points 0 .. BACK_POINTS - 1. The FFN seam's
 # three task loops (push, reduce and slice, then gate, then norm) end at the
@@ -203,6 +205,9 @@ def scratch_layout(
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
     place({"normed": (0, s * HIDDEN * 2), "xrdy_moe": (s * HIDDEN * 2 + 256, s * 8)})
     place({"krdy": (0, s * 8)})
+    if tuned:
+        # the normed rows again as tagged bf16 pairs: the router polls its x
+        place({"normed_mb": (0, s * HIDDEN // 2 * 8)})
     return out
 
 
@@ -434,7 +439,7 @@ def build_mono_k1(key: MonoBuild):
         def store(*v):
             store_x8(c, *v)
             if const_expr(key.index):
-                store_normed(normed_out, *v)
+                store_normed(normed_out, *v, wide=key.tuned)
 
         def seam_rest():
             for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
@@ -543,10 +548,29 @@ def build_mono_k1(key: MonoBuild):
 
 
 @traced
-def store_normed(normed, t, col, ys, live):
+def store_normed(normed, t, col, ys, live, cb=None, wide=False):
     """The FFN seam's norm output -> the MoE input row (bf16, device scope:
-    this launch reads it)."""
-    if live:
+    this launch reads it). ``wide``: the 8 values as one 16-byte store (a store
+    each kept the publish's drain behind 24 of them). With the MoE context
+    ``cb``, the same bf16 values as tagged pairs too (``cb["xmb"]``: the
+    router's x, polled; ``wide`` only)."""
+    if const_expr(wide):  # noqa: SIM102 (a build-time and a run-time test)
+        if live:
+            if const_expr(cb is not None):
+                for h in range_constexpr(2):
+                    cb["put_bf"](
+                        cb["xmb"], t * HIDDEN + col + 4 * h, ys[4 * h : 4 * h + 4]
+                    )
+            words = [
+                bf16_pair(ys[2 * j], ys[2 * j + 1]).bitcast(fx.Int32) for j in range(4)
+            ]
+            bo.buffer_store(
+                fx.Vector.from_elements(words, fx.Int32),
+                rsrc(normed),
+                (t * HIDDEN + col) // 2,
+                cache_modifier=CM_DEV,
+            )
+    elif live:
         for j in range_constexpr(8):
             bo.buffer_store(
                 ys[j].to(fx.BFloat16),
@@ -659,6 +683,11 @@ def run_ffn(
         assert size <= layout[region][1], (region, size, layout[region][1])
     mlayout = {n: layout[n] for n in mregions}
     mlayout["xrdy"] = layout["xrdy_moe"]
+    # tuned, one token tile: the router polls the normed rows' pairs (``xmb``);
+    # past it (token groups, a router CTA's x in several tiles) the flag and loads
+    x_pairs = key.tuned and s <= ROUTER_X_PAIRS
+    if const_expr(x_pairs):
+        mlayout["xmb"] = layout["normed_mb"]
     margs = moe.moe_args(
         normed,
         a["gate_w"],
@@ -696,7 +725,13 @@ def run_ffn(
         seam.stage_gate(ca, t)
     mark(K2_SEAM_POINT + 1)
     for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
-        seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
+        seam.stage_norm(
+            ca,
+            t,
+            lambda *v: store_normed(
+                normed, *v, cb if x_pairs else None, wide=key.tuned
+            ),
+        )
         publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
     gpu.barrier()
     mark(K2_SEAM_POINT + 2)

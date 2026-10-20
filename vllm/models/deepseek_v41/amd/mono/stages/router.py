@@ -28,8 +28,9 @@ ROWS = 16  # a tile's rows: the MFMA's M
 PARTS = 4  # contiguous K parts of a tile, summed in order
 
 
-def _k0s(part, lane, wave):
-    """The K offsets of this lane's loads in part ``part`` (8 bf16 each)."""
+def k_offsets(part, lane, wave):
+    """The K offsets of this lane's loads in part ``part`` (8 bf16 each): the
+    same for the weight and x operands."""
     per_wave = HIDDEN // 32 // WAVES // PARTS
     assert per_wave * 32 * WAVES * PARTS == HIDDEN
     return [
@@ -53,7 +54,7 @@ def router_weight_loads(w, task, part, lane, wave, w_cm=0):
                 cache_modifier=w_cm,
             )
         )
-        for k0 in _k0s(part, lane, wave)
+        for k0 in k_offsets(part, lane, wave)
     ]
 
 
@@ -74,7 +75,7 @@ def router_x_loads(x, part, s, lane, wave, x_cm=0, t0=0):
                 cache_modifier=x_cm,
             )
         )
-        for k0 in _k0s(part, lane, wave)
+        for k0 in k_offsets(part, lane, wave)
     ]
 
 

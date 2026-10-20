@@ -128,6 +128,7 @@ from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import (
     route_shape,
 )
 from vllm.models.deepseek_v41.amd.mono.stages.router import PARTS as ROUTER_PARTS
+from vllm.models.deepseek_v41.amd.mono.stages.router import k_offsets as router_k0s
 from vllm.models.deepseek_v41.amd.mono.stages.router import (
     router_tile_mfma,
     router_weight_loads,
@@ -385,7 +386,14 @@ def stage_router(c, task, wvs=None):
     ]
     if const_expr(wvs is None):
         wvs = router_weight_loads(a["gate_w"], tile, part, lane, wave, CM_NT)
-    xs = [router_x_loads(a["x"], part, n, lane, wave, c["x_cm"], t0) for t0, n in tiles]
+    if const_expr(c.get("xmb") is not None):
+        # x polled as the norm's tagged pairs: no flag, then load, in series
+        xs = [router_x_polls(c, part, n, t0) for t0, n in tiles]
+    else:
+        xs = [
+            router_x_loads(a["x"], part, n, lane, wave, c["x_cm"], t0)
+            for t0, n in tiles
+        ]
     for (t0, n), xvs in zip(tiles, xs):
         router_tile_mfma(wvs, xvs, lane, wave, red)
         gpu.barrier()
@@ -399,6 +407,27 @@ def stage_router(c, task, wvs=None):
                 v,
             )
         gpu.barrier()
+
+
+def router_x_polls(c, part, n, t0):
+    """``router_x_loads``' operands from the normed rows' tagged pairs
+    (``c["xmb"]``): each lane's 8 bf16 of a K step, 4 pairs, the same words."""
+    lane, wave = c["lane"], c["wave"]
+    tok = fx.min(lane % 16, n - 1)
+    if const_expr(not isinstance(t0, int) or t0 != 0):
+        tok = tok + t0
+    k0s = router_k0s(part, lane, wave)
+    got = c["poll"](
+        [
+            (c["xmb"], (tok * HIDDEN + k0) // 2 + 2 * h, 2)
+            for k0 in k0s
+            for h in range(2)
+        ]
+    )
+    return [
+        fx.Vector.from_elements(got[2 * i] + got[2 * i + 1], fx.Int32)
+        for i in range(len(k0s))
+    ]
 
 
 # ---------------------------------------------------------------- route
@@ -2167,12 +2196,15 @@ def run_moe(c, key, bid, tls, tl0):
         publish(c["put"], c["x8rdy"], t, 1, tid == 0)
     stamp(timeline, tls, tid, tl0 + 1)
     multi = len(token_tiles(s)) > 1
+    # with the normed rows' pairs (``xmb``) the router polls x itself
+    x_flags = c.get("xmb") is None
     for task in range(
         first_task(bid, c["rs"].router0, key.tuned), router_tasks, BLOCKS
     ):
         # tuned: the gate weights in flight before x's wait
         wvs = router_task_weights(c, task) if key.tuned else None
-        await_x(c, list(range(s)))
+        if const_expr(x_flags):
+            await_x(c, list(range(s)))
         stage_router(c, task, wvs)
     stamp(timeline, tls, tid, tl0 + 2)
     for t in range(first_task(bid, route0, key.tuned), s, BLOCKS):
