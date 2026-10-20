@@ -90,6 +90,8 @@ pub fn lower_sampling_params(
         default_top_k,
         default_min_p,
         default_repetition_penalty,
+        default_presence_penalty,
+        default_frequency_penalty,
         default_max_tokens,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
@@ -162,6 +164,8 @@ pub fn lower_sampling_params(
     let top_k = top_k.or(default_top_k).unwrap_or(0);
     let min_p = min_p.or(default_min_p).unwrap_or(0.0);
     let repetition_penalty = repetition_penalty.or(default_repetition_penalty).unwrap_or(1.0);
+    let presence_penalty = presence_penalty.or(default_presence_penalty).unwrap_or(0.0);
+    let frequency_penalty = frequency_penalty.or(default_frequency_penalty).unwrap_or(0.0);
     let max_tokens = resolve_max_tokens(
         max_tokens,
         default_max_tokens,
@@ -176,8 +180,6 @@ pub fn lower_sampling_params(
         });
     }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
-    let frequency_penalty = frequency_penalty.unwrap_or(0.0);
-    let presence_penalty = presence_penalty.unwrap_or(0.0);
 
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
@@ -406,6 +408,8 @@ mod tests {
             default_top_k: None,
             default_min_p: None,
             default_repetition_penalty: None,
+            default_presence_penalty: None,
+            default_frequency_penalty: None,
             default_max_tokens: None,
         }
     }
@@ -433,6 +437,8 @@ mod tests {
                 default_top_k: None,
                 default_min_p: None,
                 default_repetition_penalty: None,
+                default_presence_penalty: None,
+                default_frequency_penalty: None,
                 default_max_tokens: None,
             },
             sampling_limits,
@@ -954,6 +960,8 @@ mod tests {
                 ),
                 default_min_p: None,
                 default_repetition_penalty: None,
+                default_presence_penalty: None,
+                default_frequency_penalty: None,
                 default_max_tokens: None,
             }
         "#]]
@@ -1034,6 +1042,8 @@ mod tests {
                 default_top_k: None,
                 default_min_p: None,
                 default_repetition_penalty: None,
+                default_presence_penalty: None,
+                default_frequency_penalty: None,
                 default_max_tokens: None,
             },
             sample_sampling_limits(),
@@ -1097,6 +1107,8 @@ mod tests {
             top_k: Some(4),
             max_tokens: Some(32),
             min_tokens: Some(2),
+            presence_penalty: Some(0.25),
+            frequency_penalty: Some(0.75),
             ..Default::default()
         };
 
@@ -1110,6 +1122,8 @@ mod tests {
                 default_top_k: Some(12),
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
+                default_presence_penalty: Some(1.5),
+                default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(128),
             },
             sample_sampling_limits(),
@@ -1133,8 +1147,8 @@ mod tests {
                 prompt_logprob_token_ids: None,
                 prompt_logprob_start: None,
                 min_p: 0.1,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
+                frequency_penalty: 0.75,
+                presence_penalty: 0.25,
                 repetition_penalty: 1.2,
                 repetition_detection: None,
                 stop_token_ids: [],
@@ -1172,6 +1186,8 @@ mod tests {
                 default_top_k: None,
                 default_min_p: None,
                 default_repetition_penalty: None,
+                default_presence_penalty: None,
+                default_frequency_penalty: None,
                 default_max_tokens: None,
             },
             SamplingLimits {
@@ -1497,6 +1513,8 @@ mod tests {
                 default_top_k: Some(12),
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
+                default_presence_penalty: Some(1.5),
+                default_frequency_penalty: Some(0.5),
                 default_max_tokens: Some(128),
             },
             sample_sampling_limits(),
@@ -1520,8 +1538,8 @@ mod tests {
                 prompt_logprob_token_ids: None,
                 prompt_logprob_start: None,
                 min_p: 0.1,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
+                frequency_penalty: 0.5,
+                presence_penalty: 1.5,
                 repetition_penalty: 1.2,
                 repetition_detection: None,
                 stop_token_ids: [],
