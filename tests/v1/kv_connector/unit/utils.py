@@ -328,7 +328,6 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    # Not a pytest test class despite the name.
     __test__ = False
 
     def __init__(
