@@ -198,9 +198,11 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
+    # --torch-backend would restrict torch-ecosystem packages to the stable index,
+    # which has no cu132 torchaudio; the test channel has the whole stack.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
         VLLM_PRECOMPILED_WHEEL_VARIANT="${cuda_variant}" \
-        uv pip install -e . --torch-backend="${cuda_variant}"
+        uv pip install -e . --extra-index-url "https://download.pytorch.org/whl/test/${cuda_variant}"
 else
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 fi
