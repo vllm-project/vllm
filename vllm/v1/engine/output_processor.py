@@ -802,16 +802,8 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
-            request_error = (
-                RequestError(
-                    code=engine_core_output.request_error.code,
-                    message=engine_core_output.request_error.message,
-                    retryable=engine_core_output.request_error.retryable,
-                )
-                if engine_core_output.request_error is not None
-                else None
-            )
-            if request_error is None and (
+            request_error = None
+            if (
                 req_state.detokenizer is None
                 and engine_core_output.mm_cache_miss_hashes
                 and finish_reason == FinishReason.ERROR

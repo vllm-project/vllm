@@ -451,9 +451,7 @@ class TestValidateStructuredOutputs:
             assert params.structured_outputs._backend == "guidance"
 
     class TestPR49625Regression:
-        def test_manager_rejects_mixed_structured_output_backends(
-            self, monkeypatch
-        ):
+        def test_manager_rejects_mixed_structured_output_backends(self, monkeypatch):
             xgrammar_backend = Mock()
             xgrammar_backend.compile_grammar.return_value = object()
             xgrammar_factory = Mock(return_value=xgrammar_backend)

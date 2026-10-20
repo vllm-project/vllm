@@ -200,13 +200,6 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-@dataclass(frozen=True)
-class EngineCoreRequestError:
-    code: str
-    message: str
-    retryable: bool = False
-
-
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -252,9 +245,6 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
-
-    # Appended last for array_like compatibility.
-    request_error: EngineCoreRequestError | None = None
 
     @property
     def finished(self) -> bool:

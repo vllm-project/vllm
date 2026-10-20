@@ -72,7 +72,6 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
-    EngineCoreRequestError,
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
@@ -2137,28 +2136,12 @@ class EngineCoreProc(EngineCore):
     def _handle_request_validation_error(
         self, request: EngineCoreRequest, error: VLLMValidationError
     ) -> None:
-        logger.info(
-            "Request %s failed validation: %s", request.request_id, error
-        )
-        self.output_queue.put_nowait(
-            (
-                request.client_index,
-                EngineCoreOutputs(
-                    engine_index=self.engine_index,
-                    finished_requests={request.request_id},
-                    outputs=[
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ERROR,
-                            request_error=EngineCoreRequestError(
-                                code="validation_error",
-                                message=str(error),
-                            ),
-                        )
-                    ],
-                ),
-            )
+        logger.info("Request %s failed validation: %s", request.request_id, error)
+        self._send_finish_outputs_to_client(
+            [request.request_id],
+            request.client_index,
+            FinishReason.ERROR,
+            RequestError(code="validation_error", message=str(error)),
         )
 
     def pause_scheduler(
