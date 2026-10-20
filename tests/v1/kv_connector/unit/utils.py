@@ -328,6 +328,8 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
+    __test__ = False
+
     def __init__(
         self,
         config: VllmConfig,
