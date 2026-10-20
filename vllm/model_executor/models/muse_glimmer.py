@@ -983,18 +983,6 @@ class MuseGlimmerAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        attn_output = self._forward_unfused(qkv, positions)
-
-        if self.use_output_gate:
-            gate, _ = self.output_gate_proj(hidden_states)
-            attn_output = torch.sigmoid(gate) * attn_output
-
-        output, _ = self.o_proj(attn_output)
-        return output
-
-    def _forward_unfused(
-        self, qkv: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # QK-norm over head_dim, fp32, applied BEFORE RoPE; then pre-scale q.
@@ -1008,7 +996,14 @@ class MuseGlimmerAttention(nn.Module):
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
 
-        return self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
+
+        # Gate reads the layer input hidden states (not the attn output).
+        gate, _ = self.output_gate_proj(hidden_states)
+        attn_output = torch.sigmoid(gate) * attn_output
+
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MuseGlimmerDecoderLayer(nn.Module):

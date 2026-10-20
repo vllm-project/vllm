@@ -401,10 +401,9 @@ def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
     )
     text_config = vllm_config.model_config.hf_text_config
     text_config.head_dim = 128
-    text_config.no_rope_layers = [1]
+    text_config.layer_rope_theta = [10000.0]
     text_config.rms_norm_eps = 1e-6
     text_config.qk_scale_factor = MuseQKNormRoPEKVCacheTestModel.q_scale
-    text_config.use_qk_norm = True
     with vllm.config.set_current_vllm_config(vllm_config):
         model = MuseQKNormRoPEKVCacheTestModel(
             vllm_config=vllm_config,
