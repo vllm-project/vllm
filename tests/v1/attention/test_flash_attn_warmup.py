@@ -26,8 +26,9 @@ def config():
 
 @pytest.mark.parametrize("num_qo_heads", [1, 8])
 @pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("page_size", [128, 1536, 16384])
 def test_dense_warmup_covers_prefill_schedulers(
-    monkeypatch, config, num_qo_heads, head_dim
+    monkeypatch, config, num_qo_heads, head_dim, page_size
 ):
     """Short prefills and SplitKV must not wait for the first user request."""
     monkeypatch.setattr(
@@ -36,7 +37,7 @@ def test_dense_warmup_covers_prefill_schedulers(
         lambda: DeviceCapability(10, 3),
     )
     spec = FullAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=head_dim, dtype=torch.bfloat16
+        block_size=page_size, num_kv_heads=1, head_size=head_dim, dtype=torch.bfloat16
     )
     compiled = []
     monkeypatch.setattr(
@@ -50,6 +51,7 @@ def test_dense_warmup_covers_prefill_schedulers(
 
     classes = set()
     for args in compiled:
+        assert args["page_table_shape"][1] * page_size >= args["max_seqlen_k"]
         packed_q = args["max_seqlen_q"] * num_qo_heads
         stage = 2 if packed_q > 128 else 1
         split = args["num_splits"] > 1
@@ -92,7 +94,10 @@ def test_dense_warmup_preserves_specialized_kernels(
     not flash_attn.current_platform.is_cuda(), reason="requires native FA4"
 )
 @pytest.mark.parametrize("num_qo_heads", [1, 8])
-def test_dense_warmup_populates_native_forward_cache(monkeypatch, config, num_qo_heads):
+@pytest.mark.parametrize("page_size, num_pages", [(128, 64), (16384, 1)])
+def test_dense_warmup_populates_native_forward_cache(
+    monkeypatch, config, num_qo_heads, page_size, num_pages
+):
     """Exercise native scheduler dispatch, not just the representative shapes."""
     capability = flash_attn.current_platform.get_device_capability()
     if capability is None or capability.major not in (10, 11):
@@ -104,7 +109,7 @@ def test_dense_warmup_populates_native_forward_cache(monkeypatch, config, num_qo
     assert compile_from_specs is not None
     monkeypatch.setattr(interface._flash_attn_fwd, "compile_cache", JITCache())
     spec = FullAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        block_size=page_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )
     flash_attn.FA4DenseAttentionKernel().warmup(
         vllm_config=config, kv_cache_spec=spec, num_qo_heads=num_qo_heads
@@ -119,12 +124,12 @@ def test_dense_warmup_populates_native_forward_cache(monkeypatch, config, num_qo
     ):
         compile_from_specs(
             q_shape=(batch * query_len, num_qo_heads, 128),
-            k_shape=(256, 128, 1, 128),
-            v_shape=(256, 128, 1, 128),
+            k_shape=(256, page_size, 1, 128),
+            v_shape=(256, page_size, 1, 128),
             q_dtype=torch.bfloat16,
             cu_seqlens_q_shape=(batch + 1,),
             seqused_k_shape=(batch,),
-            page_table_shape=(batch, 64),
+            page_table_shape=(batch, num_pages),
             max_seqlen_q=query_len,
             max_seqlen_k=8192,
             causal=causal,
