@@ -126,6 +126,32 @@ récupéré seul — comportement documenté.
 nvfp4 de l'éval (N=1 33,9 → N=48 767,5 ; −13/−17 % vs fp8 frais) restent la référence
 du config : le tier (24→32 GiB) ne touche pas le chemin decode.
 
+## Soak (cycle surveillance 04:47Z, ~4 h post-fenêtre)
+
+- **Amortissement OPÉRATIONNEL** : prefix hit **77-78 %**, **external (tier) hit 75,7 %**
+  puis 66,6 % — le tier CPU replaye réellement. KV jamais au-dessus de ~67 % (vs 100 %
+  avant la fenêtre). `num_preemptions_total=4` en 1 h. VRAM GPU 0 21 727 MiB (bande
+  en charge, sous la ligne 23 000).
+- **★ WEDGE #4 à 03:43:56Z — VARIANT NOUVEAU, PAS une saturation** : KV **12,8 %** au
+  moment du stall, ligne clé `Deferred: 1, KV fetch: 0 waiting to start, 0 in
+  progress, 1 completed waiting` puis decode 0,0 t/s et trou de log 2min41 →
+  restart watchdog (rôle rempli). Lecture : **le fetch tier était TERMINÉ mais la
+  requête deferred n'a jamais été replanifiée** — stall scheduler/connector
+  (suspect : chemin de complétion de load de l'OffloadingConnector). Candidat issue
+  upstream une fois une repro propre rédigée. Les wedges 1-3 (KV 100 %) n'ont pas
+  récidivé — (a)+(b) ont traité la capacité.
+- **400+gros continuent** : 23:41:37Z 985K, 02:12:07Z 930K, 04:11:38Z 917K (Bun) —
+  le rognage local persiste, #431 toujours pas armé côté claudish.
+- **⚠️ Marge commit 86,4 % (52,1 GB) au cycle 04:47Z — seuil 85 % franchi** :
+  aucun travail lourd ; **l'éval tier fs est BLOQUÉE tant que la marge repasse
+  sous 85 %** (le tier fs ajouterait de l'IO disque + des pages, pas du commit,
+  mais la fenêtre elle-même (boot + trafic) non plus ne se lance au-dessus du seuil
+  — règle spec §3).
+- Sécurité : zéro IP inconnue avec 200 ; nouveau **probe externe persistant
+  `ZOLTRAAK/0.2.0 (security-research)` / Hetzner 116.202.50.2** — /v1/models ×2-3
+  toutes les 1-2 h, token invalide, **100 % 401** — ajouté à la carte census, pas
+  le critère d'alerte (aucun 200).
+
 ## Verdict : **FENÊTRE VALIDÉE** (20/10 ~01:40Z) — prod sur nvfp4 + 32 GiB
 
 - Toutes les cibles atteintes : KV **750 747** (×1,75), dtype nvfp4, tier 32, exec
