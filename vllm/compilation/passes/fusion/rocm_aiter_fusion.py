@@ -1011,6 +1011,19 @@ class AiterSiluMulMxfp4QuantPattern(VllmPatternReplacement):
         return _replacement
 
 
+class AiterSiluMulMxfp4AsmQuantPattern(AiterSiluMulMxfp4QuantPattern):
+    """The same fold for MXFP4 linears on the ASM layout (preshuffle Triton GEMM
+    up to 64 rows, ASM a4w4 above), where the linear emits
+    ``rocm_aiter_dynamic_mxfp4_asm_quant``: the HIP quant with its RoundUp e8m0
+    scale, shuffled scales from 32 rows. The fused kernel runs with
+    ``scaling_mode="ceil"`` and the same scale layout, so against the compiled
+    native silu_and_mul it writes the HIP quant's bytes.
+    """
+
+    QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_asm_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_act_mul_fused_mxfp4_asm_quant_op()
+
+
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -1030,6 +1043,8 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         )
         if rocm_aiter_ops.is_mxfp4_quant_fusion_supported():
             self.register(AiterSiluMulMxfp4QuantPattern())
+        if rocm_aiter_ops.is_mxfp4_asm_quant_fusion_supported():
+            self.register(AiterSiluMulMxfp4AsmQuantPattern())
 
         self.dump_patterns(config, self.pm_pass)
 

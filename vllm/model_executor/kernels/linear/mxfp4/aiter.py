@@ -162,6 +162,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     # tests do) keeps the single gemm_with_dynamic_quant call
     fold_act_quant = False
     split_act_quant = False
+    fold_asm_act_quant = False
+    split_asm_act_quant = False
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
@@ -177,7 +179,10 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             bool(pass_config.fuse_act_quant)
             or bool(pass_config.fuse_norm_quant and pass_config.fuse_norm_mxfp4_quant)
         )
+        # the ASM layout only has the SiLU-mul fold
+        self.fold_asm_act_quant = compiled and bool(pass_config.fuse_act_quant)
         self.split_act_quant = False
+        self.split_asm_act_quant = False
 
     @classmethod
     def is_supported(
@@ -236,11 +241,17 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             )
             self.use_asm_gemm = False
 
-        # the MXFP4 quant fusions only cover the Triton afp4wfp4 path
+        # the folds into SiLU-mul and RMSNorm write the Triton afp4wfp4 layout,
+        # the ASM layout (HIP quant, shuffled scales) has a SiLU-mul fold of its own
         self.split_act_quant = (
             not self.use_asm_gemm
             and self.fold_act_quant
             and bool(rocm_aiter_ops.is_mxfp4_quant_fusion_supported())
+        )
+        self.split_asm_act_quant = (
+            self.use_asm_gemm
+            and self.fold_asm_act_quant
+            and bool(rocm_aiter_ops.is_mxfp4_asm_quant_fusion_supported())
         )
 
         if self.use_asm_gemm:
@@ -278,6 +289,19 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
                 layer.weight,
                 layer.weight_scale,
                 False,
+                self.out_dtype,
+                x_s,
+            )
+        elif self.split_asm_act_quant:
+            # Same for the ASM layout: the HIP quant gemm_with_dynamic_quant
+            # runs otherwise, scales laid out the way the preshuffle / a4w4
+            # GEMM reads them for this M.
+            x_q, x_s = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_asm_quant(x)
+            y = torch.ops.vllm.gemm_with_dynamic_quant(
+                x_q,
+                layer.weight,
+                layer.weight_scale,
+                True,
                 self.out_dtype,
                 x_s,
             )
