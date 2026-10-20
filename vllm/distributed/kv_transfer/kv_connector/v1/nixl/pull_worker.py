@@ -317,7 +317,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Pure MLA reads once because its cache is replicated. Hybrid
         # MLA+SSM still needs one read per SSM source rank. With DCP, pure
         # MLA may also read from multiple ranks (disjoint token slices).
-        if self.use_mla and tp_ratio < 0 and not self._has_mamba and not dcp_active:
+        # Head-scaled mixed MLA (e.g. sparse_mla_force_mqa: replicated
+        # latent + head-sharded indexer) also reads once per source rank —
+        # the plan's attention groups have multiple sources only in these
+        # cases, never for genuinely replicated pure MLA.
+        _plan = self.tp_mappings.get(engine_id)
+        _multi_source = _plan is not None and any(
+            len(g) > 1 for g in _plan.source_ranks_per_group
+        )
+        if (
+            self.use_mla
+            and tp_ratio < 0
+            and not self._has_mamba
+            and not dcp_active
+            and not _multi_source
+        ):
             assert len(read_specs) == 1
 
         for i, spec in enumerate(read_specs):
