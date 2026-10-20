@@ -18,12 +18,15 @@ The on_page_markdown hook passes the current page context to the preprocessor be
 each page is converted.
 """
 
+import os
 import posixpath
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import regex as re
 from markdown import Extension
 from markdown.preprocessors import Preprocessor
+from markdown.treeprocessors import Treeprocessor
 from mkdocs.config.defaults import MkDocsConfig
 from mkdocs.structure.files import Files
 from mkdocs.structure.pages import Page
@@ -81,7 +84,8 @@ class UrlSchemesPreprocessor(Preprocessor):
                 return match.group(0)
 
             # Files and directories have different URL schemes on GitHub
-            slug = "tree/main" if path.is_dir() else "blob/main"
+            kind = "tree" if path.is_dir() else "blob"
+            slug = f"{kind}/{quote(self.ext.source_ref, safe='')}"
 
             path = path.relative_to(ROOT_DIR)
             url = f"https://github.com/vllm-project/vllm/{slug}/{path}{fragment}"
@@ -139,17 +143,47 @@ class UrlSchemesPreprocessor(Preprocessor):
         return markdown.split("\n")
 
 
+class SourceLinksTreeprocessor(Treeprocessor):
+    def __init__(self, md, ext):
+        super().__init__(md)
+        self.ext = ext
+
+    def run(self, root):
+        if self.ext.source_ref == "main":
+            return
+
+        ref = quote(self.ext.source_ref, safe="")
+        for link in root.iter("a"):
+            href = link.get("href", "")
+            url = urlsplit(href)
+            if url.scheme not in {"http", "https"} or url.netloc != "github.com":
+                continue
+            for kind in ("blob", "tree"):
+                prefix = f"/vllm-project/vllm/{kind}/main"
+                if url.path == prefix or url.path.startswith(f"{prefix}/"):
+                    path = f"/vllm-project/vllm/{kind}/{ref}{url.path[len(prefix) :]}"
+                    target = url._replace(path=path).geturl()
+                    link.set("href", target)
+                    if link.text == href:
+                        link.text = target
+                    break
+
+
 class UrlSchemesExtension(Extension):
     """Markdown extension that registers the URL schemes preprocessor."""
 
     def __init__(self, **kwargs):
         self.page = None
         self.files = None
+        self.source_ref = "main"
         super().__init__(**kwargs)
 
     def extendMarkdown(self, md):
         # Priority 25 runs after pymdownx.snippets (priority 32)
         md.preprocessors.register(UrlSchemesPreprocessor(md, self), "url_schemes", 25)
+        md.treeprocessors.register(
+            SourceLinksTreeprocessor(md, self), "source_links", 5
+        )
 
 
 # Singleton extension instance shared between the hook and the preprocessor.
@@ -158,6 +192,12 @@ _ext = UrlSchemesExtension()
 
 def on_config(config: MkDocsConfig) -> MkDocsConfig:
     """Register the URL schemes markdown extension."""
+    if os.getenv("READTHEDOCS_VERSION_TYPE") == "tag":
+        _ext.source_ref = os.environ["READTHEDOCS_GIT_IDENTIFIER"]
+        if not _ext.source_ref:
+            raise ValueError("READTHEDOCS_GIT_IDENTIFIER must contain the release tag")
+    else:
+        _ext.source_ref = "main"
     config["markdown_extensions"].append(_ext)
     return config
 
