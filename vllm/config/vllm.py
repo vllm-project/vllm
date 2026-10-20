@@ -2851,7 +2851,7 @@ class VllmConfig:
         if model_config is None:
             return
         mm_config = model_config.multimodal_config
-        if mm_config is None:
+        if mm_config is None or mm_config.language_model_only:
             return
 
         ec_config = self.ec_transfer_config
