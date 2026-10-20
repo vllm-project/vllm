@@ -540,6 +540,8 @@ class AttentionSpec(KVCacheSpec):
     """Distinct shards this cache splits into across TP; TP ranks beyond this
     hold replicas. None: unknown, treated as not replicated."""
     num_kv_heads: int
+    num_query_heads: int | None = field(default=None, compare=False)
+    """Per-rank query heads for kernel selection; not part of the cache layout."""
     head_size: int
     dtype: torch.dtype
     head_size_v: int = None  # type: ignore[assignment]
