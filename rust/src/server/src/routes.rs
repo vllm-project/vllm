@@ -82,7 +82,7 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
                 ),
                 error_type: "NotImplementedError".to_string(),
                 param: None,
-                code: Some("501".to_string()),
+                code: 501,
             },
         }),
     )
