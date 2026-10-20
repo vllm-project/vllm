@@ -1499,10 +1499,23 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # attention_dispatch.cu only holds the runtime dispatch, attention_kernels.cuh
   # the kernels and launchers. A file listed here is dead weight unless
   # attention_dispatch.cu also dispatches its entry point (guarded below).
+
+  # The skinny GEMM launchers are split per kernel family: the kernels (and the
+  # device code they instantiate) are shared through skinny_gemms.cuh, but each
+  # family gets its own translation unit so ninja compiles them in parallel.
+  # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
+  # s_waitcnt asm) that gfx1250 (gfx12) does not provide; they are excluded from
+  # the gfx1250 build below.
+  set(VLLM_SKINNY_SRC
+    "csrc/rocm/skinny_gemms_llmm1.cu"
+    "csrc/rocm/skinny_gemms_wvsplitk.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
+    "csrc/rocm/skinny_gemms_wvsplitkq.cu"
+    "csrc/rocm/skinny_gemms_int4.cu")
+
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/skinny_gemms_int4.cu"
+    ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
     "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
     "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
@@ -1554,15 +1567,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
   # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_SRC})
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    set(VLLM_SKINNY_SRC
-      "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
