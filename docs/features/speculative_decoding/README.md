@@ -89,15 +89,18 @@ vLLM what the drafter needs (target hidden states, auxiliary hidden states and
 lookahead KV slots).
 
 A method that verifies drafts other than a chain (a tree, for example) on a
-hybrid model with gated delta net layers can also replace the spec-decode conv
-and recurrence of those layers. It names a factory in
+hybrid model with gated delta net or Mamba2 layers can also replace the
+spec-decode conv and recurrence of those layers. It names a factory in
 `SpeculativeMethodSpec.linear_attn_verify_extension`; the factory gets the
 `VllmConfig` and returns a `LinearAttnVerifyExtension`
 (`vllm/model_executor/layers/mamba/verify_extension.py`), whose
 `forward_spec_rows(rows)` receives the spec-decode rows of each forward as a
 `GDNSpecRows` and writes `rows.out`. The state layout stays vLLM's: row `i` of a
 request stores its states at `state_indices[b, i]`, and the next step resumes
-from `num_accepted_tokens - 1`. Only Qwen gated delta net layers consult it.
+from `num_accepted_tokens - 1`. Qwen gated delta net layers consult it, and
+Mamba2 layers call `forward_mamba2_spec_rows(rows)` with a `Mamba2SpecRows`
+(ReplaySSM is refused with an extension); an extension that does not implement
+it raises at the first Mamba2 forward instead of verifying its drafts as chains.
 
 ## `--speculative-config` schema
 
