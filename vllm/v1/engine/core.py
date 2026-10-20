@@ -1100,6 +1100,15 @@ class EngineCore:
                 request.mm_features
             )
 
+        if request.mm_features:
+            missing_mm_hashes = [
+                feature.mm_hash or feature.identifier
+                for feature in request.mm_features
+                if feature.data is None
+            ]
+            if missing_mm_hashes:
+                raise MultiModalCacheMissError(missing_mm_hashes)
+
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
