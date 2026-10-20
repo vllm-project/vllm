@@ -424,9 +424,10 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a backend that supports non-causal attention)."""
-    kv_cache_dtype: CacheDType | None = None
+    kv_cache_dtype: CacheDType | str | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
-    target model's `--kv-cache-dtype`."""
+    target model's `--kv-cache-dtype`. Custom dtypes registered by platform
+    backends are accepted."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -1100,6 +1101,15 @@ class SpeculativeConfig:
                     "n_predict": text_config.num_nextn_predict_layers,
                     "architectures": ["Glm5NextMTPModel"],
                     "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
                 }
             )
 
