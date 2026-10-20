@@ -188,6 +188,9 @@ def test_ffn_launch_matches_native_layers(monkeypatch):
             assert res[0] > 0.99999
 
 
+SITE_INJECT = 12
+
+
 def _arm_late_fault(worker, rank, ticks):
     runner = worker.model_runner.model_state.backbone.specialized_decode.executor
     runner.runner.inject.copy_(torch.tensor([rank + 1, ticks], dtype=torch.int32))
@@ -215,6 +218,6 @@ def test_late_rank_fault_returns_no_tokens_from_full_graphs(monkeypatch, capfd):
     with pytest.raises(EngineDeadError):
         outputs = llm.generate(["The capital of Italy is"], params)
     assert outputs is None
-    err = capfd.readouterr().err
-    assert "MiniMax-M3 FFN launch failed on TP rank 2" in err
-    assert "tokens are discarded" in err
+    logs = "".join(capfd.readouterr())
+    assert "MiniMax-M3 FFN launch failed on TP rank 2" in logs
+    assert f"site {SITE_INJECT}" in logs and "tokens are discarded" in logs
