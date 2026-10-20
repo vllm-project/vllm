@@ -709,7 +709,11 @@ async def _generate_text_stream(
 
 
 async def _derender_completion_text(
-    client: httpx.AsyncClient, output_ids: list[int], finish_reason: str
+    client: httpx.AsyncClient,
+    output_ids: list[int],
+    finish_reason: str,
+    stop_reason: int | str | None = None,
+    completion_request: dict | None = None,
 ) -> str:
     resp = await client.post(
         "/v1/completions/derender",
@@ -723,10 +727,12 @@ async def _derender_completion_text(
                             "index": 0,
                             "token_ids": output_ids,
                             "finish_reason": finish_reason,
+                            "stop_reason": stop_reason,
                         }
                     ],
                 }
             ],
+            "completion_request": completion_request,
         },
     )
     assert resp.status_code == 200, resp.text
@@ -835,9 +841,10 @@ async def test_text_parity_logprobs(client):
 async def test_text_parity_stop_string(client, stream):
     """Inline text follows the engine's stop handling, like /v1/completions.
 
-    token_ids keep every generated token, so /derender brings the matched
-    stop string back. Its text must start with the inline text and only
-    differ after it.
+    token_ids keep every generated token, so batch /derender must cut the
+    matched stop string itself, from generate's stop_reason or, for older
+    generate servers, from the request's stop list. Without either it brings
+    the stop string back.
     """
     stop = "\n"
     token_ids = await _render_token_ids(
@@ -863,21 +870,33 @@ async def test_text_parity_stop_string(client, stream):
         inline_text = "".join(ch["text"] for ch in choices)
         output_ids = [t for ch in choices for t in ch.get("token_ids") or []]
         finish_reason = choices[-1]["finish_reason"]
+        stop_reason = choices[-1]["stop_reason"]
     else:
         inline = (await _generate(client, token_ids, "text", stop=[stop]))["choices"][0]
         inline_text = inline["text"]
         output_ids = inline["token_ids"]
         finish_reason = inline["finish_reason"]
+        stop_reason = inline["stop_reason"]
 
     assert inline_text == coupled["text"]
     assert finish_reason == coupled["finish_reason"]
+    assert stop_reason == coupled["stop_reason"]
     assert stop not in inline_text
 
-    derendered = await _derender_completion_text(client, output_ids, finish_reason)
-    assert derendered.startswith(inline_text)
+    reported = await _derender_completion_text(
+        client, output_ids, finish_reason, stop_reason=stop_reason
+    )
+    scanned = await _derender_completion_text(
+        client,
+        output_ids,
+        finish_reason,
+        completion_request={"model": MODEL, "prompt": token_ids, "stop": [stop]},
+    )
+    assert reported == scanned == inline_text
     if coupled["stop_reason"] != stop:
         pytest.skip("Model did not emit the stop string")
-    assert derendered[len(inline_text) :].startswith(stop)
+    unknown = await _derender_completion_text(client, output_ids, finish_reason)
+    assert unknown[len(inline_text) :].startswith(stop)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,3 +1056,4 @@ async def test_inline_derender_logprobs(client, include_reasoning, extra):
         assert [sorted(_top_tokens(e)) for e in i_content] == [
             sorted(_top_tokens(e)) for e in c_content
         ]
+
