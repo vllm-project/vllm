@@ -324,7 +324,11 @@ class CacheConfig:
     prefix caching, flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_recoverssm: bool = field(default=False, init=False)
-    """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
+    """Whether RecoverSSM speculative decode is used (Kimi-K3 KDA, Qwen4Exp GDN
+    and PLE; selected by `use_replayssm` with speculative decoding). It pays off
+    at K >= 3 under load (Yuchi017 measured +7-11% at concurrency 32 for
+    K=3/5/7 on an L40S with Qwen3.5-4B); at concurrency 1 or K=1 the commit's
+    fixed cost cancels the saving."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
