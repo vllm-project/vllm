@@ -306,6 +306,9 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
+            return Err(Error::InvalidCacheSalt);
+        }
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
         }
@@ -313,9 +316,44 @@ impl TextRequest {
     }
 }
 
+/// Whether a cache salt is safe to hand to downstream cache backends, which
+/// may use these characters as key separators or terminators. Mirrors Python's
+/// `validate_cache_salt`, which counts length in code points.
+fn is_valid_cache_salt(salt: &str) -> bool {
+    const MAX_LEN: usize = 128;
+    const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
+
+    !salt.is_empty() && salt.chars().count() <= MAX_LEN && !salt.contains(FORBIDDEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_unsafe_cache_salt() {
+        let max_len = "é".repeat(128);
+        for (salt, valid) in [
+            ("tenant-a", true),
+            (max_len.as_str(), true),
+            ("", false),
+            (&"a".repeat(129), false),
+            ("tenant@a", false),
+            ("tenant/a", false),
+            ("tenant\\a", false),
+            ("tenant\0a", false),
+        ] {
+            let request = TextRequest {
+                cache_salt: Some(salt.to_string()),
+                ..TextRequest::for_test()
+            };
+            let result = request.validate();
+            assert_eq!(result.is_ok(), valid, "{salt:?}");
+            if let Err(err) = result {
+                assert!(err.is_request_validation_error());
+            }
+        }
+    }
 
     #[test]
     fn validate_rejects_empty_stop_string_at_shared_chokepoint() {
