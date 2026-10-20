@@ -275,18 +275,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         obj_handle: object | None = None
         xfer_handle: object | None = None
         try:
+            # These calls return a usable handle or raise; NIXL has no sentinel
+            # return path here.
             files_desc = self._agent.register_memory(nixl_files, "OBJ")
-            if files_desc is None:
-                logger.warning("register_memory (OBJ) failed for job %d", job_id)
-                self._fail_submission(job_id)
-                return
-
             obj_handle = self._agent.prep_xfer_dlist("ObjAgent", files_desc.trim())
-            if not obj_handle:
-                logger.warning("prep_xfer_dlist (OBJ) failed for job %d", job_id)
-                self._fail_submission(job_id, files_desc=files_desc)
-                return
-
             xfer_handle = self._agent.make_prepped_xfer(
                 op,
                 self._dram_prepped_handle,
@@ -294,27 +286,22 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 obj_handle,
                 np.arange(len(nixl_files), dtype=np.int32),
             )
-            if not xfer_handle:
-                logger.warning("make_prepped_xfer failed for job %d", job_id)
-                self._fail_submission(
-                    job_id, obj_handle=obj_handle, files_desc=files_desc
-                )
-                return
-
             state = self._agent.transfer(xfer_handle)
-            if state == "ERR":
-                logger.warning("agent.transfer failed for job %d", job_id)
-                self._fail_submission(
-                    job_id,
-                    xfer_handle=xfer_handle,
-                    obj_handle=obj_handle,
-                    files_desc=files_desc,
-                )
-                return
         except Exception as exc:
             # NIXL's Python bindings raise on every error status instead of
             # returning a sentinel, so any of these calls can fail here.
             logger.warning("OBJ transfer submission failed for job %d: %s", job_id, exc)
+            self._fail_submission(
+                job_id,
+                xfer_handle=xfer_handle,
+                obj_handle=obj_handle,
+                files_desc=files_desc,
+            )
+            return
+
+        # transfer() reports a failed post as "ERR" instead of raising.
+        if state == "ERR":
+            logger.warning("agent.transfer failed for job %d", job_id)
             self._fail_submission(
                 job_id,
                 xfer_handle=xfer_handle,

@@ -438,44 +438,6 @@ class TestMockObjTierFailures:
         )
         assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
-    def test_submit_store_register_memory_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
-        agent.register_memory = lambda *a, **k: None
-        tier.submit_store(make_job(1, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 1
-        assert not results[0].success
-
-    def test_submit_load_register_memory_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
-        agent.register_memory = lambda *a, **k: None
-        tier.submit_load(make_job(2, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 2
-        assert not results[0].success
-
-    def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
-        agent.make_prepped_xfer = lambda *a, **k: None
-        tier.submit_store(make_job(3, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 3
-        assert not results[0].success
-
-    def test_submit_store_raise_reported_in_get_finished(self):
-        # NIXL's bindings raise on an error status instead of returning a
-        # sentinel, so a failed registration must not escape submit_store.
-        tier, agent = _make_tier(num_blocks=4)
-        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
-        tier.submit_store(make_job(1, [key(1)], [0]))
-        results = list(tier.get_finished_jobs())
-        assert len(results) == 1
-        assert results[0].job_id == 1
-        assert not results[0].success
-
     def test_submit_load_raise_marks_verdict_negative(self):
         # A promotion that fails at submission must mark the cached verdict as
         # a miss, so the scheduler does not re-issue the same doomed promotion
@@ -500,19 +462,20 @@ class TestMockObjTierFailures:
         assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
 
     @pytest.mark.parametrize(
-        ("failing_call", "released"),
+        ("failing_call", "failure", "released"),
         [
-            ("register_memory", []),
-            ("prep_xfer_dlist", ["files_desc"]),
-            ("make_prepped_xfer", ["obj_handle", "files_desc"]),
-            ("transfer", ["xfer_handle", "obj_handle", "files_desc"]),
+            ("register_memory", "raise", []),
+            ("prep_xfer_dlist", "raise", ["files_desc"]),
+            ("make_prepped_xfer", "raise", ["obj_handle", "files_desc"]),
+            ("transfer", "raise", ["xfer_handle", "obj_handle", "files_desc"]),
+            ("transfer", "ERR", ["xfer_handle", "obj_handle", "files_desc"]),
         ],
     )
-    def test_submission_raise_releases_the_handles_created(
-        self, monkeypatch, failing_call, released
+    def test_submission_failure_releases_the_handles_created(
+        self, monkeypatch, failing_call, failure, released
     ):
-        # Each NIXL call can fail after the previous ones created handles.
-        # Release exactly those, in reverse creation order, and report the job.
+        # NIXL returns a handle or raises; transfer() also reports "ERR".
+        # Release exactly the handles created so far, and report the job.
         tier, agent = _make_tier(num_blocks=4)
         handles = {
             "files_desc": MagicMock(name="files_desc"),
@@ -538,10 +501,11 @@ class TestMockObjTierFailures:
         ):
             monkeypatch.setattr(agent, release, released_handles.append)
 
-        def raise_backend_error(*args, **kwargs):
-            raise RuntimeError("backend error")
-
-        monkeypatch.setattr(agent, failing_call, raise_backend_error)
+        if failure == "raise":
+            fail = MagicMock(side_effect=RuntimeError("backend error"))
+        else:
+            fail = MagicMock(return_value=failure)
+        monkeypatch.setattr(agent, failing_call, fail)
 
         tier.submit_store(make_job(1, [key(1)], [0]))
 
@@ -621,7 +585,9 @@ class TestMockObjTierFailures:
 
         def register_once_fail(*a, **k):
             call_count[0] += 1
-            return None if call_count[0] == 1 else original_register(*a, **k)
+            if call_count[0] == 1:
+                raise RuntimeError("backend error")
+            return original_register(*a, **k)
 
         agent.register_memory = register_once_fail
 
@@ -835,7 +801,9 @@ class TestObjTierKVEvents:
         assert self.tier._store_job_keys == {}
 
     def test_submission_failure_emits_no_event(self):
-        self.agent.make_prepped_xfer = lambda *a, **k: None
+        self.agent.make_prepped_xfer = MagicMock(
+            side_effect=RuntimeError("backend error")
+        )
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = list(self.tier.get_finished_jobs())
         assert not results[0].success
