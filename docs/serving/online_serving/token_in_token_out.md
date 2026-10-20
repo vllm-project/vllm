@@ -94,6 +94,7 @@ print(response["choices"][0]["token_ids"])
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs` and `token_ids` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
 - `stream: true` isn't supported yet.
+- `/cohere/v2/chat/render` drops the Cohere document map from `parse_context`, so citations come back without their document sources.
 
 ### Logprobs
 
@@ -106,7 +107,7 @@ The server returns a 400 for:
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
 - `output_mode: "derender"` with `stream: true`.
-- `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a `parse_context` that a chat request would reject, such as `tool_choice: "required"` without `tools`. This is checked before generating.
+- `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).

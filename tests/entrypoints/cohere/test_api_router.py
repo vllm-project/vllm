@@ -38,6 +38,7 @@ from vllm.entrypoints.cohere.serving import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
+    ParseContext,
     ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
@@ -488,21 +489,27 @@ class TestRenderEndpoint:
         assert kwargs["safety_mode"] == "strict"
 
     def test_api_server_only_kwargs_not_forwarded(self):
-        """As on ``/cohere/v2/chat``, the engine's reasoning parser must not
-        receive the template kwargs that only the API server reads."""
+        """As on ``/cohere/v2/chat``, the engine's reasoning parser and the
+        derender ``parse_context`` must not receive the template kwargs that
+        only the API server reads. Their tuple keys can't be JSON encoded."""
+        kwargs = {
+            "safety_mode": "strict",
+            **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, {(0, 0): "x"}),
+        }
         result = _generate_request()
         result.reasoning_parser_kwargs = ReasoningParserKwargs(
-            chat_template_kwargs={
-                "safety_mode": "strict",
-                **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, "x"),
-            }
+            chat_template_kwargs=kwargs
         )
+        result.parse_context = ParseContext(chat_template_kwargs=kwargs)
         app = _build_render_app(_RenderChatHandler(), _RenderHandler(result))
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
         assert r.status_code == HTTPStatus.OK
         assert r.json()["reasoning_parser_kwargs"] == {
             "chat_template_kwargs": {"safety_mode": "strict"}
+        }
+        assert r.json()["parse_context"]["chat_template_kwargs"] == {
+            "safety_mode": "strict"
         }
 
     def test_501_when_chat_handler_missing(self):

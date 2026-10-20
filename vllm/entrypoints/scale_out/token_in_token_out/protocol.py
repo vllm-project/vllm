@@ -33,6 +33,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
@@ -67,19 +68,29 @@ class ParseContext(BaseModel):
     def to_chat_request(self) -> ChatCompletionRequest:
         """Build the message less chat request the parser reads.
 
-        Validated from plain data because the request validators only accept
-        a named `tool_choice` as a dict.
+        Built without the chat request validators: the Anthropic converter
+        assigns tool fields that they would reject (e.g. `tools: []`) and the
+        coupled path serves those as is.
 
         Raises:
-            ValueError: If the context fails the chat request validators.
-            VLLMValidationError: Same for the tool usage validators.
+            VLLMValidationError: If a named `tool_choice` matches no tool.
 
         """
-        return ChatCompletionRequest.model_validate(
-            {
-                "messages": [],
-                **self.model_dump(exclude={"history_tool_call_cnt"}),
-            }
+        if isinstance(self.tool_choice, ChatCompletionNamedToolChoiceParam):
+            name = self.tool_choice.function.name
+            if not any(tool.function.name == name for tool in self.tools or ()):
+                raise VLLMValidationError(
+                    "The tool specified in `tool_choice` does not match any"
+                    " of the specified `tools`",
+                    parameter="tool_choice",
+                )
+        return ChatCompletionRequest.model_construct(
+            messages=[],
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+            parallel_tool_calls=self.parallel_tool_calls,
+            include_reasoning=self.include_reasoning,
+            chat_template_kwargs=self.chat_template_kwargs,
         )
 
 

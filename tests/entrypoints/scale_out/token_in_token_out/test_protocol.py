@@ -27,8 +27,10 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
     MultiModalFeatures,
+    ParseContext,
     PlaceholderRangeInfo,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
@@ -183,6 +185,22 @@ def test_parse_context_rejects_unknown_fields():
     payload = {**_base_payload(), "parse_context": {"tool_choise": "auto"}}
     with pytest.raises(ValidationError, match="tool_choise"):
         GenerateRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("tools", [None, []])
+def test_parse_context_to_chat_request_accepts_converter_tool_fields(tools):
+    """The Anthropic converter emits these and coupled /v1/messages serves them."""
+    chat_request = ParseContext(tools=tools, tool_choice="auto").to_chat_request()
+    assert chat_request.tools == tools
+    assert chat_request.tool_choice == "auto"
+
+
+def test_parse_context_to_chat_request_rejects_unknown_named_tool():
+    parse_context = ParseContext.model_validate(
+        {"tool_choice": {"type": "function", "function": {"name": "nope"}}}
+    )
+    with pytest.raises(VLLMValidationError, match="tool_choice"):
+        parse_context.to_chat_request()
 
 
 def test_derender_mode_rejects_detokenize_false():

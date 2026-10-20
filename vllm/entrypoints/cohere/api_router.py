@@ -202,6 +202,12 @@ if _SDK_AVAILABLE:
             kwargs.chat_template_kwargs = handler._engine_chat_template_kwargs(
                 kwargs.chat_template_kwargs
             )
+        # Citations from derender mode lack document sources: the
+        # position-to-source map can't go over JSON.
+        if (parse_context := result.parse_context) is not None:
+            parse_context.chat_template_kwargs = handler._engine_chat_template_kwargs(
+                parse_context.chat_template_kwargs
+            )
 
         return JSONResponse(content=result.model_dump())
 

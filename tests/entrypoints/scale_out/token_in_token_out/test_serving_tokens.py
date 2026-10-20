@@ -820,11 +820,13 @@ async def test_derender_mode_with_parser_matches_chat_completions(client, messag
         json={
             **generate_request,
             "output_mode": "derender",
-            "parse_context": {"tool_choice": "required"},
+            "parse_context": {
+                "tool_choice": {"type": "function", "function": {"name": "nope"}}
+            },
         },
     )
     assert invalid.status_code == 400
-    assert "tools" in invalid.json()["error"]["message"]
+    assert "tool_choice" in invalid.json()["error"]["message"]
 
     resp = await client.post(
         GEN_ENDPOINT, json={**generate_request, "output_mode": "derender"}
