@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Controller ordering and helper cleanup without CUDA initialization."""
 
+import subprocess
+import sys
 from unittest.mock import Mock, patch
 
 import pytest
@@ -71,3 +73,31 @@ def test_helper_read_timeout_kills_process():
         driver._read(0)
     driver.proc.kill.assert_called_once()
     selector.close.assert_called_once()
+
+
+def test_helper_close_terminates_blocked_driver_call():
+    driver = Driver.__new__(Driver)
+    driver.proc = Mock()
+    driver.proc.poll.return_value = None
+    driver.close()
+    driver.proc.kill.assert_called_once()
+    driver.proc.communicate.assert_called_once_with(timeout=1)
+
+
+def test_helper_close_reaps_real_process():
+    driver = Driver.__new__(Driver)
+    driver.proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        driver.close()
+        assert driver.proc.returncode is not None
+        assert driver.proc.stdin is not None and driver.proc.stdout is not None
+        assert driver.proc.stdin.closed and driver.proc.stdout.closed
+    finally:
+        if driver.proc.poll() is None:
+            driver.proc.kill()
+            driver.proc.wait(timeout=5)

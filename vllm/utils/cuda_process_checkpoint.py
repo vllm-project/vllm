@@ -132,12 +132,9 @@ class Driver:
             raise RuntimeError(str(row))
 
     def close(self):
-        cast(TextIO, self.proc.stdin).close()
-        try:
-            self.proc.wait(timeout=5)
-        except Exception:
+        if self.proc.poll() is None:
             self.proc.kill()
-            self.proc.wait(timeout=5)
+        self.proc.communicate(timeout=1)
 
 
 class CudaProcessCheckpoint:

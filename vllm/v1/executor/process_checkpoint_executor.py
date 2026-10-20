@@ -4,6 +4,7 @@
 
 import json
 import os
+import sys
 import threading
 import time
 from concurrent.futures import Future
@@ -12,6 +13,7 @@ from multiprocessing.process import BaseProcess
 from typing import Any, cast
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.cuda_process_checkpoint import CudaProcessCheckpoint
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
@@ -52,6 +54,18 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
         self._checkpoint = None
         self._checkpoint_active = False
         parallel = vllm_config.parallel_config
+        if sys.platform != "linux" or not current_platform.is_cuda():
+            raise ValueError("Process checkpoint requires Linux and NVIDIA CUDA")
+        if (
+            not vllm_config.use_v2_model_runner
+            or vllm_config.model_config.sleep_mode_backend != "cumem"
+            or parallel.enable_expert_parallel
+            or parallel.worker_cls not in ("auto", "vllm.v1.worker.gpu_worker.Worker")
+        ):
+            raise ValueError(
+                "Process checkpoint requires the V2 GPU model runner, cumem sleep "
+                "backend and standard GPU worker, without expert parallelism"
+            )
         compilation = getattr(vllm_config, "compilation_config", None)
         passes = getattr(compilation, "pass_config", None)
         fused_allreduce = bool(getattr(compilation, "mode", 0)) and bool(
@@ -77,9 +91,13 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
             or parallel.world_size != parallel.tensor_parallel_size
         ):
             raise ValueError("Process checkpoint requires single-node TP=1, 2 or 4")
-        if vllm_config.kv_transfer_config or vllm_config.ec_transfer_config:
+        if (
+            vllm_config.kv_transfer_config
+            or vllm_config.ec_transfer_config
+            or vllm_config.weight_transfer_config
+        ):
             raise ValueError(
-                "Process checkpoint does not support external cache transfer"
+                "Process checkpoint does not support external cache or weight transfer"
             )
         if not vllm_config.model_config.enable_sleep_mode:
             raise ValueError("Process checkpoint requires enable_sleep_mode=True")
@@ -97,17 +115,9 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
             }
             if vllm_config.model_config.enable_nccl_comm_suspend:
                 # NCCL suspend releases P2P mappings while retaining addresses.
-                # NVLS keeps persistent shared allocations whose multicast
-                # handling hits a confirmed 580 UMD defect (in our
-                # freeze/restore matrix the failure surfaces at restore;
-                # NVIDIA reports it fixed in 595 and above, see
-                # ai-dynamo/snapshot#510). We then validated this executor's
-                # full sleep-then-checkpoint flow on UMD 610.57.04 with the
-                # restrictions lifted: freeze hangs at the Checkpoint call
-                # while a worker holds live multicast groups (with and
-                # without NCCL communicator suspend), so the restrictions
-                # remain required regardless of UMD version until freeze-time
-                # multicast teardown exists (see the PR discussion).
+                # Live multicast allocations can block checkpoint even on
+                # newer user-mode drivers. Keep NVLS disabled until the sleep
+                # path can release those allocations before checkpoint.
                 if os.environ.get("NCCL_DISABLE_MEM_MANAGER", "0") != "0":
                     raise ValueError("NCCL checkpoint requires the memory manager")
                 required.update(
@@ -191,11 +201,13 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
-        MultiprocExecutor._ensure_worker_termination(worker_procs)
-        # A checkpointed worker cannot finish CUDA-dependent cleanup. The base
-        # executor may SIGKILL it and return before waitpid reaps the child.
-        # Reap before notifying EngineCore of failure and losing the parent.
-        deadline = time.monotonic() + 5
+        # Dedicated workers can be inside locked CUDA calls. Destroy their
+        # processes without restoring GPU memory or waiting for CUDA cleanup.
+        # Reap within the outer process manager's shutdown window.
+        for proc in worker_procs:
+            if proc.is_alive():
+                proc.kill()
+        deadline = time.monotonic() + 3
         for proc in worker_procs:
             proc.join(timeout=max(0, deadline - time.monotonic()))
             if proc.exitcode is None:
@@ -277,13 +289,6 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
     @_serialized
     def shutdown(self):
         try:
-            if self._checkpoint_active and not getattr(self, "is_failed", False):
-                try:
-                    self.wake_up()
-                except Exception:
-                    logger.exception(
-                        "Failed to restore during shutdown; workers terminated"
-                    )
             super().shutdown()
         finally:
             self._close_checkpoint()

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU lifecycle tests for the opt-in process checkpoint executor."""
 
+import multiprocessing
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
@@ -103,7 +105,7 @@ def test_failed_checkpoint_stops_workers_and_blocks_wake(executor):
     assert not any(c[0] == "wake" for c in calls)
 
 
-def test_shutdown_still_terminates_when_restore_fails(executor):
+def test_shutdown_does_not_restore_checkpointed_memory(executor):
     obj, calls = executor
     obj.sleep()
 
@@ -112,7 +114,9 @@ def test_shutdown_still_terminates_when_restore_fails(executor):
 
     obj._checkpoint.resume = fail
     obj.shutdown()
-    assert obj.is_failed and ("shutdown",) in calls and ("close",) in calls
+    assert not obj.is_failed
+    assert ("shutdown",) in calls and ("close",) in calls
+    assert ("wake", None) not in calls
 
 
 def test_level_two_rejected_before_sleep(executor):
@@ -190,6 +194,7 @@ def test_failed_executor_never_acknowledges_pause(executor):
 def test_p2p_requires_suspension_and_no_nvls(
     monkeypatch, nvls, suspend, accepted, fusion, backend
 ):
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
     env = {
         "NCCL_P2P_DISABLE": "0",
         "NCCL_SHM_DISABLE": "1",
@@ -221,10 +226,16 @@ def test_p2p_requires_suspension_and_no_nvls(
             data_parallel_size=1,
             world_size=2,
             disable_custom_all_reduce=True,
+            enable_expert_parallel=False,
+            worker_cls="vllm.v1.worker.gpu_worker.Worker",
         ),
         model_config=SimpleNamespace(
-            enable_sleep_mode=True, enable_nccl_comm_suspend=suspend
+            enable_sleep_mode=True,
+            enable_nccl_comm_suspend=suspend,
+            sleep_mode_backend="cumem",
         ),
+        use_v2_model_runner=True,
+        weight_transfer_config=None,
         kv_transfer_config=None,
         ec_transfer_config=None,
     )
@@ -293,11 +304,31 @@ def test_sleep_worker_rpc_has_deadline(executor):
 
 def test_terminated_workers_are_reaped():
     proc = Mock()
+    proc.is_alive.return_value = True
+    proc.exitcode = -9
     with patch.object(MultiprocExecutor, "_ensure_worker_termination") as terminate:
         ProcessCheckpointExecutor._ensure_worker_termination([proc])
-    terminate.assert_called_once_with([proc])
+    terminate.assert_not_called()
+    proc.kill.assert_called_once()
     proc.join.assert_called_once()
     assert 0 <= proc.join.call_args.kwargs["timeout"] <= 5
+
+
+def test_worker_termination_reaps_real_processes():
+    ctx = multiprocessing.get_context("spawn")
+    processes = [ctx.Process(target=time.sleep, args=(60,)) for _ in range(2)]
+    try:
+        for proc in processes:
+            proc.start()
+        ProcessCheckpointExecutor._ensure_worker_termination(processes)
+        assert all(proc.exitcode is not None for proc in processes)
+        assert not any(proc.is_alive() for proc in processes)
+    finally:
+        for proc in processes:
+            if proc.is_alive():
+                proc.kill()
+            proc.join(timeout=5)
+            proc.close()
 
 
 def test_kv_first_partial_wake_then_sleep_preserves_parent_noop(executor):
@@ -315,3 +346,59 @@ def test_kv_first_partial_wake_then_sleep_preserves_parent_noop(executor):
     assert not obj.is_failed
     obj.wake_up(["weights"])
     assert not obj.is_sleeping
+
+
+@pytest.mark.parametrize(
+    "component,field,value",
+    [
+        ("parallel_config", "enable_expert_parallel", True),
+        ("parallel_config", "worker_cls", "custom.Worker"),
+        ("model_config", "sleep_mode_backend", "custom"),
+        (None, "use_v2_model_runner", False),
+        (None, "weight_transfer_config", object()),
+        ("platform", "is_cuda", False),
+        ("platform", "linux", False),
+    ],
+)
+def test_unsupported_checkpoint_configuration_fails_before_workers(
+    component, field, value, monkeypatch
+):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            world_size=1,
+            nnodes=1,
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            enable_expert_parallel=False,
+            worker_cls="vllm.v1.worker.gpu_worker.Worker",
+        ),
+        model_config=SimpleNamespace(
+            enable_sleep_mode=True,
+            enable_nccl_comm_suspend=False,
+            sleep_mode_backend="cumem",
+        ),
+        use_v2_model_runner=True,
+        weight_transfer_config=None,
+        kv_transfer_config=None,
+        ec_transfer_config=None,
+    )
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    if component == "platform":
+        if field == "is_cuda":
+            monkeypatch.setattr(
+                "vllm.platforms.current_platform.is_cuda", lambda: value
+            )
+        else:
+            monkeypatch.setattr("sys.platform", "darwin")
+    else:
+        setattr(getattr(config, component) if component else config, field, value)
+    with (
+        patch.object(MultiprocExecutor, "__init__") as initialize,
+        patch.object(MultiprocExecutor, "shutdown"),
+        pytest.raises(ValueError, match="checkpoint"),
+    ):
+        ProcessCheckpointExecutor(config)
+    initialize.assert_not_called()
