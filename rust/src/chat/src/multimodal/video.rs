@@ -93,7 +93,7 @@ impl MultimodalModelInfo {
             // `DynamicImage` per sampled frame after media decode.
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb_timed(&frame_refs, clip.frame_timestamps()) {
+                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs) {
                         Ok(preprocessed) => return Ok(preprocessed),
                         Err(error) => warn!(
                             error = %error.as_report(),
@@ -108,7 +108,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video_timed(&frames, clip.frame_timestamps())?)
+            Ok(processor.preprocess_video(&frames)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?

@@ -76,9 +76,6 @@ impl KwargValue {
             ModelSpecificValue::FloatVec(values) => Self::Passthrough(List(
                 values.into_iter().map(|value| Float(value as f64)).collect(),
             )),
-            ModelSpecificValue::Float64Vec(values) => {
-                Self::Passthrough(List(values.into_iter().map(Float).collect()))
-            }
             ModelSpecificValue::TupleVec(values) => Self::Passthrough(List(
                 values
                     .into_iter()
