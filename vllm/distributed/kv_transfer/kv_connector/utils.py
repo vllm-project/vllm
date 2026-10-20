@@ -20,7 +20,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -370,8 +370,6 @@ def get_current_attn_backends_and_specs(
         for name, layer in layers.items():
             spec = specs.get(name, group.kv_cache_spec)
             if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
-                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-                assert layout.is_block_outermost, "Compressed caches must be packed"
                 continue
             if not isinstance(spec, AttentionSpec):
                 spec = None
@@ -379,6 +377,26 @@ def get_current_attn_backends_and_specs(
     if not pairs:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+
+
+def check_compressed_kernel_split(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, kernel_block_size: int
+) -> None:
+    """A layer-outer layout cannot split compressed pages into kernel blocks."""
+    if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
+        return
+    for group in kv_cache_config.transfer_groups:
+        for spec in iter_layer_specs(group.kv_cache_spec):
+            if (
+                isinstance(spec, AttentionSpec)
+                and spec.tokens_per_state > 1
+                and spec.block_size % kernel_block_size == 0
+                and spec.block_size != kernel_block_size
+            ):
+                raise NotImplementedError(
+                    "Compressed KV caches cannot be split into kernel blocks "
+                    "with a layer-outermost KV cache layout."
+                )
 
 
 def get_current_attn_backend(
