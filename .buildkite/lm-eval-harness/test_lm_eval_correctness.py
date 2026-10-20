@@ -23,6 +23,7 @@ from lm_eval.utils import simple_parse_args_string
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -100,7 +101,34 @@ def _shutdown_lm(lm) -> None:
     _wait_for_memory_release(gpu_memory_utilization)
 
 
+_cached_model_name: str | None = None
+
+
+def _drop_previous_checkpoint_cache(model_name: str) -> None:
+    """Free the page cache of the previously evaluated checkpoint.
+
+    Page cache is charged to the container's memory cgroup, which is what the
+    safetensors prefetch gate measures, so without this the models evaluated so
+    far consume the RAM budget of the ones still to come. The last model's cache
+    is left in place for whichever job lands on the node next, and a checkpoint
+    evaluated twice in a row keeps its cache because there the warm pages are
+    what makes the second load fast.
+
+    ROCm only: the prefetch this protects does not engage upstream.
+    """
+    if not current_platform.is_rocm():
+        return
+    global _cached_model_name
+    previous = _cached_model_name
+    _cached_model_name = model_name
+    if previous is not None and previous != model_name:
+        # This module's logger has no handler, so INFO records are dropped.
+        print(f"Releasing page cache of checkpoint {previous}", flush=True)
+        drop_checkpoint_cache(previous)
+
+
 def launch_lm_eval(eval_config, tp_size):
+    _drop_previous_checkpoint_cache(eval_config["model_name"])
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
     batch_size = eval_config.get("batch_size", "auto")
