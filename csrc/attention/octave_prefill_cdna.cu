@@ -47,8 +47,8 @@ typedef int i4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u2v __attribute__((ext_vector_type(2)));
 
-constexpr int KT = 16;      // tokens per tile
-constexpr int FR = D / 16;  // 16-dim output fragments
+constexpr int KT = 16;                       // tokens per tile
+[[maybe_unused]] constexpr int FR = D / 16;  // 16-dim output fragments
 // Both phases run 8 waves (128 query vectors of one KV head) per block: every
 // block reads the whole K/V it attends to, so more query vectors per block
 // means less of that work per query.
@@ -63,8 +63,8 @@ constexpr int KT1 = 32;  // phase-1 tile: two 16-token sub-tiles
 // Phase 2 LDS rows, picked for conflict-free banks: a K row is 2 dwords
 // mod 32, and V^T rows of 40 halves with the 4-token group XORed by
 // (row >> 3) & 7 spread both the transposed stores and the MFMA reads.
-constexpr int KROW2 = D + 4;
-constexpr int VST2 = KT1 + 8;
+[[maybe_unused]] constexpr int KROW2 = D + 4;
+[[maybe_unused]] constexpr int VST2 = KT1 + 8;
 [[maybe_unused]] constexpr float PSCALE = 4096.0f;
 
 constexpr int kMinSplitTokens = 2048;

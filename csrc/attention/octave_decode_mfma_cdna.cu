@@ -47,7 +47,8 @@ using octave::LUT_ONE;
 [[maybe_unused]] constexpr float PSCALE = 256.0f;
 [[maybe_unused]] constexpr float BIAS = 1152.0f;  // byte x fed as x + 1152
 [[maybe_unused]] constexpr uint32_t X = 0x80808080u;
-constexpr int TILE_MAX = 4096;  // bytes of a 16-token tile (slot <= 256)
+// Bytes of a 16-token tile (slot <= 256).
+[[maybe_unused]] constexpr int TILE_MAX = 4096;
 
 // Bytes b of a dword -> fp16 1024 + b, exact.
 __device__ __forceinline__ h4v bytes_to_h4(uint32_t w) {
