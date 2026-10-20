@@ -48,10 +48,10 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 @functools.cache
 def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
-    """gfx942 prefill kernel when AITER is enabled."""
+    """gfx942 prefill kernel when AITER MLA is enabled."""
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if not _ON_GFX942 or not rocm_aiter_ops.is_enabled():
+    if not _ON_GFX942 or not rocm_aiter_ops.is_mla_enabled():
         return None
     from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
 

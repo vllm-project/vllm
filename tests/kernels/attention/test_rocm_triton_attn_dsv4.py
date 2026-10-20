@@ -859,6 +859,99 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
     assert torch.count_nonzero(output) == 0
 
 
+def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(monkeypatch) -> None:
+    """512 rows take pa_prefill_sparse. MLA off stays on Triton."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    getter = mod._get_aiter_pa_prefill_sparse
+    getter.cache_clear()
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: False)
+    monkeypatch.setattr(mod, "_ON_GFX942", True)
+    try:
+        assert getter() is None
+
+        getter.cache_clear()
+        monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: True)
+        monkeypatch.setattr(mod, "_ON_GFX942", False)
+        assert getter() is None
+
+        try:
+            from aiter.ops.triton.attention.pa_prefill_sparse import (
+                pa_prefill_sparse,
+            )
+        except ImportError:
+            pa_prefill_sparse = None
+        if pa_prefill_sparse is not None:
+            getter.cache_clear()
+            monkeypatch.setattr(mod, "_ON_GFX942", True)
+            assert getter() is pa_prefill_sparse
+
+        # A skipped import above leaves this gate off.
+        monkeypatch.setattr(mod, "_ON_GFX942", True)
+        kernel = object()
+        aiter_calls: list[object] = []
+        triton_calls: list[int] = []
+
+        def fake_aiter(fn, **kwargs):
+            aiter_calls.append(fn)
+            kwargs["output"].zero_()
+
+        def fake_triton(*args, out, **kwargs):
+            triton_calls.append(1)
+            out.zero_()
+            return out
+
+        monkeypatch.setattr(
+            mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False
+        )
+        monkeypatch.setattr(mod, "_get_aiter_pa_prefill_sparse", lambda: kernel)
+        monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_aiter", fake_aiter)
+        monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_triton)
+        monkeypatch.setattr(
+            mod,
+            "_rocm_sparse_attn_prefill_ragged_triton",
+            lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
+        )
+        monkeypatch.setattr(
+            mod,
+            "build_ragged_indices_from_dense",
+            lambda *args, **kwargs: (
+                torch.zeros(1, dtype=torch.int32),
+                torch.tensor([0, 1], dtype=torch.int32),
+            ),
+        )
+
+        def run(num_queries: int) -> None:
+            q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
+            kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
+            output = torch.empty_like(q)
+            mod.rocm_sparse_attn_prefill(
+                q=q,
+                kv=kv,
+                indices=torch.zeros(num_queries, 1, dtype=torch.int32),
+                topk_length=torch.ones(num_queries, dtype=torch.int32),
+                scale=HEAD_DIM**-0.5,
+                head_dim=HEAD_DIM,
+                nope_head_dim=NOPE_HEAD_DIM,
+                rope_head_dim=ROPE_HEAD_DIM,
+                attn_sink=torch.empty(1, dtype=torch.float32),
+                output=output,
+            )
+
+        min_queries = mod._GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
+        run(min_queries)
+        assert aiter_calls == [kernel]
+        assert triton_calls == []
+
+        aiter_calls.clear()
+        run(min_queries - 1)
+        assert aiter_calls == []
+        assert triton_calls == [1]
+    finally:
+        getter.cache_clear()
+
+
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
