@@ -469,9 +469,8 @@ class DeepseekV41ModelState(DefaultModelState):
         if current_platform.is_rocm():
             computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
             prefill_len = input_batch.prefill_len_np[:num_reqs]
-            unfinished = (
-                input_batch.is_prefilling_np[:num_reqs]
-                & (computed + query_lens < prefill_len)
+            unfinished = input_batch.is_prefilling_np[:num_reqs] & (
+                computed + query_lens < prefill_len
             )
             row_limit = np.where(unfinished, 1, int(layers.window))
         kept_lens = np.where(
