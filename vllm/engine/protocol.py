@@ -36,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -59,6 +59,10 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def errored(self) -> bool: ...
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
 
     @property
     @abstractmethod
@@ -262,6 +266,12 @@ class EngineClient(ABC):
         """Scale the engine."""
         raise NotImplementedError
 
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        """Return shared external Elastic EP operation status, if enabled."""
+        return None
+
     async def collective_rpc(
         self,
         method: str,
@@ -294,6 +304,10 @@ class EngineClient(ABC):
         self, init_request: WeightTransferInitRequest
     ) -> None:
         """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
     async def start_weight_update(self) -> None:

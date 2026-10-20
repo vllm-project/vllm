@@ -56,16 +56,20 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// Include request timing metrics in OpenAI chat and completion responses.
+    pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
+    /// When `true`, register `/tokenizer_info`.
+    pub enable_tokenizer_info_endpoint: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
 }
 
-/// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
+/// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CorsConfig {
     /// Allowed origins. `["*"]` allows any origin.
@@ -81,7 +85,7 @@ pub struct CorsConfig {
 impl Default for CorsConfig {
     fn default() -> Self {
         Self {
-            allow_origins: vec!["*".to_string()],
+            allow_origins: Vec::new(),
             allow_methods: vec!["*".to_string()],
             allow_headers: vec!["*".to_string()],
             allow_credentials: false,
@@ -236,8 +240,9 @@ pub struct Config {
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
-    /// Server-side floor for tool-call structural tags.
-    pub tool_strict_level: ToolStrictLevel,
+    /// Server-side floor for tool-call structural tags, or `None` for the
+    /// tool parser's default level.
+    pub tool_strict_level: Option<ToolStrictLevel>,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -248,6 +253,8 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Whether requests may supply their own chat template.
+    pub trust_request_chat_template: bool,
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
@@ -296,6 +303,11 @@ impl Config {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
+        if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
+            bail!(
+                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
+            );
+        }
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
         if let Some(tls) = &self.tls {

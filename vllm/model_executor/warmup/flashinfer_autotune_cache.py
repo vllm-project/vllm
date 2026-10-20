@@ -84,8 +84,8 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
             "currently supported only within one node."
         )
         return False
-    # The pinned FlashInfer does not coordinate cache hits before profiling.
-    # Shared storage can still yield mixed hits after a partial or concurrent run.
+    # Lift this gate after pinning a release with the fix below and validating
+    # distributed managed-cache tuning: https://github.com/flashinfer-ai/flashinfer/pull/6185
     if get_world_group().world_size > 1:
         logger.info_once(
             "Using legacy FlashInfer autotune cache synchronization for "

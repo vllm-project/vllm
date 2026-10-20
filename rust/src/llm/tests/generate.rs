@@ -12,6 +12,7 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -25,12 +26,14 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
+    WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -342,25 +345,38 @@ async fn generate_merges_outputs_by_stream_interval() {
                 let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
 
                 // One engine step per batch.
-                let steps: [(&[u32], Option<EngineCoreFinishReason>); 6] = [
-                    (&[1], None),
-                    (&[2], None),
-                    (&[3], None),
-                    (&[4, 5], None),
-                    (&[6], None),
-                    (&[7], Some(EngineCoreFinishReason::Length)),
+                // The label changes within the merged output [2, 3, 4, 5].
+                let steps: [(&[u32], &str, Option<EngineCoreFinishReason>); 6] = [
+                    (&[1], "v7", None),
+                    (&[2], "v7", None),
+                    (&[3], "v8", None),
+                    (&[4, 5], "v8", None),
+                    (&[6], "v7", None),
+                    (&[7], "v7", Some(EngineCoreFinishReason::Length)),
                 ];
-                for (token_ids, finish_reason) in steps {
+                for (step, (token_ids, weight_version, finish_reason)) in
+                    steps.into_iter().enumerate()
+                {
+                    let mut output = request_output_with_logprobs(
+                        &request.request_id,
+                        token_ids.to_vec(),
+                        finish_reason,
+                        Some(token_logprobs(token_ids)),
+                        None,
+                    );
+                    // One [layer, top_k] = [1, 2] routing row per token.
+                    let rows: Vec<u8> = token_ids.iter().flat_map(|&id| [id as u8, 0]).collect();
+                    output.routed_experts = Some(Box::new(WireNdArray::from_raw(
+                        TensorDtype::U8,
+                        vec![token_ids.len(), 1, 2],
+                        rows,
+                    )));
                     send_outputs(
                         push,
                         RequestBatchOutputs {
-                            outputs: vec![request_output_with_logprobs(
-                                &request.request_id,
-                                token_ids.to_vec(),
-                                finish_reason,
-                                Some(token_logprobs(token_ids)),
-                                None,
-                            )],
+                            outputs: vec![output],
+                            weight_version: Some(weight_version.into()),
+                            timestamp: step as f64 + 1.0,
                             ..Default::default()
                         }
                         .into(),
@@ -412,6 +428,38 @@ async fn generate_merges_outputs_by_stream_interval() {
     for output in &outputs {
         assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
     }
+    let span = |version: &str, start, end| WeightVersionSpan {
+        version: version.into(),
+        start,
+        end,
+    };
+    let weight_versions: Vec<_> =
+        outputs.iter().map(|output| output.weight_versions.clone()).collect();
+    assert_eq!(
+        weight_versions,
+        [
+            None,
+            None,
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+        ]
+    );
+    let routed_experts: Vec<_> =
+        outputs.iter().map(|output| output.routed_experts.clone()).collect();
+    assert_eq!(
+        routed_experts,
+        [
+            None,
+            None,
+            Some(Box::new(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![7, 1, 2],
+                vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0],
+            )))
+        ]
+    );
+    let last_token_timestamps: Vec<_> =
+        outputs.iter().map(|output| output.timestamps.last_token_ts).collect();
+    assert_eq!(last_token_timestamps, [1.0, 4.0, 6.0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -530,6 +578,9 @@ async fn collect_output_rejects_partial_sampling_mask() {
             rows: vec![vec![1, 33, 99]],
         }),
         spec_decode_metrics: None,
+        weight_versions: None,
+        routed_experts: None,
+        timestamps: Default::default(),
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
@@ -731,6 +782,7 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
                     push,
                     RequestBatchOutputs {
                         outputs: vec![request_output(&request.request_id, vec![7], None)],
+                        weight_version: Some("v7".into()),
                         ..Default::default()
                     }
                     .into(),
@@ -764,6 +816,15 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Abort));
     assert!(terminal.token_ids.is_empty());
+    // The synthesized abort output reports the spans received so far.
+    assert_eq!(
+        terminal.weight_versions,
+        Some(vec![WeightVersionSpan {
+            version: "v7".into(),
+            start: 0,
+            end: 1
+        }])
+    );
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
@@ -869,6 +930,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
+                            num_nans_in_logits: 2,
                             prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
@@ -952,6 +1014,9 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"

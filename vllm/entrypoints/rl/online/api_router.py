@@ -36,6 +36,9 @@ async def pause_generation(
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
+    In ``abort`` and ``wait`` modes new requests are rejected with HTTP 503
+    until /resume; ``keep`` continues to accept and queue them.
+
     Args:
         raw_request: The incoming FastAPI request, used to reach the engine
             client on the app state.
@@ -166,6 +169,13 @@ async def init_weight_transfer_engine(
             WeightTransferInitRequest(init_info=init_info)
         )
     return JSONResponse(content={"message": "Weight transfer initialized"})
+
+
+@router.post("/shutdown_weight_transfer_engine")
+async def shutdown_weight_transfer_engine(raw_request: Request):
+    with weight_operation_metrics().record("shutdown"):
+        await engine_client(raw_request).shutdown_weight_transfer_engine()
+    return JSONResponse(content={"message": "Weight transfer shut down"})
 
 
 @router.post("/start_weight_update")
