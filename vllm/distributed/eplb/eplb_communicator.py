@@ -881,6 +881,18 @@ class NixlEplbCommunicator(EplbCommunicator):
                         len(pending),
                         total,
                     )
+                    if os.getenv("VLLM_EEP_DEBUG_MAPPINGS") == "1":
+                        # The snapshot taken before this wait misses anything
+                        # UCX maps while it is performing the read, and that is
+                        # the window the fault falls in: not one of the six
+                        # fault addresses of the last run was inside any range
+                        # known at issue time. Re-reading here puts those
+                        # mappings on the record while the stall is live.
+                        from vllm.distributed.elastic_ep import rocm_debug
+
+                        self._mappings = rocm_debug.log_new_device_mappings(
+                            f"layer {self._layer_idx} stalled", self._mappings
+                        )
                 if timeout > 0 and elapsed > timeout:
                     raise RuntimeError(
                         f"NIXL EPLB transfers for layer {self._layer_idx} did "

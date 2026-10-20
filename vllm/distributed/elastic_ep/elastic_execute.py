@@ -645,8 +645,38 @@ class ElasticEPScalingExecutor:
                 reset_compile_wrapper(draft_model)
 
         gc.collect()
+        if os.getenv("VLLM_EEP_DEBUG_LIVE_GRAPHS") == "1":
+            self._report_live_graphs()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+
+    def _report_live_graphs(self) -> None:
+        """Count graphs that outlived the release and name what holds them.
+
+        rocm-systems#13018 reports that RCCL teardown waits without a bound on
+        references that kernel plans captured into a graph hold, and that they
+        drop only when the graph itself is destroyed. One graph missed here is
+        enough for ncclCommAbort never to return, which is what two ranks of
+        the last run reported five seconds before being refused an IPC export.
+        The branch above only reaches the containers it knows about and the
+        breakable registry only when a runner exists, so the referrer types
+        are the half of the answer that says where to look.
+        """
+        graphs = [o for o in gc.get_objects() if isinstance(o, torch.cuda.CUDAGraph)]
+        if not graphs:
+            logger.warning("[EEP-DEBUG] no captured graph outlived the release")
+            return
+        holders: dict[str, int] = {}
+        for graph in graphs:
+            for referrer in gc.get_referrers(graph):
+                name = type(referrer).__name__
+                holders[name] = holders.get(name, 0) + 1
+        ranked = sorted(holders.items(), key=lambda item: -item[1])[:8]
+        logger.warning(
+            "[EEP-DEBUG] %d captured graph(s) outlived the release, held by %s",
+            len(graphs),
+            ", ".join(f"{name} x{count}" for name, count in ranked),
+        )
 
     def switch_and_remove(self) -> None:
         # The EPLB worker is a daemon thread that runs collectives on the EPLB

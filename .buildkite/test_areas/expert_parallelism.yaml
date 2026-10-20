@@ -79,6 +79,10 @@ steps:
       label: ':amd: (MI355) Elastic EP Scaling'
       dind: false
       device: mi355_4
+      # This asks for 180 but does not get it. The run on 20 October was sent
+      # SIGTERM at 90.5 minutes with no teardown line, so something outside the
+      # step caps it there. Three passes at about 30 minutes each do not fit,
+      # which is why the most valuable one runs first.
       timeout_in_minutes: 180
       working_dir: /vllm-workspace/tests
       depends_on:
@@ -172,13 +176,27 @@ steps:
       #
       # That count now has something to say. At each of the three refusals the
       # rank held 5.4 to 5.7 GiB of NCCL buffers, and the two on the same device
-      # stopped 6,291,456 bytes apart, which is exactly one buffer, so this
-      # looks like a ceiling rather than a race. Whether anything is released
-      # between reconfigurations is the open half of it: destroy() runs
-      # ncclCommAbort on a daemon thread with join(timeout=5.0) and can return
-      # having freed nothing, which it now says out loud. The summary after each
-      # pass therefore counts ncclCudaFree, Destroy COMPLETE and commAbort next
-      # to the shareable buffers, so the question is answered by a number.
+      # stopped 6,291,456 bytes apart, which is exactly one buffer. That looked
+      # like a ceiling until a later run refused an export at 4.9 GiB, so there
+      # is no single threshold and the accumulation is at most part of it.
+      #
+      # Whether anything is released between reconfigurations is the open half:
+      # destroy() runs ncclCommAbort on a daemon thread with join(timeout=5.0)
+      # and can return having freed nothing, which it now says out loud, and it
+      # did, on both old ranks, 49 s before an export was refused in the same
+      # process. The summary after each pass counts the frees and the teardowns
+      # next to the shareable buffers so that becomes a number rather than one
+      # anecdote. Two of those counters were wrong on the first attempt and are
+      # worth stating so nobody reads an old log as evidence: the abort count
+      # matched commAbort, which never appears because the symbol is
+      # ncclCommAbort, and Destroy COMPLETE belongs to ncclCommDestroy while
+      # vLLM aborts instead, so both read zero by construction. The count is
+      # now case insensitive and Abort COMPLETE is counted beside it.
+      #
+      # Each summary also prints the lines around every refused export. The 200
+      # line tail happens to contain it when the process dies right after, but
+      # that is luck, and the pointer and the memory in use at that moment are
+      # the two numbers the refusal is worth nothing without.
       #
       # It goes to NCCL_DEBUG_FILE rather than to the step log, because on
       # stdout it is unusable: measured locally it adds 2 MB a minute, about
@@ -240,41 +258,81 @@ steps:
       # rendezvous has to run over tcp with rocm_copy, the combination the
       # crashing stack shows, still passed.
       #
-      # Two additions answer the one question above, which an address alone
-      # cannot. VLLM_EEP_DEBUG_ALLOC_EXTENTS=1 prints the allocation each
-      # published tensor really falls inside, because an IPC export covers the
-      # whole allocation and not the tensor handed to it, so a tensor cut out of
-      # a pool segment is exported together with every unrelated tensor sharing
-      # that segment, which the owner keeps writing to while a peer holds it
-      # mapped. Locally every one of 432 exports is exactly its tensor, offset
-      # zero and nothing on either side, and these tensors are 176 and 352 MiB
-      # so the allocator gives each its own segment. If that also holds in CI,
-      # the width of the export is retired as a cause. VLLM_EEP_DEBUG_MAPPINGS=1
-      # lists the device backed ranges of the process before any transfer and
-      # then every range that appears later, so a fault address can finally be
-      # placed. The rank that dies is importing as well as being read from, and
-      # a mapping UCX makes when it opens a peer's memory is invisible from
-      # Python but listed by the kernel, so this is the only way to tell a peer
-      # mapping apart from this rank's own memory. It runs on the first and
-      # third pass, where the fault actually happens, and the extents only on
-      # the first, since they do not change between passes.
+      # VLLM_EEP_DEBUG_LIVE_GRAPHS=1 answers a question rocm-systems#13018
+      # raised. That ticket reports RCCL teardown waiting without a bound on
+      # references held by kernel plans captured into a graph, which drop only
+      # when the graph is destroyed, on this same gfx950 hardware. Two ranks of
+      # the last run reported ncclCommAbort not returning within five seconds,
+      # and the same two were refused an IPC export forty nine seconds later in
+      # the same process, with graph capture in between taking 46.9 s where
+      # every other case in the run took 4.0 s. The ticket's own matrix says a
+      # teardown with the graph released first exits cleanly, and this code does
+      # release first, so if the abort still hangs then the release is missing a
+      # graph. That is a defect this repository owns rather than one to wait on,
+      # and the escape the ticket names does not apply here: it needs at least
+      # eight ranks for the gfx950 DDA path and these communicators have two to
+      # four. So this counts the captured graphs still alive after the release
+      # and names the types holding them, since the release only reaches the
+      # containers it knows about.
       #
-      # The third pass keeps the caching allocator and turns off the UCX
-      # registration cache instead. With a pool a freed buffer comes back at the
-      # same address, so the cache can keep a registration for a range the
-      # allocator has already handed to a different tensor: the owner writes to
-      # that tensor and faults on a write at an address inside no current
-      # registration, which is exactly the shape of the fault. Without a pool an
-      # address is never reused and there is nothing stale to hit, which is why
-      # the second pass passes going up. So this pass asks whether it is the
-      # reuse of addresses rather than the pool itself. UCX_MEM_EVENTS=no is
-      # not the same lever and has already failed: it removes the hooks that
-      # invalidate the cache, so it makes a stale entry more likely, not less.
-      - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_ALLOC_EXTENTS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_ALLOC_EXTENTS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -c commAbort "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -c commAbort "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
-      - UCX_RCACHE_ENABLE=n VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,UCX_RCACHE_ENABLE,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_WARM_NIXL_TRANSFERS,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
-      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -c commAbort "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
+      # VLLM_EEP_DEBUG_MAPPINGS=1 lists the device backed ranges of the process
+      # before any transfer and then every range that appears later, so a fault
+      # address can be placed. The rank that dies is importing as well as being
+      # read from, and a mapping UCX makes when it opens a peer's memory is
+      # invisible from Python but listed by the kernel, so this is the only way
+      # to tell a peer mapping apart from this rank's own memory.
+      #
+      # The first run of this answered no: not one of six fault addresses was
+      # inside any range the process held, the nearest being 1 MiB to 5.9 GiB
+      # away. That is only half an answer, because the snapshot is taken as the
+      # transfers are issued and misses whatever UCX maps while it performs the
+      # read, which is the window the fault falls in. The snapshot is therefore
+      # taken again on each stall report, so the ranges that appear during the
+      # read are on the record while the stall is still live.
+      #
+      # VLLM_EEP_DEBUG_ALLOC_EXTENTS is gone. It asked whether an export covers
+      # more than the tensor handed to it, since IPC exports whole allocations
+      # and a pool cuts tensors out of large segments. The answer is no and it
+      # is not close: 432 of 432 exports locally and 1296 of 1296 in CI are
+      # exactly the tensor, offset zero with nothing on either side, because
+      # these tensors are 176 and 352 MiB so the allocator gives each its own
+      # segment. Printing it again only costs log.
+      #
+      # The order of the three passes is deliberate and was wrong before. The
+      # refusal this group is stuck on happens when the standby groups for the
+      # smaller size are built, which is on the way down, and with the caching
+      # allocator on no eager case ever gets there: all three die going up on
+      # the NIXL transfer instead. So a pass that keeps the allocator and turns
+      # off the UCX registration cache measures nothing, which is exactly what
+      # happened: zero refusals, and zero scale downs attempted, the same as the
+      # pass that changed nothing. With the allocator off, all three eager cases
+      # scale up clean and then refuse on the way down, five refusals in three
+      # cases, so that is the only configuration where the lever can be read.
+      #
+      # The first pass therefore carries both, the allocator off so the refusal
+      # is reachable and UCX_RCACHE_ENABLE=n as the thing being tested. It is
+      # also the one configuration that could get a case through all three
+      # phases. The second pass is the same minus the lever, so the two differ
+      # in one variable. The third keeps the allocator and is the configuration
+      # the transfer fault needs. First is safest for the most valuable pass:
+      # the last run was killed by a 90 minute limit at the fourth case of the
+      # third pass, and each pass costs about 30 minutes.
+      #
+      # UCX_MEM_EVENTS=no is not the same lever as UCX_RCACHE_ENABLE=n and has
+      # already failed: it removes the hooks that invalidate the cache, so it
+      # makes a stale entry more likely, not less. What points at the cache is
+      # the address: UCX warns `ucm free non HSA managed memory` for the exact
+      # pointer that is then refused, seven times out of seven, with no refusal
+      # lacking a warning and no warning lacking a refusal. UCX's own free hook
+      # prints that line and returns without dispatching the free event, so on
+      # those pointers its cache is never told the range went away. RCCL takes
+      # them through hipExtMallocWithFlags with flags 3, which is why the torch
+      # pool setting does not reach them.
+      - UCX_RCACHE_ENABLE=n PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=UCX_RCACHE_ENABLE,PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
+      - PYTORCH_NO_HIP_MEMORY_CACHING=1 PYTORCH_NO_CUDA_MEMORY_CACHING=1 RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=PYTORCH_NO_HIP_MEMORY_CACHING,PYTORCH_NO_CUDA_MEMORY_CACHING,RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
+      - RAY_DEDUP_LOGS=0 VLLM_EEP_DEBUG_WATCHDOG=60 VLLM_EEP_DEBUG_GROUP_PRESSURE=1 VLLM_EEP_DEBUG_SYNC_RESHUFFLE=1 VLLM_EEP_DEBUG_OFF=1 VLLM_EEP_DEBUG_XFER_DESCS=1 VLLM_EEP_DEBUG_MAPPINGS=1 VLLM_EEP_WARM_NIXL_TRANSFERS=1 VLLM_EEP_DEBUG_LIVE_GRAPHS=1 VLLM_EPLB_NIXL_XFER_REPORT_S=10 AMD_LOG_LEVEL=1 PYTHONFAULTHANDLER=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ALLOC NCCL_DEBUG_FILE=/tmp/nccl-eep-%h-%p.log VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=RAY_DEDUP_LOGS,VLLM_EEP_DEBUG_WATCHDOG,VLLM_EEP_DEBUG_GROUP_PRESSURE,VLLM_EEP_DEBUG_SYNC_RESHUFFLE,VLLM_EEP_DEBUG_OFF,VLLM_EEP_DEBUG_XFER_DESCS,VLLM_EEP_DEBUG_MAPPINGS,VLLM_EEP_WARM_NIXL_TRANSFERS,VLLM_EEP_DEBUG_LIVE_GRAPHS,VLLM_EPLB_NIXL_XFER_REPORT_S,AMD_LOG_LEVEL,PYTHONFAULTHANDLER,NCCL_DEBUG,NCCL_DEBUG_SUBSYS,NCCL_DEBUG_FILE pytest -v -s --timeout=780 --timeout-method=thread distributed/test_elastic_ep.py || true
+      - for f in /tmp/nccl-eep-*.log; do [ -e "$$f" ] || continue; echo "=== $$f ==="; echo "lines $$(wc -l < "$$f") shareable_buffers $$(grep -c 'Allocated shareable buffer' "$$f") freed $$(grep -c ncclCudaFree "$$f") destroyed $$(grep -c 'Destroy COMPLETE' "$$f") aborted $$(grep -ci ncclCommAbort "$$f") abort_complete $$(grep -c 'Abort COMPLETE' "$$f") init_complete $$(grep -c 'Init COMPLETE' "$$f")"; grep -B3 -A8 'hipIpcGetMemHandle failed' "$$f" || true; tail -n 200 "$$f"; done; rm -f /tmp/nccl-eep-*.log; true
       # Every command ends in || true, so the step stays green and the log is the
       # deliverable rather than the result.
