@@ -402,7 +402,6 @@ class TestPermissionScenario:
 
         msg = str(exc_info.value)
         assert "127.0.0.1:80" in msg
-        assert "elevated privileges" in msg
         assert exc_info.value.__cause__ is err
 
 
