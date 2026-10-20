@@ -4925,6 +4925,22 @@ steps:
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":amd: (MI355 DPX) Step5"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  - vllm/model_executor/models/step3p5.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s models/step5
+
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]

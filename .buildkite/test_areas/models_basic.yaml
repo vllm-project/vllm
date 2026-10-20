@@ -198,6 +198,20 @@ steps:
   - tests/models/step5/
   commands:
     - pytest -v -s models/step5
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Step5"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/step5/
+      - tests/models/step5/
+      - vllm/model_executor/models/step3p5.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
