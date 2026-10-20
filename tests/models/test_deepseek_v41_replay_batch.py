@@ -21,9 +21,11 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the replay buffers live on the GPU"
@@ -214,15 +216,100 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     assert build.batch.query_start_loc.tolist() == [0, 1, 4, 4 + WINDOW]
 
 
-def test_prompt_logprobs_requests_keep_their_rows(state):
-    """Every prompt row of a prompt-logprobs request is read, so it never
-    trims; the other prefills still do."""
-    state._keeps_rows_np[1] = True
+@pytest.mark.parametrize(
+    ("prompt_logprobs", "score_tokens"),
+    [(0, False), (-1, False), (None, True), (0, True)],
+)
+def test_scoring_requests_keep_only_their_rows(state, prompt_logprobs, score_tokens):
+    """Scoring keeps its rows, without disabling other requests' trimming or
+    leaving the flag set when a generation request reuses the slot."""
+    params = SamplingParams(
+        prompt_logprobs=prompt_logprobs,
+        prompt_logprob_token_ids=(
+            np.ones((299, 1), dtype=np.int32) if score_tokens else None
+        ),
+    )
+    state.add_request(1, SimpleNamespace(replay_start=0, sampling_params=params))
     batch = _input_batch([1, 300, 300], [500, 300, 300], PREFILLING)
     replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
     assert replay is not None
     assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
     assert build.batch.max_query_len == 300
+
+    state.add_request(
+        1, SimpleNamespace(replay_start=0, sampling_params=SamplingParams())
+    )
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay.rows.tolist() == [
+        0,
+        *range(301 - WINDOW, 301),
+        *range(601 - WINDOW, 601),
+    ]
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("chunk_size", [150, 300])
+@pytest.mark.parametrize("start", [0, 100, 172, 200])
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_target_token_scores_survive_replay(
+    state, cg_mode, chunk_size, start, logprobs_mode
+):
+    """Exercise real row selection and scoring with synthetic layer outputs.
+
+    A correct output shape alone misses zero-filled rows discarded by replay.
+    Include a separately trimmed request and score across prefill chunks.
+    """
+    ids = np.tile(np.array([[2, 1, -1]], dtype=np.int32), (299 - start, 1))
+    params = SamplingParams(
+        max_tokens=1, prompt_logprob_start=start, prompt_logprob_token_ids=ids
+    )
+    state.add_request(7, SimpleNamespace(replay_start=0, sampling_params=params))
+    state.decoder_replay_layers.trim_threshold = WINDOW + 1
+    state.decoder_replay_layers.run_layers = lambda hidden: (hidden,)
+    worker = PromptLogprobsWorker(16, DEVICE, logprobs_mode)
+    worker.add_request("scoring", 7, params)
+    prompt_lens = np.full(16, 300, dtype=np.int32)
+    reference_hidden = torch.stack(
+        [
+            torch.arange(1, 301, device=DEVICE) / 300,
+            torch.ones(300, device=DEVICE),
+            -torch.ones(300, device=DEVICE),
+            torch.zeros(300, device=DEVICE),
+        ],
+        dim=1,
+    )
+    for offset in range(0, 300, chunk_size):
+        batch = replace(
+            _input_batch([300, chunk_size], [300, offset + chunk_size], [True, True]),
+            req_ids=[f"generation-{offset}", "scoring"],
+            idx_mapping_np=np.array([3, 7], dtype=np.int32),
+            idx_mapping=torch.tensor([3, 7], dtype=torch.int32, device=DEVICE),
+            prefill_len_np=np.array([300, 300], dtype=np.int32),
+            num_computed_prefill_tokens_np=np.array([0, offset], dtype=np.int32),
+            num_scheduled_tokens=np.array([300, chunk_size], dtype=np.int32),
+        )
+        replay, _ = _prepare(state, batch, cg_mode)
+        hidden = torch.cat(
+            [reference_hidden, reference_hidden[offset : offset + chunk_size]]
+        )
+        (actual,) = state.decoder_replay_layers._run(hidden)
+        scores = worker.compute_prompt_token_id_logprobs(
+            lambda rows: rows, actual, batch, prompt_lens
+        )
+        if offset + chunk_size < 300:
+            assert scores == {}
+
+    reference = reference_hidden[start:299]
+    if logprobs_mode == "raw_logprobs":
+        reference = reference.log_softmax(-1)
+    token_ids = torch.as_tensor(ids, device=DEVICE).long()
+    reference = reference.gather(-1, token_ids.clamp_min(0))
+    reference.masked_fill_(token_ids < 0, float("-inf"))
+    torch.testing.assert_close(scores["scoring"], reference)
+    assert replay.rows.tolist() == [
+        *range(300 - WINDOW, 300),
+        *range(300, 300 + chunk_size),
+    ]
 
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
@@ -234,7 +321,7 @@ def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
             index,
             SimpleNamespace(
                 replay_start=0,
-                sampling_params=SimpleNamespace(prompt_logprobs=None),
+                sampling_params=SamplingParams(),
             ),
         )
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
