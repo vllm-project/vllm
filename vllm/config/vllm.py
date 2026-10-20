@@ -99,6 +99,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
         "Qwen4ExpMTP",
+        "Step5ForCausalLM",
+        "Step5ForConditionalGeneration",
     }
 )
 
@@ -3092,6 +3094,12 @@ class VllmConfig:
 
         if self.parallel_config.enable_batch_sharded_sampling:
             unsupported.append("batch-sharded sampling")
+
+        if self.model_config is not None and self.model_config.architecture in (
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        ):
+            unsupported.append("Step5")
 
         return unsupported
 
