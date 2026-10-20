@@ -68,6 +68,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling"
   key: e2e-scheduling-1-gpu
+  automatic_shard: true
   timeout_in_minutes: 53
   device: h200_18gb
   source_file_dependencies:
@@ -78,6 +79,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) E2E Scheduling"
+      automatic_shard: true
       dind: false
       device: mi250_1
       timeout_in_minutes: 55
@@ -141,7 +143,7 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
-    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
   mirror:
     amd:
       label: ":amd: (MI355 DPX) E2E Core Large Memory"
@@ -238,9 +240,9 @@ steps:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
   mirror:
     amd:
-      label: ":amd: (MI300) V1 E2E Hybrid Chunked Prefill"
+      label: ":amd: (MI355 DPX) V1 E2E Hybrid Chunked Prefill"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
