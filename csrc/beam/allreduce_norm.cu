@@ -1,13 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// Communication helpers and launch geometry from NVIDIA/FlashInfer's MNNVL
-// all-reduce (Apache-2.0); Beam supplies the normalization epilogue.
+// Beam's TP all-reduce fused with its FP32 norm-residual-norm epilogue and,
+// optionally, the TRTLLM-Gen MoE top-k finalize. Built on the MNNVL Lamport
+// primitives in mnnvl_lamport.cuh; launch geometry follows FlashInfer's MNNVL
+// all-reduce.
 
-#include "flashinfer/comm/trtllm_mnnvl_allreduce.cuh"
-#include "tvm_ffi_utils.h"
+#include "../torch_utils.h"
+#include "../mnnvl_lamport.cuh"
 
+#include <torch/headeronly/core/ScalarType.h>
+
+namespace vllm {
 namespace beam {
-namespace ar = flashinfer::trtllm_mnnvl_allreduce;
+
+namespace ar = vllm::mnnvl;
 namespace cg = cooperative_groups;
 using T = __nv_bfloat16;
 using Vec = ar::utils::PackedVec<float4, T>;
@@ -277,78 +281,103 @@ __global__ void __launch_bounds__(1024) finishTwoshot(Params p) {
   epilogue<UseCGA>(p, value, packedIdx, offset);
   cudaGridDependencySynchronize();
   flag.waitAndUpdate(
-      {static_cast<uint32_t>(flashinfer::round_up(p.ar.numTokens, p.ar.nRanks) *
+      {static_cast<uint32_t>(ar::round_up(p.ar.numTokens, p.ar.nRanks) *
                              p.ar.tokenDim * sizeof(T)),
        static_cast<uint32_t>(p.ar.numTokens * p.ar.tokenDim * sizeof(T)), 0,
        0});
 }
 
 void checkCuda(cudaError_t status) {
-  TVM_FFI_ICHECK_EQ(status, cudaSuccess) << cudaGetErrorString(status);
+  STD_TORCH_CHECK(status == cudaSuccess, cudaGetErrorString(status));
 }
 
-void launch(TensorView input, TensorView residual,
-            tvm::ffi::Optional<TensorView> postWeight,
-            tvm::ffi::Optional<TensorView> nextWeight, TensorView hidden,
-            tvm::ffi::Optional<TensorView> normalized, int64_t pointers,
-            TensorView flags, int64_t multicast, int64_t local, int64_t world,
-            int64_t rank, double postEps, double nextEps, double xScale,
-            double rScale, bool postNorm, bool nextNorm, bool scaled,
-            bool oneShot, tvm::ffi::Optional<TensorView> experts,
-            tvm::ffi::Optional<TensorView> expertWeights,
-            tvm::ffi::Optional<TensorView> permutation, double routedScale,
-            bool smallBatch) {
-  ffi::CUDADeviceGuard guard(input.device().device_id);
-  auto stream = get_stream(input.device());
-  TVM_FFI_ICHECK_EQ(encode_dlpack_dtype(input.dtype()), bfloat16_code);
-  TVM_FFI_ICHECK_EQ(input.size(1) % 8, 0);
+ar::AllReduceKernelParams<T> workspaceParams(torch::stable::Tensor const& input,
+                                             int64_t buffer_ptrs,
+                                             torch::stable::Tensor& flags,
+                                             int64_t multicast_ptr,
+                                             int64_t world, int64_t rank) {
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Beam all-reduce requires BF16 input");
+  STD_TORCH_CHECK(
+      input.dim() == 2 && input.is_contiguous() && input.size(1) % 8 == 0,
+      "Beam all-reduce requires a contiguous [tokens, 8k] input");
+  STD_TORCH_CHECK(world == 2 || world == 4 || world == 8,
+                  "Beam all-reduce supports TP2/4/8");
+  ar::AllReduceKernelParams<T> p{};
+  p.shardPtr = static_cast<T const*>(input.data_ptr());
+  p.inputPtrs = reinterpret_cast<T**>(buffer_ptrs);
+  p.mcastPtr = reinterpret_cast<T*>(multicast_ptr);
+  p.bufferFlags = static_cast<uint32_t*>(flags.data_ptr());
+  p.nRanks = world;
+  p.rank = rank;
+  p.numTokens = input.size(0);
+  p.tokenDim = input.size(1);
+  return p;
+}
+
+}  // namespace beam
+}  // namespace vllm
+
+void beam_allreduce_norm(
+    torch::stable::Tensor const& input, torch::stable::Tensor const& residual,
+    std::optional<torch::stable::Tensor> post_weight,
+    std::optional<torch::stable::Tensor> next_weight,
+    torch::stable::Tensor& hidden,
+    std::optional<torch::stable::Tensor> normalized, int64_t buffer_ptrs,
+    torch::stable::Tensor& flags, int64_t multicast_ptr, int64_t local_ptr,
+    int64_t world, int64_t rank, double post_eps, double next_eps,
+    double x_scale, double r_scale, bool post_norm, bool next_norm, bool scaled,
+    bool one_shot, bool small_batch,
+    std::optional<torch::stable::Tensor> experts,
+    std::optional<torch::stable::Tensor> expert_weights,
+    std::optional<torch::stable::Tensor> permutation, double routed_scale) {
+  using namespace vllm::beam;
+  int const device = input.get_device_index();
+  torch::stable::accelerator::DeviceGuard const device_guard(device);
+  cudaStream_t stream = get_current_cuda_stream(device);
   Params p{};
+  p.ar = workspaceParams(input, buffer_ptrs, flags, multicast_ptr, world, rank);
+  p.ar.localBufferPtr = reinterpret_cast<T*>(local_ptr);
   p.ar.outputPtr = normalized.has_value()
-                       ? static_cast<T*>(normalized.value().data_ptr())
+                       ? static_cast<T*>(normalized->data_ptr())
                        : nullptr;
   p.ar.prenormedPtr = static_cast<T*>(hidden.data_ptr());
-  p.ar.shardPtr = static_cast<T const*>(input.data_ptr());
   p.ar.residualInPtr = static_cast<T const*>(residual.data_ptr());
-  p.ar.gammaPtr = postWeight.has_value()
-                      ? static_cast<T const*>(postWeight.value().data_ptr())
+  p.ar.gammaPtr = post_weight.has_value()
+                      ? static_cast<T const*>(post_weight->data_ptr())
                       : nullptr;
-  p.nextWeight = nextWeight.has_value()
-                     ? static_cast<T const*>(nextWeight.value().data_ptr())
+  p.ar.epsilon = post_eps;
+  p.nextWeight = next_weight.has_value()
+                     ? static_cast<T const*>(next_weight->data_ptr())
                      : nullptr;
-  p.ar.inputPtrs = reinterpret_cast<T**>(pointers);
-  p.ar.mcastPtr = reinterpret_cast<T*>(multicast);
-  p.ar.localBufferPtr = reinterpret_cast<T*>(local);
-  p.ar.bufferFlags = static_cast<uint32_t*>(flags.data_ptr());
-  p.ar.nRanks = world;
-  p.ar.rank = rank;
-  p.ar.numTokens = input.size(0);
-  p.ar.tokenDim = input.size(1);
-  p.ar.epsilon = postEps;
-  p.nextEps = nextEps;
-  p.xScale = xScale;
-  p.rScale = rScale;
-  p.postNorm = postNorm;
-  p.nextNorm = nextNorm;
+  p.nextEps = next_eps;
+  p.xScale = x_scale;
+  p.rScale = r_scale;
+  p.postNorm = post_norm;
+  p.nextNorm = next_norm;
   p.scaled = scaled;
   if (experts.has_value()) {
-    TVM_FFI_ICHECK(expertWeights.has_value() && permutation.has_value());
-    p.experts = static_cast<T const*>(experts.value().data_ptr());
-    p.expertWeights = expertWeights.value().data_ptr();
-    p.permutation = static_cast<int const*>(permutation.value().data_ptr());
-    p.topK = permutation.value().size(1);
+    STD_TORCH_CHECK(expert_weights.has_value() && permutation.has_value());
+    p.experts = static_cast<T const*>(experts->data_ptr());
+    p.expertWeights = expert_weights->data_ptr();
+    p.permutation = static_cast<int const*>(permutation->data_ptr());
+    p.topK = permutation->size(1);
     p.floatWeights =
-        encode_dlpack_dtype(expertWeights.value().dtype()) == float32_code;
-    p.routedScale = routedScale;
+        expert_weights->scalar_type() == torch::headeronly::ScalarType::Float;
+    p.routedScale = routed_scale;
   }
+  if (p.ar.numTokens == 0) return;
   auto [threads, clusters, loads] =
-      ar::utils::adjustGridConfig(p.ar.numTokens, p.ar.tokenDim, 8, true);
-  TVM_FFI_ICHECK(!smallBatch || (oneShot && !p.experts));
-  if (smallBatch) {
+      ar::utils::adjustGridConfig(p.ar.numTokens, p.ar.tokenDim, 8, true,
+                                  get_device_prop()->multiProcessorCount);
+  STD_TORCH_CHECK(!small_batch || (one_shot && !p.experts));
+  if (small_batch) {
     clusters = 1;
     threads = p.ar.tokenDim / 8;
   }
-  TVM_FFI_ICHECK_EQ(loads, 1);
-  TVM_FFI_ICHECK_EQ(threads * clusters * 8, p.ar.tokenDim);
+  STD_TORCH_CHECK(loads == 1);
+  STD_TORCH_CHECK(threads * clusters * 8 == p.ar.tokenDim);
   cudaLaunchAttribute attrs[2]{};
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
@@ -359,11 +388,11 @@ void launch(TensorView input, TensorView residual,
   config.blockDim = dim3(threads);
   config.stream = stream;
   config.attrs = attrs;
-  config.numAttrs = smallBatch ? 1 : 2;
-  if (oneShot) {
+  config.numAttrs = small_batch ? 1 : 2;
+  if (one_shot) {
 #define LAUNCH(W)                                                          \
   case W:                                                                  \
-    if (smallBatch)                                                        \
+    if (small_batch)                                                       \
       checkCuda(cudaLaunchKernelEx(&config, &oneshot<W, false, true>, p)); \
     else if (p.experts)                                                    \
       checkCuda(cudaLaunchKernelEx(&config, &oneshot<W, true>, p));        \
@@ -374,14 +403,11 @@ void launch(TensorView input, TensorView residual,
       LAUNCH(2);
       LAUNCH(4);
       LAUNCH(8);
-      default:
-        TVM_FFI_LOG_AND_THROW(ValueError) << "Beam supports TP2/4/8";
     }
 #undef LAUNCH
   } else {
     cudaLaunchConfig_t scatter{};
-    scatter.gridDim =
-        dim3(p.ar.numTokens, flashinfer::ceil_div(p.ar.tokenDim, 1024));
+    scatter.gridDim = dim3(p.ar.numTokens, ar::ceil_div(p.ar.tokenDim, 1024));
     scatter.blockDim = dim3(128);
     scatter.stream = stream;
     scatter.attrs = attrs;
@@ -398,8 +424,6 @@ void launch(TensorView input, TensorView residual,
       LAUNCH(2);
       LAUNCH(4);
       LAUNCH(8);
-      default:
-        TVM_FFI_LOG_AND_THROW(ValueError) << "Beam supports TP2/4/8";
     }
 #undef LAUNCH
     if (clusters > 1) {
@@ -410,5 +434,39 @@ void launch(TensorView input, TensorView residual,
     }
   }
 }
-}  // namespace beam
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(beam_allreduce, beam::launch);
+
+void beam_allreduce(torch::stable::Tensor const& input,
+                    torch::stable::Tensor& output, int64_t buffer_ptrs,
+                    torch::stable::Tensor& flags, int64_t multicast_ptr,
+                    int64_t world, int64_t rank) {
+  using namespace vllm::beam;
+  int const device = input.get_device_index();
+  torch::stable::accelerator::DeviceGuard const device_guard(device);
+  auto p =
+      workspaceParams(input, buffer_ptrs, flags, multicast_ptr, world, rank);
+  p.outputPtr = static_cast<T*>(output.data_ptr());
+  if (p.numTokens == 0) return;
+  cudaLaunchAttribute attrs[1]{};
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t config{};
+  config.gridDim = dim3(p.numTokens, ar::ceil_div(p.tokenDim / 8, 128));
+  config.blockDim = dim3(128);
+  config.stream = get_current_cuda_stream(device);
+  config.attrs = attrs;
+  config.numAttrs = 1;
+  switch (world) {
+    case 2:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<2, T, true>, p));
+      break;
+    case 4:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<4, T, true>, p));
+      break;
+    case 8:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<8, T, true>, p));
+      break;
+  }
+}

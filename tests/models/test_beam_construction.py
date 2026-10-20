@@ -277,7 +277,7 @@ def test_moe_finalize_deferral_requires_replicated_tokens(
         (4, 8, 8192, 65536, -1, 8192, False),
     ],
 )
-def test_decoder_finalizes_large_ep_batches_before_flashinfer_allreduce(
+def test_decoder_finalizes_large_ep_batches_before_fused_allreduce(
     monkeypatch,
     world_size,
     ep_size,

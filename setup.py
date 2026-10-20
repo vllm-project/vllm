@@ -1623,7 +1623,6 @@ package_data = {
     "vllm": [
         "py.typed",
         "libs/*.so*",
-        "models/beam/nvidia/*.cu",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",

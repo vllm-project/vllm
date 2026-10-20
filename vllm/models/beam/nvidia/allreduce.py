@@ -1,50 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CUDA JIT MNNVL collective with Beam's FP32 sandwich-norm epilogue."""
-
-import functools
-import hashlib
-from pathlib import Path
+"""MNNVL all-reduce with Beam's FP32 sandwich-norm epilogue."""
 
 import torch
+import torch.distributed as dist
 
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 
-
-@functools.cache
-def _module():
-    from flashinfer.jit import env as jit_env
-    from flashinfer.jit.core import current_compilation_context, gen_jit_spec
-
-    source = Path(__file__).with_suffix(".cu")
-    communication_header = (
-        jit_env.FLASHINFER_INCLUDE_DIR / "flashinfer/comm/trtllm_mnnvl_allreduce.cuh"
-    )
-    digest = hashlib.sha256(
-        source.read_bytes() + communication_header.read_bytes()
-    ).hexdigest()[:16]
-    flags = current_compilation_context.get_nvcc_flags_list(
-        supported_major_versions=[9, 10]
-    )
-    spec = gen_jit_spec(
-        f"beam_allreduce_{digest}",
-        [source],
-        extra_cuda_cflags=[*flags, "--fmad=false"],
-        extra_include_paths=[jit_env.FLASHINFER_CSRC_DIR],
-    )
-    spec.extra_cuda_cflags.remove("-use_fast_math")
-    return spec.build_and_load()
+_NUM_LAMPORT_BUFFERS = 3
+# FlashInfer's MNNVL one-shot cutoff on the BF16 payload staged across ranks.
+_ONESHOT_MAX_BYTES = 1024 * 1024
 
 
 class BeamAllReduceWorkspace:
-    """Reuse FlashInfer's multicast allocation and Lamport generation protocol."""
+    """Multicast Lamport buffers and generation flags for the Beam kernels."""
 
     @classmethod
     def create(
         cls,
-        group: torch.distributed.ProcessGroup,
+        group: dist.ProcessGroup,
         hidden_size: int,
         max_tokens: int,
         dtype: torch.dtype,
@@ -55,6 +31,7 @@ class BeamAllReduceWorkspace:
             or dtype != torch.bfloat16
             or hidden_size % 1024
             or not 1024 <= hidden_size <= 8192
+            or not hasattr(torch.ops._C, "beam_allreduce_norm")
             or not has_flashinfer()
         ):
             return None
@@ -72,43 +49,64 @@ class BeamAllReduceWorkspace:
         return cls(group, hidden_size, max_tokens)
 
     def __init__(
-        self, group: torch.distributed.ProcessGroup, hidden_size: int, max_tokens: int
+        self, group: dist.ProcessGroup, hidden_size: int, max_tokens: int
     ) -> None:
-        from flashinfer.comm import create_allreduce_fusion_workspace
-        from flashinfer.comm.mnnvl import TorchDistBackend
-
         self.world_size = group.size()
-        self.rank = torch.distributed.get_rank(group)
+        self.rank = dist.get_rank(group)
         self.hidden_size = hidden_size
         self.max_tokens = max_tokens
         # Scale one-shot cutoffs by the BF16 payload staged across all ranks.
         token_bytes = hidden_size * 2
         rank_token_bytes = self.world_size * token_bytes
+        self.oneshot_max_tokens = _ONESHOT_MAX_BYTES // rank_token_bytes
         self.small_batch_max_tokens = 3200 * 1024 // rank_token_bytes
         self.ep_finalize_oneshot_max_tokens = 2560 * 1024 // rank_token_bytes
-        # Two-shot reserves two rows per token; one-shot needs one per rank.
-        workspace_tokens = max(
-            max_tokens,
-            min(max_tokens, self.small_batch_max_tokens) * self.world_size // 2,
-        )
-        self.workspace = create_allreduce_fusion_workspace(
-            backend="mnnvl",
-            world_size=self.world_size,
-            rank=self.rank,
-            max_token_num=workspace_tokens,
-            hidden_dim=hidden_size,
-            dtype=torch.bfloat16,
-            comm_backend=TorchDistBackend(group=group),
-            group=group,
-        )
-        self.module = _module()
-        self.allocation_bytes = (
-            self.workspace.handle.mcast_device_memory.get_allocation_size()
-        )
         self.separate_norm_min_tokens = cdiv(
             10 * 1024**2 * self.world_size, token_bytes
         )
         self.ep_finalize_max_tokens = 640 * 1024**2 // token_bytes
+
+        # One-shot stages one row per rank; two-shot two rows per owned token.
+        oneshot_tokens = min(max_tokens, self.small_batch_max_tokens)
+        buffer_bytes = max(
+            oneshot_tokens * rank_token_bytes,
+            2 * cdiv(max_tokens, self.world_size) * rank_token_bytes,
+        )
+        # Both two-shot stages stay 16-byte aligned.
+        buffer_bytes = round_up(buffer_bytes, 32)
+        if buffer_bytes >= 2**32:
+            raise ValueError(
+                f"Beam all-reduce needs {buffer_bytes} bytes per Lamport "
+                "buffer, which exceeds the 32-bit flag field"
+            )
+        # FlashInfer only maps the multicast memory; the Lamport protocol and
+        # its flags are ours. Small batches reduce ~0.3us faster on its mapping
+        # than on torch symmetric memory.
+        from flashinfer.comm.mnnvl import McastGPUBuffer, TorchDistBackend
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        self.buffer = McastGPUBuffer(
+            _NUM_LAMPORT_BUFFERS * buffer_bytes,
+            self.world_size,
+            self.rank,
+            device,
+            TorchDistBackend(group=group),
+        )
+        self.multicast_ptr = self.buffer.get_multicast_ptr()
+        if not self.multicast_ptr:
+            raise RuntimeError("Beam all-reduce requires NVLink multicast")
+        self.local_ptr = self.buffer.get_unicast_ptr(self.rank)
+        self.buffer_ptrs = self.buffer.get_buffer_ptrs_dev()
+        self.buffer.lamport_initialize(self.rank, torch.float32)
+        # [current, dirty, bytes per buffer, dirty stages, bytes to clear x4,
+        # arrival count]
+        self.flags = torch.tensor(
+            [0, 2, buffer_bytes, 0, 0, 0, 0, 0, 0],
+            dtype=torch.uint32,
+            device=device,
+        )
+        torch.accelerator.synchronize()
+        dist.barrier(group=group)
 
 
 def beam_allreduce_norm_residual_norm(
@@ -131,15 +129,17 @@ def beam_allreduce_norm_residual_norm(
     assert x.shape[1] == workspace.hidden_size
     assert x.shape[0] <= workspace.max_tokens
     if x.shape[0] >= workspace.separate_norm_min_tokens:
-        from flashinfer.comm import AllReduceFusionPattern, allreduce_fusion
-
         from .layernorm import beam_norm_residual_norm
 
-        reduced = allreduce_fusion(
-            input=x,
-            workspace=workspace.workspace,
-            pattern=AllReduceFusionPattern.kAllReduce,
-            launch_with_pdl=True,
+        reduced = torch.empty_like(x)
+        torch.ops._C.beam_allreduce(
+            x,
+            reduced,
+            workspace.buffer_ptrs,
+            workspace.flags,
+            workspace.multicast_ptr,
+            workspace.world_size,
+            workspace.rank,
         )
         return beam_norm_residual_norm(
             reduced,
@@ -169,8 +169,6 @@ def _cuda_allreduce_norm_residual_norm(
     routed_scale: float = 1.0,
     oneshot_max_tokens: int = 0,
 ):
-    from flashinfer.comm.trtllm_mnnvl_ar import MNNVLAllreduceFusionStrategy
-
     assert x.dtype == residual.dtype == torch.bfloat16
     assert x.is_contiguous() and residual.is_contiguous()
     m, n = x.shape
@@ -178,22 +176,18 @@ def _cuda_allreduce_norm_residual_norm(
     hidden = torch.empty_like(x)
     normalized = torch.empty_like(x) if next_eps is not None else None
     if m:
-        strategy = MNNVLAllreduceFusionStrategy.select_strategy(
-            workspace.world_size, m, n, x.dtype
-        )
         small_batch = unfinalized is None and m <= workspace.small_batch_max_tokens
-        w = workspace.workspace
-        workspace.module.beam_allreduce(
+        torch.ops._C.beam_allreduce_norm(
             x,
             residual,
             post_weight,
             next_weight,
             hidden,
             normalized,
-            w.uc_ptrs_dev,
-            w.buffer_flags,
-            w.mc_ptr,
-            w.uc_ptr_local,
+            workspace.buffer_ptrs,
+            workspace.flags,
+            workspace.multicast_ptr,
+            workspace.local_ptr,
             workspace.world_size,
             workspace.rank,
             post_eps or 0.0,
@@ -202,16 +196,14 @@ def _cuda_allreduce_norm_residual_norm(
             post_eps is not None,
             next_eps is not None,
             scales is not None,
-            small_batch
-            or m <= oneshot_max_tokens
-            or strategy == MNNVLAllreduceFusionStrategy.ONESHOT,
+            small_batch or m <= max(oneshot_max_tokens, workspace.oneshot_max_tokens),
+            small_batch,
             unfinalized.gemm2_permuted if unfinalized is not None else None,
             unfinalized.expert_weights if unfinalized is not None else None,
             unfinalized.expanded_idx_to_permuted_idx
             if unfinalized is not None
             else None,
             routed_scale,
-            small_batch,
         )
     return hidden, normalized
 

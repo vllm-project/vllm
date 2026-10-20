@@ -458,6 +458,14 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
     torch.accelerator.synchronize()
 
 
+def _skip_without_beam_allreduce():
+    if not hasattr(torch.ops._C, "beam_allreduce_norm"):
+        pytest.skip("Beam all-reduce kernel not built")
+    mnnvl = pytest.importorskip("flashinfer.comm.mnnvl")
+    if not mnnvl.is_multicast_supported(0):
+        pytest.skip("NVLink multicast required")
+
+
 def _beam_allreduce_worker(rank, world_size, port, hidden_size, host="127.0.0.1"):
     from datetime import timedelta
 
@@ -554,9 +562,7 @@ def test_allreduce_boundary_handles_batch_changes_and_graph_replay(
 
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Requires {world_size} GPUs")
-    mnnvl = pytest.importorskip("flashinfer.comm.mnnvl")
-    if not mnnvl.is_multicast_supported(0):
-        pytest.skip("NVLink multicast required")
+    _skip_without_beam_allreduce()
     spawn(
         _beam_allreduce_worker,
         args=(world_size, get_open_port(), hidden_size),
@@ -713,9 +719,7 @@ def test_moe_finalize_allreduce_preserves_local_rounding_and_replay(
 
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Requires {world_size} GPUs")
-    mnnvl = pytest.importorskip("flashinfer.comm.mnnvl")
-    if not mnnvl.is_multicast_supported(0):
-        pytest.skip("NVLink multicast required")
+    _skip_without_beam_allreduce()
     spawn(
         _beam_finalize_worker,
         args=(world_size, get_open_port(), expert_parallel, hidden_size),
