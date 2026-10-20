@@ -141,6 +141,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
+    VLLM_ROCM_EP_MEGA_MOE_QUANT: Literal["a8w4", "a4w4"] = "a8w4"
+    VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE: Literal["fp8", "fp4"] = "fp8"
+    VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE: Literal["bf16", "fp8"] = "bf16"
+    VLLM_ROCM_TP_MEGA_MOE_AR_GATHER: Literal["bf16", "fp8", "auto"] = "bf16"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1284,6 +1288,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
+    ),
+    # Experimental activation precision for DeepSeek V4's EP MegaMoEV2.
+    # Keep MXFP8 activations by default; a4w4 explicitly selects MXFP4.
+    # This does not change shared-expert precision or Stage2 P2P transport.
+    "VLLM_ROCM_EP_MEGA_MOE_QUANT": env_with_choices(
+        "VLLM_ROCM_EP_MEGA_MOE_QUANT", "a8w4", ["a8w4", "a4w4"]
+    ),
+    # True-TP MegaMoE: FP4 activation is an explicit precision experiment.
+    "VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE", "fp8", ["fp8", "fp4"]
+    ),
+    "VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE", "bf16", ["bf16", "fp8"]
+    ),
+    "VLLM_ROCM_TP_MEGA_MOE_AR_GATHER": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_AR_GATHER", "bf16", ["bf16", "fp8", "auto"]
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass

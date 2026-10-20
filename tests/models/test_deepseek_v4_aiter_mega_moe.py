@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,103 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w13[:INTER] == 10 * expert + 1)
             assert torch.all(w13[INTER:] == 10 * expert + 2)
             assert torch.all(w2 == 10 * expert + 3)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mode, expected", [(None, "a8w4"), ("a8w4", "a8w4"), ("a4w4", "a4w4")]
+)
+def test_ep_mega_moe_quant_env(monkeypatch, mode, expected):
+    name = "VLLM_ROCM_EP_MEGA_MOE_QUANT"
+    monkeypatch.delenv(name, raising=False)
+    if mode is not None:
+        monkeypatch.setenv(name, mode)
+    assert mega_moe_module.envs.environment_variables[name]() == expected
+
+
+@pytest.mark.cpu_test
+def test_ep_mega_moe_quant_env_rejects_invalid_mode(monkeypatch):
+    name = "VLLM_ROCM_EP_MEGA_MOE_QUANT"
+    monkeypatch.setenv(name, "a16w4")
+    with pytest.raises(ValueError, match=name):
+        mega_moe_module.envs.environment_variables[name]()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "first_mode, second_mode", [("a8w4", "a4w4"), ("a4w4", "a8w4")]
+)
+def test_runtime_cache_isolates_activation_modes(monkeypatch, first_mode, second_mode):
+    created = []
+
+    def make_runtime(**kwargs):
+        runtime = SimpleNamespace(
+            **kwargs,
+            _bundle_plan=SimpleNamespace(
+                entries=(SimpleNamespace(config=SimpleNamespace(p2p_quant="none")),)
+            ),
+        )
+        created.append(runtime)
+        return runtime
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mega_moe",
+        SimpleNamespace(MegaMoEV2=make_runtime),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(DeepseekV4AiterMegaMoEExperts, "_runtime_cache", {})
+    monkeypatch.setattr(mega_moe_module.envs, "VLLM_ROCM_EP_MEGA_MOE_QUANT", first_mode)
+    first = _make_experts(monkeypatch)
+    another_layer = _make_experts(monkeypatch)
+    first_runtime = first.get_runtime(128)
+    assert another_layer.get_runtime(128) is first_runtime
+
+    monkeypatch.setattr(
+        mega_moe_module.envs, "VLLM_ROCM_EP_MEGA_MOE_QUANT", second_mode
+    )
+    second = _make_experts(monkeypatch)
+    second_runtime = second.get_runtime(128)
+    assert second_runtime is not first_runtime
+    assert first_runtime.quant == first_mode
+    assert second_runtime.quant == second_mode
+    assert first_runtime.stage2_p2p_quant == second_runtime.stage2_p2p_quant == "auto"
+    # Existing layers retain the precision they were built with, even if a
+    # later model is constructed with a different experimental mode.
+    assert first.get_runtime(128) is first_runtime
+    assert second.get_runtime(128) is second_runtime
+    assert len(created) == 2
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("mode, a_dtype", [("a8w4", "fp8"), ("a4w4", "fp4")])
+def test_fixed_slot_plan_uses_selected_activation_mode(monkeypatch, mode, a_dtype):
+    calls = []
+
+    def build_plan(capacity, **kwargs):
+        calls.append((capacity, kwargs))
+        return SimpleNamespace(fixed_slot_dispatch=True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mega_moe.mega_moe_config",
+        SimpleNamespace(build_mega_moe_bundle_plan=build_plan),
+    )
+    monkeypatch.setattr(mega_moe_module.envs, "VLLM_ROCM_EP_MEGA_MOE_QUANT", mode)
+    experts = _make_experts(monkeypatch, ep_size=8, num_experts=384)
+    assert experts._uses_fixed_slot(128)
+    assert calls == [
+        (
+            128,
+            dict(
+                a_dtype=a_dtype,
+                experts_per_rank=48,
+                model_dim=HIDDEN,
+                inter_dim=INTER,
+                world_size=8,
+            ),
+        )
+    ]
 
 
 @pytest.mark.cpu_test
