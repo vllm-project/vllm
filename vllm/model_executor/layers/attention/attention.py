@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -14,7 +13,6 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.config.vllm import VllmConfig
-from vllm.device_allocator import get_mem_allocator_instance
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
@@ -344,7 +342,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
-        self._sleep_mode = model_config is not None and model_config.enable_sleep_mode
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
@@ -420,20 +417,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 extra_impl_args.setdefault("block_n", block_n)
 
         impl_cls = self.attn_backend.get_impl_cls()
-        with self._impl_state_pool():
-            self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
-                num_heads,
-                head_size,
-                scale,
-                num_kv_heads,
-                alibi_slopes,
-                sliding_window,
-                kv_cache_dtype,
-                logits_soft_cap,
-                attn_type,
-                kv_sharing_target_layer_name,
-                **extra_impl_args,
-            )
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **extra_impl_args,
+        )
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -590,17 +586,8 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def _impl_state_pool(self):
-        # Impl-derived tensors (e.g. alibi, fp32 sinks) must survive level-2 sleep.
-        return (
-            get_mem_allocator_instance().use_memory_pool(tag="runtime")
-            if self._sleep_mode and current_platform.is_cuda_alike()
-            else nullcontext()
-        )
-
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        with self._impl_state_pool():
-            self.impl.process_weights_after_loading(act_dtype)
+        self.impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
