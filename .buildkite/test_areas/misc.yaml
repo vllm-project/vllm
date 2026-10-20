@@ -648,6 +648,11 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/standalone_tests/test_precompiled_wheel.py
+  - tests/tools/test_cpu_wheel_distribution.py
+  - .buildkite/scripts/stage-cpu-triton-wheels.sh
+  - .buildkite/scripts/upload-nightly-wheels.sh
+  - .buildkite/scripts/generate-nightly-index.py
+  - requirements/cpu.txt
   - setup.py
   - tests/reasoning
   - tools/pre_commit/check_test_tethering.py
@@ -668,6 +673,7 @@ steps:
   - pip install cmake # test_cmake_utils.py shells out to cmake; the CPU image has none
   - python3 standalone_tests/lazy_imports.py
   - python3 standalone_tests/test_precompiled_wheel.py
+  - pytest -v -s tools/test_cpu_wheel_distribution.py
   - pytest -v -s device_allocator
   - pytest -v -s test_uvicorn_logging.py
   - pytest -v -s test_attention_backend_registry.py

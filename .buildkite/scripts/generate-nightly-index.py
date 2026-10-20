@@ -471,7 +471,9 @@ if __name__ == "__main__":
         wheel_files = list(
             filter(
                 lambda x: (version in x and "dev" not in x)
-                or (x.startswith("triton-") and "+xpu-" in x),
+                or (
+                    x.startswith("triton-") and any(v in x for v in ("+xpu-", "+cpu-"))
+                ),
                 wheel_files,
             )
         )

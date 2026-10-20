@@ -13,8 +13,11 @@ import sys
 import sysconfig
 from pathlib import Path
 from shutil import which
+from urllib.parse import unquote, urlsplit
 
 import torch
+from packaging.requirements import Requirement
+from packaging.utils import parse_wheel_filename
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -1521,6 +1524,16 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
         requirements = _read_requirements("cpu.txt")
+        for index, req in enumerate(requirements):
+            if not req.startswith("triton @ "):
+                continue
+            requirement = Requirement(req)
+            filename = unquote(Path(urlsplit(requirement.url).path).name)
+            _, version, _, _ = parse_wheel_filename(filename)
+            pinned = f"{requirement.name}=={version}"
+            if requirement.marker:
+                pinned += f"; {requirement.marker}"
+            requirements[index] = pinned
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
     else:

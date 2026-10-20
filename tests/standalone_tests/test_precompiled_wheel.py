@@ -191,5 +191,67 @@ class TestDetermineWheelUrl(unittest.TestCase):
                 search.assert_not_called()
 
 
+class TestCpuWheelRequirements(unittest.TestCase):
+    def test_cpu_wheel_uses_version_pins_with_original_platform_conditions(self):
+        from urllib.parse import unquote, urlsplit
+
+        from packaging.requirements import Requirement
+        from packaging.utils import parse_wheel_filename
+
+        function = next(
+            node
+            for node in ast.parse(setup_path.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "get_requirements"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "requirements").mkdir()
+            cpu_reqs = root / "requirements/cpu.txt"
+            cpu_reqs.write_text(
+                "setuptools==78.1.1\n"
+                "triton @ https://example.com/triton-3.8.0%2Bcpu-cp311-cp311-"
+                'linux_x86_64.whl#sha256=abc ; platform_machine == "x86_64" '
+                'and python_version == "3.11"\n'
+                "triton @ https://example.com/triton-3.8.0%2Bcpu-cp312-abi3-"
+                'linux_x86_64.whl#sha256=abc ; platform_machine == "x86_64" '
+                'and python_version >= "3.12"\n'
+            )
+            scope = {
+                "ROOT_DIR": root,
+                "Requirement": Requirement,
+                "unquote": unquote,
+                "urlsplit": urlsplit,
+                "Path": Path,
+                "parse_wheel_filename": parse_wheel_filename,
+                **{
+                    name: lambda: False
+                    for name in ("_no_device", "_is_cuda", "_is_hip", "_is_tpu")
+                },
+                "_is_cpu": lambda: True,
+            }
+            exec(
+                compile(
+                    ast.Module(body=[function], type_ignores=[]), "setup.py", "exec"
+                ),
+                scope,
+            )
+            requirements = scope["get_requirements"]()
+        self.assertEqual(requirements[0], "setuptools==78.1.1")
+        triton_reqs = [Requirement(req) for req in requirements[1:]]
+        for req in triton_reqs:
+            self.assertIsNone(req.url)
+            self.assertEqual(str(req.specifier), "==3.8.0+cpu")
+        for arch in ("x86_64", "aarch64"):
+            for python in ("3.11", "3.12", "3.13"):
+                with self.subTest(arch=arch, python=python):
+                    active = sum(
+                        req.marker.evaluate(
+                            {"platform_machine": arch, "python_version": python}
+                        )
+                        for req in triton_reqs
+                    )
+                    self.assertEqual(active, int(arch == "x86_64"))
+
+
 if __name__ == "__main__":
     unittest.main()
