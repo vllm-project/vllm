@@ -257,6 +257,17 @@ class KVConnectorKVEvents(ABC):
         self.add_events(other.get_all_events())
         return self
 
+    def aggregate_worker(self, other: "KVConnectorKVEvents") -> "KVConnectorKVEvents":
+        """Fold the events one more worker reported for this step into self.
+
+        Used by KVOutputAggregator to combine the per-worker outputs of a step.
+        Containers that hold events for several connectors override this to
+        merge per connector.
+        """
+        self.add_events(other.get_all_events())
+        self.increment_workers(1)
+        return self
+
 
 class EventPublisher(ABC):
     """Lightweight publisher for EventBatch batches with data parallelism

@@ -13,6 +13,7 @@ import torch
 from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -26,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorKVEvents,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
@@ -35,7 +37,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVConnectorWorkerMetadata,
+    ModelRunnerOutput,
+)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -1013,12 +1019,9 @@ class TestMultiConnectorStats:
 def test_multi_connector_overrides_all_base_methods():
     """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
-    # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
-    # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
     INHERITED_OK = {
         "role",
         "has_connector_metadata",
-        "get_kv_connector_kv_cache_events",
     }
 
     base_members = {
@@ -1294,3 +1297,112 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+class ListKVEvents(KVConnectorKVEvents):
+    """Minimal per-connector KV events container for MultiConnector tests."""
+
+    def __init__(self, events: list[KVCacheEvent] | None = None) -> None:
+        self.events = list(events or [])
+        self.num_workers = 1
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        self.events.extend(events)
+
+    def aggregate(self) -> "ListKVEvents":
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        self.num_workers += count
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return list(self.events)
+
+    def get_number_of_workers(self) -> int:
+        return self.num_workers
+
+    def clear_events(self) -> None:
+        self.events.clear()
+        self.num_workers = 1
+
+
+def _block_stored(block_hash: str) -> BlockStored:
+    return BlockStored(
+        block_hashes=[block_hash],
+        parent_block_hash=None,
+        token_ids=[1, 2, 3],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+    )
+
+
+def test_multi_connector_kv_cache_events_drain_every_connector(mc):
+    first, second = mc._connectors
+
+    first.get_kv_connector_kv_cache_events.return_value = None
+    second.get_kv_connector_kv_cache_events.return_value = None
+    assert mc.get_kv_connector_kv_cache_events() is None
+
+    # Connectors that buffer worker-side events (e.g. MooncakeStoreConnector)
+    # are only drained by this call, so every sub-connector must be asked on
+    # every step, including when an earlier one has nothing to report.
+    second_events = ListKVEvents([_block_stored("second")])
+    second.get_kv_connector_kv_cache_events.return_value = second_events
+    events = mc.get_kv_connector_kv_cache_events()
+    assert isinstance(events, MultiKVConnectorKVEvents)
+    assert events.events == [None, second_events]
+    assert first.get_kv_connector_kv_cache_events.call_count == 2
+    assert second.get_kv_connector_kv_cache_events.call_count == 2
+
+
+def test_multi_connector_kv_cache_events_aggregate_per_connector():
+    from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+
+    a, b, c = _block_stored("a"), _block_stored("b"), _block_stored("c")
+    worker_events = [
+        MultiKVConnectorKVEvents([ListKVEvents([a]), None]),
+        MultiKVConnectorKVEvents([ListKVEvents([b]), ListKVEvents([c])]),
+    ]
+    outputs = [
+        ModelRunnerOutput(
+            req_ids=[f"req_{i}"],
+            req_id_to_index={f"req_{i}": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(kv_cache_events=events),
+        )
+        for i, events in enumerate(worker_events)
+    ]
+
+    output = KVOutputAggregator(expected_finished_count=2).aggregate(outputs)
+    combined = output.kv_connector_output.kv_cache_events
+
+    assert isinstance(combined, MultiKVConnectorKVEvents)
+    first, second = combined.events
+    # Events are merged per connector, never across connectors, and each
+    # connector counts only the workers that reported events for it.
+    assert first.get_all_events() == [a, b]
+    assert first.get_number_of_workers() == 2
+    assert second.get_all_events() == [c]
+    assert second.get_number_of_workers() == 1
+
+
+def test_multi_connector_routes_kv_cache_events_to_each_connector(mc):
+    seen: list[tuple[int, KVConnectorKVEvents | None]] = []
+    for i, connector in enumerate(mc._connectors):
+        connector.update_connector_output.side_effect = lambda output, i=i: seen.append(
+            (i, output.kv_cache_events)
+        )
+
+    first_events = ListKVEvents([_block_stored("first")])
+    multi_events = MultiKVConnectorKVEvents([first_events, None])
+    output = KVConnectorOutput(kv_cache_events=multi_events)
+    mc.update_connector_output(output)
+
+    assert seen == [(0, first_events), (1, None)]
+    # The caller's output is left as it was.
+    assert output.kv_cache_events is multi_events
