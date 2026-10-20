@@ -2491,7 +2491,7 @@ async def test_stream_parsed_matches_batch_tool_call(parser_client, parser_token
     )
     assert batch_resp.status_code == 200, batch_resp.text
     batch_choice = batch_resp.json()["choices"][0]
-    if not batch_choice["message"]["tool_calls"]:
+    if not batch_choice["message"].get("tool_calls"):
         pytest.skip("Model did not emit a tool call")
 
     for chunk_sizes in ([len(output_ids)], [1] * len(output_ids)):

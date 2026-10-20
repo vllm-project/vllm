@@ -918,7 +918,7 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
     assert len(inline["choices"]) == len(coupled["choices"])
     for c, i in zip(coupled["choices"], inline["choices"]):
         assert i["token_ids"] == c["token_ids"], (
-            "greedy (temperature=0) generation was expected to be deterministic "
+            "greedy or seeded generation was expected to be deterministic "
             "across the coupled and inline calls"
         )
         assert i["message"]["content"] == c["message"]["content"]
@@ -971,7 +971,11 @@ def _assert_inline_parity(coupled: dict, inline: dict) -> None:
         pytest.param(
             "Write two short lines about the sea.", {"stop": ["\n"]}, id="stop"
         ),
-        pytest.param(TEXT_MESSAGES[0]["content"], {"n": 2}, id="n2"),
+        pytest.param(
+            TEXT_MESSAGES[0]["content"],
+            {"n": 2, "temperature": 0.8, "seed": 42},
+            id="n2",
+        ),
     ],
 )
 async def test_inline_derender_parity(client, content, extra):

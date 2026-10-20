@@ -835,7 +835,7 @@ async def test_derender_mode_with_parser_matches_chat_completions(client, messag
     expected = chat_resp.json()["choices"][0]
     got = resp.json()["choices"][0]
     assert got["message"]["content"] == expected["message"]["content"]
-    assert got["message"]["tool_calls"] == expected["message"]["tool_calls"]
+    assert got["message"].get("tool_calls") == expected["message"].get("tool_calls")
     assert got["finish_reason"] == expected["finish_reason"]
 
 
