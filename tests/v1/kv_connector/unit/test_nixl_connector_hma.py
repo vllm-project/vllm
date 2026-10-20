@@ -702,7 +702,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
-    worker._recving_transfers = {}
+    worker._recving_transfers = defaultdict(list)
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -2365,7 +2365,7 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
+    worker.dst_xfer_side_handles = defaultdict(dict, {engine_id: {0: 100, 1: 101}})
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
