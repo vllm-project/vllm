@@ -214,7 +214,7 @@ def get_fse_test_model_config(
         )
         return config, DeepseekV4Model
     if model_type == "qwen3_5":
-        from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
+        from vllm.models.qwen3_5.amd.model import Qwen3_5Model
 
         config = Qwen3_5MoeTextConfig(
             vocab_size=256,

@@ -36,7 +36,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.utils import configure_quant_config
 from vllm.model_executor.models.interfaces import SupportsHCSP, SupportsPP
-from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -51,6 +50,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.qwen3_5.nvidia.model import Qwen3_5Model
 from vllm.sequence import IntermediateTensors
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled

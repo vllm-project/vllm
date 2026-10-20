@@ -44,10 +44,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from vllm.model_executor.models.qwen3_5 import (
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5Model,
-)
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextSparseMoeBlock,
@@ -74,6 +70,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
+)
+from vllm.models.qwen3_5.nvidia.model import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5Model,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -821,7 +821,7 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_gdn_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -850,7 +850,7 @@ class Qwen4ExpForCausalLM(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         return cls.get_gdn_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
@@ -1138,7 +1138,7 @@ class Qwen4ExpForConditionalGeneration(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod

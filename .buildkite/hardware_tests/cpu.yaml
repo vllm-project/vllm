@@ -76,8 +76,7 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
-  - vllm/model_executor/models/qwen3_5.py
-  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/llama_eagle3.py
   - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
   - vllm/model_executor/layers/mamba/mamba_mixer2.py
