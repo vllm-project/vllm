@@ -14,8 +14,12 @@ if TYPE_CHECKING:
     from xgrammar import StructuralTag
 
 
-class Qwen3EngineToolParser(Qwen3ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = "qwen_3_coder"
+class UnwrappedQwenXmlStructuralTagMixin:
+    """Constrain Qwen3 XML calls written without ``<tool_call>``.
+
+    For tool parsers whose engine config extracts ``<function=...>`` calls
+    with or without the ``<tool_call>`` wrapper, while their
+    ``qwen_3_coder`` structural tag only triggers on the wrapped form."""
 
     def get_structural_tag(
         self,
@@ -24,7 +28,7 @@ class Qwen3EngineToolParser(Qwen3ParserToolAdapter):  # type: ignore[valid-type,
         reasoning: bool = False,
         strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ) -> StructuralTag | None:
-        tag = super().get_structural_tag(
+        tag = super().get_structural_tag(  # type: ignore[misc]
             request, reasoning=reasoning, strict_level=strict_level
         )
         if tag is None:
@@ -35,3 +39,10 @@ class Qwen3EngineToolParser(Qwen3ParserToolAdapter):  # type: ignore[valid-type,
 
         # The parser also extracts calls written without <tool_call>.
         return allow_unwrapped_qwen_xml_tool_calls(tag)
+
+
+class Qwen3EngineToolParser(
+    UnwrappedQwenXmlStructuralTagMixin,
+    Qwen3ParserToolAdapter,  # type: ignore[valid-type, misc]
+):
+    structural_tag_model = "qwen_3_coder"

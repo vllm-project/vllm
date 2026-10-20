@@ -55,6 +55,7 @@ from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
+from vllm.tool_parsers.step5_tool_parser import Step5ToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
@@ -873,16 +874,24 @@ def _qwen_xml_call(name: str, parameters: str, wrapped: bool) -> str:
 
 @pytest.mark.parametrize("wrapped", [True, False], ids=["wrapped", "unwrapped"])
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize(
+    "tool_parser_cls",
+    [Qwen3EngineToolParser, Step5ToolParser, Step3p5ToolParser],
+    ids=["qwen3_coder", "step5", "step3p5"],
+)
 def test_qwen3_xml_grammar_constrains_every_call_the_parser_extracts(
-    sample_tools_strict: list[ChatCompletionToolsParam], tool_choice, wrapped
+    sample_tools_strict: list[ChatCompletionToolsParam],
+    tool_parser_cls,
+    tool_choice,
+    wrapped,
 ):
-    """The Qwen3 parser extracts ``<function=...>`` calls with or without
-    ``<tool_call>``, so strict arguments must be enforced in both forms."""
-
-    class Qwen3Parser(DelegatingParser):
-        tool_parser_cls = Qwen3EngineToolParser
-
-    parser = Qwen3Parser(MagicMock(), tools=sample_tools_strict)
+    """Parsers built on the Qwen3 XML engine config extract ``<function=...>``
+    calls with or without ``<tool_call>``, so strict arguments must be
+    enforced in both forms."""
+    parser_cls = type(
+        "Qwen3XmlParser", (DelegatingParser,), {"tool_parser_cls": tool_parser_cls}
+    )
+    parser = parser_cls(MagicMock(), tools=sample_tools_strict)
     request = parser.adjust_request(
         ChatCompletionRequest(
             messages=[],
