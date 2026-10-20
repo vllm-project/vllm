@@ -430,18 +430,16 @@ OBJDUMP = shutil.which("llvm-objdump") or next(
 )
 
 
-@pytest.mark.skipif(OBJDUMP is None, reason="needs llvm-objdump")
-def test_isa_encodes_the_mailbox_contract(weights):
-    """The linked kernel's memory operations take the shapes ``mono/sync.py``
-    argues from: every system-scope access one aligned 64-bit pair or the
-    32-bit error word; on this GPU every cross-CTA access sc1 (agent-coherent),
-    so no L2 write-back or invalidate; the handshake's system release a
-    write-back then a drain before its store, its acquire a drain then an
-    invalidate."""
+@pytest.fixture(scope="module")
+def tp4_isa(weights):
+    """The linked TP4 S=1 kernel's instructions, each split into words."""
     from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
         code_object,
     )
 
+    if OBJDUMP is None:
+        pytest.skip("needs llvm-objdump")
+    assert OBJDUMP is not None
     dev = torch.device("cuda")
     peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
     peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
@@ -449,22 +447,38 @@ def test_isa_encodes_the_mailbox_contract(weights):
     runner.warm(weights)
     elf = Path(tempfile.mkdtemp()) / "ffn.elf"
     elf.write_bytes(code_object(runner._compiled[1]._keepalive._ir_text))
-    assert OBJDUMP is not None
     isa = subprocess.run(
         [OBJDUMP, "-d", "--mcpu=gfx950", str(elf)], capture_output=True, text=True
     ).stdout
     ops = [line.split("//")[0].split() for line in isa.splitlines() if "\t" in line]
-    ops = [op for op in ops if op]
+    return [op for op in ops if op]
+
+
+def test_isa_encodes_the_mailbox_contract(tp4_isa):
+    """The shapes ``mono/sync.py`` argues from: every system-scope access one
+    aligned 64-bit pair or the 32-bit error word; every scoped (cross-CTA)
+    access an atomic / av global op, none a buffer op carrying cache bits
+    outside the memory model; the handshake's system release a write-back then
+    a drain, its acquire a drain then an invalidate."""
+    ops = tp4_isa
     system = [op[0] for op in ops if "sc0" in op and "sc1" in op]
     assert {o for o in system if "store" in o} == {"global_store_dwordx2"}
     assert {o for o in system if "load" in o} <= {
         "global_load_dwordx2",
         "global_load_dword",
     }
+    data = [op for op in ops if op[0].startswith(("buffer_load", "buffer_store"))]
+    assert data and not [op for op in data if "sc0" in op or "sc1" in op]
     for i, op in enumerate(ops):
         if op[0] == "buffer_wbl2":
             assert ops[i + 1][:2] == ["s_waitcnt", "vmcnt(0)"]
         if op[0] == "buffer_inv":
             assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
-    kinds = {" ".join(op) for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")}
+
+
+def test_same_gpu_handoffs_do_no_l2_maintenance(tp4_isa):
+    """Performance policy, not correctness: agent-scope hand-off fences are
+    av-none (waits only), so the only L2 write-back / invalidate left is the
+    step-end system handshake's."""
+    kinds = {" ".join(op) for op in tp4_isa if op[0] in ("buffer_wbl2", "buffer_inv")}
     assert kinds == {"buffer_wbl2 sc0 sc1", "buffer_inv sc0 sc1"}

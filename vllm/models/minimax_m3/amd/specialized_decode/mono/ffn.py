@@ -33,7 +33,6 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
-    CM_DEV,
     CM_SYS,
     ballot,
     bf2_f32,
@@ -57,7 +56,7 @@ from vllm.models.deepseek_v41.amd.mono.common.plan import (
     key_tuple,
     pair_layout,
 )
-from vllm.models.deepseek_v41.amd.mono.common.sync import preg, sreg
+from vllm.models.deepseek_v41.amd.mono.common.sync import Space, preg, sreg
 
 from .a16w4 import scale_f32, scale_loads, step_mfma, weight_loads
 from .sources import SOURCES
@@ -68,7 +67,12 @@ from .sync import (
     cta_sync,
     error_word,
     load32,
+    load_dev,
+    store16,
     store32,
+    store_dev,
+    sync_acquire,
+    sync_release,
 )
 
 _STREAM = fx.Stream(None)
@@ -205,16 +209,6 @@ assert slots(MAX_TOKENS) <= 80
 
 
 # ---------------------------------------------------------------- helpers
-def ld_dev(base, i, n=1, dtype=None):
-    dtype = T.i32 if dtype is None else dtype
-    v = bo.buffer_load(rsrc(base), i, vec_width=n, dtype=dtype, cache_modifier=CM_DEV)
-    return fx.Vector(v) if n > 1 else v
-
-
-def st_dev(v, base, i):
-    bo.buffer_store(v, rsrc(base), i, cache_modifier=CM_DEV)
-
-
 def put_word(c, addr, i, word):
     """Pair i of ``addr`` := (word, tag) at its space's scope."""
     c["mb"].put_words(addr, i, [word])
@@ -299,10 +293,10 @@ def stage_reduce(c, task):
             rsrc(a["res_out"]),
             t * (HIDDEN // 2) + cp,
         )
-        st_dev(
-            fx.Vector.from_elements([sl, sh], fx.Float32),
+        store_dev(
             c["sres"].value,
             t * HIDDEN + 2 * cp,
+            [sl.bitcast(fx.Int32), sh.bitcast(fx.Int32)],
         )
         sq = butterfly(sl * sl + sh * sh, (8, 4, 2, 1))
     cta_sync(drain=True)
@@ -319,23 +313,24 @@ def stage_norm(c, t):
     if tid < SEAM_TASKS:
         got = c["mb"].poll([(c["ssq"], t * SEAM_TASKS + tid, 1)], site=SITE_NORM)
         part = got[0][0].bitcast(fx.Float32)
+        c["mb"].acquire(Space.SCRATCH)
     cta_sync()
     var = block_sum(c, part, 0) / fx.Float32(HIDDEN)
     rstd = fx.Float32(1.0) / fx.Float32(fmath.sqrt(var + fx.Float32(EPS)))
     per = HIDDEN // THREADS  # 12
     for q in range_constexpr(per // 2):
         col = (q * THREADS + tid) * 2
-        sv = ld_dev(c["sres"].value, t * HIDDEN + col, 2, T.f32)
+        sv = load_dev(c["sres"].value, t * HIDDEN + col, 2)
         ww = fx.Int32(
             bo.buffer_load(rsrc(a["norm_w"]), col // 2, vec_width=1, dtype=T.i32)
         )
         wl, wh = bf2_f32(ww)
-        ol = sv[0] * rstd * (fx.Float32(1.0) + wl)
-        oh = sv[1] * rstd * (fx.Float32(1.0) + wh)
-        st_dev(
-            bf16_pair(ol, oh).bitcast(fx.Int32),
+        ol = fx.Int32(sv[0]).bitcast(fx.Float32) * rstd * (fx.Float32(1.0) + wl)
+        oh = fx.Int32(sv[1]).bitcast(fx.Float32) * rstd * (fx.Float32(1.0) + wh)
+        store_dev(
             c["xn"].value,
             t * (HIDDEN // 2) + col // 2,
+            [bf16_pair(ol, oh).bitcast(fx.Int32)],
         )
     flag_after_stores(c, c["xrdy"], t, tid == 0)
 
@@ -346,6 +341,7 @@ def await_x(c, tokens_n):
     tid = c["tid"]
     if tid < tokens_n:
         c["mb"].poll([(c["xrdy"], tid, 1)], site=SITE_ROUTER)
+        c["mb"].acquire(Space.SCRATCH)
     cta_sync()
 
 
@@ -395,7 +391,7 @@ def stage_router(c, task):
     await_x(c, s)
     tok = fx.min(lane % 16, s - 1)
     xv = [
-        ld_dev(c["xn"].value, (tok * HIDDEN + k0 + 16 * ch) // 2, 2)
+        load_dev(c["xn"].value, (tok * HIDDEN + k0 + 16 * ch) // 2, 2)
         for ch in range(chunks)
     ]
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
@@ -413,7 +409,8 @@ def stage_router(c, task):
         tot = fx.Float32(0.0)
         for w in range_constexpr(WAVES):
             tot = tot + fx.ptr_load(red + (w * 64 * 4 + at))
-        c["mb"].put(
+        # released: a routed up CTA reads XN through logit -> route -> table
+        c["mb"].publish(
             c["logit"], (t * EXPERTS + tile * 16 + r) * ROUTER_PARTS + part, tot
         )
     gpu.barrier()
@@ -440,6 +437,7 @@ def stage_route(c, t):
         ],
         site=SITE_ROUTE,
     )
+    c["mb"].acquire(Space.SCRATCH)
     part = fx.Float32(0.0)
     for p in range_constexpr(quarter):
         part = part + got[p // 2][p % 2].bitcast(fx.Float32)
@@ -488,7 +486,7 @@ def stage_route(c, t):
         live = row_valid(c, t)
         my_id = live.select(my_id, fx.Int32(-1))
         if lane < TOPK:
-            c["mb"].put(c["route"], t * 2 * TOPK + lane, my_id)
+            c["mb"].publish(c["route"], t * 2 * TOPK + lane, my_id)
             c["mb"].put(c["route"], t * 2 * TOPK + TOPK + lane, my_w * scale)
 
 
@@ -518,6 +516,7 @@ def load_table(c):
             ],
             site=SITE_TABLE,
         )
+        c["mb"].acquire(Space.SCRATCH)
         tab_st(c, got[0][0], T_PICK_E + tid)
         tab_st(c, got[1][0], T_PICK_W + tid)
     if tid < EXPERTS:
@@ -625,7 +624,7 @@ def x_operands(c, base, row, k_dwords, st0, steps):
     lane = c["lane"]
     at = row * k_dwords + (lane // 16) * 16
     return [
-        [ld_dev(base, at + (st0 + i) * 64 + d * 4, 4) for d in range(4)]
+        [load_dev(base, at + (st0 + i) * 64 + d * 4, 4) for d in range(4)]
         for i in range(steps)
     ]
 
@@ -663,12 +662,7 @@ def stage_up(c, u, j, weights=None):
                 g = g + fx.ptr_load(red + ((w * 2) * 64 * 4 + at))
                 up = up + fx.ptr_load(red + ((w * 2 + 1) * 64 * 4 + at))
             v = _swiglu(g, up).to(fx.BFloat16)
-            bo.buffer_store(
-                v,
-                rsrc(c["mid"].value),
-                (u * 16 + col) * INTER + j * 16 + r,
-                cache_modifier=CM_DEV,
-            )
+            store16(c["mid"].value, (u * 16 + col) * INTER + j * 16 + r, v, "agent")
     flag_after_stores(c, c["upf"], u * UP_TILES + j, tid == 0)
 
 
@@ -695,10 +689,13 @@ def stage_down(c, tasks):
         wvs = [weight_loads(a["w2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
         svs = [scale_loads(a["s2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
         cnt = slot_count(c, u)
+        # the UPF of every tile this lane's MID loads span (x_operands: K
+        # dwords 64 i + 16 (lane // 16) .. + 16 = tiles 8 i + 2 (lane // 16) + 0/1)
+        first = u * UP_TILES + 2 * (lane // 16)
         c["mb"].poll(
-            [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
+            [(c["upf"], first + 8 * i, 2) for i in range(K2_STEPS)], site=SITE_DOWN
         )
-        # MID's sc1 loads below issue after every lane's poll has completed
+        c["mb"].acquire(Space.SCRATCH)
         col = slot_col(c, cnt)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)
@@ -984,6 +981,7 @@ def finish(c, key, epoch, tag, handshake, inject, peers):
         injected_fault(c, inject)
     cta_sync(drain=True)
     if (tid == 0) & (bid != key.drop_mark):
+        sync_release("agent")
         store32(epoch, EPOCH_MARKS + bid, tag, "agent")
     epoch_end(c, epoch, tag)
     if (handshake != 0) & (bid == 0) & (tid == 0):
@@ -1009,8 +1007,7 @@ def trade_faults(c, tag, peers):
     failed = fx.Int32((error_word(mb.err_base) != 0).select(1, 0))
     hs = [preg(b, HANDSHAKE_BYTES, "handshake") for b in peers]
     own = preg(mb.err_base, HANDSHAKE_BYTES, "handshake")
-    for p in range_constexpr(c["tp"]):
-        mb.publish_release(hs[p], c["rank"], failed)
+    mb.put_release_all(hs, c["rank"], failed)
     got = mb.poll([(own, p, 1) for p in range(c["tp"])], site=SITE_HANDSHAKE)
     mb.acquire_system()
     for p in range_constexpr(c["tp"]):
@@ -1037,6 +1034,7 @@ def epoch_end(c, epoch, tag):
                 late = memrealtime() - t0
             if mark != tag:
                 fx.ptr_store(fx.Int32(1).bitcast(fx.Float32), red)
+            sync_acquire("agent")
         cta_sync()
         if tid == 0:
             if fx.ptr_load(red).bitcast(fx.Int32) == 0:
