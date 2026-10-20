@@ -52,20 +52,24 @@ def _dequant_block(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return weight.float() * scale.repeat_interleave(128, -2).repeat_interleave(128, -1)
 
 
+def _dequant_ue8m0(weight: torch.Tensor, sf: torch.Tensor) -> torch.Tensor:
+    return weight.float() * torch.exp2(sf.float() - 127).repeat_interleave(32, -1)
+
+
 def test_requant_gives_power_of_two_scale_per_32_columns():
     torch.manual_seed(0)
     real = torch.randn(3, 256, 384) * 0.02
     weight, scale = _block_fp8(real)
 
-    requant, sf = requant_block_fp8_to_ue8m0(weight, scale, chunk=2)
+    requant, sf = requant_block_fp8_to_ue8m0(weight, scale)
 
     assert requant.dtype == FP8
     assert requant.shape == weight.shape
+    assert sf.dtype == torch.uint8
     assert sf.shape == (3, 256, 384 // 32)
-    assert torch.equal(torch.log2(sf), torch.round(torch.log2(sf)))
     assert requant.float().abs().max() <= 448.0
     original = _dequant_block(weight, scale)
-    restored = requant.float() * sf.repeat_interleave(32, -1)
+    restored = _dequant_ue8m0(requant, sf)
     # One more E4M3 rounding of every element: a few percent, never garbage.
     rel = ((restored - original).norm() / original.norm()).item()
     assert 0 < rel < 0.05
@@ -73,15 +77,13 @@ def test_requant_gives_power_of_two_scale_per_32_columns():
 
 def test_requant_is_exact_for_power_of_two_block_scales():
     torch.manual_seed(1)
-    real = torch.randn(256, 256) * 0.05
+    real = torch.randn(1, 256, 256) * 0.05
     weight, scale = _block_fp8(real, power_of_two=True)
 
     requant, sf = requant_block_fp8_to_ue8m0(weight, scale)
 
     # A finer power-of-two scale only shifts exponents, so nothing rounds.
-    assert torch.equal(
-        requant.float() * sf.repeat_interleave(32, -1), _dequant_block(weight, scale)
-    )
+    assert torch.equal(_dequant_ue8m0(requant, sf), _dequant_block(weight, scale))
 
 
 def _shared_mlp(shared_size: int):
@@ -135,10 +137,13 @@ def _checkpoint(num_experts: int, seed: int) -> dict[str, torch.Tensor]:
     }
 
 
-def _load_shuffled(experts, ckpt, seed) -> None:
+def _load_shuffled(experts, ckpt, seed, suffix="") -> None:
+    """Load the checkpoint tensors whose names end in ``suffix``, shuffled."""
     shards = []
     for expert_id in range(ckpt["w13_weight"].shape[0]):
         for name, tensor in ckpt.items():
+            if not name.endswith(suffix):
+                continue
             if name.startswith("w2_"):
                 shards.append((name, tensor[expert_id], "w2", expert_id))
             else:
@@ -158,10 +163,6 @@ def _load_shuffled(experts, ckpt, seed) -> None:
         )
         # Physical experts 2 and 3 are this rank's.
         assert loaded == (expert_id >= 2)
-
-
-def _ue8m0(sf: torch.Tensor) -> torch.Tensor:
-    return (sf.view(torch.int32) >> 23).to(torch.uint8)
 
 
 def _reference_mega_moe_layout(w13, s13, w2, s2):
@@ -192,7 +193,7 @@ def _expected_routed(ckpt):
     w2, s2 = requant_block_fp8_to_ue8m0(
         ckpt["w2_weight"][local], ckpt["w2_weight_scale_inv"][local]
     )
-    return _reference_mega_moe_layout(w13, _ue8m0(s13), w2, _ue8m0(s2))
+    return _reference_mega_moe_layout(w13, s13, w2, s2)
 
 
 def _assert_layout(actual, expected):
@@ -226,6 +227,24 @@ def test_block_fp8_shards_requantize_into_the_kernel_layout():
     _assert_layout(_routed(experts), _expected_routed(ckpt))
 
 
+@pytest.mark.parametrize("first", ["weight", "weight_scale_inv"])
+def test_weight_update_split_across_calls(first):
+    """A weight update may send weights and block scales in separate
+    load_weights calls; each shard is requantized once both have arrived."""
+    experts = _experts()
+    _load_shuffled(experts, _checkpoint(4, seed=0), seed=0)
+    experts.requantize_block_fp8()
+
+    ckpt = _checkpoint(4, seed=1)
+    second = "weight_scale_inv" if first == "weight" else "weight"
+    _load_shuffled(experts, ckpt, seed=1, suffix=first)
+    experts.requantize_block_fp8()
+    _load_shuffled(experts, ckpt, seed=2, suffix=second)
+    experts.requantize_block_fp8()
+
+    _assert_layout(_routed(experts), _expected_routed(ckpt))
+
+
 def test_block_fp8_shared_expert_is_fused_and_requantized():
     experts = _experts()
     assert experts.has_fused_shared_experts
@@ -247,7 +266,7 @@ def test_block_fp8_shared_expert_is_fused_and_requantized():
 
     q13, sf13 = requant_block_fp8_to_ue8m0(w13, s13)
     q2, sf2 = requant_block_fp8_to_ue8m0(w2, s2)
-    expected = _reference_mega_moe_layout(q13, _ue8m0(sf13), q2, _ue8m0(sf2))
+    expected = _reference_mega_moe_layout(q13, sf13, q2, sf2)
     actual = (
         experts.shared_l1_weight,
         experts.shared_l1_weight_scale,
@@ -264,6 +283,19 @@ def test_shared_expert_with_other_scales_is_not_fused():
 
     assert not experts.has_fused_shared_experts
     assert not any(n.startswith("shared_") for n, _ in experts.named_parameters())
+
+
+def test_mxfp8_shared_expert_is_not_fused():
+    """Only a block-FP8 shared expert is fused; the GLM loader cannot place an
+    MXFP8 one, so it stays a separate MLP."""
+    mlp = _shared_mlp(INTER)
+    for linear in (mlp.gate_up_proj, mlp.down_proj):
+        n, k = linear.weight.shape
+        del linear.weight_scale_inv
+        linear.weight_scale = torch.empty(n, k // 32, dtype=torch.uint8)
+    experts = _experts(shared_experts=mlp)
+
+    assert not experts.has_fused_shared_experts
 
 
 def test_requantize_rejects_missing_block_scales():
