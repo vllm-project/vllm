@@ -937,6 +937,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
@@ -988,7 +990,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         block_table: torch.Tensor,
         k_scale: float,
         v_scale: float,
-        alibi_slopes: torch.Tensor | None = None,
     ):
         assert attn_metadata.extend_metadata is not None
         assert attn_metadata.extend_metadata.chunk_context_metadata is not None
@@ -1033,7 +1034,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=True,
             window_size=self.sliding_window,
-            alibi_slopes=alibi_slopes,
+            alibi_slopes=self.alibi_slopes,
             return_lse=False,
             out=output,
             sink_ptr=self.sinks,
@@ -1056,7 +1057,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        alibi_slopes: torch.Tensor | None = None,
     ):
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
@@ -1070,7 +1070,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 block_table,
                 k_scale,
                 v_scale,
-                alibi_slopes,
             )
             return
         out, lse = rocm_aiter_ops.flash_attn_varlen_func(
@@ -1086,7 +1085,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=True,
             window_size=self.sliding_window,
-            alibi_slopes=alibi_slopes,
+            alibi_slopes=self.alibi_slopes,
             return_lse=True,
             sink_ptr=self.sinks,
         )
@@ -1134,7 +1133,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=False,
                 window_size=self.sliding_window,
-                alibi_slopes=alibi_slopes,
+                alibi_slopes=self.alibi_slopes,
                 return_lse=True,
                 sink_ptr=self.sinks,
             )
@@ -1198,7 +1197,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
 
         """
-        alibi_slopes = layer.alibi_slopes if self.alibi_slopes is not None else None
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported "
@@ -1287,7 +1285,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=attn_metadata.causal,
                 window_size=self.sliding_window,
-                alibi_slopes=alibi_slopes,
+                alibi_slopes=self.alibi_slopes,
                 out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
                 sink_ptr=self.sinks,
             )
@@ -1325,7 +1323,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 ],
                 k_scale=k_scale,
                 v_scale=v_scale,
-                alibi_slopes=alibi_slopes,
             )
 
         # calculate for decodes
@@ -1397,7 +1394,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         max_seqlen_k=attn_metadata.max_seq_len,
                         softmax_scale=self.scale,
                         causal=True,
-                        alibi_slopes=alibi_slopes,
+                        alibi_slopes=self.alibi_slopes,
                         window_size=self.sliding_window,
                         block_table=attn_metadata.block_table[:num_decodes],
                         softcap=self.logits_soft_cap,
@@ -1438,7 +1435,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=attn_metadata.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    alibi_slopes=alibi_slopes,
+                    alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
                     block_table=attn_metadata.block_table[:num_decodes],
                     softcap=self.logits_soft_cap,
@@ -1541,7 +1538,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     attn_metadata.query_start_loc[:num_decodes],
                     attn_metadata.seq_lens[:num_decodes],
                     attn_metadata.max_seq_len,
-                    alibi_slopes,
+                    self.alibi_slopes,
                     self.kv_cache_dtype,
                     "NHD",
                     self.logits_soft_cap,

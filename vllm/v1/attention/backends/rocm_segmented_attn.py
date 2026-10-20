@@ -211,10 +211,8 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         self._segmented_attention_warmed_up = False
         self._segmented_attention_config: VllmConfig | None = None
 
-    def process_weights_after_loading(
-        self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
-    ):
-        super().process_weights_after_loading(act_dtype, layer)
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
         config = get_current_vllm_config()
         self._segmented_attention_config = config
 

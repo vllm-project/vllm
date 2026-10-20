@@ -207,7 +207,7 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             k_descale=layer._k_scale if quantized else None,
             v_descale=layer._v_scale if quantized else None,
             causal=True,
-            alibi_slopes=layer.alibi_slopes if self.alibi_slopes is not None else None,
+            alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,
             block_table=attn_metadata.block_table,

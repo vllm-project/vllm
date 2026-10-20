@@ -250,7 +250,7 @@ def create_and_prepopulate_kv_cache(
     return kv_cache
 
 
-class MockAttentionLayer(torch.nn.Module):
+class MockAttentionLayer:
     """A mock attention layer for testing."""
 
     def __init__(
@@ -259,7 +259,6 @@ class MockAttentionLayer(torch.nn.Module):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
     ):
-        super().__init__()
         self._q_scale = torch.tensor(1.0, device=device)
         self._k_scale = torch.tensor(k_scale, device=device)
         self._v_scale = torch.tensor(v_scale, device=device)
@@ -375,8 +374,6 @@ def run_attention_backend(
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device, layer_k_scale, layer_v_scale)
-    if sinks is not None:
-        impl.process_weights_after_loading(query.dtype, mock_layer)
     output = torch.empty_like(query)
 
     if is_quantized_kv_cache(kv_cache_dtype) and impl.supports_quant_query_input:
@@ -950,7 +947,7 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     impl.dcp_world_size = 1
     impl.o_sf_scale = None
     impl.window_left = -1
-    impl._sinks_source = None
+    impl.sinks = None
 
     layer = unittest.mock.Mock(
         _q_scale=torch.tensor(1.0),
@@ -1540,20 +1537,20 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     source_sinks = torch.tensor([1.0, 2.0], dtype=dtype)
     impl = object.__new__(flashinfer_backend.FlashInferImpl)
     impl._sinks_source = source_sinks
-    layer = torch.nn.Module()
+    impl.sinks = source_sinks
 
-    impl.process_weights_after_loading(dtype, layer)
+    impl.process_weights_after_loading(dtype)
 
-    sinks = layer.get_buffer("_sinks_fp32")
-    sinks_ptr = sinks.data_ptr()
-    assert sinks.dtype == torch.float32
-    torch.testing.assert_close(sinks, source_sinks.float())
+    assert impl.sinks is not None
+    sinks_ptr = impl.sinks.data_ptr()
+    assert impl.sinks.dtype == torch.float32
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
 
     source_sinks.copy_(torch.tensor([3.0, 4.0], dtype=dtype))
-    impl.process_weights_after_loading(dtype, layer)
+    impl.process_weights_after_loading(dtype)
 
-    assert layer._sinks_fp32.data_ptr() == sinks_ptr
-    torch.testing.assert_close(layer._sinks_fp32, source_sinks.float())
+    assert impl.sinks.data_ptr() == sinks_ptr
+    torch.testing.assert_close(impl.sinks, source_sinks.float())
 
 
 @pytest.mark.skipif(

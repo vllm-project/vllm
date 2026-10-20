@@ -241,11 +241,9 @@ def create_composite_attention_backend(
                 output_block_scale,
             )
 
-        def process_weights_after_loading(
-            self, act_dtype: torch.dtype, layer: torch.nn.Module | None = None
-        ):
+        def process_weights_after_loading(self, act_dtype: torch.dtype):
             for impl in self.get_impl_variants():
-                impl.process_weights_after_loading(act_dtype, layer)
+                impl.process_weights_after_loading(act_dtype)
 
         def fused_output_quant_supported(self, quant_key):
             return all(

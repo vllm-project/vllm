@@ -430,13 +430,27 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        # Layer-owned so sleep mode restores them; the impl uses the same tensors.
         if alibi_slopes is not None:
-            # Layer-owned (like the KV scales); impls read it in forward.
             self.register_buffer(
                 "alibi_slopes",
                 torch.tensor(alibi_slopes, dtype=torch.float32),
                 persistent=False,
             )
+            self.impl.alibi_slopes = self.alibi_slopes
+        sinks = extra_impl_args.get("sinks")
+        if (
+            sinks is not None
+            and sinks.dtype != torch.float32
+            and getattr(self.impl, "needs_fp32_sinks", False)
+        ):
+            # The impl refreshes this fp32 copy in place after every load.
+            self.register_buffer(
+                "_sinks_fp32",
+                sinks.new_empty(sinks.shape, dtype=torch.float32),
+                persistent=False,
+            )
+            self.impl.sinks = self._sinks_fp32
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -594,7 +608,7 @@ class Attention(nn.Module, AttentionLayerBase):
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype, layer=self)
+        self.impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
