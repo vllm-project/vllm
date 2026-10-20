@@ -252,7 +252,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             seqused_k_shape=(batch_size,),
             page_table_shape=(
                 batch_size,
-                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+                cdiv(FA4_DENSE_MAX_SEQLEN_K, compile_key.page_size),
             ),
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
