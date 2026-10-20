@@ -488,7 +488,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 3}, {8}),
+        expected_evictions=({4, 5, 3}, {8}, {9}),
     )
 
 
@@ -1034,6 +1034,39 @@ class TestARCPolicy:
         # verify events
         events = list(cpu_manager.take_events())
         assert len(events) > 0  # should have store and eviction events
+
+
+def test_take_events_prunes_retried_cleanup_and_drains_once():
+    """Failed-write cleanup must not outlive a retry that re-owns the key, and a
+    partially consumed drain must not replay it."""
+    manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
+
+    assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    # A retry re-allocates key 1 before the cleanup is drained.
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    drain = manager.take_events()
+    cleanup = next(drain)
+    assert cleanup.removed and cleanup.metadata_only
+    assert cleanup.keys == to_keys([2])
+    # Stopping early must not leave the batch queued for the next drain.
+    assert list(manager.take_events()) == []
+    assert [event.keys for event in drain] == [to_keys([3])]
+
+
+def test_reset_cache_discards_queued_events():
+    manager = make_cpu_manager(num_chunks=1, enable_events=True)
+
+    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
+    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+    assert list(manager.events or [])
+
+    manager.reset_cache()
+
+    assert list(manager.take_events()) == []
 
 
 def test_filter_reused_manager():

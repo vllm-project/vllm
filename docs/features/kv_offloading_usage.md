@@ -113,6 +113,22 @@ vllm serve <model> \
 | `self_describing_kv_events` | no | `false` | both | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. With `TieringOffloadingSpec`, a CPU promotion is self-describing when a local request observes its primary-tier `HIT` before event translation; otherwise its stored event may retain the placeholder, while a later `HIT` can backfill metadata for removal. Pending-removal/re-promotion races and externally initiated promotions may also produce placeholders, and consumers must ignore removals for unknown hashes. Partial recurrent tails emit the hash-aligned portion from the physical block start through the tail boundary. Other sliding-window/SSM chunks keep the placeholder fallback. In chunk mode (`block_size` > GPU block size, or `blocks_per_chunk` > 1), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
+## KV cache events
+
+`KVEventBatch.events` is a tagged union containing block events and cache
+invalidation events:
+
+| Event | Definition |
+| --- | --- |
+| `BlockStored` | One or more KV blocks became available in `medium`. It includes the block hashes and metadata needed to identify the stored blocks. |
+| `BlockRemoved` | One or more KV blocks are no longer available in `medium`. It includes the affected block hashes and optional scope metadata. |
+| `AllBlocksCleared` | The GPU prefix cache was cleared. This is a global cache invalidation. |
+| `OffloadingBlocksCleared` | An offloading residency was cleared. `medium` identifies the cleared medium; `locality` and `ownership` further restrict the scope when provided. |
+
+`OffloadingConnector.reset_cache()` emits
+`OffloadingBlocksCleared(medium="CPU")` because it clears the CPU primary
+residency while secondary tiers such as `STORAGE` remain available.
+
 ## Info Metric Labels
 
 The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. The labels hold static facts of the offloading configuration, so a user reads the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no series. Each engine reports its own configuration, and not the instance total.
