@@ -78,6 +78,9 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 ### kv_connector_extra_config
 
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
+- **max_pending_transfers**: Maximum number of pending transfer metadata batches per producer worker, including batches waiting for Prefill readiness. (default 1024, positive integer)
+    - Readiness waits do not occupy the data-transfer slots, which remain limited to twice `num_workers`.
+    - Excess batches receive an explicit transfer error instead of waiting in an unbounded queue.
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
