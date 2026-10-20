@@ -32,6 +32,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) V1 Sample"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
@@ -163,6 +164,82 @@ steps:
       depends_on:
       - image-build-amd
 
+# The shared KV Connectors steps above exclude vllm/distributed/kv_transfer/ from
+# their triggers, and CUDA skips MoRIIO's mori/aiter-gated tests. Run the whole
+# MoRIIO suite on ROCm whenever the connector or its tests change.
+- label: ":amd: (MI355 DPX) MoRIIO Connector Unit Tests"
+  key: amd-moriio-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+  - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/utils.py
+  - requirements/kv_connectors_rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
+# Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
+# GPUs over xGMI, compared exactly against a direct serve.
+- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
+  key: amd-moriio-write-dummy-e2e-mi355
+  dind: false
+  device: mi355_2
+  num_devices: 2
+  # ~3.5-5 min per case; pytest-shard hashes test ids, so with 20 cases the
+  # largest of 6 shards holds 5 (~22 min on MI355). Every case picks free ports
+  # for its servers and proxy and its own compile-cache dir.
+  parallelism: 6
+  timeout_in_minutes: 45
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+  - vllm/model_executor/model_loader/dummy_loader.py
+  - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+  - tests/v1/kv_connector/moriio_integration/
+  - requirements/kv_connectors_rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+# The same P/D with prefill TP2 writing into decode TP1, which needs 3 GPUs.
+- label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight Heterogeneous TP"
+  key: amd-moriio-write-dummy-hetero-tp-mi355
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 45
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/moriio/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
+  - vllm/model_executor/model_loader/dummy_loader.py
+  - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
+  - tests/v1/kv_connector/moriio_integration/
+  - requirements/kv_connectors_rocm.txt
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k heterogeneous_tp
+
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb
   key: v1-metrics-lmeval
@@ -213,12 +290,14 @@ steps:
     - vllm/v1/
     - tests/v1
     - tests/watermarking
+    - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
   device: cpu-small
   commands:
     # split the test to avoid interference
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
@@ -575,6 +654,8 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/check_trust_remote_code.py
+  - tests/tools/test_check_trust_remote_code.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -626,6 +707,7 @@ steps:
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
+  - pytest -v -s tools/test_check_trust_remote_code.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -707,6 +789,7 @@ steps:
     amd:
       label: ":amd: (MI300) Batch Invariance"
       dind: false
+      automatic_shard: true
       device: mi300_1
       timeout_in_minutes: 60
       depends_on:

@@ -150,6 +150,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.is_producer = False
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.tp_size = tp_size
+    scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
     scheduler.unmap_request_id = MagicMock()
     return scheduler
@@ -166,6 +167,10 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = True
     scheduler.block_size = block_size
+    scheduler._has_mamba = False
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
+    )
     scheduler.blocks_per_sw = [0]
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
@@ -581,15 +586,14 @@ def test_send_transfer_release_sends_structured_release_message():
     scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
 
     payload = sock.send.call_args.args[0]
-    # WRITE-mode release advertises the consumer (decode) TP size so the prefill
-    # side counts the right number of ACKs via get_moriio_expected_ack_count,
-    # mirroring the READ-mode release in _pop_done_transfers (see
-    # test_read_completion_sends_structured_release_with_consumer_tp_size). The
-    # fixture's tp_size is 2, so consumer_tp_size == 2.
+    # Unlike the READ-mode release in _pop_done_transfers, which every decode
+    # rank sends, the decode scheduler sends this one once per prefill rank on
+    # behalf of all decode ranks (the fixture's tp_size is 2), so the prefill
+    # rank must count it as its only ACK.
     assert msgspec.msgpack.decode(payload) == {
         "type": "release",
         "transfer_id": "xfer-7",
-        "consumer_tp_size": 2,
+        "consumer_tp_size": 1,
     }
 
 
@@ -956,6 +960,7 @@ def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
     scheduler._write_stop_due = {}
     scheduler._unmap_after_recv = {}
     scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._has_mamba = False
     scheduler._group_block_sizes = [16, 32, 16]
 
     req = SimpleNamespace(num_prompt_tokens=40)

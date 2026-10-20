@@ -160,7 +160,8 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
 @pytest.mark.parametrize(
     ("kv_connector", "extra_config", "env"),
     [
-        ("NixlConnector", {}, None),
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, None),
+        ("NixlPushConnector", {}, None),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
         ("MooncakeConnector", {}, "MC_USE_TENT"),
         ("MoRIIOConnector", {"backend": "xgmi"}, None),

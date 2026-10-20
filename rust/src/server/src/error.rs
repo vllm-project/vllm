@@ -6,6 +6,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
+use vllm_engine_core_client::protocol::output::RequestError;
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
@@ -26,6 +27,8 @@ pub enum ApiError {
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// The engine rejected the request with a retryable error.
+    ServiceUnavailable { code: String, message: String },
 }
 
 impl ApiError {
@@ -37,6 +40,7 @@ impl ApiError {
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -74,6 +78,12 @@ impl ApiError {
                 param: None,
                 code: Some("conflict_error".to_string()),
             },
+            Self::ServiceUnavailable { code, message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "service_unavailable_error".to_string(),
+                param: None,
+                code: Some(code.clone()),
+            },
         };
 
         ErrorResponse { error }
@@ -109,6 +119,18 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
         return invalid_request!("{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
+}
+
+/// Classify an engine-reported request failure: a retryable error (e.g. a
+/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+pub fn engine_error(error: Option<&RequestError>) -> ApiError {
+    match error {
+        Some(error) if error.retryable => ApiError::ServiceUnavailable {
+            code: error.code.clone(),
+            message: error.message.clone(),
+        },
+        _ => server_error!("Internal server error"),
+    }
 }
 
 #[cfg(test)]
