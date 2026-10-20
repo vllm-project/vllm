@@ -306,8 +306,6 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
     assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
     # The prefill keeps its scheduled tokens; only drafts are dropped.
     assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
-<<<<<<< HEAD
-=======
 
 
 def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
@@ -446,4 +444,3 @@ def test_manager_gate_rejects_query_lens_mismatch_unsupported_backend(monkeypatc
             num_bonus_tokens=1,
             max_total_logits=1024,
         )
->>>>>>> a9527fb8d2 (fix: Gate 4 conformance — both pre-commit stages green, mypy clean)

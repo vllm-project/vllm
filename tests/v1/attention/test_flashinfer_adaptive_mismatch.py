@@ -20,6 +20,7 @@ pytest.importorskip("flashinfer")
 import vllm.v1.attention.backends.flashinfer as fi  # noqa: E402
 from vllm.config import CUDAGraphMode, set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferBackend,
     FlashInferDecodeKernel,
@@ -58,12 +59,16 @@ def _cfg(adaptive: bool = True) -> Any:
             num_speculative_tokens=7,
             parallel_drafting=True,
         ),
+        num_speculative_tokens=7,
         attention_config=SimpleNamespace(
             use_non_causal=False,
             use_trtllm_attention=None,
             disable_flashinfer_q_quantization=None,
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
         model_config=SimpleNamespace(
             get_num_attention_heads=lambda pc: 32,
             get_num_kv_heads=lambda pc: 8,
@@ -158,7 +163,10 @@ def _full_cfg(adaptive: bool = True):
         static_forward_context={LAYER: _FakeLayer()},
     )
     vc.scheduler_config = SimpleNamespace(max_num_batched_tokens=512, max_num_seqs=4)
-    vc.cache_config = SimpleNamespace(cache_dtype="auto")
+    vc.cache_config = SimpleNamespace(
+        cache_dtype="auto",
+        get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
+    )
     vc.kv_transfer_config = None
     return vc
 

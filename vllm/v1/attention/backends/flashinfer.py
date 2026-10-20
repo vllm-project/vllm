@@ -1549,7 +1549,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             "(runner decode_query_len) mask_rows=%s is_target=%s",
             self.flashinfer_trtllm_api_decode_kernel,
             self.use_dedicated_xqa,
-            AttentionCGSupport.VARLEN_DECODE,
+            AttentionCGSupport.UNIFORM_BATCH,
             self.vllm_config.parallel_config.decode_context_parallel_size,
             self.adaptive_max_decode_width,
             self._adaptive_mask_buffer.shape[0],
