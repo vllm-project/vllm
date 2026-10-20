@@ -198,6 +198,7 @@ mod tests {
         TestTokenizer::new()
             .with_regular_token("<think>", 256)
             .with_regular_token("</think>", 257)
+            .with_regular_token("｜DSML｜", 258)
     }
 
     fn test_tools() -> Vec<Tool> {
