@@ -50,6 +50,7 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "ultraquant_4bit",
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
@@ -120,6 +121,7 @@ class CacheConfig:
 
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
+    An explicit float16 or bfloat16 must match the model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
@@ -175,8 +177,7 @@ class CacheConfig:
     page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
-    Can be set only when prefix caching is enabled.
-    Value must be a multiple of 8 to align with causal_conv1d kernel."""
+    Can be set only when prefix caching is enabled."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -186,19 +187,19 @@ class CacheConfig:
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
     mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers:
+    """The cache strategy for Mamba layers, derived from `enable_prefix_caching`:
 
-    - "none": set when prefix caching is disabled.
-    - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size. This is the default when prefix
-      caching is enabled.
+    - "none": prefix caching is disabled.
+    - "align": prefix caching is enabled. Only cache the mamba state of the last
+      token of each scheduler step and when the token is at position
+      i * block_size.
     """
     enable_mamba_shared_prefix_checkpoint: bool = False
     """Also register a Mamba "align" checkpoint at the shared-prefix junction --
     where an EAGLE/MTP sibling was observed to resume -- instead of only at the
-    prompt tail. Off by default; only takes effect with `mamba_cache_mode`
-    "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
-    Mamba block size."""
+    prompt tail. Off by default; only takes effect with prefix caching enabled,
+    EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
+    block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -206,11 +207,10 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    or FlashInfer mamba backend. Mamba2 speculative decode requires FlashInfer
-    and mamba_cache_mode 'none'. In align mode flushes are most efficient when
-    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
-    required."""
+    Requires the Triton or FlashInfer mamba backend; FlashInfer does not support
+    prefix caching yet. Mamba2 speculative decode requires FlashInfer. With
+    prefix caching, flushes are most efficient when mamba_block_size is a
+    multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -229,6 +229,15 @@ class CacheConfig:
     for hybrid models where requests occupy multiple KV cache groups."""
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
+    # The two differ when hashes are finer than the scheduler block but partial
+    # hash hits are off (e.g. a sliding-window group cannot look up sub-block
+    # hits), so hits only land on the scheduler block.
+    # TODO(zjy0516): Merge into one value
+    hash_block_size: int | None = field(default=None, init=False)
+    """Tokens per prefix-cache block hash."""
+    cache_hit_alignment_tokens: int | None = field(default=None, init=False)
+    """Token granularity at which prefix-cache hits land: `hash_block_size`
+    with partial hash hits, otherwise the scheduler block size."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -297,6 +306,8 @@ class CacheConfig:
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
+            "hash_block_size",
+            "cache_hit_alignment_tokens",
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",

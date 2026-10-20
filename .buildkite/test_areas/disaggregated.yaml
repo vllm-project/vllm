@@ -4,6 +4,8 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Distributed NixlConnector PD accuracy"
   key: distributed-nixlconnector-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -14,8 +16,11 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -32,6 +37,8 @@ steps:
 
 - label: ":nvidia: (L4) Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -44,6 +51,8 @@ steps:
     - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -68,6 +77,8 @@ steps:
 
 - label: ":nvidia: (L4) Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -81,6 +92,8 @@ steps:
     - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
       dind: false
       device: mi300_4
@@ -98,6 +111,8 @@ steps:
 
 - label: ":nvidia: (L4) DP EP Distributed NixlConnector PD accuracy"
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -110,6 +125,8 @@ steps:
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
       dind: false
       device: mi355_4
@@ -126,6 +143,8 @@ steps:
 
 - label: ":nvidia: (L4) CrossLayer KV layout Distributed NixlConnector PD accuracy"
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -138,6 +157,8 @@ steps:
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy"
       dind: false
       device: mi300_4
@@ -154,6 +175,8 @@ steps:
 
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD accuracy"
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -166,6 +189,8 @@ steps:
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
       dind: false
       device: mi300_4
@@ -426,7 +451,7 @@ steps:
     # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
     PREFILL_BLOCK_SIZE: "2048"
     DECODE_BLOCK_SIZE: "2048"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
