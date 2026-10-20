@@ -57,6 +57,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .audio_padding_mask import broadcast_audio_key_padding_mask
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -266,6 +267,7 @@ def _build_audio_encoder_attention_mask(
     *,
     dtype: torch.dtype,
     device: torch.device,
+    attn_implementation: str | None,
 ) -> torch.Tensor:
     input_lengths = feature_attention_mask.sum(-1).to(torch.long)
     conv_lengths = (input_lengths - 1) // 2 + 1
@@ -282,15 +284,14 @@ def _build_audio_encoder_attention_mask(
         .unsqueeze(0)
         .expand(batch_size, max_seq_len)
     )
+    # True marks a padding key. Length math stays on the conv output.
     padding_mask = seq_range >= conv_lengths[:, None]
-
-    attention_mask = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-        batch_size, 1, max_seq_len, max_seq_len
+    return broadcast_audio_key_padding_mask(
+        ~padding_mask,
+        attn_implementation,
+        dtype=dtype,
+        device=device,
     )
-    attention_mask = attention_mask.to(dtype=dtype, device=device)
-    attention_mask.masked_fill_(padding_mask[:, None, None, :], float("-inf"))
-
-    return attention_mask
 
 
 def _flatten_valid_audio_embeddings(
@@ -616,6 +617,9 @@ class AudioFlamingo3ForConditionalGeneration(
             feature_attention_mask,
             dtype=self.audio_tower.conv1.weight.dtype,
             device=self.audio_tower.conv1.weight.device,
+            attn_implementation=getattr(
+                self.audio_tower.config, "_attn_implementation", None
+            ),
         )
 
         return self.audio_tower(input_features, attention_mask=audio_attention_mask)

@@ -64,6 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .audio_padding_mask import broadcast_audio_key_padding_mask
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
@@ -413,17 +414,14 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
             batch_size, max_seq_len
         )
-        # Create mask
+        # Create mask. True marks a padding key.
         padding_mask = seq_range >= lengths_expand
-
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
-        audio_attention_mask = audio_attention_mask_.to(
+        audio_attention_mask = broadcast_audio_key_padding_mask(
+            ~padding_mask,
+            getattr(self.audio_tower.config, "_attn_implementation", None),
             dtype=self.audio_tower.conv1.weight.dtype,
             device=self.audio_tower.conv1.weight.device,
         )
-        audio_attention_mask[audio_attention_mask_] = float("-inf")
 
         audio_outputs = self.audio_tower(
             input_features, attention_mask=audio_attention_mask
