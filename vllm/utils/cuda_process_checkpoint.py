@@ -45,7 +45,8 @@ class DirectDriver:
         rc = self.lib.cuCheckpointProcessGetState(pid, C.byref(state))
         return {"rc": rc, "value": state.value}
 
-    def __call__(self, pid, op):
+    def invoke(self, pid, op):
+        """Return a result without writing to the helper protocol stream."""
         before = self.state(pid)
         args = LockArgs(10000) if op == "Lock" else None
         start = time.perf_counter()
@@ -56,7 +57,7 @@ class DirectDriver:
         name = C.c_char_p()
         self.lib.cuGetErrorName(rc, C.byref(name))
         after = self.state(pid)
-        self.emit(
+        return dict(
             kind="control",
             pid=pid,
             op=op,
@@ -66,11 +67,31 @@ class DirectDriver:
             after=after,
             time_s=elapsed,
         )
-        if rc or after != {
+
+    def __call__(self, pid, op):
+        row = self.invoke(pid, op)
+        self.emit(**row)
+        if row["rc"] or row["after"] != {
             "rc": 0,
             "value": {"Lock": 1, "Checkpoint": 2, "Restore": 1, "Unlock": 0}[op],
         }:
-            raise RuntimeError(f"{op} pid={pid} rc={rc} state={after}")
+            raise RuntimeError(str(row))
+
+
+def _run_parallel_stage(pids, op, invoke):
+    """Run one stage in the helper; never emit partial protocol responses."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run(pid):
+        try:
+            return invoke(pid, op)
+        except Exception as exc:
+            return {"pid": pid, "op": op, "error": repr(exc)}
+
+    # Waiting threads live only in the helper. The parent's stage deadline
+    # terminates this process if any driver call blocks.
+    with ThreadPoolExecutor(max_workers=len(pids)) as pool:
+        return list(pool.map(run, pids))
 
 
 class Driver:
@@ -114,22 +135,50 @@ class Driver:
             sel.close()
 
     def __call__(self, pid, op):
+        self.run_stage([pid], op)
+
+    def run_stage(self, pids, op):
         import json
 
-        self.emit(kind="control_start", pid=pid, op=op)
-        cast(TextIO, self.proc.stdin).write(json.dumps([pid, op]) + "\n")
+        for pid in pids:
+            self.emit(kind="control_start", pid=pid, op=op)
+        cast(TextIO, self.proc.stdin).write(json.dumps([pids, op]) + "\n")
         cast(TextIO, self.proc.stdin).flush()
         try:
-            row = self._read(30)
-        except Exception as e:
-            self.emit(kind="control_failed", pid=pid, op=op, error=repr(e))
+            response = self._read(30)
+        except Exception as exc:
+            self.emit(kind="control_failed", pids=pids, op=op, error=repr(exc))
             raise
-        self.emit(**row)
-        if row.get("rc") != 0 or row.get("after") != {
-            "rc": 0,
-            "value": {"Lock": 1, "Checkpoint": 2, "Restore": 1, "Unlock": 0}[op],
-        }:
-            raise RuntimeError(str(row))
+        if not isinstance(response, dict):
+            raise RuntimeError(f"Invalid CUDA checkpoint stage response: {response}")
+        rows = response.get("results", [])
+        if (
+            response.get("kind") != "stage"
+            or response.get("op") != op
+            or not isinstance(rows, list)
+            or len(rows) != len(pids)
+            or any(
+                not isinstance(row, dict)
+                or row.get("pid") != pid
+                or row.get("op") != op
+                for pid, row in zip(pids, rows)
+            )
+        ):
+            raise RuntimeError(f"Invalid CUDA checkpoint stage response: {response}")
+        for row in rows:
+            self.emit(**row)
+        failed = [
+            row
+            for row in rows
+            if row.get("rc") != 0
+            or row.get("after")
+            != {
+                "rc": 0,
+                "value": {"Lock": 1, "Checkpoint": 2, "Restore": 1, "Unlock": 0}[op],
+            }
+        ]
+        if failed:
+            raise RuntimeError(str(failed))
 
     def close(self):
         if self.proc.poll() is None:
@@ -151,8 +200,7 @@ class CudaProcessCheckpoint:
             raise RuntimeError("CUDA process checkpoint failed; restart required")
         try:
             for op in operations:
-                for pid in self.pids:
-                    self.driver(pid, op)
+                self.driver.run_stage(self.pids, op)
                 self.emit(kind="boundary", stage=op, pids=self.pids)
         except Exception:
             self.failed = True
@@ -187,6 +235,14 @@ if __name__ == "__main__":
     output(kind="controller_ready")
     for line in sys.stdin:
         try:
-            driver(*json.loads(line))
+            pids, op = json.loads(line)
+            if isinstance(pids, int):
+                driver(pids, op)
+            else:
+                output(
+                    kind="stage",
+                    op=op,
+                    results=_run_parallel_stage(pids, op, driver.invoke),
+                )
         except Exception:
             break
