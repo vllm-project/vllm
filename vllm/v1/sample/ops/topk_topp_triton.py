@@ -149,7 +149,6 @@ def _topk_topp_kernel(
                 quarter_idx = i // SUB_TILE
                 sub_idx = i % SUB_TILE
                 offs = quarter_idx * Q_STRIDE + sub_idx
-                offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
                 logits_blk0 = tl.load(
                     LOGITS_ROW + offs, mask=mask_n, other=-float("inf")
