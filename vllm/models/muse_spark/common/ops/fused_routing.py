@@ -68,12 +68,8 @@ def _routing_kernel(
     NORMALIZATION_MODE: tl.constexpr,
     HAS_MULTIPLIER: tl.constexpr,
     HAS_EPS: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ) -> None:
     """One program per token; constexpr ``TOPK`` keeps the selection in registers."""
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
-
     token_id = tl.program_id(0)
     if token_id >= num_tokens:
         return
@@ -186,7 +182,6 @@ def fused_musespark1x_routing(
     weights_view = topk_weights[:num_tokens, :topk]
     ids_view = topk_ids[:num_tokens, :topk]
 
-    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _routing_kernel[(num_tokens,)](
         gating_output,
         bias if bias.dtype == torch.float32 else bias.float(),
@@ -211,9 +206,7 @@ def fused_musespark1x_routing(
         NORMALIZATION_MODE=normalization_mode,
         HAS_MULTIPLIER=router_output_multiplier is not None,
         HAS_EPS=router_score_division_eps is not None,
-        USE_PDL=enable_pdl,
         # Keep Muse's repeated 256-expert selections within one warp.
         num_warps=1 if num_experts == 256 or current_platform.is_rocm() else 4,
-        **({"launch_pdl": True} if enable_pdl else {}),
     )
     return weights_view, ids_view

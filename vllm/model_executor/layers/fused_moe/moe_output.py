@@ -32,30 +32,6 @@ class UnfinalizedMoEOutput:
     expert_weights: torch.Tensor
     # [num_tokens, top_k] int32 permute map; -1 = expert not local to this rank.
     expanded_idx_to_permuted_idx: torch.Tensor
-    # Row t * top_k + k holds route (t, k): the permute map is the identity apart
-    # from its -1 slots, and the row count is num_tokens * top_k on every rank.
-    route_major: bool = False
-
-
-def route_major_moe_output(
-    routes: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    expert_map: torch.Tensor | None,
-) -> UnfinalizedMoEOutput:
-    """Wrap one-row-per-route GEMM2 output; remote routes map to ``-1``."""
-    num_tokens, top_k = topk_ids.shape
-    permuted_idx = torch.arange(
-        num_tokens * top_k, dtype=torch.int32, device=routes.device
-    ).view(num_tokens, top_k)
-    if expert_map is not None:
-        permuted_idx = permuted_idx.masked_fill(expert_map[topk_ids] < 0, -1)
-    return UnfinalizedMoEOutput(
-        gemm2_permuted=routes.view(num_tokens * top_k, routes.shape[-1]),
-        expert_weights=topk_weights,
-        expanded_idx_to_permuted_idx=permuted_idx,
-        route_major=True,
-    )
 
 
 def convert_flashinfer_moe_output(

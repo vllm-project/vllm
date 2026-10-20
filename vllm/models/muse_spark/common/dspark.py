@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dense Muse Spark DSpark draft model for CUDA and ROCm."""
+"""Dense Muse Spark DSpark draft model for ROCm."""
 
 from collections.abc import Iterable
 from copy import copy
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,19 +28,12 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.models.muse_spark.amd.model import MuseSpark1xDecoderLayer
 from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     materialize_residual_path_constants,
 )
-from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.muse_spark import MuseSparkDSparkConfig
-
-if TYPE_CHECKING or not current_platform.is_rocm():
-    from vllm.models.muse_spark.nvidia.model import MuseSpark1xDecoderLayer
-else:
-    from vllm.models.muse_spark.amd.model import (  # type: ignore[assignment]
-        MuseSpark1xDecoderLayer,
-    )
 
 
 class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
@@ -49,12 +41,6 @@ class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config, prefix)
-        # The draft stream stays replicated even when the target runs SP.
-        if getattr(self, "is_sequence_parallel", False):
-            self.is_sequence_parallel = False
-            self.is_sequence_parallel_input = False
-            self.self_attn.is_sequence_parallel_output = False
-            self.self_attn.o_proj.reduce_results = True
         config = vllm_config.model_config.hf_config
         self.self_attn.causal = True
         if (self.self_attn.rotary_emb is not None) != config.use_rope:

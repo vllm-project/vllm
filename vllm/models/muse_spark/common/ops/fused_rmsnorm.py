@@ -7,15 +7,6 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-try:
-    from flashinfer.norm import gated_residual_rmsnorm as postnorm_gated_residual
-    from flashinfer.norm import supports_gated_residual_rmsnorm
-except (ImportError, AttributeError):  # pragma: no cover - optional FlashInfer API
-    postnorm_gated_residual = None
-
-    def supports_gated_residual_rmsnorm(*_args: object) -> bool:
-        return False
-
 
 @triton.jit
 def _fast2sum(a, b):
@@ -88,16 +79,12 @@ def _rmsnorm_fwd_kernel(
     PER_CHANNEL: tl.constexpr,
     bT: tl.constexpr,
     bD: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ):
     """RMSNorm over the last dim of ``[T, D]``; fp32 math, the store rounds once.
 
     ``KAHAN`` uses compensated fp32 instead of fp64 for the cross-tile sum
     (Blackwell runs fp64 at 1/64 rate).
     """
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
-
     t_idx = tl.program_id(0)
     t = t_idx * bT + tl.arange(0, bT)
     tm = t < T
@@ -264,34 +251,6 @@ def fused_rmsnorm_fwd(
             alpha_scalar = float(alpha)
         per_channel = beta.numel() > 1
 
-    if (
-        postnorm_gated_residual is not None
-        and residual_stream is not None
-        and out is None
-        and (out_dtype is None or out_dtype == torch.float32)
-        and D == 8192
-        and x.dtype == torch.bfloat16
-        and residual_stream.dtype == torch.float32
-        and isinstance(alpha, torch.Tensor)
-        and alpha.dtype == torch.float32
-        and alpha.numel() == D
-        and beta is not None
-        and beta.dtype == torch.float32
-        and beta.numel() == D
-        and ((w is None and not input_scale) or (w is not None and input_scale))
-        and (w is None or w.dtype == torch.bfloat16)
-        and supports_gated_residual_rmsnorm(x, residual_stream, w, alpha, beta)
-    ):
-        return postnorm_gated_residual(
-            x,
-            residual_stream,
-            w,
-            alpha,
-            beta,
-            eps,
-            gain_center,
-        ).view(input_shape)
-
     if out is None:
         y = torch.empty_like(residual_stream if residual else x, dtype=out_dtype)
     else:
@@ -304,10 +263,7 @@ def fused_rmsnorm_fwd(
 
     tile_elems = 8192
     bD = min(triton.next_power_of_2(D), tile_elems)
-    # The residual epilogue's fp32 stream + blend make a full-width tile spill
-    # at larger T. B300, D=8192 (us, median): T=512 wants bD 4096 (14.4 vs
-    # 18.1), T=8192 wants 2048 (136.6 vs 170.1); T=1 keeps the single tile
-    # (8.2 vs 12.3 at bD 2048).
+    # Tile the residual epilogue to limit register spilling at larger batches.
     if residual:
         if T >= 2048:
             bD = min(bD, 2048)
@@ -317,7 +273,6 @@ def fused_rmsnorm_fwd(
     # A full-width residual tile is register-bound; extra warps hide spills.
     num_warps = 16 if residual and bD >= D else 8
 
-    enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _rmsnorm_fwd_kernel[(triton.cdiv(T, bT),)](
         x,
         y,
@@ -341,8 +296,6 @@ def fused_rmsnorm_fwd(
         bT=bT,
         bD=bD,
         num_warps=num_warps,
-        USE_PDL=enable_pdl,
-        **({"launch_pdl": True} if enable_pdl else {}),
     )
     return y.view(input_shape)
 
@@ -518,9 +471,6 @@ def fused_norm_residual_norm_fwd(
     bT = max(1, _BOUNDARY_TILE_ELEMS // bD)
 
     num_warps = 32 if bD >= 8192 else (16 if bD >= 4096 else 8)
-    if D == 8192 and T >= 256 and current_platform.is_device_capability(100):
-        bT = 2
-        num_warps = 8
     if current_platform.is_rocm():
         # 64-thread wavefronts: 32 warps would exceed the 1024-thread limit.
         num_warps = min(num_warps, 16)

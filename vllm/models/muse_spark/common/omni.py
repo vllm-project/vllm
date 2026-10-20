@@ -238,8 +238,6 @@ class MuseSpark1xOmniMixin:
         self._use_vision_dp = is_vit_use_data_parallel()
         self._adapter_output_dim = adapter_output_dim
 
-        # FlashInfer's cute-dsl GEMM passes operands over DLPack, which refuses
-        # grad-carrying tensors such as the towers' biases.
         cast(nn.Module, self).requires_grad_(False)
 
     def get_language_model(self) -> torch.nn.Module:

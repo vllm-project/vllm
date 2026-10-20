@@ -48,36 +48,9 @@ def fused_qk_norm_rope_kv_insert(
     head_dim: int,
     rotary_dim: int,
     eps: float,
-) -> torch.Tensor | None:
-    """Norm/rotate and insert KV; return FP8 Q when all attention tokens use it."""
-    metadata, attn_layer, kv_cache, slot_mapping = get_attention_context(layer_name)
-
-    q_fp8 = None
-    if attn_layer.attn_backend.get_name() == "FLASHINFER" and metadata is not None:
-        # SM90 may mix FP8 prefill Q with BF16 decode Q; emit FP8 Q only when
-        # every token uses it. The builder's Q dtypes are fixed for its
-        # lifetime, so full CUDA graph replays stay consistent.
-        from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
-
-        if (
-            isinstance(metadata, FlashInferMetadata)
-            and metadata.num_actual_tokens > 0
-            and attn_layer.kv_cache_dtype in ("fp8", "fp8_e4m3")
-            and attn_layer._q_scale.numel() == 1
-            and (
-                metadata.num_prefill_tokens == 0
-                or metadata.q_data_type_prefill == torch.float8_e4m3fn
-            )
-            and (
-                metadata.num_decode_tokens == 0
-                or metadata.q_data_type_decode == torch.float8_e4m3fn
-            )
-        ):
-            q_fp8 = torch.empty(
-                (qkv.shape[0], num_heads * head_dim),
-                dtype=torch.float8_e4m3fn,
-                device=qkv.device,
-            )
+) -> None:
+    """Normalize/rotate QK and insert KV into the attention cache."""
+    _, attn_layer, kv_cache, slot_mapping = get_attention_context(layer_name)
 
     # No cache bound (profiling) or no slots: skip the insert, still norm+rotate.
     insert = slot_mapping is not None and kv_cache.numel() > 0
@@ -103,8 +76,5 @@ def fused_qk_norm_rope_kv_insert(
         eps,
         cos_sin_cache=cos_sin_cache,
         rotary_dim=rotary_dim,
-        q_fp8_out=q_fp8,
-        q_scale=attn_layer._q_scale if q_fp8 is not None else None,
         **insert_kwargs,
     )
-    return q_fp8

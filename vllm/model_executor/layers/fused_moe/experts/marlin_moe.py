@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -90,7 +89,6 @@ def _fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
-    mul_topk_weights_in_gemm2: bool = True,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -210,7 +208,7 @@ def _fused_marlin_moe(
         topk_weights,
         moe_block_size=block_size_m,
         top_k=1,
-        mul_topk_weights=mul_topk_weights_in_gemm2 and not apply_router_weight_on_input,
+        mul_topk_weights=not apply_router_weight_on_input,
         b_q_type=quant_type,
         size_m=M * num_topk,
         size_n=K,
@@ -252,7 +250,6 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
-    mul_topk_weights_in_gemm2: bool = True,
 ) -> torch.Tensor:
     """This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -299,7 +296,6 @@ def fused_marlin_moe(
             to. A 1-byte dtype raises the M block size to at least 16.
         activation_config (ApplyMoEActivationConfig|None): Extra
             configuration forwarded to the activation.
-        mul_topk_weights_in_gemm2 (bool): Apply top-k weights in GEMM2.
 
     Returns:
         torch.Tensor: The output tensor after applying the MoE layer.
@@ -391,7 +387,6 @@ def fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=None,
         input_dtype=input_dtype,
-        mul_topk_weights_in_gemm2=mul_topk_weights_in_gemm2,
     ).view(-1, topk, K)
 
     if output is None:
@@ -741,26 +736,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        hooked = self._uses_post_gemm2_hook(hidden_states.shape[0])
         ctx = self._lora_context
-        if hooked and (apply_router_weight_on_input or ctx is not None):
-            raise NotImplementedError(
-                "post_gemm2_hook needs unweighted GEMM2 rows; it supports neither "
-                "router weights on the input nor LoRA."
-            )
         if ctx is None:
-
-            def finalize_expert_output(input, output, topk_ids, expert_map):
-                if hooked:
-                    self._run_post_gemm2_hook(
-                        route_major_moe_output(
-                            input, topk_weights, topk_ids, expert_map
-                        ),
-                        output,
-                    )
-                    return
-                self.moe_sum(input, output, topk_ids, expert_map)
-
             fused_marlin_moe(
                 hidden_states=hidden_states,
                 w1=w1,
@@ -783,7 +760,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 activation=activation,
                 activation_func=self.activation,
                 activation_config=self.activation_config,
-                moe_sum=finalize_expert_output,
+                moe_sum=self.moe_sum,
                 expert_map=expert_map,
                 output=output,
                 # Workspaces are swapped in workspace_shapes() to account for proper
@@ -791,7 +768,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
                 input_dtype=self.input_dtype,
-                mul_topk_weights_in_gemm2=not hooked,
             )
             return
 

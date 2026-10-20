@@ -323,21 +323,6 @@ def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
     assert isinstance(method, UnquantizedLinearMethod)
 
 
-def test_modelopt_nvfp4_reads_exclude_modules_from_config_json():
-    config = ModelOptNvFp4Config.from_config(
-        {
-            "quant_algo": "NVFP4",
-            "quant_method": "modelopt",
-            "group_size": 16,
-            "exclude_modules": ["lm_head"],
-        }
-    )
-
-    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
-
-    assert isinstance(method, UnquantizedLinearMethod)
-
-
 def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     config = _mixed_precision_config(
         {"lm_head": {"quant_algo": "NVFP4", "group_size": 16}}
