@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Step5 preparation, paged attention and summary contracts on CUDA/HIP."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -30,8 +32,8 @@ def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary
     kw = torch.randn_like(qw) * 0.1
     angles = torch.randn(32, rotary_dim // 2, device=device)
     rope = torch.cat([angles.cos(), angles.sin()], -1).to(dtype)
-    positions = torch.tensor([0, 8, 16, 24], device=device)
-    slots = torch.tensor([0, 24, 32, -1], device=device)
+    positions = torch.tensor([7, 8, 15, 24], device=device)
+    slots = torch.tensor([7, 24, 47, -1], device=device)
     cache = torch.full((4, block, kh, 2 * dim), 13, device=device, dtype=dtype)
     kc, vc = cache.split(dim, -1)
     actual = qkv_norm_rope_cache(
@@ -74,7 +76,7 @@ def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary
     for got, ref in zip(actual, [reference(q, qw), reference(k, kw), v]):
         torch.testing.assert_close(got, ref, atol=0.03125, rtol=0.02)
     expected_cache = torch.full_like(cache, 13)
-    for row, slot in enumerate([0, 24, 32]):
+    for row, slot in enumerate([7, 24, 47]):
         expected_cache[slot // block, slot % block, :, :dim] = actual[1][row].view(
             kh, dim
         )
@@ -93,15 +95,27 @@ def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary
     cache.fill_(13)
     extra = {}
     if fused_summary:
-        from vllm.models.step5.nvidia.sparse_summary_cache import (
-            Step5SparseSummaryCache,
-        )
+        from vllm.models.step5.common.ops.summary_update import update_decode
 
-        summary = Step5SparseSummaryCache(4, block, torch.device(device), n)
-        summary_ref = Step5SparseSummaryCache(4, block, torch.device(device), n)
+        summary = SimpleNamespace(
+            mean=torch.zeros((4, 2, 256), dtype=torch.uint8, device=device)
+        )
+        mean_ref = torch.zeros_like(summary.mean)
+        ring_base = torch.arange(n, device=device) * 8
+        ring_rows = torch.randn(n * 8, 512, device=device, dtype=dtype)
+        ring_ref = ring_rows.clone()
+        ring = SimpleNamespace(
+            rows=ring_rows,
+            capacity=8,
+            metadata=lambda: SimpleNamespace(base=ring_base),
+        )
         z = torch.randn(n, 1, 256, device=device, dtype=dtype)
-        extra = dict(decode_cache=summary, decode_z=z, decode_slots=slots)
-        summary_ref.update_decode(index_ref[1], z, slots)
+        extra = dict(
+            decode_cache=summary, decode_ring=ring, decode_z=z, decode_slots=slots
+        )
+        update_decode(
+            index_ref[1], z, slots, positions, ring_base, mean_ref, ring_ref, 8
+        )
     joint = qkv_indexer_norm_rope(
         *args,
         main_inputs=(
@@ -123,10 +137,8 @@ def test_joint_and_standalone_qkv_preserve_paged_cache(rotary_dim, fused_summary
         **extra,
     )
     if fused_summary:
-        torch.testing.assert_close(summary.mean, summary_ref.mean, atol=0, rtol=0)
-        torch.testing.assert_close(
-            summary.numerator, summary_ref.numerator, atol=0, rtol=0
-        )
+        torch.testing.assert_close(summary.mean, mean_ref, atol=0, rtol=0)
+        torch.testing.assert_close(ring.rows, ring_ref, atol=0, rtol=0)
     for got, ref in zip(joint[:3], index_ref):
         torch.testing.assert_close(got.float(), ref.float(), atol=0, rtol=0)
     for got, ref in zip(joint[3:], actual):
@@ -223,48 +235,88 @@ def test_summary_scores_use_all_local_heads(heads):
     torch.testing.assert_close(metadata.current, torch.full_like(metadata.current, 2))
 
 
-def test_prefill_summary_then_decode_continues_partial_region():
+@pytest.mark.parametrize("resume", ["prefill", "decode", "verify"])
+def test_summary_closes_regions_from_tail_ring(resume):
     from vllm.models.step5.common.ops.summary_update import (
         build_prefill_groups,
+        update_decode,
         update_prefill,
+        update_verify,
     )
-    from vllm.models.step5.nvidia.sparse_summary_cache import Step5SparseSummaryCache
 
     torch.manual_seed(71)
-    device = torch.device("cuda")
-    cache = Step5SparseSummaryCache(2, 16, device, 2)
-    key = torch.randn(2, 10, 1, 256, device=device, dtype=torch.bfloat16)
+    device, capacity = "cuda", 12
+    key = torch.randn(2, 16, 1, 256, device=device, dtype=torch.bfloat16)
     z = torch.randn_like(key)
-    slots = torch.cat(
-        [torch.arange(9, device=device), torch.arange(16, 25, device=device)]
-    )
-    positions = torch.arange(9, device=device).repeat(2)
-    owners = torch.arange(2, device=device).repeat_interleave(9)
-    starts = torch.tensor([0, 9, 18], device=device)
-    groups = build_prefill_groups(slots, positions, owners, starts, 16)
-    update_prefill(
-        key[:, :9].reshape(18, 1, 256),
-        z[:, :9].reshape(18, 1, 256),
-        groups,
-        cache.mean,
-        cache.numerator,
-        cache.denominator,
-        cache.maximum,
-        cache.last_slot,
-        16,
-    )
-    cache.update_decode(key[:, 9], z[:, 9], torch.tensor([9, 25], device=device))
-    for region, start, end in [(0, 0, 8), (1, 8, 10)]:
-        ref = (z[:, start:end].float().softmax(1) * key[:, start:end].float()).sum(1)[
-            :, 0
-        ]
-        ref = ref.bfloat16().to(torch.float8_e4m3fn).float()
-        actual = cache.mean[:, region].view(torch.float8_e4m3fn).float()
-        # Allow adjacent FP8 bins when FP32 reduction orders straddle a midpoint.
+    storage = torch.full((2, 3, 2, 256), 13, device=device, dtype=torch.uint8)
+    mean = storage[:, 1]
+    ring = torch.zeros(2 * capacity, 512, device=device, dtype=torch.bfloat16)
+
+    def prefill(start, end):
+        count = end - start
+        positions = torch.arange(start, end, device=device).repeat(2)
+        owners = torch.arange(2, device=device).repeat_interleave(count)
+        slots = owners * 16 + positions
+        starts = torch.arange(3, device=device) * count
+        groups = build_prefill_groups(slots, positions, owners, starts)
+        base = owners * capacity
+        ring_slots = base + positions % capacity
+        update_prefill(
+            key[:, start:end].reshape(-1, 1, 256),
+            z[:, start:end].reshape(-1, 1, 256),
+            groups,
+            positions,
+            base,
+            ring_slots,
+            mean,
+            ring,
+            capacity,
+        )
+
+    prefill(0, 5)
+    torch.testing.assert_close(mean, torch.full_like(mean, 13))
+    prefill(5, 11)
+    torch.testing.assert_close(mean[:, 1], torch.full_like(mean[:, 1], 13))
+    if resume == "prefill":
+        prefill(11, 16)
+    elif resume == "decode":
+        for pos in range(11, 16):
+            positions = torch.full((2,), pos, device=device)
+            update_decode(
+                key[:, pos],
+                z[:, pos],
+                torch.arange(2, device=device) * 16 + pos,
+                positions,
+                torch.arange(2, device=device) * capacity,
+                mean,
+                ring,
+                capacity,
+            )
+    else:
+        positions = torch.arange(11, 16, device=device).repeat(2)
+        owners = torch.arange(2, device=device).repeat_interleave(5)
+        update_verify(
+            key[:, 11:16].reshape(-1, 1, 256),
+            z[:, 11:16].reshape(-1, 1, 256),
+            owners * 16 + positions,
+            torch.tensor([0, 5, 10], device=device),
+            torch.tensor([16, 16], device=device),
+            owners * capacity,
+            mean,
+            ring,
+            capacity,
+        )
+    for region in range(2):
+        start, end = region * 8, (region + 1) * 8
+        ref = (z[:, start:end].float().softmax(1) * key[:, start:end].float()).sum(1)
+        ref = ref[:, 0].bfloat16().to(torch.float8_e4m3fn).float()
+        actual = mean[:, region].view(torch.float8_e4m3fn).float()
+        # Adjacent FP8 bins are possible at FP32 reduction midpoints.
         torch.testing.assert_close(actual, ref, atol=0.015625, rtol=0.125)
-    torch.testing.assert_close(
-        cache.last_slot[:2], torch.tensor([9, 25], device=device)
-    )
+    for layer in (0, 2):
+        torch.testing.assert_close(
+            storage[:, layer], torch.full_like(storage[:, layer], 13)
+        )
 
 
 def test_headwise_gate_preserves_bf16_rounding_and_inactive_rows():
