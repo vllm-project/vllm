@@ -1676,3 +1676,116 @@ def test_request_memory_charges_external_weights():
         request_memory(
             _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("eager_mirror", [False, True])
+def test_hisparse_speculative_prefetch_keeps_write_and_mirror_policy(
+    enabled, eager_mirror
+):
+    """Reset prefetch eligibility every round without changing tentative writes."""
+    runtime = SimpleNamespace(
+        backend=SimpleNamespace(supports_speculative_group_prefetch=enabled),
+        max_swap_rows=64,
+        max_num_reqs=16,
+        eager_host_mirror=eager_mirror,
+        begin_forward=MagicMock(),
+    )
+    handle = hisparse_runtime_module.HiSparseCacheHandle(runtime)
+    handle.view = SimpleNamespace(cache=object())
+    handle.slot_mapping = torch.arange(65)
+    # Grow, shrink, reject overflow/mixed prefill, then reset on dummy/empty.
+    cases = [
+        (16, 16, 4, 4, True),
+        (4, 4, 1, 4, True),
+        (64, 64, 16, 4, True),
+        (65, 65, 16, 5, False),
+        (16, 4, 4, 13, False),
+        None,
+        (0, 0, 0, 1, False),
+        (4, 4, 4, 0, False),
+        (16, 16, 0, 4, False),
+        (4, 4, 4, 1, True),
+        (16, 16, 4, 4, True),
+    ]
+    for case in cases:
+        metadata = None
+        eligible = False
+        if case is not None:
+            tokens, decode, requests, query, eligible = case
+            metadata = SimpleNamespace(
+                num_actual_tokens=tokens,
+                num_decode_tokens=decode,
+                num_reqs=requests,
+                max_query_len=query,
+                req_id_per_token=None,
+            )
+        handle._prepare_for_batch(metadata)
+        single_token = hisparse_runtime_module.is_hisparse_decode_batch(metadata)
+        assert handle.prefetch_decode_group == (single_token or (enabled and eligible))
+        assert handle.decode_batch == single_token
+        assert handle.host_mirror_required == (
+            metadata is not None and (not single_token or eager_mirror)
+        )
+        if metadata is not None:
+            _, slots, count = handle.write_target(65, 65)
+            assert count == metadata.num_actual_tokens
+            assert slots.numel() == count
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_hisparse_speculative_group_stages_followers_with_separate_events(
+    monkeypatch, prefetch
+):
+    """The copy stream stages each owner and records its own completion event."""
+    monkeypatch.setattr(
+        hisparse_runtime_module, "in_piecewise_cudagraph", lambda: False
+    )
+    leader = object.__new__(hisparse_runtime_module.HiSparseRuntime)
+    follower = SimpleNamespace(
+        _swap_rows=MagicMock(), _layer_ready_event=None, _swap_staged=False
+    )
+    leader.backend = SimpleNamespace(
+        current_stream=MagicMock(),
+        stream_context=lambda *a, **kw: nullcontext(),
+        create_event=MagicMock(side_effect=lambda: MagicMock()),
+    )
+    leader.index_group = SimpleNamespace(
+        logical_topk_ready=None,
+        copy_stream=MagicMock(),
+        request_ids=torch.empty(16, dtype=torch.int32),
+        row_indices=torch.arange(16),
+        followers=[follower],
+    )
+    leader._resolve_residency = MagicMock()
+    leader._swap_rows = MagicMock()
+    leader._layer_ready_event = None
+    leader._swap_staged = False
+    rows = slice(0, 16)
+    leader._resolve_and_stage_group(
+        resident=SimpleNamespace(decode_batch=False, prefetch_decode_group=prefetch),
+        req_id_per_token=torch.arange(4).repeat_interleave(4),
+        block_table=torch.empty(0),
+        logical_topk_indices=torch.zeros((16, 2)),
+        block_size=128,
+        return_valid_counts=False,
+        shared_rows=rows,
+        attention_indices_out=None,
+        valid_counts_out=None,
+        num_valid_rows=torch.tensor(12),
+    )
+    assert leader._swap_staged
+    leader._swap_rows.assert_called_once_with(rows)
+    leader._layer_ready_event.record.assert_called_once_with(
+        leader.index_group.copy_stream
+    )
+    assert leader.index_group.request_ids[-4:].tolist() == [-1] * 4
+    assert follower._swap_staged == prefetch
+    if prefetch:
+        follower._swap_rows.assert_called_once_with(rows)
+        assert follower._layer_ready_event is not leader._layer_ready_event
+        follower._layer_ready_event.record.assert_called_once_with(
+            leader.index_group.copy_stream
+        )
+    else:
+        follower._swap_rows.assert_not_called()
