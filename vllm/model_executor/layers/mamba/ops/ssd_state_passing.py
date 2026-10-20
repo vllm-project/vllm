@@ -159,16 +159,6 @@ def _state_passing_fwd(
     launch_autotuned(
         _state_passing_fwd_kernel,
         grid,
-        (
-            dim,
-            states.dtype,
-            out_dtype,
-            dA_cumsum.dtype,
-            None if initial_states is None else initial_states.dtype,
-            last_chunk_indices.dtype,
-            None if final_states is None else final_states.dtype,
-            None if final_state_indices is None else final_state_indices.dtype,
-        ),
         states_ptr=states,
         out_ptr=out,
         dA_cs_ptr=dA_cumsum,

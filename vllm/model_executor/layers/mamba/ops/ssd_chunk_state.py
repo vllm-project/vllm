@@ -327,14 +327,6 @@ def _chunk_cumsum_fwd(
     launch_autotuned(
         _chunk_cumsum_fwd_kernel,
         grid_chunk_cs,
-        (
-            chunk_size,
-            nheads,
-            dt.dtype,
-            A.dtype,
-            None if dt_bias is None else dt_bias.dtype,
-            cu_chunk_seqlens.dtype,
-        ),
         dt_ptr=dt,
         A_ptr=A,
         dt_bias_ptr=dt_bias,
@@ -390,17 +382,6 @@ def _chunk_state_fwd(
     launch_autotuned(
         _chunk_state_fwd_kernel,
         grid,
-        (
-            headdim,
-            dstate,
-            chunk_size,
-            x.dtype,
-            B.dtype,
-            states.dtype,
-            dt.dtype,
-            dA_cumsum.dtype,
-            cu_chunk_seqlens.dtype,
-        ),
         x_ptr=x,
         b_ptr=B,
         states_ptr=states,

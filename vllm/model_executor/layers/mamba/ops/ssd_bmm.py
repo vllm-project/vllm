@@ -189,7 +189,6 @@ def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtyp
     launch_autotuned(
         _bmm_chunk_fwd_kernel,
         grid,
-        (chunk_size, k, causal, a.dtype, b.dtype, out_dtype, cu_chunk_seqlens.dtype),
         a_ptr=a,
         b_ptr=b,
         out_ptr=out,
