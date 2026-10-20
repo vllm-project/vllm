@@ -345,6 +345,9 @@ impl ChatRenderer for InklingChatRenderer {
                         &tool_call_id_to_name,
                     )?;
                 }
+                ChatMessage::Custom { role, .. } => {
+                    return Err(Error::UnsupportedChatRole { role: role.clone() });
+                }
             }
         }
 

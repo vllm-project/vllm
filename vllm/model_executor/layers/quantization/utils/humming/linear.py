@@ -59,13 +59,13 @@ def prepare_humming_linear_layer_config(
     input_quant_config: dict | None = None,
     *,
     input_schema: "BaseInputSchema | None" = None,
+    allow_input_schema_fallback: bool = True,
 ) -> "LayerConfig":
     from vllm.utils.humming import (
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
-        prepare_layer_config,
-        transform_humming_tensors,
+        prepare_and_transform_humming_tensors,
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
@@ -87,7 +87,7 @@ def prepare_humming_linear_layer_config(
     shape_n_stacks = layer.output_partition_sizes
 
     # Step 1: convert weight and input schemas to humming standard format
-    source_tensors = dict(layer.named_parameters())
+    source_tensors = dict(layer.named_parameters(recurse=False))
     weight_schema, tensors = weight_schema.convert_humming(
         tensors=source_tensors,
         shape_n_stacks=shape_n_stacks,
@@ -101,12 +101,26 @@ def prepare_humming_linear_layer_config(
         param_dtype=layer.params_dtype,
     )
 
+    if (
+        weight_schema.has_zero_point
+        and input_schema.a_dtype is not None
+        and weight_schema.b_dtype.num_bits == input_schema.a_dtype.num_bits
+    ):
+        raise ValueError(
+            "Humming does not support asymmetric (zero_point) weights "
+            "when weight and activation bit widths are equal "
+            f"(W{weight_schema.b_dtype.num_bits}"
+            f"A{input_schema.a_dtype.num_bits}). "
+            "Use symmetric weights or a different activation bit width."
+        )
+
     tensors.update(input_tensors)
     layer.weight_schema = weight_schema
     input_schema = check_and_fallback_input_schema(
         weight_schema=weight_schema,
         input_schema=input_schema,
         param_dtype=layer.params_dtype,
+        allow_fallback=allow_input_schema_fallback,
     )
     for name in ("input_scale", "input_scale_2"):
         if name != input_schema.static_tensor_scale_name:
@@ -114,7 +128,8 @@ def prepare_humming_linear_layer_config(
             input_tensors.pop(name, None)
 
     # Step 2: transform weight (humming standard format) for forwarding.
-    config = prepare_layer_config(
+    config, tensors = prepare_and_transform_humming_tensors(
+        tensors=tensors,
         shape_n=sum(layer.output_partition_sizes),
         shape_k=input_size_per_partition,
         weight_schema=weight_schema,
@@ -125,12 +140,11 @@ def prepare_humming_linear_layer_config(
         torch_dtype=layer.params_dtype,
         device=tensors["weight"].device,
     )
-    tensors = transform_humming_tensors(config, tensors)
     tensors.update(input_tensors)
     if "bias" in tensors:
         zero_bias = torch.zeros_like(tensors["bias"])
         layer.register_buffer("zero_bias", zero_bias)
-    for name, _ in list(layer.named_parameters()):
+    for name, _ in list(layer.named_parameters(recurse=False)):
         delattr(layer, name)
     for name, tensor in tensors.items():
         param = torch.nn.Parameter(tensor, requires_grad=False)

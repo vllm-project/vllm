@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from transformers import ParakeetEncoder as HFParakeetEncoder
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.audio_utils import mel_filter_bank
 
 from vllm.logger import init_logger
@@ -93,7 +93,7 @@ class ParakeetProjection(nn.Module):
 class ProjectedParakeet(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         *,
         dtype: torch.dtype,
         llm_hidden_size: int,
@@ -199,7 +199,7 @@ LOG_ZERO_GUARD_VALUE = 2**-24
 
 
 class ParakeetExtractor:
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         self.config = ExtractorConfig.from_hf_config(config)
         """`config` is named *exactly* for `._get_subsampling_output_length` below"""
         self._clip_target_samples = int(
@@ -393,6 +393,6 @@ class ParakeetExtractor:
         }
 
     @staticmethod
-    def audio_length(raw_config: PretrainedConfig, audio_tokens: int) -> int:
+    def audio_length(raw_config: PreTrainedConfig, audio_tokens: int) -> int:
         config = ExtractorConfig.from_hf_config(raw_config)
         return int(audio_tokens * config.subsampling_factor * config.hop_length)

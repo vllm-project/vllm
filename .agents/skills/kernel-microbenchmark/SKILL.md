@@ -1,6 +1,6 @@
 ---
 name: kernel-microbenchmark
-description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUDA, Triton, and CuteDSL, including CUPTI timing, correctness checks, generated-code inspection, multi-GPU measurements, and SOL sanity checks.
+description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUDA, ROCm/HIP, Triton, and CuteDSL, including CUPTI timing, correctness checks, generated-code inspection, multi-GPU measurements, and SOL sanity checks.
 ---
 
 # Kernel Microbenchmark
@@ -15,7 +15,7 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
 4. Compare against a baseline and report enough metadata to reproduce the
    result: GPU, dtype, shape, command, branch/commit, and relevant env vars.
 5. Treat explanations as hypotheses until backed by an artifact: ablation,
-   generated PTX/SASS, profiler output, or controlled benchmark.
+   generated PTX/SASS or AMD ISA, profiler output, or controlled benchmark.
 6. If the result changes the conclusion, preserve the compact lesson in a note,
    comment, benchmark table, or final summary. For experiments, a short
    `Question / Change / Correctness / Result / Observation / Next` note is
@@ -25,6 +25,12 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
 
 - Use FlashInfer CUPTI timing by default, with CUDA graph and cold L2 cache:
   `from flashinfer.testing import bench_gpu_time_with_cupti`.
+- ROCm: CUPTI and FlashInfer do not exist. Use HIP graph replay over rotating
+  buffers whose total footprint exceeds the last-level cache (e.g. 256 MB on
+  MI355X), so every call reads cold from HBM, timed with HIP events — see
+  [benchmarks/graph_replay_benchmark.py](benchmarks/graph_replay_benchmark.py)
+  (platform-agnostic). Prefer this over `do_bench`, whose per-rep
+  launch/event overhead inflates small/decode-size kernels.
 - For compute-heavy kernels, report TFLOPS with the FLOP formula in the
   benchmark. For memory-heavy kernels, report estimated bytes moved and GB/s.
   For mixed kernels, report the most honest metric available and call out the
@@ -38,6 +44,11 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
   formulas, skipped work, sparsity, caching, and whether the baseline is doing
   the same operation.
 - Force compilation/autotuning before measuring compiled kernels.
+- Tune every arm of a comparison before trusting it. A variant's default or
+  inherited config can be far from its optimum, so conclusions drawn from
+  untuned variants — especially negative ones — are unreliable. A coarse
+  sweep of the cheap knobs at a couple of representative shapes is enough;
+  report the winning config with the numbers.
 - Seed inputs when correctness comparisons matter.
 - Keep metadata setup, plan construction, allocation, random input generation,
   and logging outside the timed region unless that overhead is the experiment.
@@ -98,11 +109,21 @@ throughput conventions.
   a two-node TP run as equivalent to a local NVLink-domain run without checking.
 - Stabilize GPU clocks or run enough untimed work to reach a steady state.
   Alternate candidate order so clock, thermal, and rank-skew effects are shared.
+- ROCm: capturing ProcessGroupNCCL collectives in HIP graphs trips the NCCL
+  watchdog (HIP forbids querying an event recorded in a capturing stream;
+  the watchdog aborts the process). `TORCH_NCCL_BLOCKING_WAIT=1` before
+  `import torch` disables the watchdog — benchmark-only knob. Ask for backend
+  `"nccl"`; torch routes it to RCCL automatically (there is no `"rccl"`
+  backend string).
 
 ## Included Examples
 
 - Use [benchmarks/cupti_microbenchmark.py](benchmarks/cupti_microbenchmark.py)
   as a minimal single-GPU FlashInfer CUPTI timing pattern.
+- Use
+  [benchmarks/graph_replay_benchmark.py](benchmarks/graph_replay_benchmark.py)
+  as a graph-replay timing pattern over rotating buffers sized past the
+  last-level cache — the ROCm/HIP default, also usable on CUDA.
 - Use
   [benchmarks/multi_gpu_gemm_rs.py](benchmarks/multi_gpu_gemm_rs.py) as a
   minimal distributed CUDA-graph timing pattern.
