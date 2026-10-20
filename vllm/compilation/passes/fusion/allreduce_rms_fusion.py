@@ -177,6 +177,14 @@ def _select_flashinfer_allreduce_use_oneshot(
 
 
 if flashinfer_comm is not None:
+    import flashinfer
+    from packaging.version import Version
+
+    # FlashInfer < 0.7.2 reads residual_in before its grid dependency sync
+    # (flashinfer-ai/flashinfer#5081): after an early PDL trigger the next
+    # fused all-reduce can read a stale residual (#45448).
+    _EARLY_PDL_TRIGGER_SAFE = Version(flashinfer.__version__) >= Version("0.7.2")
+
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         destroy_fi_ar_workspace,
         get_fi_ar_quant_workspace,
@@ -280,17 +288,11 @@ if flashinfer_comm is not None:
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
             weight_bias=weight_bias,
-            # The one-shot Lamport all-reduce signals PDL completion before its
-            # output buffer is committed when trigger_completion_at_end is
-            # False, so the next PDL-launched kernel can read the uninitialized
-            # Lamport buffer and produce NaN. This only fires for
-            # num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS (the batch=1 / spec-decode
-            # shapes, where the one-shot path is always selected). Complete at
-            # the end for the one-shot path; the two-shot path is synchronized
-            # and keeps the early completion. Related one-shot instability in
-            # the same kernel: flashinfer-ai/flashinfer#1223.
-            trigger_completion_at_end=(use_oneshot is True)
-            or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            # At small batches the next PDL kernel launches and runs its
+            # prologue while this one reduces; its grid dependency sync still
+            # waits for the whole all-reduce.
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS
+            or not _EARLY_PDL_TRIGGER_SAFE,
         )
 
     direct_register_custom_op(
