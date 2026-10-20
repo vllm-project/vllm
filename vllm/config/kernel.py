@@ -340,7 +340,8 @@ class KernelConfig:
     """
 
     step5_attention_backend: Literal["native", "prims_ts"] = "native"
-    """Step5 attention backend. PrimTS handles all FP8 attention and BF16 prefill.
+    """Step5 attention backend. PrimTS supports SM100, SM103 and SM107 and
+    handles all FP8 attention and BF16 prefill.
     BF16 decode uses PrimTS for MTP=3/Q=4 batches with at least 32 requests,
     using the padded batch size for full CUDA graphs.
     """
