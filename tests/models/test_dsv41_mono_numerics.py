@@ -602,7 +602,6 @@ def _replay_942(rank: int, tp: int, device) -> None:
     from vllm.distributed import get_tp_group
     from vllm.engine.arg_utils import EngineArgs
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.models.deepseek_v41.amd import mono_decode
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
     from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
     from vllm.models.deepseek_v41.amd.mono.runner import (
@@ -611,6 +610,8 @@ def _replay_942(rank: int, tp: int, device) -> None:
         MonoLayerWeights,
     )
     from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
+    from vllm.models.deepseek_v41.amd.specialized_decode.runtime import weights942
+    from vllm.models.deepseek_v41.amd.specialized_decode.spec import INTER_TP4
     from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
     from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -633,18 +634,18 @@ def _replay_942(rank: int, tp: int, device) -> None:
     with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
         moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
     e, sh = moe.experts.routed_experts, moe.shared_experts
-    # The hooks that the model sets at load (mono_decode._copy_942_at_load).
-    # The routed experts are copied from the plain tensors before vLLM's MoE
+    # The hooks that the model sets at load (weights942.copy_at_load). The
+    # routed experts are copied from the plain tensors before vLLM's MoE
     # backend converts them, and the shared expert from the bf16 weights that
     # vLLM dequantizes at load.
-    mono_decode._capture_plain_experts(e)
+    weights942._capture_plain_experts(e)
     for lin in (sh.gate_up_proj, sh.down_proj):
-        mono_decode._copy_linear_at_load(lin)
+        weights942._copy_linear(lin)
     _random_moe(
         moe,
         torch.Generator(device=device).manual_seed(2001 + rank),
         torch.Generator(device=device).manual_seed(2000),
-        inter=mono_decode.INTER_TP4,
+        inter=INTER_TP4,
     )
     process_weights_after_loading(moe, vc.model_config, device)
 
