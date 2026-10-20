@@ -588,7 +588,7 @@ def test_ipc_rope_matching(
     )
     model_config.hf_text_config.max_position_embeddings = 512
     server = object.__new__(daemon.WeightCacheDaemon)
-    server.cache_config = WeightCacheKey.from_model_config(
+    server.cache_key = WeightCacheKey.from_model_config(
         model_config, 1, 0, cache_config=default_vllm_config.cache_config
     )
     rope = model_config.hf_text_config.rope_parameters
@@ -726,4 +726,4 @@ def test_ipc_cache_key_tracks_kv_quantization(
     loader.load_weights(model, model_config)
     assert len(requested_keys) == 2
     for key in requested_keys:
-        assert server.cache_config.mismatched_fields(key) == mismatched_fields
+        assert server.cache_key.mismatched_fields(key) == mismatched_fields
