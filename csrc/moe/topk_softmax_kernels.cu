@@ -329,6 +329,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    // PDL permits early launch, but logits/metadata still depend on the producer.
+    cudaGridDependencySynchronize();
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
     // Threads with indices out of bounds should early exit here.
     if (thread_row >= num_rows)
     {
@@ -620,8 +626,26 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
+#ifndef USE_ROCM
+    cudaLaunchConfig_t config{};
+    config.gridDim = dim3(num_blocks);
+    config.blockDim = block_dim;
+    config.stream = stream;
+    cudaLaunchAttribute attr{};
+    attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr.val.programmaticStreamSerializationAllowed = 1;
+    config.attrs = &attr;
+    config.numAttrs = 1;
+    auto err = cudaLaunchKernelEx(
+        &config,
+        topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF>,
+        input, finished, output, num_rows, indices, source_row, k, start_expert,
+        end_expert, renormalize, bias, routed_scaling_factor, is_padding);
+    STD_TORCH_CHECK(err == cudaSuccess, "PDL topkGating launch failed: ", cudaGetErrorString(err));
+#else
     topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF><<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias, routed_scaling_factor, is_padding);
+#endif
 }
 
 #ifndef USE_ROCM
@@ -672,6 +696,7 @@ void topkGatingKernelLauncher(
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
 #ifndef USE_ROCM
+    // Non-power-of-two fast paths below are CUDA-only: ROCm uses 64-lane warps.
     // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
     // elements can be loaded by a warp
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
@@ -702,74 +727,81 @@ void topkGatingKernelLauncher(
     switch (num_experts) {
         case 1:
             LAUNCH_TOPK(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 2:
             LAUNCH_TOPK(2, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 4:
             LAUNCH_TOPK(4, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 8:
             LAUNCH_TOPK(8, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 16:
             LAUNCH_TOPK(16, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 32:
             LAUNCH_TOPK(32, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 64:
             LAUNCH_TOPK(64, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
+            return;
         case 128:
             LAUNCH_TOPK(128, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
-        case 256:
-            LAUNCH_TOPK(256, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
-        case 512:
-            LAUNCH_TOPK(512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
-            break;
-        // (CUDA only) support multiples of 64 when num_experts is not power of 2.
-        // ROCm uses WARP_SIZE 64 so 8 bytes loading won't fit for some of num_experts,
-        // alternatively we can test 4 bytes loading and enable it in future.
+            return;
 #ifndef USE_ROCM
         case 192:
             LAUNCH_TOPK(192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
-            break;
+            return;
+#endif
+        case 256:
+            LAUNCH_TOPK(256, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+            return;
+#ifndef USE_ROCM
         case 320:
             LAUNCH_TOPK(320, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+            return;
+        case 352:
+            if constexpr (SF == SCORING_SIGMOID) {
+                // Eleven scalar loads per lane cover this 32-expert multiple.
+                LAUNCH_TOPK(352, WARPS_PER_TB, sizeof(InputType));
+                return;
+            }
             break;
         case 384:
             LAUNCH_TOPK(384, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
-            break;
+            return;
         case 448:
             LAUNCH_TOPK(448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
-            break;
+            return;
+#endif
+        case 512:
+            LAUNCH_TOPK(512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+            return;
+#ifndef USE_ROCM
         case 576:
             LAUNCH_TOPK(576, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
-            break;
+            return;
 #endif
-        default: {
-            STD_TORCH_CHECK(workspace != nullptr,
-                "workspace must be provided for num_experts that are not a power of 2 or multiple of 64.");
-            static constexpr int TPB = 256;
-            if constexpr (SF == SCORING_SOFTMAX) {
-              moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-                gating_output, nullptr, workspace, num_experts,
-                input_row_stride);
-            } else if constexpr (SF == SCORING_SIGMOID) {
-              moeSigmoid<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-                gating_output, nullptr, workspace, num_experts,
-                input_row_stride);
-            } else {
-                STD_TORCH_CHECK(false, "Unsupported scoring func");
-            }
-            moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
-                workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
-                num_experts, topk, 0, num_experts, renormalize, bias, routed_scaling_factor, is_padding);
-        }
+        default:
+            break;
     }
+
+    STD_TORCH_CHECK(workspace != nullptr,
+        "workspace must be provided for num_experts that are not a power of 2 or multiple of 64.");
+    static constexpr int TPB = 256;
+    if constexpr (SF == SCORING_SOFTMAX) {
+      moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
+        gating_output, nullptr, workspace, num_experts, input_row_stride);
+    } else if constexpr (SF == SCORING_SIGMOID) {
+      moeSigmoid<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
+        gating_output, nullptr, workspace, num_experts, input_row_stride);
+    } else {
+        STD_TORCH_CHECK(false, "Unsupported scoring func");
+    }
+    moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
+        workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
+        num_experts, topk, 0, num_experts, renormalize, bias, routed_scaling_factor, is_padding);
 }
 
 } // namespace moe
