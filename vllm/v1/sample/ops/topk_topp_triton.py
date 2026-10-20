@@ -108,6 +108,12 @@ def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
     BUFFER,
+    SPLIT_MAX,
+    SPLIT_MIN,
+    SPLIT_FINITE,
+    SPLIT_OUTLIERS,
+    FINAL_PIVOT,
+    NEED_MASK,
     PERCENTILE_TO_STD_TABLE,
     NORMAL_CDF_TO_SIGMA_TABLE,
     K,
@@ -120,13 +126,21 @@ def _topk_topp_kernel(
     TOPK_ENABLED: tl.constexpr,
     TOPP_ENABLED: tl.constexpr,
     SPLIT_COVERS_PONLY: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    SPLIT_LEN: tl.constexpr,
+    BUFFER_ROW_LEN: tl.constexpr,
 ):
+    # NUM_SPLITS > 0: _topk_split_gather_kernel already ran the first top-k
+    # pass over NUM_SPLITS programs per row (one row per program here), and
+    # _topk_split_mask_kernel applies the final mask of rows without ties.
     NUM_TILES: tl.constexpr = (VOCAB_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
         LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
-        BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
+        BUFFER_ROW = BUFFER + pid * BUFFER_ROW_LEN
+        if NUM_SPLITS > 0:
+            tl.store(NEED_MASK + row_id, 0)
 
         final_pivot = -float("inf")
         duplicate_logit = float("inf")
@@ -171,30 +185,55 @@ def _topk_topp_kernel(
                 outlier_pivot = avg_logit + std_logit * sigma
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
-                # First pass: compute max and min logits and gather outliers
-                num_finite_total = tl.zeros((), dtype=tl.uint32)
-                for i in range(0, NUM_TILES):
-                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                    mask_n = offs_n < VOCAB_SIZE
-                    logits_blk = tl.load(
-                        LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                    )
+                if NUM_SPLITS > 0:
+                    # First pass, split: merge the per-split partials and move
+                    # each split's outliers down to follow the previous ones.
+                    # The buffer then holds the same values in the same order
+                    # as the one-program sweep below, so the searches and
+                    # their float sums are unchanged. Destinations never pass
+                    # their sources, and the barriers order each tile's loads
+                    # before its stores.
+                    num_finite_total = tl.zeros((), dtype=tl.uint32)
+                    for s in range(0, NUM_SPLITS):
+                        stat = row_id * NUM_SPLITS + s
+                        max_logit = tl.maximum(max_logit, tl.load(SPLIT_MAX + stat))
+                        min_logit = tl.minimum(min_logit, tl.load(SPLIT_MIN + stat))
+                        num_finite_total += tl.load(SPLIT_FINITE + stat)
+                        cnt = tl.load(SPLIT_OUTLIERS + stat)
+                        if s > 0:
+                            for j in range(0, (cnt + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC):
+                                offs_c = j * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_c = offs_c < cnt
+                                moved = tl.load(BUFFER_ROW + s * SPLIT_LEN + offs_c, mask=mask_c)
+                                tl.debug_barrier()
+                                tl.store(BUFFER_ROW + num_outliers + offs_c, moved, mask=mask_c)
+                                tl.debug_barrier()
+                        num_outliers += cnt
+                else:
+                    # First pass: compute max and min logits and gather outliers
+                    num_finite_total = tl.zeros((), dtype=tl.uint32)
+                    for i in range(0, NUM_TILES):
+                        offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                        mask_n = offs_n < VOCAB_SIZE
+                        logits_blk = tl.load(
+                            LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                        )
 
-                    max_logit = tl.maximum(max_logit, tl.max(logits_blk))
-                    # Exclude -inf from min to keep binary search bounds
-                    # finite (avoids NaN pivots).
-                    finite_blk_mask = logits_blk > -float("inf")
-                    finite_blk = tl.where(finite_blk_mask, logits_blk, float("inf"))
-                    min_logit = tl.minimum(min_logit, tl.min(finite_blk))
-                    num_finite_total += tl.sum(finite_blk_mask & mask_n)
+                        max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                        # Exclude -inf from min to keep binary search bounds
+                        # finite (avoids NaN pivots).
+                        finite_blk_mask = logits_blk > -float("inf")
+                        finite_blk = tl.where(finite_blk_mask, logits_blk, float("inf"))
+                        min_logit = tl.minimum(min_logit, tl.min(finite_blk))
+                        num_finite_total += tl.sum(finite_blk_mask & mask_n)
 
-                    outlier_mask = (logits_blk > outlier_pivot) & mask_n
-                    cumulative_pos = tl.cast(
-                        tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32
-                    )
-                    num_outliers += tl.sum(outlier_mask)
-                    write_pos = tl.where(outlier_mask, cumulative_pos, -1)
-                    tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
+                        outlier_mask = (logits_blk > outlier_pivot) & mask_n
+                        cumulative_pos = tl.cast(
+                            tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32
+                        )
+                        num_outliers += tl.sum(outlier_mask)
+                        write_pos = tl.where(outlier_mask, cumulative_pos, -1)
+                        tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
 
                 # If no finite logits exist (all -inf), clamp min to
                 # max so the search converges to -inf (no masking).
@@ -855,27 +894,182 @@ def _topk_topp_kernel(
         if not (final_pivot < max_logit):
             final_pivot = -float("inf")
         elif final_pivot != -float("inf"):
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < VOCAB_SIZE
-                logits_blk = tl.load(
-                    LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                )
-                keep_mask = (logits_blk > final_pivot) & mask_n
+            if NUM_SPLITS > 0 and num_keep >= num_duplicate_logit:
+                tl.store(FINAL_PIVOT + row_id, final_pivot)
+                tl.store(NEED_MASK + row_id, 1)
+            else:
+                for i in range(0, NUM_TILES):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < VOCAB_SIZE
+                    logits_blk = tl.load(
+                        LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                    )
+                    keep_mask = (logits_blk > final_pivot) & mask_n
 
-                # Duplicate logit handling
-                if num_keep < num_duplicate_logit:
-                    duplicate_mask = (
-                        tl.abs(logits_blk - duplicate_logit) < 1e-9
-                    ) & mask_n
-                    duplicate_count = tl.cumsum(duplicate_mask) + num_kept
-                    duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
-                    duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
-                    num_kept += tl.sum(duplicate_keep_mask)
-                    keep_mask = keep_mask & (~duplicate_remove_mask)
+                    # Duplicate logit handling
+                    if num_keep < num_duplicate_logit:
+                        duplicate_mask = (
+                            tl.abs(logits_blk - duplicate_logit) < 1e-9
+                        ) & mask_n
+                        duplicate_count = tl.cumsum(duplicate_mask) + num_kept
+                        duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
+                        duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
+                        num_kept += tl.sum(duplicate_keep_mask)
+                        keep_mask = keep_mask & (~duplicate_remove_mask)
 
-                logits_blk = tl.where(keep_mask, logits_blk, MASK_VALUE)
-                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+                    logits_blk = tl.where(keep_mask, logits_blk, MASK_VALUE)
+                    tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+
+
+# ---------------------------------------------------------------------------
+# Split first pass and final mask for rows with an active top-k.
+#
+# With one program per row, the monolithic kernel's two full-vocab passes
+# (outlier gather and final mask) are latency-bound: on A100 with a 248K vocab
+# they take most of its ~360 us per row. These two kernels run those passes
+# over NUM_SPLITS programs per row; the monolithic kernel (NUM_SPLITS > 0)
+# keeps the per-row pivot and top-p searches unchanged, so the result is
+# bitwise equal. Rows with ties at the pivot keep the sequential mask, which
+# needs vocab order.
+# ---------------------------------------------------------------------------
+
+_TOPK_SPLIT_WARPS = 4
+
+
+def _topk_split_max_rows(vocab_size: int) -> int:
+    """Largest batch for which the split pass beats the one-program kernel
+    (A100: 1.2-4x below this size, slower above it for small vocabularies)."""
+    if vocab_size >= 200_000:
+        return 512
+    if vocab_size >= 150_000:
+        return 128
+    return _SPLIT_MAX_BATCH
+
+
+def _topk_split_shape(batch_size: int, vocab_size: int) -> tuple[int, int, int]:
+    """(splits, gather block, split length) of the split top-k pass."""
+    splits, block = (16, 2048) if batch_size <= _SPLIT_MAX_BATCH else (8, 1024)
+    tiles_per_split = (triton.cdiv(vocab_size, block) + splits - 1) // splits
+    return splits, block, tiles_per_split * block
+
+
+@triton.jit
+def _topk_split_pivot_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
+    SPLIT_PIVOT,
+    PERCENTILE_TO_STD_TABLE,
+    K,
+    VOCAB_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """The block-0 Gaussian outlier pivot of _topk_topp_kernel for one row.
+    Launched with the same BLOCK_SIZE and num_warps as that kernel, so the
+    reductions round the same way and the gather selects the same outliers."""
+    row_id = tl.program_id(0)
+    k = tl.load(K + row_id)
+    if k < VOCAB_SIZE:
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
+        offs = tl.arange(0, BLOCK_SIZE)
+        mask_n = offs < VOCAB_SIZE
+        logits_blk0 = tl.load(LOGITS_ROW + offs, mask=mask_n, other=-float("inf"))
+        finite_mask = (logits_blk0 > -float("inf")) & mask_n
+        num_finite = tl.sum(finite_mask)
+        finite_logits = tl.where(finite_mask, logits_blk0, 0.0)
+        avg_logit = tl.where(num_finite > 0, tl.sum(finite_logits) / num_finite, 0.0)
+        sq_avg_logit = tl.where(
+            num_finite > 0, tl.sum(finite_logits * finite_logits) / num_finite, 0.0
+        )
+        std_logit = tl.sqrt(tl.maximum(sq_avg_logit - avg_logit * avg_logit, 0.0))
+        percentile = tl.cast(k / VOCAB_SIZE * 200, tl.uint32)
+        percentile = tl.minimum(percentile, 199)
+        sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
+        sigma = sigma + tl.abs(sigma) * -0.15
+        outlier_pivot = avg_logit + std_logit * sigma
+        tl.store(SPLIT_PIVOT + row_id, outlier_pivot)
+
+
+@triton.jit
+def _topk_split_gather_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
+    BUFFER,
+    SPLIT_MAX,
+    SPLIT_MIN,
+    SPLIT_FINITE,
+    SPLIT_OUTLIERS,
+    SPLIT_PIVOT,
+    K,
+    VOCAB_SIZE: tl.constexpr,
+    GATHER_BLOCK: tl.constexpr,
+    NUM_SPLITS: tl.constexpr,
+    SPLIT_LEN: tl.constexpr,
+    BUFFER_ROW_LEN: tl.constexpr,
+):
+    """First top-k pass of one split of one row, as in _topk_topp_kernel:
+    max, finite min and count, and the outliers above the row's block-0
+    Gaussian pivot (_topk_split_pivot_kernel), in vocab order at
+    BUFFER[row, split * SPLIT_LEN]."""
+    row_id = tl.program_id(0)
+    split = tl.program_id(1)
+    k = tl.load(K + row_id)
+    if k < VOCAB_SIZE:
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
+        outlier_pivot = tl.load(SPLIT_PIVOT + row_id)
+        max_logit = -float("inf")
+        min_logit = float("inf")
+        num_finite_total = tl.zeros((), dtype=tl.uint32)
+        num_outliers = tl.zeros((), dtype=tl.uint32)
+        SPLIT_ROW = BUFFER + row_id * BUFFER_ROW_LEN + split * SPLIT_LEN
+        for t in range(0, SPLIT_LEN // GATHER_BLOCK):
+            offs_g = split * SPLIT_LEN + t * GATHER_BLOCK + tl.arange(0, GATHER_BLOCK)
+            mask_g = offs_g < VOCAB_SIZE
+            logits_blk = tl.load(LOGITS_ROW + offs_g, mask=mask_g, other=-float("inf"))
+            max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+            finite_blk_mask = logits_blk > -float("inf")
+            finite_blk = tl.where(finite_blk_mask, logits_blk, float("inf"))
+            min_logit = tl.minimum(min_logit, tl.min(finite_blk))
+            num_finite_total += tl.sum(finite_blk_mask & mask_g)
+            outlier_mask = (logits_blk > outlier_pivot) & mask_g
+            cumulative_pos = tl.cast(
+                tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32
+            )
+            num_outliers += tl.sum(outlier_mask)
+            write_pos = tl.where(outlier_mask, cumulative_pos, -1)
+            tl.store(SPLIT_ROW + write_pos, logits_blk, mask=outlier_mask)
+        stat = row_id * NUM_SPLITS + split
+        tl.store(SPLIT_MAX + stat, max_logit)
+        tl.store(SPLIT_MIN + stat, min_logit)
+        tl.store(SPLIT_FINITE + stat, num_finite_total)
+        tl.store(SPLIT_OUTLIERS + stat, num_outliers)
+
+
+@triton.jit
+def _topk_split_mask_kernel(
+    LOGITS,
+    LOGITS_STRIDE_0,
+    FINAL_PIVOT,
+    NEED_MASK,
+    MASK_VALUE: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+    GATHER_BLOCK: tl.constexpr,
+    SPLIT_LEN: tl.constexpr,
+):
+    """Final mask of one split of a row without ties at its pivot."""
+    row_id = tl.program_id(0)
+    split = tl.program_id(1)
+    if tl.load(NEED_MASK + row_id) != 0:
+        final_pivot = tl.load(FINAL_PIVOT + row_id)
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
+        for t in range(0, SPLIT_LEN // GATHER_BLOCK):
+            offs_g = split * SPLIT_LEN + t * GATHER_BLOCK + tl.arange(0, GATHER_BLOCK)
+            mask_g = offs_g < VOCAB_SIZE
+            logits_blk = tl.load(LOGITS_ROW + offs_g, mask=mask_g, other=-float("inf"))
+            keep = (logits_blk > final_pivot) & mask_g
+            tl.store(
+                LOGITS_ROW + offs_g, tl.where(keep, logits_blk, MASK_VALUE), mask=mask_g
+            )
+
 
 
 def _max_sampler_batch_size(vllm_config: Any) -> int:
@@ -923,7 +1117,13 @@ def _topk_topp(
     p: torch.Tensor | None,
     mask_value: float,
     num_sm: int,
+    split_ws: tuple[torch.Tensor, ...] | None = None,
+    num_splits: int = 0,
+    split_len: int = 0,
+    full_batch_size: int = 0,
 ) -> DispatchSpec:
+    # split_ws: (max, min, finite, outliers, final_pivot, need_mask) of the
+    # split first pass (_apply_topk_split), or None for the one-program path.
     batch_size, vocab_size = logits.shape
     topk_enabled = k is not None
     topp_enabled = p is not None
@@ -943,12 +1143,20 @@ def _topk_topp(
         # per-tile latency bounds kernel latency, and Triton's default of 4
         # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
         # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+    # A chunk of _apply_topk_split follows the whole batch's split top-p rule.
     split_covers_ponly = (
         current_platform.is_cuda_alike()
         and topp_enabled
-        and batch_size <= _SPLIT_MAX_BATCH
+        and (full_batch_size if full_batch_size > 0 else batch_size) <= _SPLIT_MAX_BATCH
     )
+    split_ptrs = split_ws if split_ws is not None else (logits,) * 6
     return (num_programs,), dict(
+        SPLIT_MAX=split_ptrs[0],
+        SPLIT_MIN=split_ptrs[1],
+        SPLIT_FINITE=split_ptrs[2],
+        SPLIT_OUTLIERS=split_ptrs[3],
+        FINAL_PIVOT=split_ptrs[4],
+        NEED_MASK=split_ptrs[5],
         K=k_ptr,
         P=p_ptr,
         BATCH_SIZE=batch_size,
@@ -958,6 +1166,9 @@ def _topk_topp(
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
         SPLIT_COVERS_PONLY=split_covers_ponly,
+        NUM_SPLITS=num_splits,
+        SPLIT_LEN=split_len,
+        BUFFER_ROW_LEN=num_splits * split_len if num_splits > 0 else vocab_size,
         num_warps=num_warps,
     )
 
@@ -1615,6 +1826,67 @@ def _apply_topp_split(
     )
 
 
+_TRITON_TOPK_SPLIT_CACHE: dict[torch.device, tuple[torch.Tensor, ...]] = {}
+
+
+def _apply_topk_split(
+    logits: torch.Tensor,
+    buffer: torch.Tensor,
+    percentile_to_std_table: torch.Tensor,
+    normal_cdf_to_sigma_table: torch.Tensor,
+    k: torch.Tensor,
+    p: torch.Tensor | None,
+    mask_value: float,
+    num_sm: int,
+) -> None:
+    """_topk_topp with its two full-vocab passes split over several programs
+    per row; masks logits in place, bitwise equal to the one-program path.
+    Rows run in chunks of at most num_sm, one row per program, so the
+    per-program buffer of the one-program path holds every split."""
+    batch_size, vocab_size = logits.shape
+    ws = _TRITON_TOPK_SPLIT_CACHE.get(logits.device)
+    if ws is None:
+        n = num_sm * 16
+        ws = (
+            logits.new_empty(n),  # max
+            logits.new_empty(n),  # finite min
+            torch.empty(n, dtype=torch.int32, device=logits.device),  # finite
+            torch.empty(n, dtype=torch.int32, device=logits.device),  # outliers
+            logits.new_empty(num_sm),  # final pivot
+            torch.empty(num_sm, dtype=torch.int32, device=logits.device),  # need mask
+            logits.new_empty(num_sm),  # outlier pivot
+        )
+        _TRITON_TOPK_SPLIT_CACHE[logits.device] = ws
+    for start in range(0, batch_size, num_sm):
+        rows = min(num_sm, batch_size - start)
+        splits, gather_block, split_len = _topk_split_shape(batch_size, vocab_size)
+        chunk = logits[start : start + rows]
+        chunk_k = k[start : start + rows]
+        chunk_p = p[start : start + rows] if p is not None else None
+        _topk_split_pivot_kernel[(rows,)](
+            chunk, chunk.stride(0), ws[6], percentile_to_std_table, chunk_k,
+            VOCAB_SIZE=vocab_size, BLOCK_SIZE=8192, num_warps=8,
+        )
+        _topk_split_gather_kernel[(rows, splits)](
+            chunk, chunk.stride(0), buffer, *ws[:4], ws[6], chunk_k,
+            VOCAB_SIZE=vocab_size, GATHER_BLOCK=gather_block, NUM_SPLITS=splits,
+            SPLIT_LEN=split_len, BUFFER_ROW_LEN=splits * split_len,
+            num_warps=_TOPK_SPLIT_WARPS,
+        )
+        _topk_topp(
+            chunk, buffer, percentile_to_std_table, normal_cdf_to_sigma_table,
+            chunk_k, chunk_p, mask_value, num_sm,
+            split_ws=ws[:6], num_splits=splits, split_len=split_len,
+            full_batch_size=batch_size,
+        )
+        _topk_split_mask_kernel[(rows, splits)](
+            chunk, chunk.stride(0), ws[4], ws[5],
+            MASK_VALUE=mask_value, VOCAB_SIZE=vocab_size,
+            GATHER_BLOCK=gather_block, SPLIT_LEN=split_len,
+            num_warps=_TOPK_SPLIT_WARPS,
+        )
+
+
 def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -1686,13 +1958,25 @@ def apply_top_k_top_p_triton(
         return logits
 
     NUM_PROGRAMS = min(num_sm, batch_size)
+    # Active top-k on CUDA: split the two full-vocab passes over several
+    # programs per row (_apply_topk_split); each buffer row then holds every
+    # split's outliers, which pads it to whole gather tiles per split.
+    use_topk_split = (
+        topk_enabled
+        and logits.device.type == "cuda"
+        and batch_size <= _topk_split_max_rows(vocab_size)
+    )
+    row_len = vocab_size
+    if use_topk_split:
+        splits, _, split_len = _topk_split_shape(batch_size, vocab_size)
+        row_len = splits * split_len
 
     # Cache per-Triton Program buffer on each device.
-    buf_key = (logits.device, logits.dtype, vocab_size)
+    buf_key = (logits.device, logits.dtype, row_len)
     buffer = _TRITON_BUFFER_CACHE.get(buf_key)
     if buffer is None or buffer.shape[0] < NUM_PROGRAMS:
         size = min(next_power_of_2(NUM_PROGRAMS), num_sm)
-        buffer = logits.new_empty((size, vocab_size))
+        buffer = logits.new_empty((size, row_len))
         _TRITON_BUFFER_CACHE[buf_key] = buffer
     if buffer.shape[0] > NUM_PROGRAMS:
         buffer = buffer[:NUM_PROGRAMS]
@@ -1710,16 +1994,28 @@ def apply_top_k_top_p_triton(
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
-    _topk_topp(
-        logits,
-        buffer,
-        percentile_to_std_table,
-        normal_cdf_to_sigma_table,
-        k_ptr if topk_enabled else None,
-        p_ptr if topp_enabled else None,
-        mask_value,
-        num_sm,
-    )
+    if use_topk_split:
+        _apply_topk_split(
+            logits,
+            buffer,
+            percentile_to_std_table,
+            normal_cdf_to_sigma_table,
+            k_ptr,
+            p_ptr if topp_enabled else None,
+            mask_value,
+            num_sm,
+        )
+    else:
+        _topk_topp(
+            logits,
+            buffer,
+            percentile_to_std_table,
+            normal_cdf_to_sigma_table,
+            k_ptr if topk_enabled else None,
+            p_ptr if topp_enabled else None,
+            mask_value,
+            num_sm,
+        )
     if use_split and has_topp_only_rows:
         _apply_topp_split(logits, k_ptr, p_ptr, mask_value, num_sm)
 
@@ -1730,4 +2026,5 @@ def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
+    _TRITON_TOPK_SPLIT_CACHE.clear()
     torch.accelerator.empty_cache()

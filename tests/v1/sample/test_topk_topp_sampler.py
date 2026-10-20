@@ -1209,3 +1209,33 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA split top-k path")
+@pytest.mark.parametrize("batch_size", [1, 7, 64, 129])
+@pytest.mark.parametrize("vocab_size", [128 * 1024, 248320])
+@pytest.mark.parametrize("mode", ["topk", "topk_topp", "mixed", "ties"])
+def test_topk_split_matches_one_program(monkeypatch, batch_size, vocab_size, mode):
+    """The split first pass and final mask (_apply_topk_split) give the same
+    logits, bit for bit, as the one-program kernel."""
+    from vllm.v1.sample.ops import topk_topp_triton as tt
+
+    set_random_seed(0)
+    logits = torch.randn(batch_size, vocab_size, device=DEVICE_TYPE) * 4
+    if mode == "ties":
+        logits = torch.round(logits / 2) / 2
+    logits[1::5, 1000:50000] = float("-inf")
+    rows = torch.arange(batch_size, device=DEVICE_TYPE)
+    if mode == "mixed":
+        k = torch.tensor([1, 20, 1000, vocab_size], device=DEVICE_TYPE)[rows % 4]
+        p = torch.tensor([0.95, 1.0, 0.5, 0.9], device=DEVICE_TYPE)[rows % 4]
+    else:
+        k = torch.full((batch_size,), 20, device=DEVICE_TYPE)
+        p = None if mode == "topk" else torch.full((batch_size,), 0.95, device=DEVICE_TYPE)
+    k = k.to(torch.int32)
+
+    monkeypatch.setattr(tt, "_topk_split_max_rows", lambda vocab: 0)
+    expected = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
+    monkeypatch.setattr(tt, "_topk_split_max_rows", lambda vocab: 1 << 30)
+    actual = tt.apply_top_k_top_p_triton(logits.clone(), k, p)
+    assert torch.equal(actual, expected)
