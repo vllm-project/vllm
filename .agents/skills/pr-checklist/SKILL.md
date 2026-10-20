@@ -135,7 +135,9 @@ For bug fixes, there is no need to include details of the original bug and expla
 
 #### 3.2: Documentation and Examples
 
-Ensure that any new features, changes, or public APIs are properly documented. This includes updating relevant documentation files under `docs/` and providing usage examples where applicable. Refer to `supported_models.md` for new models and `examples/` for usage examples.
+Every user-visible change needs docs in the same PR: new or changed features, CLI arguments, config fields, environment variables, model or hardware support, defaults, deprecations, and removals. Check the diff against [Documenting User-Visible Changes](../../../docs/contributing/README.md#documenting-user-visible-changes), which maps each change type to its page. Docs that exist only in code comments, tests, or the PR description do not count, except where that page is generated from them (environment variable comments, config docstrings, argparse help). Add usage examples under `examples/` where applicable.
+
+Run the fresh-agent check from that section (one user question; web, GitHub, and local checkout searched separately) and report each channel's result in the PR's Validation section. Treat a missing doc, or a channel that cannot find it, as blocking.
 
 #### 3.3: Helper Functions
 

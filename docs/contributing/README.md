@@ -260,8 +260,46 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
-  It helps vLLM users understand and utilize the new features or changes.
+- Document user-visible changes in the same PR; see
+  [Documenting User-Visible Changes](#documenting-user-visible-changes).
+
+### Documenting User-Visible Changes
+
+A PR that changes what users can run, configure, or observe must update the
+rendered docs in the same PR. Code comments, tests, PR descriptions, and release
+notes are not enough on their own: users and their agents search the docs site.
+
+| Change | Document it in |
+| ------ | -------------- |
+| New feature or changed behavior | A page under `docs/features/` or the guide it belongs to, linked from [Features](../features/README.md) and its compatibility matrix |
+| CLI argument or config field | The config field docstring or argparse `help=`, which generate [Engine Arguments](../configuration/engine_args.md) and the [CLI reference](../cli/README.md) |
+| Environment variable | The comment above its `environment_variables` entry, which renders on [Environment Variables](../configuration/env_vars.md) |
+| New model | [Supported Models](../models/supported_models.md) |
+| New hardware or platform support | That hardware's installation page and the feature x hardware matrix |
+| Changed default, deprecation, or removal | The page that documents the item, following the [deprecation policy](deprecation_policy.md) |
+
+Write for a reader who only has a search box:
+
+- Open with what it is, how to turn it on (exact flag, environment variable, or
+  API field), and the default, then show an example. Help text, docstrings, and
+  environment variable comments follow the same rule: purpose, valid values, default.
+- Say when it arrived, e.g. `Available in vLLM vX.Y.0 and later.`, using the
+  next release after the latest one on [GitHub Releases](https://github.com/vllm-project/vllm/releases).
+- Use the exact strings users search for (flag, environment variable, config
+  key, model ID, error message) and a page or section title that names the feature.
+- Make it reachable: link the page from its overview or index page and from related
+  pages, and confirm it shows up in the navigation of the docs preview.
+- Name the flag or feature in the PR title, and list the changed doc pages with
+  their Read the Docs preview links in the PR description.
+
+Then check that it can be found. Give a fresh agent with no context one question a
+user would ask (e.g. "What does `VLLM_FOO` do and what is its default?" or "What
+did vLLM add recently for X, and how do I enable it?") and let it search one
+channel at a time: web search only, GitHub only, then a local checkout only. Each
+run should quote your docs and give the right answer. Before merge, the web
+channel uses the docs preview and the GitHub channel reads the PR branch, because
+GitHub code search covers only `main`. If a channel fails, fix the wording,
+placement, or links, not the question.
 
 ### Adding or Changing Kernels
 
