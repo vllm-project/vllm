@@ -3,7 +3,7 @@
 """DiffusionGemma model, ModelState, and Sampler for vLLM.
 
 Single Gemma4 backbone run in two modes (like YOCO):
-- encoder mode: causal attention, writes KV cache
+- encoder mode: causal attention with bidirectional image blocks, writes KV cache
 - decoder mode: bidirectional attention, reads encoder KV, doesn't write
 
 Same weights, same layers. The only decoder-unique component is a
@@ -59,6 +59,8 @@ from vllm.model_executor.models.utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -179,6 +181,12 @@ class DiffusionGemmaForConditionalGeneration(
         text_config = vllm_config.model_config.hf_text_config
         self.config = config
         self.model_dtype = vllm_config.model_config.dtype
+        self._full_attn_layer_idxs = frozenset(
+            i
+            for i, layer_type in enumerate(text_config.layer_types)
+            if text_config.use_bidirectional_attention == "vision"
+            and layer_type != "sliding_attention"
+        )
 
         # DiffusionGemma's full-attention layers have NO v_proj — V is
         # computed from k_proj's output (`value_states = key_states` before
@@ -289,6 +297,9 @@ class DiffusionGemmaForConditionalGeneration(
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
+    _clear_mm_prefix_for_full_attn_layers = (
+        Gemma4ForConditionalGeneration._clear_mm_prefix_for_full_attn_layers
+    )
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
@@ -312,6 +323,7 @@ class DiffusionGemmaForConditionalGeneration(
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        self._clear_mm_prefix_for_full_attn_layers()
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -908,6 +920,12 @@ class DiffusionGemmaModelState(ModelState):
     def get_supported_generation_tasks(self):
         return ("generate",)
 
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        # Image prefill ranges are built per batch, outside CUDA graphs.
+        if self.supports_mm_inputs and self.model_config.is_mm_prefix_lm:
+            return AttentionCGSupport.UNIFORM_BATCH, "DiffusionGemma image prefill"
+        return super().get_additional_cg_support()
+
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
         diffusion_config = self.vllm_config.diffusion_config
         gen = self.gen_config
@@ -1085,7 +1103,9 @@ class DiffusionGemmaModelState(ModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
 
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        query_start_loc_cpu = torch.from_numpy(
+            input_batch.query_start_loc_np[: num_reqs + 1]
+        )
         max_query_len = input_batch.num_scheduled_tokens.max().item()
 
         # Per-request causal mode: encoder (commit) = causal,
@@ -1095,7 +1115,7 @@ class DiffusionGemmaModelState(ModelState):
         slots = input_batch.idx_mapping[:actual_num_reqs]
         # Invariant: the sampler flips is_encoder_phase to False only after a
         # request's FINAL prompt chunk, so a prompt spanning multiple chunks
-        # (longer than the token budget) stays causal for every chunk.
+        # (longer than the token budget) stays in encoder mode for every chunk.
         self._causal_buf[:actual_num_reqs].copy_(
             self.diffusion_states.is_encoder_phase[slots]
         )
@@ -1103,11 +1123,25 @@ class DiffusionGemmaModelState(ModelState):
             self._causal_buf[actual_num_reqs:num_reqs] = 0
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
+        req_doc_ranges = None
+        if (
+            self.supports_mm_inputs
+            and self.encoder_cache is not None
+            and self.model_config.is_mm_prefix_lm
+        ):
+            req_doc_ranges = compute_mm_prefix_ranges(
+                [
+                    self.encoder_cache.mm_features.get(req_id, ())
+                    for req_id in input_batch.req_ids
+                ],
+                sliding_window=self.model_config.get_sliding_window(),
+            )
+
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_gpu=input_batch.query_start_loc[: num_reqs + 1],
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
@@ -1116,6 +1150,8 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            mm_req_doc_ranges=req_doc_ranges,
         )
 
     num_new_sampled_tokens_per_step: int = 0

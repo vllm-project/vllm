@@ -1325,8 +1325,7 @@ class FlashAttentionImpl(AttentionImpl):
             mm_aux = None
             if (
                 mm_prefix_query_ranges is not None
-                and not is_dynamic_causal
-                and causal is True
+                and (is_dynamic_causal or causal is True)
                 and self.vllm_flash_attn_version == 4
             ):
                 # Triton convention: 1 + window_size[0]. Global layers store
@@ -1349,8 +1348,11 @@ class FlashAttentionImpl(AttentionImpl):
                 mm_mask_mod = _make_mm_prefix_mask_mod(
                     sliding_window=mm_clamp_sw,
                     sliding_window_left=sw_val,
+                    dynamic_causal=is_dynamic_causal,
                 )
                 mm_aux = [mm_prefix_query_ranges, attn_metadata.query_start_loc]
+                if isinstance(causal, torch.Tensor):
+                    mm_aux.append(causal)
                 # mm_prefix is (causal ∧ window) ∨ bidirectional-range —
                 # not ⊆ causal. FA #155 stopped auto-clearing causal/local
                 # when mask_mod is set, so the caller must disable them or
@@ -1716,11 +1718,12 @@ class FlashAttentionImpl(AttentionImpl):
 def _make_mm_prefix_mask_mod(
     sliding_window: int = 0,
     sliding_window_left: int | None = None,
+    dynamic_causal: bool = False,
 ):
     """Build a CuTE-DSL mask_mod implementing
     ``(causal AND sliding_window) OR mm_prefix``.
 
-    Cached so identical ``(sliding_window, sliding_window_left)`` reuse the
+    Cached so identical window and causal settings reuse the
     same function object. FA4's ``hash_callable`` mixes ``repr()`` of closure
     cells into the compile key; the nested ``_load_q_range`` would otherwise
     get a new address each call and force a full JIT recompile every forward.
@@ -1746,6 +1749,9 @@ def _make_mm_prefix_mask_mod(
     term (None = full causal, no window).  ``sliding_window`` clamps the
     bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
     layers via ``mm_prefix_clamp_sliding_window``).
+
+    With ``dynamic_causal``, ``aux_tensors[2]`` supplies per-request causal
+    flags. Non-causal rows retain full or symmetric-window attention.
     """
     import cutlass
     import cutlass.cute as cute
@@ -1796,6 +1802,11 @@ def _make_mm_prefix_mask_mod(
             if sliding_window > 0:
                 mm = mm & ((q_abs - kv_idx) < sw)
             keep = keep | mm
+            if cutlass.const_expr(dynamic_causal):
+                is_causal = aux_tensors[2][batch_idx[0]] != Int32(0)
+                keep = keep | (
+                    ~is_causal & ((q_abs - kv_idx) < sw) & ((kv_idx - q_abs) < sw)
+                )
             return keep
 
     else:
@@ -1814,6 +1825,9 @@ def _make_mm_prefix_mask_mod(
             keep = kv_idx <= q_abs
             r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
             keep = keep | ((kv_idx >= r_start) & (kv_idx <= r_end))
+            if cutlass.const_expr(dynamic_causal):
+                is_causal = aux_tensors[2][batch_idx[0]] != Int32(0)
+                keep = keep | ~is_causal
             return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True

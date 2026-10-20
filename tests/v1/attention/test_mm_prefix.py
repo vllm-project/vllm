@@ -15,6 +15,8 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 import torch
@@ -56,7 +58,6 @@ if _fa4_available():
     from vllm.config import set_current_vllm_config
     from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
     from vllm.v1.attention.backends.flash_attn import (
-        FlashAttentionImpl,
         FlashAttentionMetadataBuilder,
         _make_mm_prefix_mask_mod,
     )
@@ -211,6 +212,7 @@ def _dense_reference(
     sliding_window_left,
     scale,
     mm_clamp_sw=0,
+    causal_flags=None,
 ):
     """Dense float32 ``(causal AND window) OR mm_prefix`` per request.
 
@@ -230,6 +232,11 @@ def _dense_reference(
         keep = delta >= 0
         if sliding_window_left is not None:
             keep &= delta < sliding_window_left
+
+        if causal_flags is not None and not causal_flags[req_idx]:
+            keep = torch.ones_like(keep)
+            if sliding_window_left is not None:
+                keep &= delta.abs() < sliding_window_left
 
         for start, end in mm_ranges.get(req_idx, []):
             if start >= end:
@@ -496,6 +503,8 @@ def test_decode_only_batch_reports_no_ranges():
 
 
 @requires_fa4
+@pytest.mark.parametrize("mixed_causal", [False, True])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "TRITON_ATTN"])
 @pytest.mark.parametrize(
     "head_size",
     [
@@ -503,18 +512,18 @@ def test_decode_only_batch_reports_no_ranges():
         # paged KV + seqused_k works on B200 and H100. Non-paged mm_prefix
         # cases in this file already use HEAD_SIZE=128.
         pytest.param(128, id="hd128"),
+        pytest.param(256, id="local_256"),
         # 512: Gemma4 global head dim; FA4 resolves on H100, skips on
         # Blackwell (TMEM).
         pytest.param(512, id="global_512"),
     ],
 )
-def test_mm_prefix_kv_cache_path(head_size: int):
+def test_mm_prefix_kv_cache_path(head_size: int, mixed_causal: bool, backend: str):
     """FA4 + mask_mod + block_table matches a dense reference.
 
-    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported) and
-    512 on H100 only (Blackwell FA4 rejects 512 via TMEM). Avoid 256: SM100's
-    dedicated hd256 2CTA kernel asserts away ``seqused_k``, which paged KV
-    requires.
+    Use head_size=128 on B200/H100 (FA4 + paged/`seqused_k` supported), plus
+    DiffusionGemma's local 256 and global 512 dimensions where FA4 supports
+    them. Unsupported device/head-size combinations skip below.
 
     Tensors, kv_cache_spec, and FlashAttentionImpl must all use the same
     ``head_size`` — ``run_attention_backend`` / ``create_standard_kv_cache_spec``
@@ -547,8 +556,9 @@ def test_mm_prefix_kv_cache_path(head_size: int):
     num_kv_heads = mc.get_num_kv_heads(vllm_config.parallel_config)
     scale = head_size**-0.5
 
-    batch = BatchSpec(
-        seq_lens=PAGED_SEQ_LENS, query_lens=PAGED_QUERY_LENS, name="mm_prefix_mixed"
+    query_lens = [96, 16, 1, 32] if mixed_causal else PAGED_QUERY_LENS
+    batch_spec = BatchSpec(
+        seq_lens=PAGED_SEQ_LENS, query_lens=query_lens, name="mm_prefix_mixed"
     )
     kv_cache_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -558,11 +568,14 @@ def test_mm_prefix_kv_cache_path(head_size: int):
         sliding_window=SLIDING_WINDOW,
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
     common.mm_req_doc_ranges = PAGED_MM_RANGES
+    causal_flags = [True, False, True, False] if mixed_causal else None
+    if causal_flags is not None:
+        common.causal = torch.tensor(causal_flags, dtype=torch.int32, device=DEVICE)
 
     qs, new_ks, new_vs, k_fulls, v_fulls, k_ctxs, v_ctxs = [], [], [], [], [], [], []
-    for q_len, s_len in zip(PAGED_QUERY_LENS, PAGED_SEQ_LENS):
+    for q_len, s_len in zip(query_lens, PAGED_SEQ_LENS):
         ctx = s_len - q_len
         shape = (num_kv_heads, head_size)
         qs.append(torch.randn(q_len, num_heads, head_size, dtype=DTYPE, device=DEVICE))
@@ -597,14 +610,83 @@ def test_mm_prefix_kv_cache_path(head_size: int):
 
     layer_names = ["model.layers.0.self_attn.attn"]
     with set_current_vllm_config(vllm_config):
-        builder = FlashAttentionMetadataBuilder(
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+        backend_cls = (
+            FlashAttentionBackend if backend == "FLASH_ATTN" else TritonAttentionBackend
+        )
+        builder = backend_cls.get_builder_cls()(
             kv_cache_spec, layer_names, vllm_config, DEVICE
         )
         attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+        if mixed_causal:
+            from vllm.config.compilation import CUDAGraphMode
+            from vllm.model_executor.models.diffusion_gemma import (
+                DiffusionGemmaForConditionalGeneration,
+                DiffusionGemmaModelState,
+                DiffusionGemmaRequestStates,
+            )
+            from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+            from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+            from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+            from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+            from vllm.v1.worker.utils import AttentionGroup
+
+            state = DiffusionGemmaModelState.__new__(DiffusionGemmaModelState)
+            state.model_config = mc
+            state.supports_mm_inputs = True
+            state.encoder_cache = EncoderCache()
+            state.diffusion_states = DiffusionGemmaRequestStates(
+                4, 32, 64, 2, DEVICE, hidden_size=4, stability_threshold=2
+            )
+            state.diffusion_states.is_encoder_phase.copy_(common.causal)
+            state._causal_buf = torch.empty_like(common.causal)
+            batch = InputBatch.make_dummy(
+                4, sum(query_lens), InputBuffers(4, sum(query_lens), DEVICE)
+            )
+            batch.num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+            batch.query_start_loc = common.query_start_loc
+            batch.query_start_loc_np = np.pad(
+                common.query_start_loc_cpu.numpy(), (0, 2), constant_values=8193
+            )
+            batch.seq_lens = common.seq_lens
+            batch.seq_lens_cpu_upper_bound = common.seq_lens_cpu_upper_bound
+            for i, req_id in enumerate(batch.req_ids):
+                state.encoder_cache.add_request(
+                    req_id,
+                    [
+                        MultiModalFeatureSpec(
+                            None,
+                            "image",
+                            f"{i}-{start}",
+                            PlaceholderRange(start, end - start + 1),
+                        )
+                        for start, end in PAGED_MM_RANGES[i]
+                    ],
+                )
+            group = AttentionGroup(
+                backend_cls,
+                layer_names,
+                kv_cache_spec,
+                0,
+                metadata_builders=[builder],
+            )
+            cache_config = KVCacheConfig(
+                2048, [], [KVCacheGroupSpec(layer_names, kv_cache_spec)]
+            )
+            attn_metadata = state.prepare_attn(
+                batch,
+                CUDAGraphMode.NONE,
+                (common.block_table_tensor,),
+                common.slot_mapping.unsqueeze(0),
+                [[group]],
+                cache_config,
+            )[layer_names[0]]
         # head_size=128 keeps FA4 under local attention on Blackwell (the
         # FA4→FA2 demotion is only for local+256). Window is still encoded in
         # mask_mod at forward; FA's built-in window is cleared there.
-        impl = FlashAttentionImpl(
+        impl = backend_cls.get_impl_cls()(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -613,10 +695,11 @@ def test_mm_prefix_kv_cache_path(head_size: int):
             sliding_window=SLIDING_WINDOW,
             kv_cache_dtype="auto",
         )
-        assert impl.vllm_flash_attn_version == 4, (
-            f"expected FA4, got FA{impl.vllm_flash_attn_version} for "
-            f"head_size={head_size}"
-        )
+        if backend == "FLASH_ATTN":
+            from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+            assert isinstance(impl, FlashAttentionImpl)
+            assert impl.vllm_flash_attn_version == 4
         assert impl.head_size == head_size == kv_cache_spec.head_size
 
         mock_layer = MockAttentionLayer(DEVICE)
@@ -628,16 +711,111 @@ def test_mm_prefix_kv_cache_path(head_size: int):
             mock_layer, query, key, value, kv_cache, attn_metadata, output=output
         )
 
-    ref_args = (query, k_fulls, v_fulls, PAGED_QUERY_LENS, PAGED_SEQ_LENS)
-    expected = _dense_reference(*ref_args, PAGED_MM_RANGES, SLIDING_WINDOW, scale)
+    ref_args = (query, k_fulls, v_fulls, query_lens, PAGED_SEQ_LENS)
+    expected = _dense_reference(
+        *ref_args, PAGED_MM_RANGES, SLIDING_WINDOW, scale, causal_flags=causal_flags
+    )
     torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
 
     # Without this the assertion above would also pass if the mask_mod were
     # silently dropped, since the batch would then be plain causal + window.
-    causal_only = _dense_reference(*ref_args, {}, SLIDING_WINDOW, scale)
+    causal_only = _dense_reference(
+        *ref_args, {}, SLIDING_WINDOW, scale, causal_flags=causal_flags
+    )
     assert not torch.allclose(expected, causal_only, atol=2e-2, rtol=2e-2), (
         "test batch does not actually exercise the mm_prefix branch"
     )
+
+    if mixed_causal:
+        from copy import copy
+
+        from vllm.forward_context import get_forward_context, set_forward_context
+
+        full_name = "model.layers.1.self_attn.attn"
+        full_metadata = copy(attn_metadata)
+        with set_current_vllm_config(vllm_config):
+            full_impl = backend_cls.get_impl_cls()(
+                num_heads=num_heads,
+                head_size=head_size,
+                scale=scale,
+                num_kv_heads=num_kv_heads,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="auto",
+            )
+
+            class Backbone(torch.nn.Module):
+                def forward(self, **kwargs):
+                    metadata = get_forward_context().attn_metadata
+                    assert isinstance(metadata, dict)
+                    return full_impl.forward(
+                        mock_layer,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        metadata[full_name],
+                        output=output,
+                    )
+
+            model = cast(Any, DiffusionGemmaForConditionalGeneration).__new__(
+                DiffusionGemmaForConditionalGeneration
+            )
+            torch.nn.Module.__init__(model)
+            model.model = Backbone()
+            model._full_attn_layer_idxs = frozenset({1})
+            with set_forward_context(
+                {layer_names[0]: attn_metadata, full_name: full_metadata}, vllm_config
+            ):
+                actual_full = model(input_ids=None, positions=None, inputs_embeds=query)
+            expected_full = _dense_reference(
+                *ref_args, {}, None, scale, causal_flags=causal_flags
+            )
+            torch.testing.assert_close(
+                actual_full.float(), expected_full, atol=2e-2, rtol=2e-2
+            )
+            assert any(
+                getattr(attn_metadata, field, None) is not None
+                for field in ("mm_prefix_query_range_tensor", "mm_prefix_range_tensor")
+            )
+        for req_id in batch.req_ids:
+            state.encoder_cache.remove_request(req_id)
+        metadata = state.prepare_attn(
+            batch,
+            CUDAGraphMode.NONE,
+            (common.block_table_tensor,),
+            common.slot_mapping.unsqueeze(0),
+            [[group]],
+            cache_config,
+        )[layer_names[0]]
+        assert getattr(metadata, "mm_prefix_query_range_tensor", None) is None
+        assert getattr(metadata, "mm_prefix_range_tensor", None) is None
+        with set_current_vllm_config(vllm_config):
+            impl.forward(
+                mock_layer, query, key, value, kv_cache, metadata, output=output
+            )
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                impl.forward(
+                    mock_layer, query, key, value, kv_cache, metadata, output=output
+                )
+            graph.replay()
+            torch.testing.assert_close(
+                output.float(), causal_only, atol=2e-2, rtol=2e-2
+            )
+            state.diffusion_states.is_encoder_phase.fill_(True)
+            state.prepare_attn(
+                batch,
+                CUDAGraphMode.NONE,
+                (common.block_table_tensor,),
+                common.slot_mapping.unsqueeze(0),
+                [[group]],
+                cache_config,
+            )
+            graph.replay()
+            all_causal = _dense_reference(*ref_args, {}, SLIDING_WINDOW, scale)
+            assert not torch.allclose(causal_only, all_causal, atol=2e-2, rtol=2e-2)
+            torch.testing.assert_close(output.float(), all_causal, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")
