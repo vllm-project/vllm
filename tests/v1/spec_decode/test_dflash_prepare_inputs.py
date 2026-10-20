@@ -153,29 +153,32 @@ def _run_prepare(
 
 
 def test_prepare_dflash_inputs_pads_the_unused_buffer_tail():
-    """The padding launch is exercised through the real `propose()` path.
+    """The padding path is exercised through the real `propose()` path.
 
-    `_pad_dflash_buffers_kernel` fills the tail of each draft input buffer so
-    a CUDA-graph replay at a larger captured size reads padding rather than
+    `_prepare_dflash_inputs_kernel` fills the tail of each draft input buffer
+    so a CUDA-graph replay at a larger captured size reads padding rather than
     stale values. Asserting that through `_run_prepare` -- rather than against
-    a local copy of the launch arithmetic -- is the point: `pad_span`, the
-    grid and `PAD_BLOCK_SIZE` are production code, and a test that re-derives
-    them passes no matter how they regress.
+    a local copy of the loop arithmetic -- is the point: `pad_span` and
+    `PAD_BLOCK_SIZE` are production code, and a test that re-derives them
+    passes no matter how they regress.
 
-    Shape here is num_reqs=1, num_query_per_req=num_speculative_steps=3,
-    max_num_reqs=4, max_num_tokens=4096, so last_query_end=3 and
-    pad_span=4093. That matters: PAD_BLOCK_SIZE caps at 1024, so the launch
-    is a FOUR-program grid and `tl.program_id(0)` takes four distinct values.
+    THE SHAPE IS CHOSEN TO MAKE THE PAD LOOP ITERATE. Here num_reqs=1,
+    num_query_per_req=num_speculative_steps=3, max_num_reqs=4 and
+    max_num_tokens=4096, so last_query_end=3 and pad_span=4093. PAD_BLOCK_SIZE
+    caps at 1024, so the query-tail loop runs FOUR times.
 
-    At the 16-token shape this test used to run, pad_span was 13 and
-    PAD_BLOCK_SIZE was next_power_of_2(13)=16, so the grid was a single
-    program and `program_id(0)` was always 0. `offs = program_id(0)*BLOCK +
-    arange(0, BLOCK)` is then indistinguishable from `offs = arange(0,
-    BLOCK)`, and a regression that dropped the program offset would leave
-    every slot past the first block stale -- in production
-    (max_num_tokens=16384, a 16-program grid) that is
-    query_slot_mapping[1024:] holding real slot IDs from the target's
-    previous step, which is exactly what this padding exists to prevent.
+    At the 16-token shape this test first used, pad_span was 13 and
+    PAD_BLOCK_SIZE was next_power_of_2(13)=16 -- a single iteration, where the
+    loop's stride is never exercised. A regression that advanced `i` wrongly
+    would leave everything past the first block stale, and in production
+    (max_num_tokens=16384, sixteen iterations) that is
+    query_slot_mapping[1024:] holding real slot IDs from the target's previous
+    step, which is exactly what this padding exists to prevent.
+
+    PAD_BLOCK_SIZE is deliberately NOT the main kernel's BLOCK_SIZE. That one
+    is min(256, next_pow2(max_tokens_per_req)) -- k+1 at decode, so 8 at spec
+    7 -- and walking a 16384-token span 8 elements at a time is 2048 serial
+    iterations in one program, which is where the original ~38 us/step went.
 
     `_run_prepare` pre-fills every buffer with a sentinel (-1 / -2), so an
     unwritten tail shows up as the sentinel rather than as a plausible zero.
