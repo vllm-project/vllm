@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -10,6 +9,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -41,7 +41,8 @@ def test_failed_receive_completion_honors_failure_policy(policy):
     scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
     request = create_request(num_tokens=3 * scheduler.block_size)
     scheduler.add_request(request)
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = [
         (2 * scheduler.block_size, True),
         (0, False),
@@ -102,7 +103,8 @@ def test_async_load_failure(
         request3.request_id: num_external_computed_tokens,
     }
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )
@@ -179,7 +181,7 @@ def test_sync_load_failure(
         request3.request_id: num_external_computed_tokens,
     }
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=False)
     )
@@ -260,7 +262,7 @@ def test_sync_load_failure_with_shared_blocks(
         request1.request_id: num_external_computed_tokens,
     }
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=False)
     )
@@ -331,7 +333,8 @@ def test_async_progressive_load_failure(
         request.request_id: num_external_computed_tokens,
     }
 
-    scheduler.connector = Mock()
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )

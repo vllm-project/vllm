@@ -8,8 +8,13 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 
 _OPT_KV_LORA_RANK = 512
@@ -18,8 +23,8 @@ _OPT_MIN_SIZE = 2048
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
-    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm fusion and a fused
-    decode Q-prep path."""
+    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
+    fusions and a fused decode Q-prep path."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -45,9 +50,25 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if attn.hisparse_cache is not None or attn.q_pad_num_heads is not None:
             return False
         # Only the W_UK variants reproduced in _fused_decode are supported.
-        return attn.is_aiter_triton_fp4_bmm_enabled or (
-            not attn.is_aiter_triton_fp8_bmm_enabled and attn.W_UK_T is not None
+        return (
+            attn.is_aiter_triton_fp4_bmm_enabled
+            or not attn.is_aiter_triton_fp8_bmm_enabled
         )
+
+    def get_input_quant_key(self) -> QuantKey | None:
+        if self.indexer is not None:
+            return None
+        consumers = (
+            [self.fused_qkv_a_proj]
+            if self.q_lora_rank is not None
+            else [self.kv_a_proj_with_mqa, self.q_proj]
+        )
+        if self.g_proj is not None:
+            consumers.append(self.g_proj)
+        if any(layer is None for layer in consumers):
+            return None
+        keys = [get_input_quant_key(layer) for layer in consumers if layer is not None]
+        return keys[0] if all(key == keys[0] for key in keys) else None
 
     def _normalize_q_kv(
         self,
@@ -173,10 +194,15 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
+        num_tokens = (
+            hidden_states.orig_shape[0]
+            if isinstance(hidden_states, QuantizedActivation)
+            else hidden_states.shape[0]
+        )
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -238,7 +264,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.dcp_q_replicate:
             q_dcp_replicated, q = q, q_proj_layer._local_view(q)
 
-        output_shape = (hidden_states.shape[0], self.num_heads * self.v_head_dim)
+        output_shape = (num_tokens, self.num_heads * self.v_head_dim)
 
         # The fused decode path covers only the MQA slice, so it is taken for
         # decode-only batches; anything else falls through to MLAAttention.
@@ -277,6 +303,12 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            gate = self.g_proj(hidden_states)[0]
+            if rocm_aiter_ops.is_enabled():
+                from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
+
+                attn_out = fused_sigmoid_mul(attn_out, gate)
+            else:
+                attn_out = attn_out * gate.sigmoid()
 
         return self.o_proj(attn_out)[0]
