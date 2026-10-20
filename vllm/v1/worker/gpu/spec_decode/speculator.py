@@ -71,6 +71,15 @@ class BaseSpeculator(ABC):
     def capture(self) -> None:
         pass
 
+    def set_lora_manager(self, lora_manager: Any) -> None:
+        """Receive the runner's LoRA manager once the model is loaded.
+
+        A speculator that drafts through its own adapter installs that
+        adapter's mapping around its draft pass; the target pass keeps the
+        runner's per-request mapping. Most speculators ignore this.
+        """
+        return
+
     @abstractmethod
     def propose(
         self,

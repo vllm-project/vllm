@@ -84,5 +84,9 @@ def init_speculator(
         )
 
         return NgramGPUSpeculator(vllm_config, device, req_states)
+    elif speculative_config.method == "uno":
+        from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+        return UnoSpeculator(vllm_config, device)
     else:
         raise NotImplementedError(f"{speculative_config.method} is not supported yet.")

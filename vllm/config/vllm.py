@@ -629,6 +629,10 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
+        if speculative_config.use_uno():
+            # After verification, the next draft writes one seed and K-1
+            # noisy rows beyond the target's scheduled query rows.
+            return self.num_speculative_tokens
         dspark_fill_in = speculative_config.use_dspark() and not getattr(
             speculative_config.draft_model_config.hf_config, "sample_from_anchor", True
         )
@@ -1638,10 +1642,11 @@ class VllmConfig:
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
                     and self.speculative_config.method != "dflash"
+                    and self.speculative_config.method != "uno"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash "
+                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark/DFlash/Uno "
                         "kind of speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -1672,6 +1677,7 @@ class VllmConfig:
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
                 and self.speculative_config.method != "dflash"
+                and self.speculative_config.method != "uno"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -3035,7 +3041,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "uno")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -3072,6 +3078,8 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
+            if self.speculative_config.method == "uno":
+                unsupported.append("Uno speculative decoding")
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:

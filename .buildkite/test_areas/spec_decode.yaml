@@ -246,6 +246,36 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Uno"
+  key: spec-decode-uno
+  # The 7-case greedy matrix took 2,206 s on an RTX 3090 (sm_86); not yet
+  # timed on H200 MIG. The suite skips off CUDA, so there is no AMD mirror.
+  timeout_in_minutes: 60
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    # The matrix measures the plain engine's own reproducibility before
+    # judging Uno against it: exact-token equality is no instrument on a card
+    # that does not reproduce itself. VLLM_UNO_GREEDY_CONTROL_ENGINES=2 adds a
+    # separate plain engine to every case (about +50 %).
+    - pytest -v -s v1/e2e/spec_decode/test_uno.py -k "greedy_matches_base_model and not max_model_len"
+
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Uno Nightly"
+  key: spec-decode-uno-nightly
+  # This command took 939 s on an RTX 3090 (edge alone: 363 s).
+  timeout_in_minutes: 30
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_uno.py -k "max_model_len or survivor or prebuilt"
+
 - label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
   key: spec-decode-speculators-mtp-nightly-b200
   automatic_shard: true
