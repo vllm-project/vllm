@@ -443,6 +443,13 @@ for backend in BACKENDS_TO_TEST:
 torch.manual_seed(42)
 
 
+@pytest.fixture(autouse=True)
+def _reseed_each_test():
+    # Inputs must not depend on which tests ran earlier in the process: CI
+    # shards this file, so the preceding tests differ per shard.
+    torch.manual_seed(42)
+
+
 def _convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
     if isinstance(dtype, str):
@@ -1723,7 +1730,10 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
-    if hf_config_override and current_platform.is_xpu():
+    # model_arch_config is resolved before the override reaches it, so the
+    # backends would otherwise see the full model's heads at every TP size.
+    # Not yet on CUDA, whose backends have head-count limits of their own.
+    if hf_config_override and (current_platform.is_xpu() or current_platform.is_rocm()):
         vllm_config.model_config.model_arch_config.total_num_attention_heads = (
             hf_config_override["num_attention_heads"]
         )

@@ -194,6 +194,98 @@ def _aiter_mla_native_h24_supported() -> bool:
     )
 
 
+@functools.cache
+def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) -> bool:
+    """Whether AITER's FP8 persistent MLA decode leaves V unscaled at a shape.
+
+    gfx942's (gqa 16, qseqlen 4) FP8 kernel applies kv_scale to the scores but
+    not to V, so its output is short by exactly kv_scale. Measured on a tiny
+    causal block with kv_scale 2 rather than assumed per arch, so a fixed
+    AITER build turns the correction off by itself.
+    """
+    try:
+        from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
+        from aiter.mla import mla_decode_fwd
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        gen = torch.Generator(device=device).manual_seed(0)
+        kv_len, head_dim, kv_lora_rank, scale = 64, 576, 512, 576**-0.5
+        q_dtype = dtypes.fp8 if q_fp8 else dtypes.bf16
+        q = torch.randn(qlen, num_heads, head_dim, device=device, generator=gen)
+        q = (q * 0.5).to(q_dtype)
+        kv = torch.randn(kv_len, head_dim, device=device, generator=gen)
+        kv = (kv * 0.5).to(dtypes.fp8)
+        qo_indptr = torch.tensor([0, qlen], dtype=torch.int32, device=device)
+        kv_indptr = torch.tensor([0, kv_len], dtype=torch.int32, device=device)
+        kv_indices = torch.arange(kv_len, dtype=torch.int32, device=device)
+        last_page_len = torch.ones(1, dtype=torch.int32, device=device)
+        work = [
+            torch.empty(size, dtype=dtype, device=device)
+            for size, dtype in get_mla_metadata_info_v1(
+                1, qlen, num_heads, q_dtype, dtypes.fp8, is_sparse=False, fast_mode=True
+            )
+        ]
+        get_mla_metadata_v1(
+            qo_indptr,
+            kv_indptr,
+            last_page_len,
+            num_heads,
+            1,
+            True,
+            work[0],
+            work[2],
+            work[1],
+            work[3],
+            work[4],
+            work[5],
+            page_size=1,
+            kv_granularity=16,
+            max_seqlen_qo=qlen,
+            uni_seqlen_qo=qlen,
+            fast_mode=True,
+            dtype_q=q_dtype,
+            dtype_kv=dtypes.fp8,
+        )
+        out = torch.empty(
+            qlen, num_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+        )
+        one = torch.ones(1, dtype=torch.float32, device=device)
+        mla_decode_fwd(
+            q,
+            kv.view(-1, 1, 1, head_dim),
+            out,
+            qo_indptr,
+            kv_indptr,
+            kv_indices,
+            last_page_len,
+            qlen,
+            sm_scale=scale,
+            logit_cap=0.0,
+            q_scale=one,
+            kv_scale=one * 2,
+            causal=True,
+            work_meta_data=work[0],
+            work_indptr=work[1],
+            work_info_set=work[2],
+            reduce_indptr=work[3],
+            reduce_final_map=work[4],
+            reduce_partial_map=work[5],
+        )
+        k = kv.float() * 2
+        scores = torch.einsum("qhd,kd->qhk", q.float(), k) * scale
+        visible = torch.arange(kv_len, device=device)[None, :] <= (
+            torch.arange(qlen, device=device)[:, None] + kv_len - qlen
+        )
+        scores = scores.masked_fill(~visible[:, None, :], float("-inf"))
+        ref = torch.einsum("qhk,kd->qhd", scores.softmax(-1), k[:, :kv_lora_rank])
+        err_scaled = (out.float() - ref).abs().max().item()
+        err_unscaled = (out.float() - ref / 2).abs().max().item()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("AITER FP8 MLA V-scale probe failed: %s", exc)
+        return False
+    return err_unscaled < 0.05 < err_scaled
+
+
 def _aiter_mla_non_causal_asm_kernels() -> bool:
     """Whether this arch ships non-causal MLA decode ASM kernels.
 
@@ -732,6 +824,9 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # Real per-request KV lengths for varlen verify; ``seq_lens`` then holds
     # the padded kernel lengths.
     triton_verify_real_seq_lens: torch.Tensor | None = None
+    # The FP8 asm kernel for this batch leaves V unscaled
+    # (_aiter_fp8_mla_decode_drops_v_scale); scale the output by k_scale.
+    fp8_v_scale_fix: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
     varlen_q_rows: torch.Tensor | None = None
@@ -1197,6 +1292,23 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 dcp_local_max_seq_len,
                 self.mla_dims.kv_lora_rank,
                 current_platform.num_compute_units(),
+            )
+
+        # FP8 verify lengths whose asm kernel leaves V unscaled; the impl
+        # multiplies the output by k_scale for those batches.
+        self._fp8_v_scale_fix_qlens: frozenset[int] = frozenset()
+        if (
+            is_quantized_kv_cache(self._kv_cache_dtype_str)
+            and self.dcp_world_size == 1
+            and self._mtp_decode_qlen > 1
+        ):
+            heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
+            self._fp8_v_scale_fix_qlens = frozenset(
+                qlen
+                for qlen in range(2, min(self._mtp_decode_qlen, 4) + 1)
+                if _aiter_fp8_mla_decode_drops_v_scale(
+                    heads, qlen, self._kv_cache_dtype_str == "fp8"
+                )
             )
 
         # Verify blocks past qlen 4 that no asm kernel serves correctly take
@@ -1973,6 +2085,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_decode=use_gluon_decode,
             use_gluon_verify=use_gluon_verify,
             triton_verify_num_kv_splits=triton_verify_num_kv_splits,
+            fp8_v_scale_fix=(
+                has_persistent_metadata
+                and self.dcp_world_size == 1
+                and int(max_qo_len) in self._fp8_v_scale_fix_qlens
+            ),
             triton_verify_real_seq_lens=(
                 seq_lens_device if use_triton_verify and varlen_decode else None
             ),
@@ -3212,6 +3329,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 causal=attn_metadata.causal,
                 **mla_kwargs,
             )
+            if decode.fp8_v_scale_fix:
+                o.mul_(layer._k_scale)
 
         if asm_dcp_heads > self._decode_num_heads:
             # Keep a view: a post-kernel copy races the symm-mem a2a combine.
