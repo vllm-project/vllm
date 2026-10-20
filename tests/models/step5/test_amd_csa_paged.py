@@ -10,12 +10,7 @@ tokens without changing any shape.
 import pytest
 import torch
 
-from vllm.models.step5.common.ops.csa import round_e4m3
-from vllm.models.step5.common.ops.csa_paged import (
-    compress_regions_paged,
-    indexer_scores_paged,
-    sparse_attention_paged,
-)
+from vllm.models.step5.common.ops.csa_paged import sparse_attention_paged
 from vllm.models.step5.nvidia.ops.sparse_decode_attention import (
     sparse_decode_attention,
 )
@@ -29,10 +24,6 @@ pytestmark = pytest.mark.skipif(
 DEVICE = "cuda"
 REGION = 8
 PROXY = 256
-
-
-def _e4m3(x: torch.Tensor) -> torch.Tensor:
-    return round_e4m3(x).float()
 
 
 def _paged(
@@ -55,16 +46,6 @@ def _paged(
         idx = torch.arange(x.shape[0], device=DEVICE)
         cache[table[r, idx // rows_per_page].long(), idx % rows_per_page] = x
     return cache, table
-
-
-def ref_compress(k: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-    regions = k.shape[0] // REGION
-    k = k[: regions * REGION].float().view(regions, REGION, -1)
-    z = z[: regions * REGION].float().view(regions, REGION, -1)
-    # One max per region over rows and dims, like the reference kernel, so
-    # dims far below the region max underflow to zero.
-    w = torch.exp(z - z.amax(dim=(1, 2), keepdim=True))
-    return _e4m3((w * k).sum(1) / w.sum(1).clamp_min(1e-20))
 
 
 def ref_select(scores: torch.Tensor, positions: torch.Tensor, topk: int):
@@ -97,68 +78,6 @@ def ref_attention(q, k, v, regions, req, positions, scale):
             )
             out[t, hs] = p @ vr[cols, g].float().cpu()
     return out
-
-
-def test_round_e4m3_saturates():
-    x = torch.tensor([447.0, 500.0, -1e4], device=DEVICE)
-    assert round_e4m3(x).tolist() == [448.0, 448.0, -448.0]
-
-
-def test_compress_regions_paged():
-    torch.manual_seed(0)
-    lens = [64, 203]
-    ks = [torch.randn(n, PROXY, dtype=torch.bfloat16, device=DEVICE) for n in lens]
-    zs = [torch.randn(n, PROXY, dtype=torch.bfloat16, device=DEVICE) * 4 for n in lens]
-    zs[1][:, :128] += 200
-    index_cache, index_bt = _paged([torch.cat(kz, -1) for kz in zip(ks, zs)], 64)
-    regions = [n // REGION for n in lens]
-    summary_cache, summary_bt = _paged(
-        [torch.zeros(n, PROXY, dtype=torch.bfloat16, device=DEVICE) for n in regions],
-        4,
-    )
-    work = [(req, r) for req, n in enumerate(regions) for r in range(n)]
-    work = torch.tensor(work + [(-1, -1)] * 3, dtype=torch.int32, device=DEVICE)
-    compress_regions_paged(
-        index_cache, summary_cache, index_bt, summary_bt, work, region_size=REGION
-    )
-    for req, n in enumerate(regions):
-        r = torch.arange(n, device=DEVICE)
-        got = summary_cache[summary_bt[req, r // 4].long(), r % 4].float()
-        # Within one E4M3 step: exp and reduction order may differ by an ulp.
-        torch.testing.assert_close(
-            got, ref_compress(ks[req], zs[req]), rtol=0.125, atol=0
-        )
-
-
-def test_indexer_scores_paged():
-    torch.manual_seed(0)
-    groups, regions = 4, 25
-    summaries = [
-        _e4m3(torch.randn(regions, PROXY, device=DEVICE)).to(torch.bfloat16)
-        for _ in range(2)
-    ]
-    summary_cache, summary_bt = _paged(summaries, 8)
-    pos = torch.cat([torch.arange(200), torch.arange(150, 154)]).int().to(DEVICE)
-    req = torch.tensor([0] * 200 + [1] * 4, dtype=torch.int32, device=DEVICE)
-    q = torch.randn(len(pos), groups, 4, PROXY, dtype=torch.bfloat16, device=DEVICE)
-    w = torch.randn(len(pos), groups, 4, device=DEVICE)
-    got = indexer_scores_paged(
-        q,
-        w,
-        summary_cache,
-        summary_bt,
-        req,
-        pos,
-        max_regions=regions,
-        region_size=REGION,
-    )
-    history = torch.stack(summaries)[req.long()].float()
-    dots = torch.einsum("tghd,trd->tghr", _e4m3(q), history).clamp_min(0)
-    want = (dots * w.unsqueeze(-1)).sum(2)
-    visible = torch.arange(regions, device=DEVICE) < (pos // REGION)[:, None]
-    visible = visible[:, None, :].expand_as(got)
-    torch.testing.assert_close(got[visible], want[visible], atol=1e-3, rtol=1e-4)
-    assert torch.isneginf(got[~visible]).all()
 
 
 def test_select_regions_breaks_ties_by_region_id():
@@ -259,3 +178,71 @@ def test_sparse_decode_attention(kv_dtype):
     )
     want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
     torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)
+
+
+def test_summaries_on_coarse_summary_blocks():
+    """ROCm keeps summaries in their own KV group, whose block (384 tokens,
+    48 regions) differs from the main 16-token block; summaries and decode
+    scores must match the main-block layout."""
+    from vllm.models.step5.nvidia.ops.sparse_indexer_scores import (
+        decode_summary_scores,
+    )
+    from vllm.models.step5.nvidia.ops.summary_update import (
+        build_prefill_groups,
+        update_prefill,
+    )
+
+    torch.manual_seed(0)
+    seq, capacity = 1001, 12
+    regions = seq // REGION
+    key = torch.randn((seq, 1, PROXY), device=DEVICE).to(torch.bfloat16)
+    z = torch.randn((seq, 1, PROXY), device=DEVICE).to(torch.bfloat16)
+    positions = torch.arange(seq, device=DEVICE)
+    query = torch.randn((2, 1, 8, PROXY), device=DEVICE).to(torch.float8_e4m3fn)
+    weights = torch.rand((2, 1, 8), device=DEVICE)
+
+    def run(block: int):
+        blocks = -(-seq // block)
+        table = torch.randperm(blocks + 2, device=DEVICE)[:blocks].int()
+        mean = torch.zeros(
+            (blocks + 2, block // REGION, PROXY), dtype=torch.uint8, device=DEVICE
+        )
+        rows = torch.zeros((capacity, 2 * PROXY), dtype=torch.bfloat16, device=DEVICE)
+        slots = table[positions // block].long() * block + positions % block
+        groups = build_prefill_groups(
+            slots,
+            positions,
+            torch.zeros_like(positions),
+            torch.tensor([0, seq], device=DEVICE),
+        )
+        keep = positions >= seq - capacity
+        update_prefill(
+            key,
+            z,
+            groups,
+            positions,
+            torch.zeros_like(positions),
+            torch.where(keep, positions % capacity, -1),
+            mean,
+            rows,
+            capacity,
+        )
+        r = torch.arange(regions, device=DEVICE)
+        per_region = mean[table[r // mean.shape[1]].long(), r % mean.shape[1]]
+        scores, meta = decode_summary_scores(
+            query,
+            weights,
+            mean,
+            table[None].expand(2, -1).contiguous(),
+            slots[-1:].expand(2).contiguous(),
+            torch.tensor([seq, seq - 9], device=DEVICE),
+            regions,
+            num_sms=4,
+        )
+        return per_region, scores, meta.lengths
+
+    fine, fine_scores, lengths = run(16)
+    coarse, coarse_scores, _ = run(384)
+    assert fine.any() and torch.equal(fine, coarse)
+    for row, length in enumerate(lengths.tolist()):
+        assert torch.equal(fine_scores[row, :length], coarse_scores[row, :length])

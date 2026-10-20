@@ -713,9 +713,10 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only.
 
 !!! note
-    On ROCm, `Step5ForConditionalGeneration` requires `--moe-backend triton` and a
-    BF16 KV cache. Use `--attention-backend ROCM_AITER_UNIFIED_ATTN` for long
-    contexts. The checkpoint ships three MTP layers, enabled with
+    On ROCm, `Step5ForConditionalGeneration` runs its MoE layers on Triton. With
+    `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
+    apply Step-5's SwiGLU clamp. An FP8 KV cache (`--kv-cache-dtype fp8`) needs
+    `--block-size 32`. The checkpoint ships three MTP layers, enabled with
     `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
 
 !!! note

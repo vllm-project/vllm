@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -26,16 +27,15 @@ from vllm.model_executor.models.step3p7 import Step3p7ForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.step5.common.config import get_step5_sparse_config
 from vllm.models.step5.common.csa_attention import step5_csa_attention
-from vllm.models.step5.common.csa_cache import (
-    Step5CSAIndexCache,
-    Step5CSASummaryCache,
-)
-from vllm.models.step5.common.ops.csa import indexer_norm
+from vllm.models.step5.common.csa_cache import Step5CSASummaryCacheLayer
+from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing
 from vllm.models.step5.nvidia.layernorm import get_step5_norm_dtype
 from vllm.models.step5.nvidia.model import _validate_step5_dsa_parallel_geometry
+from vllm.models.step5.nvidia.ops.indexer_norm_rope import indexer_norm_rope
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx1250
 from vllm.transformers_utils.configs.step5 import Step5Config
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
@@ -63,6 +63,7 @@ class Step5SparseIndexer(nn.Module):
         self.num_groups = sparse.index_tp_size
         self.heads_per_group = sparse.sparse_indexer_num_heads // self.num_groups
         self.eps = config.rms_norm_eps
+        self.zero_centered = config.zero_centered
 
         tp_size = get_tensor_model_parallel_world_size()
         group_shards = min(tp_size, self.num_groups)
@@ -118,51 +119,65 @@ class Step5SparseIndexer(nn.Module):
             rope_parameters=rope_parameters,
         )
 
+        self.native_rope = not self.rotary_emb.enabled()
         vllm_config = get_current_vllm_config()
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
-        self.index_cache = Step5CSAIndexCache(
-            proxy_dim=self.proxy_dim,
-            cache_config=vllm_config.cache_config,
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.index_cache",
+        spec = vllm_config.speculative_config
+        self.num_speculative_tokens = spec.num_speculative_tokens if spec else 0
+        self.max_regions = cdiv(
+            vllm_config.model_config.max_model_len, self.region_size
         )
-        self.register_buffer(
-            "index_cache_scale", torch.ones((), dtype=torch.float32), persistent=False
+        self.num_sms = current_platform.num_compute_units()
+        # Peak scoring workspace: decode scores or bounded prefill logits, plus
+        # the per-step prefill page table.
+        sched = vllm_config.scheduler_config
+        decode_rows = (
+            sched.max_num_seqs
+            * (1 + self.num_speculative_tokens)
+            * self.num_local_groups
         )
-        self.summary_cache = Step5CSASummaryCache(
-            proxy_dim=self.proxy_dim,
-            region_size=self.region_size,
-            cache_config=vllm_config.cache_config,
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.summary_cache",
+        decode_scores = decode_rows * round_up(self.max_regions, 256) * 4
+        prefill_table = sched.max_num_batched_tokens * cdiv(self.max_regions, 128) * 16
+        self.workspace_bytes = (
+            max(envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB << 20, decode_scores)
+            + prefill_table
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, positions: torch.Tensor
+        self, hidden_states: torch.Tensor, positions: torch.Tensor, decode=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns ``(q [T, G, Hg, P], k [T, P], z [T, P], w [T, G, Hg])`` for
-        this rank's ``G`` local groups."""
-        tokens = hidden_states.shape[0]
+        """Returns ``(q [T, G, 8, P] fp8, k [T, 1, P], z [T, 1, P],
+        w [T, G, 8])`` for this rank's ``G`` local groups, heads padded to 8.
+
+        With ``decode=(summary cache, ring, slots)`` it also stores each
+        token's open-region row and summarizes the regions it closes.
+        """
         q, _ = self.sparse_indexer_q(hidden_states)
         k, _ = self.sparse_indexer_k(hidden_states)
         z, _ = self.sparse_indexer_z(hidden_states)
         w, _ = self.sparse_indexer_w(hidden_states)
-        q, k = indexer_norm(
-            q.view(tokens, -1, self.proxy_dim),
-            k.view(tokens, 1, self.proxy_dim),
+        fused = {}
+        if decode is not None:
+            cache, ring, slots = decode
+            fused = dict(
+                decode_cache=cache, decode_ring=ring, decode_z=z, decode_slots=slots
+            )
+        q, k, w = indexer_norm_rope(
+            q,
+            k,
+            w,
             self.sparse_indexer_q_norm.weight,
             self.sparse_indexer_k_norm.weight,
             self.sparse_indexer_k_norm.bias,
+            self.rotary_emb.cos_sin_cache,
+            positions,
             self.eps,
+            self.zero_centered,
+            native_rope=self.native_rope,
+            num_groups=self.num_local_groups,
+            **fused,
         )
-        q, k = self.rotary_emb(positions, q.flatten(1), k.flatten(1))
-        weights = w.view(tokens, self.num_local_groups, self.heads_per_group)
-        return (
-            q.view(tokens, self.num_local_groups, self.heads_per_group, self.proxy_dim),
-            k.view(tokens, self.proxy_dim),
-            z.view(tokens, self.proxy_dim),
-            weights.float() * self.heads_per_group**-0.5,
-        )
+        return q, k, z.view(-1, 1, self.proxy_dim), w
 
 
 def _layer_types(config: Step5Config) -> list[str]:
@@ -242,8 +257,19 @@ class Step5Attention(Step3p5Attention):
         self.indexer = Step5SparseIndexer(
             config, self.layer_idx, prefix=kwargs["prefix"]
         )
-        self.csa_layer_name = f"{kwargs['prefix']}.csa"
         static_context = vllm_config.compilation_config.static_forward_context
+        self.sparse_summary_cache = Step5CSASummaryCacheLayer(
+            prefix=f"{kwargs['prefix']}.attn.sparse_summary_cache",
+            target_impl=self.attn.impl,
+            static_forward_context=static_context,
+        )
+        self.csa_tail_ring = Step5CSATailRing(
+            prefix=f"{kwargs['prefix']}.attn.csa_tail_ring",
+            main_layer_name=self.attn.layer_name,
+            num_speculative_tokens=self.indexer.num_speculative_tokens,
+            static_forward_context=static_context,
+        )
+        self.csa_layer_name = f"{kwargs['prefix']}.csa"
         if self.csa_layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.csa_layer_name}")
         static_context[self.csa_layer_name] = self
