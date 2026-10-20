@@ -3,10 +3,9 @@
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{EngineLabels, HistogramFamily, U64Counter};
+use crate::{EngineLabels, Histogram, HistogramFamily, U64Counter};
 
 const TTFT_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
@@ -107,6 +106,7 @@ pub struct RequestMetrics {
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
+    pub corrupted_requests: Family<EngineLabels, U64Counter>,
 
     // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
@@ -172,6 +172,13 @@ impl RequestMetrics {
             "vllm:generation_tokens",
             "Number of generation tokens processed.",
             generation_tokens.clone(),
+        );
+
+        let corrupted_requests = Family::default();
+        registry.register(
+            "vllm:corrupted_requests",
+            "Corrupted requests, in terms of total number of requests with NaNs in logits.",
+            corrupted_requests.clone(),
         );
 
         // Request lifecycle counters and histograms.
@@ -310,6 +317,7 @@ impl RequestMetrics {
             prompt_tokens_by_source,
             prompt_tokens_cached,
             generation_tokens,
+            corrupted_requests,
             request_success,
             request_prompt_tokens,
             request_generation_tokens,

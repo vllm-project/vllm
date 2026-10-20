@@ -12,6 +12,7 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     scaled_quantize,
 )
 from vllm.platforms import current_platform
@@ -108,6 +109,36 @@ def test_dynamic_per_tensor_fp8_quant(
     opcheck_fp8_quant(ops_out, x)
 
 
+@pytest.mark.parametrize("pad", [8, 16])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_strided_input(
+    pad: int, dtype: torch.dtype, seed: int
+) -> None:
+    """Non-contiguous rows take the strided abs-max kernel; contiguous rows take
+    the flat one. Both must produce exactly the same scale and bytes.
+
+    pad=8 (16 B for bf16) leaves rows misaligned for 32 B vector loads, pad=16
+    keeps them aligned but non-contiguous.
+    """
+    set_random_seed(seed)
+    num_tokens, hidden_size = 64, 4096
+
+    full = torch.rand(num_tokens, hidden_size + pad, dtype=dtype, device="cuda")
+    x = full[:, :hidden_size]
+    assert not x.is_contiguous()
+
+    ops_out, ops_scale = ops.scaled_fp8_quant(x)
+    flat_out, flat_scale = ops.scaled_fp8_quant(x.contiguous())
+    assert torch.equal(ops_scale, flat_scale)
+    assert torch.equal(ops_out.view(torch.uint8), flat_out.view(torch.uint8))
+
+    ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
+    assert torch.equal(ref_scale, ops_scale)
+    assert torch.equal(ref_out.view(torch.uint8), ops_out.view(torch.uint8))
+
+
 # Regression test for a case with large activations where an int32 index cannot
 # represent the number of elements.
 @torch.inference_mode()
@@ -178,7 +209,10 @@ def test_static_fp8_quant_group_2d(
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale = scaled_quantize(
-        x, group_shape, current_platform.fp8_dtype(), compute_dtype=torch.float32
+        x,
+        GroupShape(*group_shape),
+        current_platform.fp8_dtype(),
+        compute_dtype=torch.float32,
     )
     ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
@@ -206,7 +240,7 @@ def test_static_fp8_quant_1d_scale(
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale_2d = scaled_quantize(
-        x, group_shape, FP8_DTYPE, compute_dtype=torch.float32
+        x, GroupShape(*group_shape), FP8_DTYPE, compute_dtype=torch.float32
     )
 
     # Flatten scale to 1D for testing 1D scale path

@@ -11,13 +11,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import ImageOps
 from PIL.Image import Image
 from transformers import (
     BaseImageProcessor,
     BaseVideoProcessor,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
 )
 from transformers.image_utils import ImageInput
@@ -26,7 +25,7 @@ from typing_extensions import TypedDict
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -54,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import normalize_image
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -1299,13 +1299,13 @@ def exif_transpose(
             exif_transpose(img) if isinstance(img, Image) else img for img in images
         ]
     elif images is not None and isinstance(images, Image):
-        images = ImageOps.exif_transpose(images)
+        images = normalize_image(images)
     return images
 
 
 def build_flat_image_bool_length(
     image_grids: torch.LongTensor,
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     image_use_col_tokens: bool = True,
     use_single_crop_col_tokens: bool | None = None,
     use_single_crop_start_token: bool = True,
@@ -1393,7 +1393,7 @@ def build_flat_image_bool_length(
 
 def build_flat_video_bool_length(
     video_grids: torch.LongTensor,
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
 ) -> tuple[torch.LongTensor, torch.LongTensor]:
     image_patch_id = hf_config.image_patch_id
     frame_start_id = hf_config.frame_start_token_id
@@ -1834,7 +1834,7 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1845,13 +1845,11 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
         if num_images > 0:
             target_width, target_height = self.info.get_image_size_with_most_features()
 
-            image_overrides = mm_options.get("image")
-
             dummy_images = self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=image_overrides,
+                overrides=mm_options.get("image"),
             )
 
         if num_videos > 0:
@@ -1864,7 +1862,6 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
             video_overrides = mm_options.get("video")
 
             if video_overrides:
-                assert isinstance(video_overrides, VideoDummyOptions)
                 num_frames_override = video_overrides.num_frames
                 if num_frames_override:
                     if num_frames_override > target_num_frames:

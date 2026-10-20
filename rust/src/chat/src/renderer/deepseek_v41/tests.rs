@@ -154,6 +154,79 @@ fn media_order_excludes_dropped_historical_developer_content() {
     assert!(media_order.is_empty());
 }
 
+#[test]
+fn drop_thinking_keeps_current_turn_across_tool_results() {
+    let mut messages = vec![
+        ChatMessage::user("q1"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r1".into() },
+            AssistantContentBlock::Text { text: "a1".into() },
+        ]),
+        ChatMessage::user("q2"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r2".into() },
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response("value", "call-1"),
+    ];
+    let request = ChatRequest {
+        messages: messages.clone(),
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜><think>r2</think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result><｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+
+    messages.push(ChatMessage::user("q3"));
+    let request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜></think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result>
+
+        q3<｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+}
+
+#[test]
+fn rejects_image_placeholder_in_message_text() {
+    let text = "hi <｜deepseek_image｜>";
+    for message in [
+        ChatMessage::user(text),
+        ChatMessage::user(vec![ChatContentPart::text(text)]),
+        ChatMessage::tool_response(text, "call-1"),
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::Reasoning { text: text.into() }]),
+    ] {
+        let request = ChatRequest {
+            messages: vec![message, ChatMessage::user("question")],
+            ..ChatRequest::for_test()
+        };
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
+        assert!(error.is_request_validation_error());
+    }
+}
+
 fn image_part(uuid: &str) -> ChatContentPart {
     ChatContentPart::ImageUrl {
         image_url: format!("data:image/png;base64,{uuid}"),
@@ -165,9 +238,9 @@ fn image_part(uuid: &str) -> ChatContentPart {
 #[test]
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
-        (None, 50),
-        (Some(EffortValue::from("low")), 25),
-        (Some(EffortValue::from("high")), 50),
+        (None, 75),
+        (Some(EffortValue::from("low")), 50),
+        (Some(EffortValue::from("high")), 75),
         (Some(EffortValue::from("xhigh")), 75),
         (Some(EffortValue::from("max")), 100),
         (Some(EffortValue::Number(37.into())), 37),
@@ -189,7 +262,7 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         (json!(1), 1),
         (json!(42), 42),
         (json!(100), 100),
-        (json!("low"), 25),
+        (json!("low"), 50),
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
@@ -286,11 +359,11 @@ fn system_after_dropped_developer_becomes_leading_system() {
         ],
         ..ChatRequest::for_test()
     };
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
         .assert_eq(&render(&request));
 
     request.messages.push(ChatMessage::user("question"));
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 }
 
@@ -322,7 +395,7 @@ fn last_user_turn_omits_generation_prompt_when_disabled() {
     let mut request = request();
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
 
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
         .assert_eq(&render(&request));
 }
 

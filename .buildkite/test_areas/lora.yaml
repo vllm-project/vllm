@@ -14,9 +14,9 @@ steps:
   parallelism: 4
   mirror:
     amd:
-      label: ":amd: (MI300) LoRA Shard %N"
+      label: ":amd: (MI355 DPX) LoRA Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 85
       source_file_dependencies:
@@ -57,7 +57,7 @@ steps:
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp
   mirror:
     amd:
-      label: ":amd: (MI300) LoRA TP (Distributed) %N"
+      label: ":amd: (MI300) LoRA TP (Distributed) Shard %N"
       dind: false
       device: mi300_4
       working_dir: "/vllm-workspace/tests"

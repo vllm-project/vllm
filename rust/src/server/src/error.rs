@@ -6,6 +6,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
+use vllm_engine_core_client::protocol::output::RequestError;
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
@@ -22,8 +23,12 @@ pub enum ApiError {
     ModelNotFound { model: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
+    /// The requested operation conflicts with current server state.
+    Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// The engine rejected the request with a retryable error.
+    ServiceUnavailable { code: String, message: String },
 }
 
 impl ApiError {
@@ -32,8 +37,10 @@ impl ApiError {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -64,6 +71,18 @@ impl ApiError {
                 error_type: "invalid_request_error".to_string(),
                 param: None,
                 code: Some("json_parse_error".to_string()),
+            },
+            Self::Conflict { message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "conflict_error".to_string(),
+                param: None,
+                code: Some("conflict_error".to_string()),
+            },
+            Self::ServiceUnavailable { code, message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "service_unavailable_error".to_string(),
+                param: None,
+                code: Some(code.clone()),
             },
         };
 
@@ -100,6 +119,18 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
         return invalid_request!("{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
+}
+
+/// Classify an engine-reported request failure: a retryable error (e.g. a
+/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+pub fn engine_error(error: Option<&RequestError>) -> ApiError {
+    match error {
+        Some(error) if error.retryable => ApiError::ServiceUnavailable {
+            code: error.code.clone(),
+            message: error.message.clone(),
+        },
+        _ => server_error!("Internal server error"),
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +222,27 @@ mod tests {
                 "invalid_request_error"
             );
         }
+    }
+
+    #[test]
+    fn chat_template_throw_maps_to_invalid_request() {
+        let error = vllm_chat::Error::ChatTemplateThrown {
+            message: "Unexpected reasoning effort high.".to_string(),
+        };
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.message, "Unexpected reasoning effort high.");
+    }
+
+    #[test]
+    fn chat_template_render_failure_stays_internal() {
+        let error = vllm_chat::Error::ChatTemplate(
+            "failed to render jinja template: unknown function".to_string(),
+        );
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

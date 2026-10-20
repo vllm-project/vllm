@@ -22,10 +22,26 @@ To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `t
 - `torch_profiler_with_flops` to enable recording FLOPs, off by default
 - `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
 - `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
+- `torch_profiler_activities` to select worker activities. Defaults are
+  platform-specific: `["CPU"]` on CPU, `["CPU", "CUDA"]` on NVIDIA GPUs, and
+  `["CPU", "XPU"]` on Intel GPUs. Selecting `["CUDA"]` omits CPU annotations
+  and the AsyncLLM CPU trace to reduce profiling overhead and trace size.
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
 Traces can be visualized using <https://ui.perfetto.dev/>.
+
+Each worker writes its trace and summary table under `torch_profiler_dir`,
+named after its rank, for example `rank0.<id>.pt.trace.json.gz` and
+`rank0.profiler_out.txt`. Depending on the parallel configuration, the rank
+name can also include the parallel ranks, such as
+`dp0_pp0_tp0_dcp0_ep0_rank0`. The AsyncLLM CPU trace uses
+`<hostname>_<pid>.async_llm` instead of the rank name. When a session sets
+`profile_prefix`, it is prepended as `<profile_prefix>_`, so summaries from
+different sessions do not overwrite each other.
+
+!!! note
+    The summary table was previously written to `profiler_out_<rank>.txt`.
 
 !!! tip
     You can directly call bench module without installing vLLM using `python -m vllm.entrypoints.cli.main bench`.
@@ -83,6 +99,31 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 # After need call /stop_profile api to stop profile.
 $ curl -X POST http://localhost:8000/stop_profile
 ```
+
+`/start_profile` also accepts an optional JSON body with settings for that
+profiling session. The Python and Rust API frontends accept the same fields:
+
+```shell
+curl -X POST http://localhost:8000/start_profile \
+    -H "Content-Type: application/json" \
+    -d '{
+        "profile_prefix": "sharegpt_run_1",
+        "delay_iterations": 5000,
+        "max_iterations": 20
+    }'
+```
+
+`profile_prefix` is prepended to the generated trace and summary file names. It
+must be 1-128 ASCII characters, start with a letter or number, and contain only
+letters, numbers, `.`, `_`, or `-`. `delay_iterations` skips worker iterations
+before collection starts, and `max_iterations` limits the number of collected
+worker iterations (`0` means no limit). Both must be non-negative JSON integers;
+values of the wrong type, such as `"5"` or `5.0`, are rejected rather than
+converted. Unknown fields are ignored. These iteration
+bounds do not apply to the AsyncLLM frontend CPU profiler, which records from
+`/start_profile` until `/stop_profile`. Always call `/stop_profile`, including
+after the worker reaches `max_iterations`; starting another session before
+stopping the current one returns HTTP 409.
 
 ## Profile with Triton Proton
 
