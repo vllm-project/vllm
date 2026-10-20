@@ -37,7 +37,7 @@ Settings:
 - `-cc.cudagraph_mode=NONE`
 - `-cc.mode=NONE` (also resulting in `-cc.custom_ops=["none"]`)
 - `-cc.pass_config.fuse_...=False` (all fusions disabled)
-- `--no-enable-flashinfer-autotune`
+- `--disable-flashinfer-autotune`
 
 ### `-O1`: Fast Optimization
 
@@ -84,6 +84,6 @@ in the future that are more time-consuming or experimental.
 
 ### Common Issues
 
-1. **Startup Time Too Long**: Use `-O0` or `-O1` for faster startup, or pass `--no-enable-flashinfer-autotune` to skip only FlashInfer autotuning
+1. **Startup Time Too Long**: Use `-O0` or `-O1` for faster startup, or pass `--disable-flashinfer-autotune` to skip only FlashInfer autotuning
 2. **Compilation Errors**: Use `debug_dump_path` for additional debugging information
 3. **Performance Issues**: Ensure using `-O2` for production
