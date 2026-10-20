@@ -301,6 +301,27 @@ def test_shard_sequence_parallel_mlp_gating(
     )
 
 
+@pytest.mark.parametrize(
+    ("moe_backend", "all2all_backend", "expected"),
+    [
+        ("deep_gemm_mega_moe", "naive", True),
+        ("auto", "deepep_v2", True),
+        ("auto", "deepep_low_latency", False),
+    ],
+)
+def test_shared_expert_sharding_backend_gate(
+    moe_backend: str,
+    all2all_backend: str,
+    expected: bool,
+):
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend=moe_backend),
+        parallel_config=SimpleNamespace(all2all_backend=all2all_backend),
+    )
+
+    assert kimi_model.can_shard_sequence_parallel_shared_expert(vllm_config) is expected
+
+
 def test_sharded_sequence_parallel_mlp_matches_replicated(default_vllm_config):
     """Sharded SP MLP must reproduce the replicated result for every token.
 

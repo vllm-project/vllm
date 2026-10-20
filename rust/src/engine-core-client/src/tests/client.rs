@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
@@ -255,7 +257,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.unwrap().into_vec()
 }
 
-async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
+async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     let frames = sub.recv().await.unwrap().into_vec();
     assert_eq!(frames.len(), 2);
     assert_eq!(
@@ -263,6 +265,19 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, u32) {
         EngineCoreRequestType::StartDpWave.to_frame().as_ref()
     );
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
+}
+
+async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
+    send_outputs(
+        push,
+        DpControlOutput {
+            engine_index,
+            timestamp: 0.0,
+            control: DpControlMessage::StartWave(wave),
+        }
+        .into(),
+    )
+    .await;
 }
 
 async fn connect_client_with_ipc(
@@ -311,10 +326,17 @@ fn bootstrapped_test_config(
     client_index: u32,
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
+    fn listener(address: &str) -> i32 {
+        let path = address.strip_prefix("ipc://").expect("bootstrapped tests use IPC listeners");
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).expect("bind inherited test listener");
+        listener.into_raw_fd()
+    }
+
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_address,
-            output_address,
+            input_listener_fd: listener(&input_address),
+            output_listener_fd: listener(&output_address),
             engine_start_index: 0,
             engine_count,
             data_parallel_size: engine_count,
@@ -362,15 +384,22 @@ fn bootstrapped_test_config_with_start_index(
 
 #[test]
 fn client_config_validates_bootstrapped_dp_range() {
-    let mut config = bootstrapped_test_config_with_start_index(
-        "ipc://unused-input".to_string(),
-        "ipc://unused-output".to_string(),
-        1,
-        2,
-        Duration::from_secs(1),
-        0,
-        None,
-    );
+    // Validation never consumes the descriptors, so placeholders avoid opening
+    // listeners that nothing would close.
+    let mut config = EngineCoreClientConfig {
+        transport_mode: TransportMode::Bootstrapped {
+            input_listener_fd: -1,
+            output_listener_fd: -1,
+            engine_start_index: 1,
+            engine_count: 2,
+            data_parallel_size: 3,
+            ready_timeout: Duration::from_secs(1),
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index: 0,
+        engine_stats_enabled: true,
+    };
     config.validate().expect("frontend may own a subset of global DP ranks");
 
     let TransportMode::Bootstrapped {
@@ -395,12 +424,6 @@ async fn recv_xpub_subscription(xpub: &mut XPubSocket) {
     let frames = recv_xpub_message(xpub).await;
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].as_ref(), b"\x01");
-}
-
-async fn recv_external_coordinator_wakeup(xpub: &mut XPubSocket) -> (u32, u32) {
-    let frames = recv_xpub_message(xpub).await;
-    assert_eq!(frames.len(), 1);
-    rmp_serde::from_slice(&frames[0]).expect("decode external coordinator wakeup")
 }
 
 async fn send_external_coordinator_publish<T: serde::Serialize>(
@@ -591,18 +614,35 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
         let handshake_address = handshake_address.clone();
         async move {
             let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
+            let coordinator_address = engine
+                .init
+                .addresses
+                .coordinator_input
+                .clone()
+                .expect("coordinator input address should be present");
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
-
+            // An idle engine handed a request starts the wave itself.
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-1");
             assert_eq!(request.current_wave, 0);
+            send_start_wave(&mut coordinator.output_push, 0, 0).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+
+            let mut late_subscriber = SubSocket::new();
+            late_subscriber.connect(&coordinator_address).await.unwrap();
+            late_subscriber.subscribe("").await.unwrap();
+
+            let replay = recv_start_dp_wave(&mut late_subscriber).await;
+            assert_eq!(replay, (0, None));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             assert!(
                 timeout(
@@ -639,14 +679,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             )
             .await;
 
-            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
-
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
+            send_start_wave(&mut coordinator.output_push, 0, 1).await;
+
+            let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             send_outputs(
                 &mut data_socket.push,
@@ -677,7 +718,9 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (0, 0));
+            assert_eq!((wave, exclude_engine), (0, Some(0)));
+            let replay = recv_start_dp_wave(&mut coordinator.input_sub).await;
+            assert_eq!(replay, (0, None));
 
             let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
@@ -711,7 +754,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (1, 0));
+            assert_eq!((wave, exclude_engine), (1, Some(0)));
 
             assert!(
                 timeout(
@@ -739,8 +782,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     )
     .await;
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let final_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
@@ -762,7 +805,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap();
+    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap().into_outputs();
     let final_3 = timeout(Duration::from_secs(1), stream_3.next())
         .await
         .unwrap()
@@ -796,7 +839,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown0_rx.await;
         }
@@ -822,7 +865,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
             .await;
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-            assert_eq!((wave, exclude_engine), (4, 1));
+            assert_eq!((wave, exclude_engine), (4, Some(1)));
 
             let _ = shutdown1_rx.await;
         }
@@ -862,9 +905,6 @@ async fn coordinator_accepts_stats_only_outputs() {
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
         let data_socket = engine.data_sockets.first_mut().expect("data socket");
-
-        let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
-        assert_eq!((wave, exclude_engine), (0, 0));
 
         send_outputs(
             &mut coordinator.output_push,
@@ -917,7 +957,7 @@ async fn coordinator_accepts_stats_only_outputs() {
     )
     .await;
 
-    let mut stream = client.call(sample_request_with_id("req-stats")).await.unwrap();
+    let mut stream = client.call(sample_request_with_id("req-stats")).await.unwrap().into_outputs();
     let final_output =
         timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(final_output.request_id, "req-stats");
@@ -1010,8 +1050,8 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     assert!(client.ready_responses()[0].max_model_len > 0);
     assert_eq!(client.vllm_version(), "test-vllm-version");
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let error_2 = timeout(Duration::from_secs(1), stream_2.next())
         .await
@@ -1087,7 +1127,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let error = match client.call(sample_request()).await {
         Ok(_) => panic!("expected duplicate request error"),
         Err(error) => error,
@@ -1154,7 +1194,7 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let error = timeout(Duration::from_secs(1), stream.next())
         .await
         .unwrap()
@@ -1217,7 +1257,7 @@ async fn dropping_a_live_stream_triggers_abort() {
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(first.new_token_ids, vec![99]);
     drop(stream);
@@ -1300,7 +1340,7 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
     // emits outputs, then drain the first token from each stream.
     let mut streams = Vec::new();
     for id in request_ids {
-        streams.push(client.call(sample_request_with_id(id)).await.unwrap());
+        streams.push(client.call(sample_request_with_id(id)).await.unwrap().into_outputs());
     }
     for stream in streams.iter_mut() {
         let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
@@ -1347,8 +1387,8 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     )
     .await;
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let error_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
@@ -1846,7 +1886,7 @@ async fn client_decodes_multipart_logprob_outputs() {
     )
     .await;
 
-    let stream = client.call(sample_request()).await.unwrap();
+    let stream = client.call(sample_request()).await.unwrap().into_outputs();
     let outputs = stream.collect::<Vec<_>>().await;
     assert_eq!(outputs.len(), 1);
 
@@ -1934,7 +1974,7 @@ async fn client_sends_large_multimodal_tensor_as_aux_frame() {
     )
     .await;
 
-    let outputs = client.call(request).await.unwrap().collect::<Vec<_>>().await;
+    let outputs = client.call(request).await.unwrap().into_outputs().collect::<Vec<_>>().await;
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].is_ok());
 
@@ -2063,8 +2103,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(client.ready_responses().len(), 2);
     assert_eq!(client.engine_identities()[0], b"engine-0");
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
     assert_eq!(
         timeout(Duration::from_secs(1), engine_0_seen_rx.recv()).await.unwrap().unwrap(),
         "req-1"
@@ -2084,7 +2124,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(final_1.new_token_ids, vec![10]);
     assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Length));
 
-    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap();
+    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap().into_outputs();
     assert_eq!(
         timeout(Duration::from_secs(1), engine_0_seen_rx.recv()).await.unwrap().unwrap(),
         "req-3"
@@ -2255,8 +2295,8 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     assert!(client.is_sleeping().await.unwrap());
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     client
         .abort(&[
@@ -2787,6 +2827,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         },
     );
 
@@ -2844,7 +2885,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_prompt_logprobs_tensors: None,
                         pooling_output: None,
                         finish_reason: Some(
-                            Length,
+                            Error,
                         ),
                         stop_reason: None,
                         events: None,
@@ -2852,12 +2893,34 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        error: Some(
+                            RequestError {
+                                code: "engine_paused",
+                                message: "Generation is paused.",
+                                retryable: true,
+                            },
+                        ),
                     },
                 ],
                 scheduler_stats: None,
@@ -2866,6 +2929,9 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                     {
                         "req-1",
                     },
+                ),
+                weight_version: Some(
+                    "v7",
                 ),
             },
         )
@@ -3211,7 +3277,7 @@ async fn bootstrapped_external_coordinator_connects_and_subscribes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
+async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_no_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let input_address = ipc.input_endpoint();
@@ -3250,20 +3316,13 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
 
-    let wakeup = timeout(
-        Duration::from_secs(1),
-        recv_external_coordinator_wakeup(&mut stats_socket),
-    )
-    .await
-    .unwrap();
-    assert_eq!(wakeup, (0, 7));
-
+    // The engine that receives the request starts the wave, not the frontend.
     assert!(
         timeout(
             Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
+            recv_xpub_message(&mut stats_socket)
         )
         .await
         .is_err()
@@ -3275,81 +3334,6 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
     assert_eq!(request.request_id, "req-1");
     assert_eq!(request.current_wave, 7);
     assert!(client.is_healthy());
-
-    send_outputs(
-        &mut push,
-        RequestBatchOutputs {
-            outputs: vec![request_output(
-                "req-1",
-                vec![],
-                Some(EngineCoreFinishReason::Length),
-            )],
-            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-            ..Default::default()
-        }
-        .into(),
-    )
-    .await;
-
-    let final_output = timeout(Duration::from_secs(1), stream.next()).await.unwrap();
-    assert!(final_output.is_some());
-
-    client.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
-    init_tracing();
-    let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
-    let coordinator_address = ipc.endpoint("stats.sock");
-
-    let mut stats_socket = XPubSocket::new();
-    stats_socket.bind(&coordinator_address).await.unwrap();
-
-    let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
-        let coordinator_address = coordinator_address.clone();
-        async move {
-            EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
-                1,
-                Duration::from_secs(2),
-                0,
-                Some(CoordinatorMode::External {
-                    address: coordinator_address,
-                }),
-            ))
-            .await
-            .unwrap()
-        }
-    });
-
-    let (mut dealer, mut push) =
-        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
-    let client = client_task.await.unwrap();
-    recv_xpub_subscription(&mut stats_socket).await;
-
-    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let mut stream = client.call(sample_request()).await.unwrap();
-
-    assert!(
-        timeout(
-            Duration::from_millis(200),
-            recv_external_coordinator_wakeup(&mut stats_socket)
-        )
-        .await
-        .is_err()
-    );
-
-    let add = recv_engine_message(&mut dealer).await;
-    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-    assert_eq!(request.current_wave, 5);
 
     send_outputs(
         &mut push,

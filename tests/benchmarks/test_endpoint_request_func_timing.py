@@ -4,8 +4,10 @@
 
 serve.py derives TPOT as (latency - ttft) / (output_len - 1), which only means
 "average inter-token latency" if latency - ttft == sum(itl). These tests pin
-that identity, and pin that the trailing choice-less usage chunk does not
-extend the measured end of the request.
+that identity, pin that the trailing choice-less usage chunk does not extend
+the measured end of the request, and pin that chat chunks carrying no token
+(the opening role chunk, an empty delta) are skipped for TTFT and ITL while a
+token that renders as an empty string is still counted.
 
 Driven against a fake session and a scripted clock: no GPU, model, or socket.
 """
@@ -83,6 +85,20 @@ def _usage_chunk(n_tokens: int) -> bytes:
                 "total_tokens": 7 + n_tokens,
             },
         }
+    )
+
+
+def _role_chunk(role: str = "assistant") -> bytes:
+    choice = {"index": 0, "delta": {"role": role, "content": ""}}
+    return _sse(
+        {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
+    )
+
+
+def _empty_chunk() -> bytes:
+    choice = {"index": 0, "delta": {}}
+    return _sse(
+        {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
     )
 
 
@@ -345,6 +361,52 @@ def test_usage_only_stream_is_not_reported_as_success(
     assert "TTFT" in output.error
 
 
+# Significant whitespace at every edge, plus a multibyte character so that a
+# split can land inside a UTF-8 sequence.
+_BOUNDARY_TEXT = " leading 中 trailing "
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,request_func,api_url,chat",
+    STREAMING_ENDPOINTS,
+    ids=[e[0] for e in STREAMING_ENDPOINTS],
+)
+def test_streamed_output_is_invariant_to_transport_chunk_boundaries(
+    endpoint_id: str,
+    request_func,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """iter_any() yields arbitrary transport fragments, so parsing must
+    give the same result no matter where the byte stream is split."""
+    if chat:
+        choice: dict[str, Any] = {"index": 0, "delta": {"content": _BOUNDARY_TEXT}}
+    else:
+        choice = {"index": 0, "text": _BOUNDARY_TEXT}
+    # Not _sse(): its ensure_ascii default would escape the multibyte char.
+    event = json.dumps(
+        {"id": "cmpl-test", "object": "x", "choices": [choice]}, ensure_ascii=False
+    )
+    stream = f"data: {event}\n\ndata: [DONE]\n\n".encode()
+
+    async def run_all_splits() -> list[tuple[int, bool, str, str]]:
+        failures = []
+        for split_at in range(1, len(stream)):
+            chunks = [(0.0, stream[:split_at]), (0.0, stream[split_at:])]
+            output = await request_func(
+                _make_input(api_url, 1, endpoint_id),
+                _FakeSession(chunks),
+            )
+            if not output.success or output.generated_text != _BOUNDARY_TEXT:
+                error = output.error.splitlines()[-1] if output.error else ""
+                failures.append(
+                    (split_at, output.success, output.generated_text, error)
+                )
+        return failures
+
+    assert asyncio.run(run_all_splits()) == []
+
+
 # ``benchmarks/backend_request_func.py`` is a standalone script rather than a
 # package module, so it is loaded by path. It also builds its own ClientSession,
 # so the scripted stream is injected by swapping the module's aiohttp reference.
@@ -462,3 +524,173 @@ def test_legacy_usage_only_stream_is_not_reported_as_success(
 
     assert not output.success
     assert output.itl == []
+
+
+def _run_chat(
+    monkeypatch: pytest.MonkeyPatch,
+    client: str,
+    chunks: list[tuple[float, bytes]],
+    n_tokens: int,
+    *,
+    clock: _ScriptedClock | None = None,
+    expect_success: bool = True,
+):
+    if client == "packaged":
+        if clock is not None:
+            monkeypatch.setattr(request_func_module, "time", _FakeTime(clock))
+        return _run(
+            async_request_openai_chat_completions,
+            "http://test/v1/chat/completions",
+            "chat",
+            chunks,
+            n_tokens,
+            expect_success=expect_success,
+        )
+    elif client == "legacy":
+        output = _run_legacy(
+            monkeypatch,
+            "async_request_openai_chat_completions",
+            "http://test/v1/chat/completions",
+            "chat",
+            chunks,
+            n_tokens,
+            clock=clock,
+        )
+        if expect_success:
+            assert output.success, output.error
+        return output
+    raise ValueError(f"Unknown client: {client}")
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+def test_chat_role_chunk_is_not_streamed_output(
+    monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """Opening role chunk is not a streamed output: TTFT is measured to tok0."""
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 5
+    chunks = [
+        (0.0, _role_chunk()),
+        *[(0.0, _token_chunk(i, chat=True)) for i in range(n_tokens)],
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+    assert output.output_tokens == n_tokens
+
+    # Clock read 0 is start_time (1000.0).
+    # Clock read 1 is role chunk (1001.0); skipped because delta has no content.
+    # Clock read 2 is tok0 chunk (1002.0); sets TTFT = 1002.0 - 1000.0 = 2 * tick.
+    expected_ttft = 2.0 * tick
+    assert output.ttft == pytest.approx(expected_ttft, abs=tick / 1000), (
+        f"{client}: TTFT {output.ttft} should be measured to the first content chunk "
+        f"({expected_ttft}), not the opening role chunk ({1.0 * tick})"
+    )
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+def test_chat_midstream_content_free_chunk_adds_no_interval(
+    monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """Mid-stream content-free chunk adds no ITL and does not advance timestamp."""
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 3
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _token_chunk(0, chat=True)),
+        (0.0, _token_chunk(1, chat=True)),
+        (0.0, _empty_chunk()),
+        (0.0, _token_chunk(2, chat=True)),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+    # tok0 to tok1 is 1 tick. empty_chunk is at tick 4 but does not advance
+    # most_recent_timestamp (remains tick 3 from tok1). tok2 is at tick 5, so
+    # interval is 5 - 3 = 2 ticks.
+    assert output.itl == pytest.approx([1.0 * tick, 2.0 * tick], abs=tick / 1000), (
+        f"{client}: empty chunk should not add interval or advance "
+        f"most_recent_timestamp: {output.itl}"
+    )
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+def test_chat_tokenless_stream_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """A stream with no streamed output is rejected (#54708)."""
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _empty_chunk()),
+        (0.0, _usage_chunk(0)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, 0, expect_success=False)
+
+    assert not output.success, f"{client}: tokenless stream should have failed"
+    assert output.itl == []
+    assert "TTFT" in output.error
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+def test_chat_empty_string_token_is_counted(
+    monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    """A token that renders as an empty string is counted as streamed output."""
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 3
+
+    def _chunk(content: str) -> bytes:
+        choice = {"index": 0, "delta": {"content": content}}
+        return _sse(
+            {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
+        )
+
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _chunk("")),
+        (0.0, _chunk("a")),
+        (0.0, _chunk("b")),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == 2
+    assert output.output_tokens == n_tokens
+
+    # Clock read 0 is start_time (1000.0).
+    # Clock read 1 is role chunk (1001.0); skipped because delta carries role.
+    # Clock read 2 is empty token chunk (1002.0); sets TTFT = 2 * tick.
+    expected_ttft = 2.0 * tick
+    assert output.ttft == pytest.approx(expected_ttft, abs=tick / 1000), (
+        f"{client}: TTFT {output.ttft} should be measured to the empty token chunk "
+        f"({expected_ttft}), not the next chunk ({3.0 * tick})"
+    )
+
+    assert output.itl == pytest.approx([1.0 * tick, 1.0 * tick], abs=tick / 1000)
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
