@@ -18,6 +18,11 @@ pub enum Error {
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
     #[error(
+        "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
+         and must not contain '@', '/', '\\', or NUL."
+    )]
+    InvalidCacheSalt,
+    #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
     )]
@@ -63,6 +68,7 @@ impl Error {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
