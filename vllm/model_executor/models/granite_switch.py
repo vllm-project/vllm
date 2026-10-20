@@ -2235,12 +2235,18 @@ _MOE_OUTPUT_SUFFIX = ".block_sparse_moe.experts.down_proj"
 _MOE_ROUTER_SUFFIX = ".block_sparse_moe.router.weight"
 
 
-def _try_load_stacked_moe(name, loaded_weight, params_dict, loaded_params, model):
+def _try_load_stacked_moe(
+    name: str,
+    loaded_weight: torch.Tensor,
+    params_dict: dict[str, nn.Parameter],
+    loaded_params: set[str],
+    model: nn.Module,
+) -> bool:
     """Remap one stacked-MoE checkpoint tensor onto vLLM's FusedMoE.
 
     Returns:
-        True if ``name`` was an MoE tensor and the caller should move on; False
-        if the caller should fall through to its own direct-by-name load.
+        Whether ``name`` was an MoE tensor. False means the caller should fall
+        through to its own direct-by-name load.
 
     """
 
@@ -2349,7 +2355,9 @@ class DecoderInterface(abc.ABC):
         """Populate the ctx kernel metadata from per-token ``adapter_indices``."""
 
     @abc.abstractmethod
-    def load_weights(self, model, weights: Iterable[tuple[str, torch.Tensor]]) -> set:
+    def load_weights(
+        self, model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
         """Apply checkpoint weights into ``model``.
 
         Owns the whole per-adaptation weight-application decision, not just a
@@ -2369,7 +2377,7 @@ class DecoderInterface(abc.ABC):
         """
 
     @abc.abstractmethod
-    def finalize_modules(self, model, config) -> None:
+    def finalize_modules(self, model: nn.Module, config: GraniteSwitchConfig) -> None:
         """Post-load: finalize fused kernel state and register remap tables.
 
         Args:

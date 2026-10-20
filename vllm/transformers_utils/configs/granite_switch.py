@@ -10,6 +10,8 @@ self-describing, and its validation is what turns a malformed checkpoint into a
 startup error instead of silently wrong routing.
 """
 
+from typing import Any
+
 from transformers import GraniteMoeHybridConfig
 
 # Decoder-layer cache slots the switch reserves at the front of the model when
@@ -154,7 +156,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         num_local_experts: int = 0,
         position_embedding_type: str = "rope",
         layer_types: list[str] | None = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         # This model is attention-only, but the hybrid parent fills an unset
         # ``layer_types`` with all-mamba, which would size the per-layer cache
