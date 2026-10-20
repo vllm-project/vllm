@@ -58,6 +58,7 @@ MTPModelTypes = Literal[
     "kimi_k3_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "step5_mtp",
     "hy_v3_mtp",
     "hy_v4_mtp",
     "gemma4_mtp",
@@ -423,9 +424,10 @@ class SpeculativeConfig:
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
     backend (e.g. DFlash needs a backend that supports non-causal attention)."""
-    kv_cache_dtype: CacheDType | None = None
+    kv_cache_dtype: CacheDType | str | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
-    target model's `--kv-cache-dtype`."""
+    target model's `--kv-cache-dtype`. Custom dtypes registered by platform
+    backends are accepted."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -995,6 +997,23 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
+        # Step5 has its own draft module because its model and weight-loading
+        # contracts differ from Step3.5.
+        if hf_config.model_type in ("step5", "step5_vl") or {
+            "Step5ForCausalLM",
+            "Step5ForConditionalGeneration",
+        }.intersection(getattr(hf_config, "architectures", None) or []):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "step5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step5MTP"]})
+
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
@@ -1082,6 +1101,15 @@ class SpeculativeConfig:
                     "n_predict": text_config.num_nextn_predict_layers,
                     "architectures": ["Glm5NextMTPModel"],
                     "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
+        if hf_config.model_type == "muse_glimmer_assistant":
+            # Non-causal DFlash drafter sharing Muse Glimmer's vocabulary
+            hf_config.update(
+                {
+                    "dflash_config": {"causal": False}
+                    | (getattr(hf_config, "dflash_config", None) or {}),
+                    "vocab_size": getattr(hf_config, "vocab_size", 202048),
                 }
             )
 
@@ -1368,7 +1396,7 @@ class SpeculativeConfig:
                     if (
                         self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
+                        not in ("step3p5_mtp", "step5_mtp", "inkling_mtp")
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
