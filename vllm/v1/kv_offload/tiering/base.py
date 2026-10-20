@@ -6,6 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -66,6 +67,7 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    IO_TIMEOUTS = "vllm:kv_offload_tiering_io_timeouts"
 
 
 @dataclass
@@ -93,6 +95,15 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    timed_out: bool = False
+    # Monotonic time when physical completion was confirmed by the backend.
+    completed_at: float | None = None
+
+
+class JobTimeoutStatus(Enum):
+    RUNNING = auto()
+    CANCELED = auto()
+    COMPLETED = auto()
 
 
 class ParentManager(ABC):
@@ -278,10 +289,13 @@ class SecondaryTierManager(ABC):
 
     @abstractmethod
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Return all jobs (loads and stores) that completed since the last call.
+        """Return completed jobs since the last call.
 
-        The framework uses these results to release resources and finalize
-        transfers.
+        The framework uses these results to release primary slots. A tier
+        with ``io_timeout_seconds`` set must only report physical completions
+        here, including jobs already timed out logically. Populate
+        ``completed_at`` with the monotonic time physical completion was
+        confirmed.
 
         Returns:
             Iterable of JobResult objects for jobs finished since the
@@ -289,6 +303,20 @@ class SecondaryTierManager(ABC):
 
         """
         pass
+
+    @property
+    def io_timeout_seconds(self) -> float | None:
+        """Logical job deadline, measured from submission."""
+        return None
+
+    def on_job_timeout(self, job_metadata: TransferJob) -> JobTimeoutStatus:
+        """Atomically check completion before canceling or timing out a job.
+
+        COMPLETED means the physical result is waiting for get_finished_jobs().
+        CANCELED means the job cannot access primary memory and will not report
+        a physical completion. RUNNING means the job may still access it.
+        """
+        return JobTimeoutStatus.RUNNING
 
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.

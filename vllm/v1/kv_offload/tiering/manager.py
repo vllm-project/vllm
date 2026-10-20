@@ -52,6 +52,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     JobId,
     JobResult,
+    JobTimeoutStatus,
     ParentManager,
     SecondaryTierManager,
     TransferJob,
@@ -136,6 +137,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
+        self._quarantined_chunk_ids: set[int] = set()
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
@@ -163,6 +165,29 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         ``view[c]``.
         """
         return self._kv_memoryview
+
+    def quarantine_write(self, keys: Collection[OffloadKey]) -> None:
+        """Hide failed writes while reserving slots still touched by a tier."""
+        for key in keys:
+            chunk = self._policy.get(key)
+            assert chunk is not None and not chunk.is_ready
+            self._policy.remove(key)
+            self._quarantined_chunk_ids.add(chunk.chunk_id)
+
+    def release_quarantined_write(self, chunk_ids: Iterable[int]) -> None:
+        """Return detached slots once their physical I/O has stopped."""
+        for chunk_id in chunk_ids:
+            self._quarantined_chunk_ids.remove(chunk_id)
+            self._free_list.append(int(chunk_id))
+            self._num_write_pending_chunks -= 1
+
+    @override
+    def reset_cache(self) -> None:
+        if self._quarantined_chunk_ids:
+            raise RuntimeError(
+                "Cannot reset primary cache while I/O targets are unsafe"
+            )
+        super().reset_cache()
 
     @override
     def shutdown(self) -> None:
@@ -248,6 +273,7 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        self._timed_out_jobs: dict[int, dict[JobId, JobMetadata]] = {}
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
@@ -494,6 +520,35 @@ class TieringOffloadingManager(OffloadingManager):
                 False,
             )
 
+    def _report_timeout(
+        self, tier: SecondaryTierManager, job_metadata: JobMetadata
+    ) -> JobTimeoutStatus:
+        job = job_metadata.transfer_job
+        status = tier.on_job_timeout(job)
+        if status is JobTimeoutStatus.COMPLETED:
+            return status
+        self._metrics.on_job_finished(
+            job_metadata,
+            JobResult(job_id=job.job_id, success=False, timed_out=True),
+            hold_primary=True,
+        )
+        if job.is_promotion:
+            sources = self._request_load_sources.get(job.req_context.req_id)
+            if sources is not None:
+                for key in job.keys:
+                    if sources.get(key) == tier.cache_hit_source:
+                        del sources[key]
+            self.primary_tier.quarantine_write(job.keys)
+        return status
+
+    def _release_timed_out_job(self, job_metadata: JobMetadata) -> None:
+        job = job_metadata.transfer_job
+        if job.is_promotion:
+            self.primary_tier.release_quarantined_write(job.chunk_ids)
+        else:
+            self.primary_tier.complete_read(job.keys, job.req_context)
+        self._metrics.on_job_released(job_metadata)
+
     def _process_finished_jobs(
         self,
         tiers: Sequence[SecondaryTierManager] | None = None,
@@ -518,36 +573,76 @@ class TieringOffloadingManager(OffloadingManager):
             tiers = self.secondary_tiers
         for tier in tiers:
             i = self._tier_index[tier]
-            for completed_job in tier.get_finished_jobs():
-                job_id = completed_job.job_id
-                job_metadata = self._pop_job(job_id)
-                assert job_metadata is not None, (
-                    f"Finished job_id {job_id} from tier #{i}"
-                    f" ({tier.tier_type}) not in _jobs"
-                )
-                assert job_metadata.tier_idx == i, (
-                    f"Finished job_id {job_id} reported by tier #{i}"
-                    f" but belongs to tier #{job_metadata.tier_idx}"
-                )
-                transfer_job = job_metadata.transfer_job
-                self._metrics.on_job_finished(job_metadata, completed_job)
+            while True:
+                poll_time = time.monotonic()
+                for completed_job in tier.get_finished_jobs():
+                    self._process_completed_job(i, tier, completed_job)
 
-                if transfer_job.is_promotion:
-                    # secondary→primary transfer (promotion) completed.
-                    # Make chunks available in primary tier.
-                    self._complete_promotion(job_metadata, completed_job)
+                timeout = tier.io_timeout_seconds
+                if timeout is None:
+                    break
+                for job_id, job_metadata in list(self._jobs.items()):
+                    if job_metadata.tier_idx != i:
+                        continue
+                    if poll_time < job_metadata.transfer_job.submit_time + timeout:
+                        continue
+                    status = self._report_timeout(tier, job_metadata)
+                    if status is JobTimeoutStatus.COMPLETED:
+                        break
+                    del self._jobs[job_id]
+                    if status is JobTimeoutStatus.CANCELED:
+                        self._release_timed_out_job(job_metadata)
+                    else:
+                        self._timed_out_jobs.setdefault(i, {})[job_id] = job_metadata
                 else:
-                    # primary→secondary transfer completed.
-                    # Decrement ref_cnt on primary chunks.
-                    self.primary_tier.complete_read(
-                        transfer_job.keys, transfer_job.req_context
-                    )
-                    if completed_job.success:
-                        self._update_backpressure(tier, job_metadata, completed_job)
+                    break
+
+    def _process_completed_job(
+        self, tier_idx: int, tier: SecondaryTierManager, completed_job: JobResult
+    ) -> None:
+        job_id = completed_job.job_id
+        job_metadata = self._pop_job(job_id)
+        if job_metadata is None:
+            pending = self._timed_out_jobs.get(tier_idx, {})
+            job_metadata = pending.pop(job_id, None)
+            if not pending:
+                self._timed_out_jobs.pop(tier_idx, None)
+            assert job_metadata is not None, (
+                f"Finished job_id {job_id} from tier #{tier_idx}"
+                f" ({tier.tier_type}) not in _jobs"
+            )
+            assert job_metadata.tier_idx == tier_idx
+            self._release_timed_out_job(job_metadata)
+            return
+        assert job_metadata.tier_idx == tier_idx, (
+            f"Finished job_id {job_id} reported by tier #{tier_idx}"
+            f" but belongs to tier #{job_metadata.tier_idx}"
+        )
+        transfer_job = job_metadata.transfer_job
+        deadline = tier.io_timeout_seconds
+        if deadline is not None:
+            assert completed_job.completed_at is not None, (
+                f"Tier {tier.tier_type} did not report completed_at"
+            )
+            if completed_job.completed_at >= transfer_job.submit_time + deadline:
+                status = self._report_timeout(tier, job_metadata)
+                assert status is not JobTimeoutStatus.COMPLETED
+                self._release_timed_out_job(job_metadata)
+                return
+        self._metrics.on_job_finished(job_metadata, completed_job)
+
+        if transfer_job.is_promotion:
+            self._complete_promotion(job_metadata, completed_job)
+        else:
+            self.primary_tier.complete_read(transfer_job.keys, transfer_job.req_context)
+            if completed_job.success:
+                self._update_backpressure(tier, job_metadata, completed_job)
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
     ) -> bool:
+        if self._tier_index[tier] in self._timed_out_jobs:
+            return False
         detector = tier.bp_detector
         if detector is None:
             return True
@@ -633,7 +728,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         any_retry = False
         for i, tier in enumerate(self.secondary_tiers):
-            if i == exclude_tier_idx:
+            if i == exclude_tier_idx or i in self._timed_out_jobs:
                 continue
             if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
                 continue
@@ -1109,9 +1204,11 @@ class TieringOffloadingManager(OffloadingManager):
     def has_pending_work(self) -> bool:
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
-        # secondary tiers themselves still have outstanding.
+        # secondary tiers themselves still have outstanding. Timed-out jobs
+        # must keep the scheduler polling until their physical I/O finishes.
         return (
             bool(self._jobs)
+            or bool(self._timed_out_jobs)
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
@@ -1149,6 +1246,7 @@ class TieringOffloadingManager(OffloadingManager):
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
         assert not self._jobs
+        assert not self._timed_out_jobs
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
