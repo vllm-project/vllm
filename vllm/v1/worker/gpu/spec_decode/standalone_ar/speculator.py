@@ -64,13 +64,12 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         )
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
-        
+
     @property
     def attn_vllm_config(self) -> VllmConfig:
         if self.speculative_config.kv_cache_dtype is not None:
             return self._draft_vllm_config
         return self.vllm_config
-
 
     def set_attn(
         self,
