@@ -33,7 +33,7 @@ SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
 MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
-MIN_DENSE_BATCH_SIZE = hybrid_module.MIN_DENSE_BATCH_SIZE
+MIN_DENSE_M = hybrid_module.MIN_DENSE_M
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, MIN_DENSE_BATCH_SIZE],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64, MIN_DENSE_M],
     ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill", "M=256_dense"],
 )
 @pytest.mark.parametrize("use_dequant", [False, True])
@@ -216,9 +216,9 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
     "M,has_dense,expected_path",
     [
         (MAX_SKINNY_BATCH_SIZE, True, "triton"),
-        (MIN_DENSE_BATCH_SIZE - 1, True, "triton"),
-        (MIN_DENSE_BATCH_SIZE, True, "dense"),
-        (MIN_DENSE_BATCH_SIZE, False, "triton"),
+        (MIN_DENSE_M - 1, True, "triton"),
+        (MIN_DENSE_M, True, "dense"),
+        (MIN_DENSE_M, False, "triton"),
     ],
     ids=["skinny_past_lds", "below_dense_threshold", "at_dense_threshold", "off"],
 )

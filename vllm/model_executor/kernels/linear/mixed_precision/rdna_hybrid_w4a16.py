@@ -5,7 +5,7 @@
 Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
-  M >= MIN_DENSE_BATCH_SIZE:  dense GEMM on a cached dequantized copy, when
+  M >= MIN_DENSE_M:  dense GEMM on a cached dequantized copy, when
       ``KernelConfig.rdna_hybrid_w4a16_prefill_dequant`` is "enable"
   otherwise: Triton W4A16 fused dequant GEMM
 
@@ -117,9 +117,10 @@ MAX_SKINNY_BATCH_SIZE = 5
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
+# M counts tokens in the forward pass, not requests: one long prefill qualifies.
 # The dense copy reads 4x the weight bytes of int4, so it only pays off once
 # the GEMM is compute bound.
-MIN_DENSE_BATCH_SIZE = 256
+MIN_DENSE_M = 256
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +557,7 @@ def _rdna_hybrid_w4a16_apply_impl(
         with _profile_scope(f"wvsplitk_int4 {M}x{N}x{K}"):
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
 
-    if w_dequant is not None and M >= MIN_DENSE_BATCH_SIZE:
+    if w_dequant is not None and M >= MIN_DENSE_M:
         with _profile_scope(f"hybrid_dequant_w4a16 {M}x{N}x{K}"):
             return rocm_unquantized_gemm_impl(x_2d, w_dequant, bias)
 
