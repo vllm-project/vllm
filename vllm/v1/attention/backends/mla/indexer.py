@@ -205,19 +205,16 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
-
-
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
+    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -1584,6 +1581,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
