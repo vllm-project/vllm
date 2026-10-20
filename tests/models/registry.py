@@ -747,6 +747,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-mini": "vllm-sr/d3-mini",
             "d3-nano": "vllm-sr/d3-nano",
             "d3-lite": "vllm-sr/d3-lite",
+            "d3-turbo": "vllm-sr/d3-turbo",
         },
         max_model_len=4096,
     ),

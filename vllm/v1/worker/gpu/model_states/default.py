@@ -158,6 +158,22 @@ class DefaultModelState(ModelState):
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
 
+    def get_mm_prefix_ranges(
+        self, input_batch: InputBatch
+    ) -> dict[int, list[tuple[int, int]]] | None:
+        """PrefixLM bidirectional token ranges per request index of the batch."""
+        if not (
+            self.supports_mm_inputs
+            and self.encoder_cache is not None
+            and self.model_config.is_mm_prefix_lm
+        ):
+            return None
+        return compute_mm_prefix_ranges(
+            req_ids=input_batch.req_ids,
+            mm_features=self.encoder_cache.mm_features,
+            sliding_window=self.model_config.get_sliding_window(),
+        )
+
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs or self.prompt_embeds_state is not None:
@@ -199,17 +215,6 @@ class DefaultModelState(ModelState):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if (
-            self.supports_mm_inputs
-            and self.encoder_cache is not None
-            and self.model_config.is_mm_prefix_lm
-        ):
-            req_doc_ranges = compute_mm_prefix_ranges(
-                req_ids=input_batch.req_ids,
-                mm_features=self.encoder_cache.mm_features,
-                sliding_window=self.model_config.get_sliding_window(),
-            )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -227,7 +232,7 @@ class DefaultModelState(ModelState):
             dcp_local_seq_lens_cpu_upper_bound=input_batch.dcp_local_seq_lens_cpu_upper_bound,
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
-            mm_req_doc_ranges=req_doc_ranges,
+            mm_req_doc_ranges=self.get_mm_prefix_ranges(input_batch),
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
             req_idx=input_batch.idx_mapping_np,

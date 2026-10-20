@@ -307,10 +307,10 @@ vllm serve Cloudflare/clef-omni
 
 ### Decision 3.0
 
-The Decision 3.0 models are a Qwen3.5 backbone with an answer-code readout:
-one forward pass per question, and the readout scores the question's options
-at the last token. vLLM detects the checkpoint's `decision_config.json` and
-serves it as a classification model. All six sizes take the same command:
+The Decision 3.0 models answer through an answer-code readout: one forward
+pass per question, and the readout scores the question's options at the last
+token. vLLM detects the checkpoint's `decision_config.json` and serves it as a
+classification model. All six sizes take the same command:
 [`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) (27B),
 [`vllm-sr/d3-flash`](https://huggingface.co/vllm-sr/d3-flash) (9B),
 [`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini) (4B),
@@ -322,6 +322,19 @@ serves it as a classification model. All six sizes take the same command:
 vllm serve vllm-sr/d3
 ```
 
+[`vllm-sr/d3-turbo`](https://huggingface.co/vllm-sr/d3-turbo) (27B) takes the
+same command. Its checkpoint declares `prefix_bidir` attention: a prompt is a
+state block (the system turn, the media, `State:` and the state) followed by a
+question block. The full attention layers read each block in both directions
+and the question block also reads the state block, so the state never sees a
+question; the linear-attention layers read the prompt in order. It answers up
+to 32,768 tokens per question, its validated length, by default; for long
+contexts up to 131,072 tokens, raise the limit:
+
+```bash
+vllm serve vllm-sr/d3-turbo --max-model-len 131072
+```
+
 - Each question is one read of the prompt the checkpoint's `d3_format.py`
   writes: the state, the question and one line per option under an answer
   code. A question's probabilities are the softmax of its options' code
@@ -330,8 +343,12 @@ vllm serve vllm-sr/d3
   this page instead.
 - A choice can have up to 255 options. A JSON state is written as JSON text,
   and an empty state as `(empty)`.
-- The full attention layers read the whole prompt in both directions, as the
-  checkpoint declares, so chunked prefill and prefix caching are off.
+- The full attention layers read the whole prompt in both directions, or with
+  `prefix_bidir` its state and question blocks, as the checkpoint declares, so
+  chunked prefill and prefix caching are off. `prefix_bidir` runs on CUDA and
+  ROCm GPUs with Model Runner V2 and an attention backend that takes PrefixLM
+  ranges, which vLLM selects (Triton, or FlashAttention 4 where available).
+  The state is read again for each question of a request.
 - `instructions` returns 400, since the prompt is fixed.
   `chat_template_kwargs` has no effect.
 - `images` and `videos` are placed before the text, images read at up to
@@ -339,7 +356,9 @@ vllm serve vllm-sr/d3
   0.2 megapixels each, as the checkpoint's runtime does. The media are read
   once and shared by every question of the request.
 - `/classify` and `/pooling` return the raw logits of all 255 codes; only the
-  first codes, one per option, belong to a question.
+  first codes, one per option, belong to a question. A `prefix_bidir` prompt
+  sent there reads as a single block; `LLM.classify` takes its state block's
+  token count as `PoolingParams(extra_kwargs={"d3_state_tokens": n})`.
 
 ### Liquid d1
 
