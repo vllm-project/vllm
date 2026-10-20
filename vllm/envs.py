@@ -1412,10 +1412,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "True").lower()
         in ("true", "1")
     ),
-    # Two-level all-reduce for a TP group of 8 spanning two fully connected
-    # XGMI islands joined by PCIe (e.g. 8x MI210): hierarchical RCCL from
-    # HIER_MIN_BYTES, otherwise custom all-reduce inside the island
-    # then across GPU pairs below CUSTOM_MAX_BYTES (0 disables it). The 2.25 MiB
+    # All-reduce for TP groups in XGMI islands on MI200 (e.g. MI210): custom
+    # all-reduce below CUSTOM_MAX_BYTES (0 disables it) inside one island or,
+    # for two islands joined by PCIe, inside each island then across GPU
+    # pairs; hierarchical RCCL from HIER_MIN_BYTES for two islands. The 2.25 MiB
     # defaults are the end-to-end break-even on 8x MI210, above the ~1 MiB
     # crossover of the two paths in isolation.
     "VLLM_ROCM_ISLAND_ALLREDUCE": lambda: (

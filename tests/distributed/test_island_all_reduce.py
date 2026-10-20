@@ -21,7 +21,6 @@ from ..utils import init_test_distributed_environment
 
 WORLD_SIZE = 8
 HIDDEN = 6144
-ONE_ISLAND_SIZE = 4
 # Exit code of a worker whose GPUs do not use the island all-reduce.
 NOT_TWO_ISLANDS = 77
 # Rank -> GPU mapping that alternates between the islands of an 8x MI210 node.
@@ -175,13 +174,13 @@ def _tp_group_worker(rank: int, port: int) -> None:
             assert torch.equal(iar.all_reduce(new), graph_out)
 
 
-def _one_island_worker(rank: int, port: int) -> None:
-    """A TP group of 4 inside one island: custom all-reduce, one stage."""
+def _one_island_worker(rank: int, port: int, n: int) -> None:
+    """A TP group of n inside one island: custom all-reduce, one stage."""
     from vllm.distributed.device_communicators.island_all_reduce import (
         IslandAllReduce,
     )
 
-    n, dtype = ONE_ISLAND_SIZE, torch.bfloat16
+    dtype = torch.bfloat16
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(device)
     dist.init_process_group(
@@ -272,9 +271,8 @@ def test_island_all_reduce_custom_path_disabled_by_zero_limit():
     _run_workers(_island_worker, "custom_off", "bfloat16")
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm() or current_platform.device_count() < ONE_ISLAND_SIZE,
-    reason="requires 4 ROCm GPUs",
-)
-def test_island_all_reduce_single_island_group():
-    _run_workers(_one_island_worker, world_size=ONE_ISLAND_SIZE)
+@pytest.mark.parametrize("n", [2, 4])
+def test_island_all_reduce_single_island_group(n):
+    if not current_platform.is_rocm() or current_platform.device_count() < n:
+        pytest.skip(f"requires {n} ROCm GPUs")
+    _run_workers(_one_island_worker, n, world_size=n)

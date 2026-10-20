@@ -1,28 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Two-level all-reduce for a TP group spanning two XGMI islands (ROCm).
+"""All-reduce for TP groups on ROCm GPUs joined by XGMI islands (e.g. MI210).
 
-Targets nodes whose 8 GPUs form two fully connected 4-GPU XGMI islands joined
-only by PCIe (e.g. 8x MI210). There the flat custom all-reduce is unavailable
-(the group is not fully connected) and a flat RCCL ring crosses PCIe twice per
-step. Instead:
+ROCm enables vLLM's custom all-reduce only on MI300 and newer, so on MI200 every
+TP all-reduce goes through RCCL, which uses a ring. Inside a fully connected
+XGMI island the custom one-shot kernel reads every peer's buffer directly in
+one step and is faster for the smaller tensors:
 
-* large tensors: RCCL reduce-scatter inside the island, all-reduce
-  of the quarter-size shard across the pairs, all-gather inside the island;
-* smaller tensors: vLLM's custom all-reduce inside each
-  island, then across the GPU pair at the same island position.
+* one island (a TP group of 2 or 4 fully connected GPUs): custom all-reduce
+  for the smaller tensors, RCCL for the rest;
+* two islands (a TP group of 8 whose halves are fully connected and joined by
+  PCIe): custom all-reduce inside each island, then across the GPU pair at the
+  same island position, for the smaller tensors; for large tensors, RCCL
+  reduce-scatter inside the island, all-reduce of the quarter-size shard
+  across the pairs, all-gather inside the island.
 
 The islands are found from the link topology, so the TP ranks need not be
-ordered by island.
-
-A TP group inside a single island (e.g. 4x MI210) is fully connected, but the
-flat custom all-reduce is enabled on MI300 and newer only. Such a group gets
-the first stage alone: custom all-reduce for the smaller tensors, RCCL for the
-rest.
-
-The custom kernels always copy the input into the pre-registered IPC buffer,
-also inside CUDA graphs: registered graph buffers return wrong sums on MI210
-with ROCm 7.
+ordered by island. The custom kernels always copy the input into the
+pre-registered IPC buffer, also inside CUDA graphs: registered graph buffers
+return wrong sums on MI210 with ROCm 7.
 """
 
 from contextlib import ExitStack, contextmanager
@@ -32,12 +28,34 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 _ISLAND_WORLD_SIZE = 8
+_ONE_ISLAND_WORLD_SIZES = (2, 4)
+# Speculative methods that run no draft model, so capture no drafter graphs.
+_NO_DRAFT_MODEL_METHODS = ("ngram", "ngram_gpu", "suffix")
+
+
+def _drafter_replays_graphs_in_capture() -> bool:
+    """Whether a drafter graph can be replayed before graph capture ends.
+
+    The custom kernels' graph buffer addresses are filled in when
+    graph_capture() exits. The V1 model runner runs the drafter inside each
+    target capture, so a drafter graph recorded for one size is replayed while
+    a later size is captured, before its addresses exist.
+    """
+    config = get_current_vllm_config_or_none()
+    spec = config.speculative_config if config is not None else None
+    return (
+        config is not None
+        and spec is not None
+        and spec.method not in _NO_DRAFT_MODEL_METHODS
+        and not config.use_v2_model_runner
+    )
 
 
 def find_two_islands(
@@ -100,7 +118,10 @@ class IslandAllReduce:
 
         if current_platform.is_fully_connected(ids):
             # Platforms with the flat custom all-reduce use that instead.
-            if current_platform.use_custom_allreduce():
+            if (
+                current_platform.use_custom_allreduce()
+                or world_size not in _ONE_ISLAND_WORLD_SIZES
+            ):
                 return
             island_ids = [ids]
             groups = [cpu_group]
@@ -137,7 +158,13 @@ class IslandAllReduce:
         self.min_hier_bytes = envs.VLLM_ROCM_ISLAND_AR_HIER_MIN_BYTES
         # A zero limit turns the custom path off; CustomAllreduce cannot
         # allocate an empty shared buffer.
-        if self.max_custom_bytes > 0:
+        if self.max_custom_bytes > 0 and _drafter_replays_graphs_in_capture():
+            logger.info_once(
+                "Island all-reduce: custom path off with a speculative draft "
+                "model on the V1 model runner.",
+                scope="global",
+            )
+        elif self.max_custom_bytes > 0:
             stages = [
                 CustomAllreduce(
                     group,
