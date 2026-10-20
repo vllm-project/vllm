@@ -735,7 +735,6 @@ def sparse_attn_indexer(
                         ),
                         row_ends,
                     )
-                num_rows = logits.shape[0]
                 if candidate_blocks is not None:
                     # Two-level selection (v4.1): the candidate source
                     # publishes its top blocks; later indexers mask their
@@ -760,15 +759,13 @@ def sparse_attn_indexer(
                             chunk_candidates,
                             candidate_block_size,
                         )
-                ops.top_k_per_row_prefill(
+                get_indexer_topk(topk_backend).forward_prefill(
                     logits,
                     torch.zeros_like(row_ends) if row_starts is None else row_starts,
                     row_ends,
                     topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
                     topk_tokens,
+                    chunk.num_reqs,
                 )
 
             if deinterleave_idx is None:
@@ -1052,6 +1049,7 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        get_indexer_topk(self.topk_backend)
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0

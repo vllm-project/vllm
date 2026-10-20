@@ -1858,6 +1858,29 @@ def _has_flashinfer_topk() -> bool:
     return importlib.util.find_spec("flashinfer") is not None
 
 
+def _has_flashinfer_gvr2() -> bool:
+    """FlashInfer with the gvr_2 top_k_varlen backend (SM100 family only).
+    Probes the package tree so collection does not import flashinfer."""
+    if not _has_flashinfer_topk() or not current_platform.is_device_capability_family(
+        100
+    ):
+        return False
+    import importlib.util
+    import os
+
+    spec = importlib.util.find_spec("flashinfer")
+    assert spec is not None and spec.submodule_search_locations
+    return any(
+        os.path.exists(os.path.join(p, "topk_varlen", "kernels", "gvr2_topk_host.py"))
+        for p in spec.submodule_search_locations
+    )
+
+
+requires_flashinfer_gvr2 = pytest.mark.skipif(
+    not _has_flashinfer_gvr2(), reason="requires flashinfer gvr_2 top-k on SM100"
+)
+
+
 def _has_cooperative_topk() -> bool:
     return _has_device_capability(
         90
@@ -1891,6 +1914,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
             not _has_flashinfer_topk(), reason="requires flashinfer top-k"
         ),
     ),
+    pytest.param("flashinfer_gvr2", marks=requires_flashinfer_gvr2),
     pytest.param("deep_select", marks=requires_sm100),
 ]
 
@@ -1966,6 +1990,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
                 not _has_flashinfer_topk(), reason="requires flashinfer top-k"
             ),
         ),
+        pytest.param("flashinfer_gvr2", marks=requires_flashinfer_gvr2),
         pytest.param("deep_select", marks=requires_sm100),
     ],
 )
@@ -2022,20 +2047,49 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
 
     def resolve(
         backend: str,
-        t: torch.Tensor = logits,
+        t: torch.Tensor | None = None,
         k: int = 2048,
         num_rows: int = 64,
     ) -> str:
         cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
         with set_current_vllm_config(cfg):
-            return SparseIndexerTopk().resolve_backend(t, k, num_rows)
+            return SparseIndexerTopk().resolve_backend(
+                logits if t is None else t, k, num_rows
+            )
 
     is_sm100 = current_platform.is_device_capability_family(100)
     has_coop = _has_cooperative_topk()
     has_fi = _has_flashinfer_topk()
+    has_gvr2 = _has_flashinfer_gvr2()
 
-    # "auto" is the chain cooperative -> persistent -> per_row, with the
-    # cooperative/persistent switch at cooperative_topk's cluster-wave row
+    if has_gvr2:
+        # Wide rows (>= 32K) go to gvr_2 regardless of the row count or the
+        # DeepSelect alignment; narrow rows keep the pre-existing chain.
+        assert resolve("auto") == "flashinfer_gvr2"
+        assert resolve("auto", k=512, num_rows=128) == "flashinfer_gvr2"
+        assert resolve("auto", unaligned_logits, num_rows=128) == "flashinfer_gvr2"
+        assert resolve("auto", k=5000) == "per_row"
+        assert resolve("flashinfer_gvr2", num_rows=1) == "flashinfer_gvr2"
+        with pytest.raises(RuntimeError, match="topk_tokens must be in"):
+            resolve("flashinfer_gvr2", k=3000)
+        with pytest.raises(RuntimeError, match="fp32"):
+            resolve("flashinfer_gvr2", logits.to(torch.bfloat16))
+        # Row pitch not a multiple of 4 (float4 loads): refused explicitly,
+        # and "auto" never picks gvr_2 for it.
+        odd_pitch = torch.randn(64, 131074, dtype=torch.float32, device="cuda")[
+            :, :131072
+        ]
+        with pytest.raises(RuntimeError, match="multiple of 4"):
+            resolve("flashinfer_gvr2", odd_pitch)
+        assert resolve("auto", odd_pitch) != "flashinfer_gvr2"
+        logits = logits[:, :16384]
+        unaligned_logits = unaligned_logits[:, :16384]
+    else:
+        with pytest.raises(RuntimeError, match="gvr_2|SM100|CUDA"):
+            resolve("flashinfer_gvr2")
+
+    # Otherwise "auto" is the chain cooperative -> persistent -> per_row, with
+    # the cooperative/persistent switch at cooperative_topk's cluster-wave row
     # limit. It must never select the opt-in backends by itself.
     if has_coop:
         from vllm.model_executor.layers.indexer_topk import (
@@ -2074,7 +2128,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         assert resolve("cooperative") == "cooperative"
     if has_fi:
         assert resolve("flashinfer") == "flashinfer"
-    if is_sm100:
+    if is_sm100 and hasattr(torch.ops.deep_select, "get_alignment_requirement"):
         # Explicit deep_select has no row-count requirement.
         assert resolve("deep_select", num_rows=1) == "deep_select"
         with pytest.raises(RuntimeError, match="constraints"):
@@ -2228,3 +2282,60 @@ def test_sparse_indexer_topk_aiter_expands_mtp_row_ends(monkeypatch) -> None:
 
     assert recorded["next_n"] == 1
     assert recorded["row_ends"] == [99, 100, 199, 200]
+
+
+@requires_flashinfer_gvr2
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "q_lens,ctx_lens,backend",
+    [
+        ([2048], [0], "flashinfer_gvr2"),
+        ([1536], [40000], "flashinfer_gvr2"),
+        ([96], [40000], "per_row"),
+        ([1024, 700, 300], [0, 33000, 1500], "per_row"),
+    ],
+)
+@torch.inference_mode()
+def test_sparse_indexer_prefill_topk_gvr2(
+    top_k: int, q_lens: list[int], ctx_lens: list[int], backend: str
+) -> None:
+    """Explicit flashinfer_gvr2 runs prefill top-k on gvr_2 only for
+    single-request chunks of >= GVR2_PREFILL_MIN_ROWS rows; small or
+    multi-request chunks fall back. Row r selects over logits[r, ks[r]:ke[r]]
+    (uncleaned outside) with indices relative to ks[r], matching torch.topk."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+
+    set_random_seed(0)
+    ks, ke, k_off = [], [], 0
+    for q, c in zip(q_lens, ctx_lens):
+        for i in range(q):
+            ks.append(k_off)
+            ke.append(k_off + c + i + 1)
+        k_off += c + q
+    num_rows, width = len(ks), k_off
+    pitch = (width + 255) // 256 * 256
+    logits = torch.randn(num_rows, pitch, device="cuda")[:, :width]
+    row_starts = torch.tensor(ks, dtype=torch.int32, device="cuda")
+    row_ends = torch.tensor(ke, dtype=torch.int32, device="cuda")
+    cols = torch.arange(width, device="cuda")
+    outside = (cols < row_starts[:, None]) | (cols >= row_ends[:, None])
+    logits[outside] = 1e30
+    reference = logits.masked_fill(outside, float("-inf"))
+
+    cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": "flashinfer_gvr2"})
+    with set_current_vllm_config(cfg):
+        topk = SparseIndexerTopk()
+    assert topk.resolve_prefill_backend(logits, top_k, len(q_lens)) == backend
+    indices = torch.full((num_rows, top_k), 7, dtype=torch.int32, device="cuda")
+    topk.forward_prefill(logits, row_starts, row_ends, indices, top_k, len(q_lens))
+
+    lens = (row_ends - row_starts)[:, None]
+    valid = torch.arange(top_k, device="cuda")[None, :] < lens
+    assert ((indices == -1) | ((indices >= 0) & (indices < lens))).all()
+    assert torch.equal((indices >= 0).sum(1), valid.sum(1))
+    picked = reference.gather(
+        1, (indices.long() + row_starts[:, None]).clamp(0, width - 1)
+    ).masked_fill(indices < 0, 0)
+    expected = reference.topk(top_k, dim=1).values.masked_fill(~valid, 0)
+    torch.testing.assert_close(picked.sort(1).values, expected.sort(1).values)
