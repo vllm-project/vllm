@@ -167,6 +167,10 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
+from vllm.v1.worker.gpu.spec_decode.sharded_greedy_rejection_sampler import (
+    ShardedGreedyVerifier,
+    create_sharded_greedy_verifier,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
@@ -340,6 +344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
+        self.sharded_greedy_verifier: ShardedGreedyVerifier | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -517,6 +522,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            self.sharded_greedy_verifier = create_sharded_greedy_verifier(
+                self.model, self.rejection_sampler, self.speculator, self.vllm_config
+            )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -1608,6 +1616,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        if self.sharded_greedy_verifier is not None:
+            output = self.sharded_greedy_verifier.try_sample(
+                hidden_states, input_batch, grammar_output
+            )
+            if output is not None:
+                return output, output.num_sampled, output.num_rejected
         shard_metadata = None
         global_input_batch = input_batch
         if self.batch_sharder is not None:
