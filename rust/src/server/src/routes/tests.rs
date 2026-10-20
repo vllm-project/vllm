@@ -1578,6 +1578,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
                         "vllm_xargs": {"custom": 1},
+                        "kv_transfer_params": {"do_remote_decode": true},
+                        "ec_transfer_params": {"do_remote_encode": true},
                         "chat_template_kwargs": {"enable_thinking": false}
                     })
                     .to_string(),
@@ -1600,7 +1602,19 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["sampling_params"]["bad_words"],
         json!(["blocked"])
     );
-    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    // Transfer params move to the top level, like Python render.
+    assert_eq!(
+        render_json["sampling_params"]["vllm_xargs"],
+        json!({"custom": 1})
+    );
+    assert_eq!(
+        render_json["kv_transfer_params"],
+        json!({"do_remote_decode": true})
+    );
+    assert_eq!(
+        render_json["ec_transfer_params"],
+        json!({"do_remote_encode": true})
+    );
     assert_eq!(
         render_json["reasoning_parser_kwargs"],
         json!({"chat_template_kwargs": {"enable_thinking": false}})
@@ -1620,6 +1634,20 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                     .as_ref()
                     .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
                 Some(&json!(false))
+            );
+            let extra_args = request
+                .sampling_params
+                .as_ref()
+                .and_then(|params| params.extra_args.as_ref())
+                .expect("extra args");
+            assert_eq!(extra_args["custom"], json!(1));
+            assert_eq!(
+                extra_args["kv_transfer_params"],
+                json!({"do_remote_decode": true})
+            );
+            assert_eq!(
+                extra_args["ec_transfer_params"],
+                json!({"do_remote_encode": true})
             );
         },
         Arc::new(FakeChatBackend::new()),
