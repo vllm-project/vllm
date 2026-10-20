@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    make_attention_sink,
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -290,9 +291,7 @@ class MiMoV2Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
+            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
@@ -372,6 +371,10 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
 
         v_scale = getattr(config, "attention_value_scale", None)
+        # cache_config.sliding_window holds MiMo's SWA window; global layers
+        # would otherwise fall back to it in Attention.
+        cache_config = vllm_config.cache_config
+        cache_config.sliding_window = None
 
         if self.is_compressed_softmax_layer():
             self.self_attn = MiMoV2Attention(
@@ -389,6 +392,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=getattr(config, "swa_rope_theta", rope_theta),
                 max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
@@ -406,6 +410,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
@@ -742,8 +747,12 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
         # Pro-format fused qkv_proj arrives as two tensors (weight and
         # weight_scale_inv). Store them per-layer so that they can be
-        # sharded together.
-        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
+        # sharded together. The state must outlive this call: AutoWeightsLoader
+        # delegates per contiguous group of names, so a pair can straddle two
+        # calls and would otherwise be dropped silently.
+        pending_fp8_qkv_proj = getattr(self, "_pending_fp8_qkv_proj", None)
+        if pending_fp8_qkv_proj is None:
+            self._pending_fp8_qkv_proj = pending_fp8_qkv_proj = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -838,18 +847,9 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
             param = params_dict[name]
 
-            if "attention_sink_bias" in name:
-                total_heads = loaded_weight.shape[0]
-                heads_per_rank = total_heads // tp_size
-                head_start = tp_rank * heads_per_rank
-                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-
-                param.data.copy_(narrow_weight)
-                loaded_params.add(name)
-            else:
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
 
         return loaded_params
 

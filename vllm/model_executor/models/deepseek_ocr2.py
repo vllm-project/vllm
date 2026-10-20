@@ -318,7 +318,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
             return None
 
         base_size = self.vision_config.image_size

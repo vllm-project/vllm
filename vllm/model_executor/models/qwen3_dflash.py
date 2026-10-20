@@ -14,7 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
@@ -33,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
@@ -251,9 +251,7 @@ class DFlashQwen3Attention(nn.Module):
         )
 
         self.attention_sink_bias = (
-            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
-            if add_swa_attention_sink_bias
-            else None
+            make_attention_sink(self.num_heads) if add_swa_attention_sink_bias else None
         )
 
         self.sliding_window = sliding_window
@@ -270,6 +268,24 @@ class DFlashQwen3Attention(nn.Module):
             sinks=self.attention_sink_bias,
         )
         self.causal = causal
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1x
+            from vllm.v1.attention.backends.rocm_segmented_attn import (
+                RocmSegmentedAttentionImpl,
+            )
+
+            if on_gfx1x() and isinstance(self.attn.impl, RocmSegmentedAttentionImpl):
+                # Startup segmented tuning needs the draft's actual attention mode.
+                # Causality is normally supplied later through attention metadata.
+                self.attn.segmented_causal = causal
+                speculative_config = get_current_vllm_config().speculative_config
+                if (
+                    speculative_config is not None
+                    and speculative_config.num_speculative_tokens is not None
+                ):
+                    self.attn.segmented_query_limit = (
+                        speculative_config.num_speculative_tokens + 1
+                    )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -622,15 +638,6 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
-        if current_platform.is_xpu():
-            for layer_idx in range(all_k.shape[0]):
-                ops.rms_norm(
-                    all_k_normed[layer_idx],
-                    all_k[layer_idx],
-                    self._k_norm_weights[layer_idx],
-                    self._rms_norm_eps,
-                )
-            return all_k_normed
         ops.rms_norm(
             all_k_normed,
             all_k,
@@ -737,26 +744,9 @@ class DFlashQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def _preprocess(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for name, loaded_weight in weights:
-            if "attention_sink_bias" in name:
-                # Sink bias is per-head; shard it across TP ranks like the
-                # attention heads themselves.
-                heads_per_rank = loaded_weight.shape[0] // tp_size
-                loaded_weight = loaded_weight.narrow(
-                    0, tp_rank * heads_per_rank, heads_per_rank
-                )
-            yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            self._preprocess(weights), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):

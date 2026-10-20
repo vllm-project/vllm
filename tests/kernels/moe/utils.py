@@ -7,7 +7,6 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -55,6 +54,14 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     second = w[..., n // 2 :]
     stacked = torch.stack((first, second), dim=-1)
     return stacked.reshape(shape)
+
+
+def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
+    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
+    e, two_i = t.shape[0], t.shape[1]
+    i, rest = two_i // 2, t.shape[2:]
+    perm = (0, 2, 1, *range(3, 3 + len(rest)))
+    return t.view(e, 2, i, *rest).permute(*perm).contiguous().view(e, two_i, *rest)
 
 
 def make_dummy_moe_config(
@@ -341,6 +348,15 @@ def moe_quantize_weights(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     assert w.dim() == 3
     e, rows, cols = w.shape
+
+    if quant_dtype == "mxfp4":
+        assert block_shape is None
+        assert not per_token_quant
+        from triton_kernels.numerics_details.mxfp import downcast_to_mxfp
+
+        w_q, w_scale = downcast_to_mxfp(w, torch.uint8, axis=-1)
+        return w_q, w_scale, None
+
     w_l = [None] * e
     w_s_l = [None] * e
     w_gs_l = [None] * e
@@ -550,97 +566,6 @@ class TestMLP(torch.nn.Module):
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
-
-
-class RealMLP(torch.nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        hidden_act: str = "silu",
-        quant_config=None,
-        reduce_results: bool = True,
-        prefix: str = "",
-        w1_s: torch.Tensor | None = None,
-        w2_s: torch.Tensor | None = None,
-    ) -> None:
-        from vllm.model_executor.layers.linear import (
-            MergedColumnParallelLinear,
-            RowParallelLinear,
-        )
-
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
-        )
-        self.gate_up_proj.register_parameter(
-            "weight", torch.nn.Parameter(w1, requires_grad=False)
-        )
-        self.gate_up_proj.register_parameter(
-            "weight_scale", torch.nn.Parameter(w1_s, requires_grad=False)
-        )
-        self.gate_up_proj.register_parameter(
-            "input_scale", None
-        )  # torch.nn.Parameter(None, requires_grad=False))
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            prefix=f"{prefix}.down_proj",
-        )
-        self.down_proj.register_parameter(
-            "weight", torch.nn.Parameter(w2, requires_grad=False)
-        )
-        self.down_proj.register_parameter(
-            "weight_scale", torch.nn.Parameter(w2_s, requires_grad=False)
-        )
-        self.down_proj.register_parameter(
-            "input_scale", None
-        )  # torch.nn.Parameter(None, requires_grad=False))
-        if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
-            )
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-def make_shared_experts_with_weights(
-    N: int,
-    K: int,
-    in_dtype: torch.dtype,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_s: torch.Tensor | None = None,
-    w2_s: torch.Tensor | None = None,
-    quant_dtype: torch.dtype | str | None = None,
-) -> torch.nn.Module:
-    old_dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(in_dtype)
-        if quant_dtype == torch.float8_e4m3fn:
-            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
-            quant_config = Fp8Config()
-        else:
-            quant_config = None
-
-        return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
-    finally:
-        torch.set_default_dtype(old_dtype)
 
 
 def modular_triton_fused_moe(

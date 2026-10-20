@@ -40,6 +40,14 @@ host memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Startup logs report two concurrency bounds at `max_model_len`. The generic
+`Maximum concurrency` line charges each request its full admission footprint,
+including the in-flight window of every resident group. The `HiSparse
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
 ## QSA configuration and validation scope
 
 For a model using the Qwen4Exp QSA implementation, configure `HiSparseConnector`
@@ -79,6 +87,9 @@ every combination of dtype, execution mode, and topology has been tested.
 | Cache dtypes | BF16 model/query dtype with independently selected BF16 or FP8 main K/V and indexer formats; all four combinations cover original scales, complete K/V rows, nonresident prefill, and selected-K/V replay, with matching eager on/off model evaluations |
 | MTP, FULL replay, and async scheduling | TP2 with three draft tokens, shared logical selection, native `FULL_DECODE_ONLY` replay, and async scheduling; real page reuse and host refill cover target verification and draft decoding, including acceptance/rejection, padding, and stable replay storage |
 | Prefix and request lifecycle | BF16 at TP1 with MTP disabled and `FULL_DECODE_ONLY` plus async scheduling; chunked prefill, shared prefixes with private writable tails, cancellation of a prefix-sharing request, and natural preemption/recompute with state invalidation and resource return |
+
+Use `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` for full decode graphs.
+HiSparse rejects `cudagraph_mode=FULL`, which also requires full prefill graphs.
 
 The dtype representation checks and lifecycle checks exercise their respective
 shared paths; they do not constitute a full dtype-by-lifecycle matrix. Existing
@@ -193,10 +204,13 @@ path. The resolver consumes the existing graph-stable request mapping from
 attention metadata; neither the worker nor individual cache handles keep a
 duplicate mapping.
 
-Speculative decoding resolves and consumes each verification step in order.
-Each step receives distinct replayable plan rows while sharing the request's
-hot-cache state, so a later step cannot reuse a hot row before an earlier step
-has consumed it.
+Speculative decoding resolves all verification rows of a request in one pass:
+one block resolves the union of the rows' top-k against the request's hot-cache
+state, so rows that select the same host row share its hot row and no row
+evicts a hot row another row of the step still reads. Draft layers write their
+rows after the target forward, so their host mirror runs at the start of the
+next step, after the drafter, and the step's page transfers are submitted
+behind it.
 
 ## P/D import target
 

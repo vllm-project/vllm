@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from http import HTTPStatus
 
 from fastapi import Request
@@ -23,6 +24,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.sampling_params import BeamSearchParams
+from vllm.tracing import contains_trace_headers, extract_trace_headers
 from vllm.utils import random_uuid
 
 
@@ -36,6 +38,13 @@ class BaseServing:
         self.models = models
         self.model_config = model_config
         self.request_logger = request_logger
+
+    async def _get_trace_headers(
+        self, headers: Mapping[str, str]
+    ) -> Mapping[str, str] | None:
+        if not contains_trace_headers(headers):
+            return None
+        return extract_trace_headers(headers)
 
     async def _check_model(
         self,
@@ -63,8 +72,12 @@ class BaseServing:
             ):
                 error_response = load_result
 
+        served_names = ", ".join(model.name for model in self.models.base_model_paths)
         return error_response or self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
+            message=(
+                f"The model `{request.model}` does not exist. "
+                f"Valid aliases: {served_names}."
+            ),
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
             param="model",

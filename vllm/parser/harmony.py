@@ -23,7 +23,6 @@ from xgrammar.structural_tag import (
     TagFormat,
 )
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -43,6 +42,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,
@@ -335,7 +335,10 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -376,7 +379,10 @@ class HarmonyParser(DelegatingParser):
         parser = get_streamable_parser_for_assistant()
         count = 0
         for token_id in token_ids:
-            parser.process(token_id)
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
             recipient = self._normalize_recipient(parser.current_recipient)
             if self._is_reasoning_token(token_id, parser.current_channel, recipient):
                 count += 1
@@ -466,7 +472,7 @@ def _assemble_tag(
     return StructuralTag(format=SequenceFormat(elements=tags))
 
 
-@register_vllm_structural_tag("harmony")
+@register_vllm_structural_tag("harmony", builtin_tools=True)
 def get_harmony_structural_tag(
     tools: list[FunctionToolParam],
     builtin_tools: list[BuiltinToolParam],
