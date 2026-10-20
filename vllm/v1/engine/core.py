@@ -248,6 +248,7 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        self._sleep_in_progress = False
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -935,6 +936,8 @@ class EngineCore:
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
+        if getattr(self, "_sleep_in_progress", False):
+            raise RuntimeError("Cannot pause while sleep is in progress")
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
@@ -951,6 +954,12 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if getattr(self, "_sleep_in_progress", False):
+            raise RuntimeError("Cannot resume while sleep is in progress")
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "Cannot resume with sleeping memory; wake all tags first"
+            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -970,26 +979,39 @@ class EngineCore:
                 documentation of pause_scheduler method.
 
         """
-        # Pause scheduler before sleeping.
+        if getattr(self, "_sleep_in_progress", False):
+            raise RuntimeError("Another sleep is in progress")
+        # Include request draining in the transition. Otherwise a wake can
+        # resume scheduling before the deferred sleep callback runs.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
         if level < 1:
             return pause_future
+        self._sleep_in_progress = True
 
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
+
+        def sleep_workers():
+            try:
+                return model_executor.sleep(level)
+            finally:
+                self._sleep_in_progress = False
+
         if pause_future is None:
-            model_executor.sleep(level)
-            return None
+            return sleep_workers()
 
         future = Future[Any]()
 
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                result = sleep_workers()
             except Exception as e:
+                self._sleep_in_progress = False
                 future.set_exception(e)
+            else:
+                future.set_result(result)
 
         logger.info("Waiting for in-flight requests to complete before sleeping...")
         pause_future.add_done_callback(pause_complete)
@@ -1005,6 +1027,8 @@ class EngineCore:
             Whether all executor memory is resident again (fully awake).
 
         """
+        if getattr(self, "_sleep_in_progress", False):
+            raise RuntimeError("Cannot wake while sleep is in progress")
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
@@ -2134,6 +2158,8 @@ class EngineCoreProc(EngineCore):
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
+        if getattr(self, "_sleep_in_progress", False):
+            raise RuntimeError("Cannot pause while sleep is in progress")
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
@@ -2173,8 +2199,8 @@ class EngineCoreProc(EngineCore):
         return future
 
     def resume_scheduler(self) -> None:
-        self.reject_new_requests = False
         super().resume_scheduler()
+        self.reject_new_requests = False
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
