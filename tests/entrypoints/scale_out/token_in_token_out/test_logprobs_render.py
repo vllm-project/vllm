@@ -371,7 +371,7 @@ def _top_k_body(serving, k, outputs, **fields):
         token_ids=[1, 2, 3],
         sampling_params=SamplingParams(max_tokens=10, logprobs=k),
         model=MODEL_NAME,
-        return_top_k_logprobs=True,
+        packed_top_k_logprobs=True,
         **fields,
     )
     response = serving._build_full_response(
@@ -477,11 +477,11 @@ def test_top_k_round_trip_against_content():
         ({"sampling_params": {"logprobs": -1}}, "got -1"),
     ],
 )
-def test_return_top_k_logprobs_invalid_requests(fields, message):
+def test_packed_top_k_logprobs_invalid_requests(fields, message):
     body = {
         "token_ids": [1],
         "sampling_params": {"max_tokens": 1, "logprobs": 2},
-        "return_top_k_logprobs": True,
+        "packed_top_k_logprobs": True,
         **fields,
     }
     with pytest.raises(ValidationError, match=message):
@@ -489,6 +489,6 @@ def test_return_top_k_logprobs_invalid_requests(fields, message):
 
 
 def test_top_k_is_omitted_unless_set():
-    """Responses without return_top_k_logprobs keep their schema and bytes."""
+    """Responses without packed_top_k_logprobs keep their schema and bytes."""
     assert GenerateLogProbs(content=[]).model_dump() == {"content": []}
     assert "top_k" not in GenerateLogProbs(content=[]).model_dump_json()

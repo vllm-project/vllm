@@ -242,7 +242,7 @@ class GenerateRequest(BaseModel):
             "In streaming mode, this metadata is included only in the first chunk."
         ),
     )
-    return_top_k_logprobs: bool | None = None
+    packed_top_k_logprobs: bool | None = None
     """Return the top-k candidates of every generated position as the packed
     block ``logprobs.top_k`` (see ``PackedTopK``) instead of per-token
     ``logprobs.content`` entries (``content`` is ``None``). Non-streaming,
@@ -335,17 +335,17 @@ class GenerateRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_return_top_k_logprobs(self) -> "GenerateRequest":
-        if not self.return_top_k_logprobs:
+    def _check_packed_top_k_logprobs(self) -> "GenerateRequest":
+        if not self.packed_top_k_logprobs:
             return self
         if self.stream:
-            raise ValueError("return_top_k_logprobs is not supported with stream=true")
+            raise ValueError("packed_top_k_logprobs is not supported with stream=true")
         if self.output_mode != "tokens":
-            raise ValueError("return_top_k_logprobs requires output_mode='tokens'")
+            raise ValueError("packed_top_k_logprobs requires output_mode='tokens'")
         logprobs = self.sampling_params.logprobs
         if logprobs is None or logprobs < 1:
             raise ValueError(
-                "return_top_k_logprobs requires sampling_params.logprobs >= 1, "
+                "packed_top_k_logprobs requires sampling_params.logprobs >= 1, "
                 f"got {logprobs}"
             )
         return self
@@ -430,7 +430,7 @@ class GenerateLogProbs(BaseModel):
 
     content: list[GenerateLogProbsContent] | None = None
     top_k: PackedTopK | None = Field(default=None, exclude_if=lambda v: v is None)
-    """The packed top-k candidates, set only for ``return_top_k_logprobs``
+    """The packed top-k candidates, set only for ``packed_top_k_logprobs``
     requests (where ``content`` is ``None``), and omitted from the output
     otherwise."""
 

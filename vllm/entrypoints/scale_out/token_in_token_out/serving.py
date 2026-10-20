@@ -531,7 +531,7 @@ class ServingTokens(GenerateBaseServing):
                 assert out_logprobs is not None, "Did not output logprobs"
                 rendered = None
                 top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
-                if request.return_top_k_logprobs:
+                if request.packed_top_k_logprobs:
                     rendered = render_top_k_logprobs(
                         out_logprobs, len(token_ids), sampling_params.logprobs
                     )

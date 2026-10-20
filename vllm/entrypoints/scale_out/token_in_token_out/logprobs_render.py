@@ -7,7 +7,7 @@
 ``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
 ``JSONResponse.render`` produce for the same rows, without a Python object
 per entry. :func:`render_top_k_logprobs` renders the packed form of the rows
-(``return_top_k_logprobs``). :func:`render_json_with_fragments` splices such
+(``packed_top_k_logprobs``). :func:`render_json_with_fragments` splices such
 pre-rendered values into the JSON of the remaining (small) response.
 """
 
@@ -288,7 +288,7 @@ def render_top_k_logprobs(
     num_tokens: int,
     num_output_top_logprobs: int,
 ) -> list[bytes]:
-    """Render the ``return_top_k_logprobs`` ``GenerateLogProbs`` JSON of one
+    """Render the ``packed_top_k_logprobs`` ``GenerateLogProbs`` JSON of one
     choice, as parts whose concatenation is the JSON that ``model_dump`` +
     ``JSONResponse`` give for ``content=None`` and ``top_k``.
 
