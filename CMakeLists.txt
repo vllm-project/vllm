@@ -1324,6 +1324,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+
+  # Rubin LUT-B MoE GEMM; tcgen05 decompress::lut::b needs CUDA 13.4.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+    cuda_archs_loose_intersection(LUT_B_MOE_ARCHS "10.7f" "${CUDA_ARCHS}")
+  endif()
+  if(LUT_B_MOE_ARCHS)
+    set(LUT_B_MOE_SRC "csrc/moe/lut_b_moe_sm107.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LUT_B_MOE_SRC}"
+      CUDA_ARCHS "${LUT_B_MOE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${LUT_B_MOE_SRC}")
+    message(STATUS "Building LUT-B MoE for archs: ${LUT_B_MOE_ARCHS}")
+  endif()
   # moe marlin arches
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
@@ -1463,6 +1476,10 @@ target_compile_definitions(_moe_C_stable_libtorch PRIVATE
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+  if(LUT_B_MOE_ARCHS)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_ENABLE_LUT_B_MOE=1)
+  endif()
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)

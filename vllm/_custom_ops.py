@@ -2322,6 +2322,42 @@ def moe_wna16_gemm(
     )
 
 
+def lut_b_moe_gemm_supported() -> bool:
+    """Whether the Rubin (SM107) LUT-B MoE GEMM was compiled."""
+    return current_platform.is_cuda() and hasattr(torch.ops._moe_C, "lut_b_moe_gemm")
+
+
+def lut_b_moe_gemm(
+    a: torch.Tensor,
+    a_scales: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+) -> None:
+    """Grouped GEMM of MXFP8 activations with LUT-B expert weights.
+
+    ``c[i] = a[sorted_token_ids[i] // top_k] @ W[expert].T`` for each routed
+    row ``i`` (scaled by ``topk_weights[i]`` when given), using routing
+    aligned to blocks of 128 by ``moe_align_block_size``. ``b`` holds the
+    weights in the kernel tile layout from ``lut_b_to_sm107_tiles``.
+    """
+    torch.ops._moe_C.lut_b_moe_gemm(
+        a,
+        a_scales,
+        b,
+        c,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+    )
+
+
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,

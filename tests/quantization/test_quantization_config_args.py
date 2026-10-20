@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
     kNvfp4Static,
@@ -124,6 +125,7 @@ def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     [
         ("int8_per_channel_weight_only", kInt8StaticChannelSym),
         ("nvfp4_per_token", kNvfp4Static),
+        ("lut_b_moe", kLutBStatic),
     ],
 )
 def test_resolve_moe_only_shorthand_leaves_linear_unset(shorthand, weight):

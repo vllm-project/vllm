@@ -2213,6 +2213,36 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         print(outputs[0][1])
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="LUT-B MoE needs a CUDA-like GPU."
+)
+def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
+    """LUT-B quantizes only the routed experts; Rubin runs it natively."""
+    from vllm.model_executor.layers.quantization.online.lut_b import (
+        LutBOnlineMoEMethod,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="lut_b_moe",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            method = layer.block_sparse_moe.experts._quant_method
+            assert isinstance(method, LutBOnlineMoEMethod)
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+            )
+
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
 def _patch_max_reduce(monkeypatch, full_amax) -> None:
     """Stand in for the TP/EP MAX all-reduce, returning the unsharded amax."""
     expected = cast(ProcessGroup, object())

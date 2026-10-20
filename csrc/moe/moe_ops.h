@@ -93,3 +93,14 @@ int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
 void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   const torch::stable::Tensor& dst2src_map,
                   torch::stable::Tensor& output_tensor);
+
+#ifdef VLLM_ENABLE_LUT_B_MOE
+void lut_b_moe_gemm(torch::stable::Tensor const& a,
+                    torch::stable::Tensor const& a_scales,
+                    torch::stable::Tensor const& b, torch::stable::Tensor& c,
+                    std::optional<torch::stable::Tensor> topk_weights,
+                    torch::stable::Tensor const& sorted_token_ids,
+                    torch::stable::Tensor const& expert_ids,
+                    torch::stable::Tensor const& num_tokens_post_padded,
+                    int64_t top_k);
+#endif

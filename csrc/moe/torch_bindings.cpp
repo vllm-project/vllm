@@ -86,6 +86,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "Tensor expert_ids, Tensor num_tokens_post_pad, "
       "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
       "int bit) -> Tensor");
+  #ifdef VLLM_ENABLE_LUT_B_MOE
+  // Rubin LUT-B weight x MXFP8 activation grouped GEMM.
+  m.def(
+      "lut_b_moe_gemm(Tensor a, Tensor a_scales, Tensor b, Tensor! c, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, int top_k) -> ()");
+  #endif
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
@@ -164,6 +171,9 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
 #ifndef USE_ROCM
   m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
+  #ifdef VLLM_ENABLE_LUT_B_MOE
+  m.impl("lut_b_moe_gemm", TORCH_BOX(&lut_b_moe_gemm));
+  #endif
   m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
 #endif
