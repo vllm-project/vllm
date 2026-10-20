@@ -54,7 +54,7 @@ _MONO = "vllm.models.deepseek_v41.amd.mono"
 
 
 def _stub_modules(monkeypatch) -> None:
-    """The FlyDSL runner package, as a spec-shaped stub."""
+    """The FlyDSL runner and arch modules, as spec-shaped stubs."""
     runner: Any = ModuleType(f"{_MONO}.runner")
     runner.BLOCKS = BLOCKS
     runner.MAX_TOKENS = 64
@@ -63,9 +63,12 @@ def _stub_modules(monkeypatch) -> None:
     runner.AttnWeights = _weights_stub
     plan: Any = ModuleType(f"{_MONO}.attention.plan")
     plan.Dims = lambda world: world
+    arch: Any = ModuleType(f"{_MONO}.common.arch")
+    arch.target_arch = lambda: "gfx950"
     for name, module in (
         (f"{_MONO}.runner", runner),
         (f"{_MONO}.attention.plan", plan),
+        (f"{_MONO}.common.arch", arch),
     ):
         monkeypatch.setitem(sys.modules, name, module)
 
@@ -306,13 +309,27 @@ def _rocm_platform() -> ModuleType:
     return sys.modules["vllm.platforms.rocm"]
 
 
-def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS) -> None:
+@pytest.fixture(autouse=True)
+def _unpin_row_cap():
+    """The row cap is cached per process, and these tests move the GPU under
+    it."""
+    sd.max_rows.cache_clear()
+    yield
+    sd.max_rows.cache_clear()
+
+
+def _gpu(monkeypatch, cdna: int = 4, cus: int = BLOCKS, target: str = "") -> None:
+    arch = "gfx942" if cdna == 3 else "gfx950"
     _stub_modules(monkeypatch)
     # The compute-unit probe reads the current accelerator, which a CPU run has
-    # none of.
+    # none of, and the arch probes read the GPU and FlyDSL's ARCH setting.
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     monkeypatch.setattr(sd.current_platform, "num_compute_units", lambda _: cus)
     monkeypatch.setattr(_rocm_platform(), "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(sd, "_gpu_arch", lambda: arch)
+    monkeypatch.setattr(
+        sys.modules[f"{_MONO}.common.arch"], "target_arch", lambda: target or arch
+    )
 
 
 def _build(monkeypatch, config=None, model=None, **layer_overrides):
@@ -430,15 +447,18 @@ def test_profile_run_takes_vllm_path(monkeypatch):
 
 
 def test_widths_follow_the_capture_sizes(monkeypatch):
+    _gpu(monkeypatch)
     config = make_config()
     config.compilation_config.cudagraph_capture_sizes = [1, 2, 8, 64, 512]
     assert sd._widths(config) == (1, 2, 8)
 
 
-def test_widths_default_to_every_row(monkeypatch):
+@pytest.mark.parametrize("cdna,rows", [(4, sd.MAX_ROWS), (3, sd.MAX_ROWS_GFX942)])
+def test_widths_default_to_every_row_the_gpu_takes(monkeypatch, cdna, rows):
+    _gpu(monkeypatch, cdna=cdna)
     config = make_config()
     config.compilation_config.cudagraph_capture_sizes = [512]
-    assert sd._widths(config) == tuple(range(1, sd.MAX_ROWS + 1))
+    assert sd._widths(config) == tuple(range(1, rows + 1))
 
 
 @pytest.mark.parametrize("tp", [1, 3, 8])
@@ -453,12 +473,20 @@ def test_a4w4_moe_refuses(monkeypatch):
     assert any("A8W4" in r for r in sd._refuse_config(make_config()))
 
 
-@pytest.mark.parametrize("cdna", [3, 5])
+@pytest.mark.parametrize("cdna", [2, 5])
 def test_other_isa_refuses(monkeypatch, cdna):
     config = make_config()
     model = TestDsv41Spec().make_model(config)
     _gpu(monkeypatch, cdna=cdna)
-    with pytest.raises(DecodeUnsupported, match="CDNA4"):
+    with pytest.raises(DecodeUnsupported, match="CDNA3/4"):
+        SpecializedDecode(model, config, select_decode_spec(config, SPECS))
+
+
+def test_arch_env_against_the_gpu_refuses(monkeypatch):
+    config = make_config()
+    model = TestDsv41Spec().make_model(config)
+    _gpu(monkeypatch, target="gfx942")
+    with pytest.raises(DecodeUnsupported, match="ARCH"):
         SpecializedDecode(model, config, select_decode_spec(config, SPECS))
 
 
