@@ -135,9 +135,7 @@ For bug fixes, there is no need to include details of the original bug and expla
 
 #### 3.2: Documentation and Examples
 
-Every user-visible change needs docs in the same PR: new or changed features, CLI arguments, config fields, environment variables, model or hardware support, defaults, deprecations, and removals. Check the diff against [Documenting User-Visible Changes](../../../docs/contributing/README.md#documenting-user-visible-changes), which maps each change type to its page. Docs that exist only in code comments, tests, or the PR description do not count, except where that page is generated from them (environment variable comments, config docstrings, argparse help). Add usage examples under `examples/` where applicable.
-
-Run the fresh-agent check from that section (one user question; web, GitHub, and local checkout searched separately) and report each channel's result in the PR's Validation section. Treat a missing doc, or a channel that cannot find it, as blocking.
+User-visible changes need docs in the same PR, placed per [Documenting User-Visible Changes](../../../docs/contributing/README.md#documenting-user-visible-changes). Docs only in comments, tests, or the PR description do not count, except where a page is generated from them (env var comments, config docstrings, `help=`). Report the fresh-agent findability check from that section in the PR; missing or unfindable docs are blocking. Add usage examples under `examples/` where applicable.
 
 #### 3.3: Helper Functions
 
