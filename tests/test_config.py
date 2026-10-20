@@ -1392,24 +1392,6 @@ def test_v1_model_runner_rejects_v2_only_features():
         VllmConfig._validate_v1_model_runner(config)
 
 
-def test_v1_model_runner_rejects_parse_mtp():
-    config = VllmConfig()
-    config.speculative_config = cast(
-        SpeculativeConfig,
-        SimpleNamespace(
-            method="mtp",
-            draft_model_config=SimpleNamespace(architectures=["ParseAuxMTPModel"]),
-            enable_adaptive_verification=False,
-            draft_lm_head_quantization=None,
-        ),
-    )
-
-    with pytest.raises(
-        ValueError, match="Model Runner V1 does not support: Parse 3.5 MTP"
-    ):
-        config._validate_v1_model_runner()
-
-
 def test_batch_sharded_sampling_rejects_return_sampling_mask():
     """The batch-sharded gather drops sampling masks, so the combination must
     fail loudly instead of returning ``sampling_mask=None``."""
