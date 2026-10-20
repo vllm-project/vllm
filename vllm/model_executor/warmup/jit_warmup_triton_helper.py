@@ -169,10 +169,9 @@ def triton_scalar_specialization_rep(value: int) -> int:
 
 
 def triton_ptr_range(tensor: Any) -> int:
-    """Pointer range Triton's ROCm backend would read off ``tensor``.
+    """Pointer range Triton's backend would read off ``tensor``.
 
-    Mirrors ``HIPBackend.is_within_2gb``: an explicit ``ptr_range`` wins over
-    the storage size, so a view that narrows its own range stays narrow here.
+    Mirrors ``HIPBackend.is_within_2gb``.
     """
     ptr_range = getattr(tensor, "ptr_range", None)
     if ptr_range is not None:
