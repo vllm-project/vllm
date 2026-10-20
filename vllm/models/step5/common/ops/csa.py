@@ -38,36 +38,3 @@ def indexer_norm(
         eps,
     )
     return q.to(dtype), k.to(dtype)
-
-
-def select_regions(
-    scores: torch.Tensor,
-    positions: torch.Tensor,
-    region_size: int,
-    topk: int,
-) -> torch.Tensor:
-    """Top-``topk`` earlier regions plus the query's own, as ascending int32 ids
-    ``[T, G, topk + 1]`` padded with ``-1``. Ties pick the lower id."""
-    tokens, groups, regions = scores.shape
-    device = scores.device
-    own = torch.div(positions.long(), region_size, rounding_mode="floor")
-    visible = torch.arange(regions, device=device)[None, :] < own[:, None]
-    masked = scores.masked_fill(~visible[:, None, :], float("-inf"))
-
-    keep = min(topk, regions)
-    picked = torch.sort(masked, dim=-1, descending=True, stable=True).indices
-    picked = picked[..., :keep]
-    count = torch.clamp(own, max=topk).view(tokens, 1, 1)
-    slot = torch.arange(keep, device=device).view(1, 1, keep)
-    # Invisible picks sort last (sentinel = regions) and are then dropped.
-    picked = torch.where(slot < count, picked, regions)
-    picked = torch.sort(picked, dim=-1).values
-
-    out = torch.full((tokens, groups, topk + 1), -1, device=device, dtype=torch.int64)
-    out[..., :keep] = picked.masked_fill(picked == regions, -1)
-    out.scatter_(
-        -1,
-        count.expand(tokens, groups, 1),
-        own.view(tokens, 1, 1).expand(tokens, groups, 1),
-    )
-    return out.to(torch.int32)

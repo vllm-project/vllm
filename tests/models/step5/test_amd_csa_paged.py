@@ -10,12 +10,16 @@ tokens without changing any shape.
 import pytest
 import torch
 
-from vllm.models.step5.common.ops.csa import round_e4m3, select_regions
+from vllm.models.step5.common.ops.csa import round_e4m3
 from vllm.models.step5.common.ops.csa_paged import (
     compress_regions_paged,
     indexer_scores_paged,
     sparse_attention_paged,
 )
+from vllm.models.step5.nvidia.ops.sparse_decode_attention import (
+    sparse_decode_attention,
+)
+from vllm.models.step5.nvidia.ops.sparse_indexer import select_regions
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -161,8 +165,12 @@ def test_select_regions_breaks_ties_by_region_id():
     scores = torch.randn(48, 2, 40, device=DEVICE)
     scores[scores.abs() < 0.5] = 0.0
     positions = torch.randint(0, 40 * REGION, (48,), device=DEVICE)
-    got = select_regions(scores, positions, REGION, topk=6)
-    assert torch.equal(got.cpu(), ref_select(scores, positions, 6))
+    own = (positions // REGION).repeat_interleave(2)
+    got = select_regions(scores.flatten(0, 1), own, 6, "per_row").view(48, 2, -1)
+    want = ref_select(scores, positions, 6)
+    for g, w in zip(got.cpu(), want):
+        for gg, ww in zip(g, w):
+            assert sorted(gg[gg >= 0].tolist()) == sorted(ww[ww >= 0].tolist())
 
 
 @pytest.mark.parametrize("topk", [6, 512])
@@ -177,7 +185,7 @@ def test_sparse_attention_paged(topk: int):
     req = torch.tensor([0] * seq_len + [1], dtype=torch.int32, device=DEVICE)
     q = torch.randn(len(pos), heads, dim, dtype=torch.bfloat16, device=DEVICE)
     scores = torch.randn(len(pos), groups, seq_len // REGION + 1, device=DEVICE)
-    regions = select_regions(scores, pos, REGION, topk)
+    regions = ref_select(scores, pos, topk).to(DEVICE)
 
     kv_cache, bt = _paged([torch.stack([k[r], v[r]], 1) for r in range(2)], 64)
     got = torch.empty_like(q)
@@ -192,6 +200,36 @@ def test_sparse_attention_paged(topk: int):
         got,
         region_size=REGION,
         scale=dim**-0.5,
+    )
+    want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
+    torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)
+
+
+def test_sparse_decode_attention():
+    """One decode row per request through the split-K kernel the model uses."""
+    torch.manual_seed(0)
+    seq_len, heads, groups, dim, topk = 203, 16, 4, 192, 6
+    shape = (2, seq_len, groups, dim)
+    k = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    v = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    pos = torch.tensor([seq_len - 1, seq_len - 9], dtype=torch.int32, device=DEVICE)
+    req = torch.arange(2, dtype=torch.int32, device=DEVICE)
+    q = torch.randn(2, heads, dim, dtype=torch.bfloat16, device=DEVICE)
+    scores = torch.randn(2, groups, seq_len // REGION + 1, device=DEVICE)
+    regions = ref_select(scores, pos, topk).to(DEVICE)
+
+    kv_cache, bt = _paged([torch.cat([k[r], v[r]], -1) for r in range(2)], 16)
+    got = torch.empty_like(q)
+    sparse_decode_attention(
+        q.view(2 * groups, -1, dim),
+        kv_cache.transpose(1, 2).contiguous(),
+        regions.view(2 * groups, -1).long(),
+        bt,
+        pos.long().repeat_interleave(groups),
+        torch.ones(2 * groups, dtype=torch.bool, device=DEVICE),
+        got.view(2 * groups, -1, dim),
+        scale=dim**-0.5,
+        splits=4,
     )
     want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
     torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)
