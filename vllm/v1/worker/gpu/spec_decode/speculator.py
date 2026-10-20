@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +67,10 @@ class BaseSpeculator(ABC):
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    # Set when ``suspend_drafting`` can return True. The model runner then
+    # builds target-only attention metadata and decode CUDA graphs for
+    # suspended batches and rejects configurations they do not support.
+    may_suspend_drafting: bool = False
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -106,6 +110,21 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def suspend_drafting(self, num_reqs: int, req_ids: Collection[str]) -> bool:
+        """Whether to stop drafting for every request of this batch.
+
+        Called once per scheduled (non-dummy) batch before its inputs are
+        built, and only when ``may_suspend_drafting`` is set. ``num_reqs`` is
+        ``len(req_ids)``. Returning True suspends drafting for each request of
+        the batch until it finishes: the requests then decode with the target
+        alone, without draft KV, through separate target-only metadata and
+        graphs, after the verification already scheduled has drained. A batch
+        that contains a suspended request is suspended whatever this returns.
+        Runs on the host and must not read device tensors. The default never
+        suspends.
+        """
+        return False
 
     def make_rejection_sampler(self, sampler: "Sampler") -> "RejectionSampler | None":
         """Return the sampler that verifies this speculator's drafts.

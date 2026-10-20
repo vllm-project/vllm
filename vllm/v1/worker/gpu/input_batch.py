@@ -131,6 +131,10 @@ class InputBatch:
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
+    # Draft suspension is distinct from K=0 (which maintains draft KV).
+    skip_draft: bool = False
+    native_target: bool = False
+
     @classmethod
     def make_dummy(
         cls,
