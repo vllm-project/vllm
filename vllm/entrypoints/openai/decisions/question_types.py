@@ -18,7 +18,7 @@ class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
 
 
-#: A choice labels its options A to Z in order. A single capital letter is one
+#: Letter labels by option position. A single capital letter is one
 #: token at the start of a reply for the tokenizers tested. Every read checks it.
 LABELS = tuple(string.ascii_uppercase)
 
@@ -40,12 +40,15 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
-    #: The labels of a question's options, in option order.
+    #: The default labels of a question's options, in option order.
     label_set: ClassVar[tuple[str, ...]] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
     def parse_options(self, qid: str, criteria: Any) -> list[Option]: ...
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        return self.label_set[: len(names)]
 
     @abstractmethod
     def answer(
@@ -119,7 +122,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=qtype.label_set[: len(options)],
+        labels=qtype.labels(names),
     )
 
 
@@ -152,6 +155,13 @@ class ChoiceQuestion(QuestionType):
             Option(str(name), None if desc is None else str(desc))
             for name, desc in criteria.items()
         ]
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        # Options named with distinct capital letters keep them.
+        own = tuple(n.strip() for n in names)
+        if all(n in LABELS for n in own) and len(set(own)) == len(own):
+            return own
+        return super().labels(names)
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
@@ -214,7 +224,7 @@ class ScoreQuestion(QuestionType):
     level names, from the first to the last level of the scale."""
 
     name = "score"
-    # 0-indexed like the answer, so a level's label is its score.
+    # Positional labels, 0-indexed like the answer.
     label_set = tuple(string.digits)
     reply_instruction = "Answer with the number of one level only."
 
@@ -224,6 +234,20 @@ class ScoreQuestion(QuestionType):
                 f"question {qid!r}: score criteria must be an ordered list of levels"
             )
         return [Option(str(level)) for level in criteria]
+
+    def labels(self, names: list[str]) -> tuple[str, ...]:
+        # Levels named with single digits keep them. Names are distinct.
+        if all(n in self.label_set for n in names):
+            return tuple(names)
+        return super().labels(names)
+
+    def prompt(self, question: Question) -> str:
+        names = tuple(o.name for o in question.options)
+        if question.labels != names:
+            return super().prompt(question)
+        # Levels that are their own labels read as the label alone.
+        lines = [f"Question: {question.instructions}"] if question.instructions else []
+        return "\n".join([*lines, *names, self.reply_instruction])
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float

@@ -907,6 +907,11 @@ async def test_d3_rejects_instructions(d3):
             ["low", "high"],
             "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
         ),
+        (
+            "score",
+            ["1", "2"],
+            "Which?\n\n0 1\n1 2\n\nReply with a single digit 0-1 only.",
+        ),
     ],
 )
 def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):

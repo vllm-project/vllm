@@ -84,6 +84,7 @@ import math
 import os
 import random
 import ssl
+import string
 import subprocess
 import threading
 import time
@@ -125,6 +126,28 @@ class SchemaError(ValueError):
     pass
 
 
+# The label rules of vllm's question_types, pinned to it by a shared test table.
+LABELS = tuple(string.ascii_uppercase)
+DIGITS = tuple(string.digits)
+
+
+def choice_labels(names):
+    """Options named with distinct capital letters keep them, else A to Z."""
+    own = [n.strip() for n in names]
+    if all(n in LABELS for n in own) and len(set(own)) == len(own):
+        return tuple(own)
+    return LABELS[: len(names)]
+
+
+def score_labels(names):
+    """Distinct single-digit level names keep them, else positions from 1."""
+    if all(n in DIGITS for n in names) and len(set(names)) == len(names):
+        return tuple(names)
+    if len(names) <= 9:
+        return DIGITS[1 : len(names) + 1]
+    return LABELS[: len(names)]
+
+
 def parse_schema(value):
     if (
         not isinstance(value, dict)
@@ -159,14 +182,10 @@ def parse_schema(value):
                 else (str(o), None)
                 for o in opts
             ]
-            labels = [chr(ord("A") + i) for i in range(len(choices))]
+            labels = choice_labels([str(c[0]) for c in choices])
         elif kind == "score":
             choices = [(str(level), None) for level in (q.get("levels") or [])]
-            labels = (
-                [str(i + 1) for i in range(len(choices))]
-                if len(choices) <= 9
-                else [chr(ord("A") + i) for i in range(len(choices))]
-            )
+            labels = score_labels([c[0] for c in choices])
         else:
             raise SchemaError(f"question {qid!r}: unknown type {kind!r}")
         if len(choices) < 2:
