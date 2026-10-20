@@ -10,6 +10,7 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
@@ -17,6 +18,7 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
     should_use_zentorch_sdpa,
     zentorch_sdpa_attn,
 )
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -1535,3 +1537,38 @@ def test_amx_fp8_qk_covers_full_64_token_group() -> None:
     )
 
     torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
+
+
+def _select_attn_backend(kv_cache_dtype: str, use_mla: bool = False) -> str:
+    config = AttentionSelectorConfig(
+        head_size=576 if use_mla else 64,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=128,
+        use_mla=use_mla,
+    )
+    return CpuPlatform.get_attn_backend_cls(None, config)
+
+
+@pytest.mark.parametrize("fp8_isa", [True, False])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "bfloat16", "fp8", "turboquant_k8v4", "nvfp4"],
+)
+def test_cpu_attn_kv_cache_dtype_validation(
+    monkeypatch: pytest.MonkeyPatch, kv_cache_dtype: str, fp8_isa: bool
+) -> None:
+    monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: False)
+    monkeypatch.setattr("torch.cpu._is_avx512_supported", lambda: fp8_isa)
+
+    if kv_cache_dtype in ("auto", "bfloat16") or (kv_cache_dtype == "fp8" and fp8_isa):
+        assert _select_attn_backend(kv_cache_dtype).endswith("CPUAttentionBackend")
+    else:
+        with pytest.raises(ValueError, match=kv_cache_dtype):
+            _select_attn_backend(kv_cache_dtype)
+
+
+def test_cpu_mla_rejects_quantized_kv_cache() -> None:
+    assert "MLA" in _select_attn_backend("auto", use_mla=True)
+    with pytest.raises(ValueError, match="fp8"):
+        _select_attn_backend("fp8", use_mla=True)
