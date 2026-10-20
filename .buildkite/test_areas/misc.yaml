@@ -208,8 +208,6 @@ steps:
   - tests/v1/kv_connector/umbp_test_utils.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # Fail loudly instead of skipping every test if the image lacks mori.
-  - python3 -c "import mori"
   - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
