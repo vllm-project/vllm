@@ -80,7 +80,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly", "approximate"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
@@ -539,7 +539,19 @@ class SpeculativeConfig:
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
     block instead of one at a time. 'fly' applies FLy's lossy, entropy-gated
-    deferred window to the native per-token acceptance decisions."""
+    deferred window to the native per-token acceptance decisions. 'approximate'
+    enables budgeted greedy prefix verification (ASD), which can change outputs."""
+
+    asd_risk_budget: float = Field(default=8.0, ge=0, allow_inf_nan=False)
+    """Maximum cumulative local target-logit regret per request for
+    rejection_sample_method='approximate'. Zero recovers strict greedy
+    verification, including argmax ties. This is not a task-quality bound."""
+
+    asd_max_regret_per_value: float = Field(default=0.25, ge=0, allow_inf_nan=False)
+    """Maximum mismatch regret divided by the remaining draft length."""
+
+    asd_max_relaxed_tokens_per_block: int = Field(default=2, ge=0)
+    """Maximum accepted non-greedy draft tokens per block. Zero is strict."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
