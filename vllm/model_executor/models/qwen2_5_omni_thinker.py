@@ -74,6 +74,7 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    VideoItem,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
@@ -347,6 +348,10 @@ def create_qwen2_5_omni_thinker_field_factory(
 class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
     embedding_fields = {
         **Qwen2VLMultiModalDataParser.embedding_fields,
+        "video": {
+            **Qwen2VLMultiModalDataParser.embedding_fields["video"],
+            "second_per_grid_ts": "metadata",
+        },
         "audio": {
             "input_audio_features": "values",
             "audio_feature_lengths": "metadata",
@@ -377,6 +382,31 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
             )
 
         return super()._parse_audio_data(data)
+
+    def _parse_video_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
+            # Legacy embedding inputs omit timing and use the model's default.
+            required.discard("second_per_grid_ts")
+            optional.add("second_per_grid_ts")
+            if "second_per_grid_ts" in data:
+                data = {
+                    **data,
+                    "second_per_grid_ts": data["second_per_grid_ts"].flatten(),
+                }
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=create_qwen2_5_omni_thinker_field_factory(
+                    self._spatial_merge_size
+                ),
+            )
+        return super()._parse_video_data(data)
 
 
 class Qwen2_5OmniThinkerProcessingInfo(
@@ -831,7 +861,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
             audio_in_video_item_idx += 1
 
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
+            processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
+            if isinstance(processed_second_per_grid_ts, torch.Tensor):
+                video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
+            elif second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 1.0
