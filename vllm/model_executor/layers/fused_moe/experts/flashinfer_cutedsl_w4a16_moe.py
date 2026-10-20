@@ -20,25 +20,35 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Static,
+)
+
+# The CuteDslFusedMoEW4A16Runner tactic for one GEMM.
+W4A16Tactic = tuple[tuple[int, int, int], tuple[int, int], bool]
 
 # Under batch invariance every token count uses this tactic.
-BATCH_INVARIANT_TACTIC = ((256, 128, 256), (2, 1), True)
+BATCH_INVARIANT_TACTIC: W4A16Tactic = ((256, 128, 256), (2, 1), True)
 # Expert-parallel layout whose combine order batch invariance reproduces.
 BATCH_INVARIANT_EP_SIZE = 4
 
 
-def w4a16_tactic(num_tokens, batch_invariant):
+def w4a16_tactic(num_tokens: int, batch_invariant: bool) -> W4A16Tactic:
     """GEMM tactic for ``num_tokens`` routed source tokens."""
     if batch_invariant or num_tokens > 64:
         return BATCH_INVARIANT_TACTIC
     return ((128, 8, 256), (1, 1), True)
 
 
-def nemotron_w4a16_support(config):
+def nemotron_w4a16_support(config: FusedMoEConfig) -> tuple[bool, str | None]:
     """Limit explicit backend selection to the validated Nemotron-H geometry."""
     parallel = config.moe_parallel_config
     if config.moe_backend != "flashinfer_cutedsl":
@@ -63,7 +73,7 @@ def nemotron_w4a16_support(config):
     return True, None
 
 
-def prepare_w4a16_scales(scale):
+def prepare_w4a16_scales(scale: torch.Tensor) -> torch.Tensor:
     """Keep padded SF storage registered; the runner consumes its raw pointer."""
     from flashinfer.quantization.fp4_quantization import block_scale_interleave
 
@@ -78,8 +88,14 @@ def prepare_w4a16_scales(scale):
 
 class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
     @staticmethod
-    def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        supported, reason = nemotron_w4a16_support(config)
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = nemotron_w4a16_support(moe_config)
         if not supported:
             return supported, reason
         try:
@@ -89,22 +105,29 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
         except ImportError:
             return False, "installed FlashInfer lacks the W4A16 runner"
         return mk.FusedMoEExperts.is_supported_config(
-            cls, config, weight_key, activation_key, activation_format
+            cls, moe_config, weight_key, activation_key, activation_format
         )
 
     @staticmethod
-    def _supports_quant_scheme(weight_key, activation_key):
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
         return weight_key == kNvfp4Static and activation_key is None
 
     @staticmethod
-    def _supports_activation(activation):
+    def _supports_activation(activation: MoEActivation) -> bool:
         return activation == MoEActivation.RELU2_NO_MUL
 
     @staticmethod
-    def _supports_batch_invariance():
+    def _supports_batch_invariance() -> bool:
         return True
 
-    def __init__(self, moe_config, quant_config):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
         from flashinfer.fused_moe.cute_dsl.tuner import CuteDslFusedMoEW4A16Runner
         from flashinfer.tllm_enums import ActivationType
 
@@ -127,7 +150,7 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
             activation_type=ActivationType.Relu2.value,
         )
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, "w13_input_scale", None) is not None:
             raise ValueError("Unexpected activation scale after W4A16 conversion")
         if layer.expert_map is not None:
@@ -144,7 +167,9 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
         for desc in (self.quant_config._w1, self.quant_config._w2):
             desc.scale = desc.alpha_or_gscale = None
 
-    def _registered_scale(self, name, initial):
+    def _registered_scale(
+        self, name: str, initial: torch.Tensor | None
+    ) -> torch.Tensor | None:
         ref = getattr(self, "_layer_ref", None)
         if ref is None:
             return initial
@@ -155,35 +180,35 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
         return getattr(layer, name)
 
     @property
-    def w1_scale(self):
+    def w1_scale(self) -> torch.Tensor | None:
         return self._registered_scale("w13_weight_scale", super().w1_scale)
 
     @property
-    def w2_scale(self):
+    def w2_scale(self) -> torch.Tensor | None:
         return self._registered_scale("w2_weight_scale", super().w2_scale)
 
     # The alphas are the checkpoint's weight_scale_2 as is, without the
     # 1/(1/s) round trip of the shared experts (NemotronSharedNvFp4LinearKernel);
     # the trainer passes the same raw alphas to this kernel.
     @property
-    def g1_alphas(self):
+    def g1_alphas(self) -> torch.Tensor | None:
         return self._registered_scale("w13_weight_scale_2", super().g1_alphas)
 
     @property
-    def g2_alphas(self):
+    def g2_alphas(self) -> torch.Tensor | None:
         return self._registered_scale("w2_weight_scale_2", super().g2_alphas)
 
     def workspace_shapes(
         self,
-        M,
-        N,
-        K,
-        topk,
-        global_num_experts,
-        local_num_experts,
-        expert_tokens_meta,
-        activation,
-    ):
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The modular caller derives K from unquantized a1, not packed weights.
         if self.hidden_dim != K:
             raise ValueError("W4A16 workspace requires the full BF16 hidden dimension")
@@ -191,34 +216,38 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
 
     def apply(
         self,
-        output,
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        activation,
-        global_num_experts,
-        expert_map,
-        a1q_scale,
-        a2_scale,
-        workspace13,
-        workspace2,
-        expert_tokens_meta,
-        apply_router_weight_on_input,
-    ):
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool | None,
+    ) -> None:
         if a1q_scale is not None or apply_router_weight_on_input:
             raise ValueError("Expected unquantized activations, routing on output")
+        w1_scale, g1_alphas = self.w1_scale, self.g1_alphas
+        w2_scale, g2_alphas = self.w2_scale, self.g2_alphas
+        assert w1_scale is not None and g1_alphas is not None
+        assert w2_scale is not None and g2_alphas is not None
         inputs = [
             hidden_states,
             topk_ids.to(torch.int32),
             topk_weights.float(),
             w1,
-            self.w1_scale,
-            self.g1_alphas.reshape(-1),
+            w1_scale,
+            g1_alphas.reshape(-1),
             w2,
-            self.w2_scale,
-            self.g2_alphas.reshape(-1),
+            w2_scale,
+            g2_alphas.reshape(-1),
             output,
         ]
         # Screened tiles chosen from host shapes: no autotuning in graph replay.
@@ -231,7 +260,7 @@ class FlashInferCuteDSLW4A16Experts(FlashInferCuteDSLExperts):
         else:
             self.runner.forward(inputs, tactic=(tile, tile))
 
-    def _apply_ep_combine(self, inputs, tile):
+    def _apply_ep_combine(self, inputs: list[torch.Tensor], tile: W4A16Tactic) -> None:
         """Run every expert locally and reduce as the EP4 combine does.
 
         Each EP rank reduces its own slots with ``moe_unpermute`` into a BF16
