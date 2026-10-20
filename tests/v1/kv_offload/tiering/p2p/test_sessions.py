@@ -286,12 +286,16 @@ class FakeParent:
         retry: set[OffloadKey] | None = None,
         secondary: set[OffloadKey] | None = None,
         promote_full: bool = False,
+        raise_on_create: bool = False,
+        raise_on_promote: bool = False,
     ) -> None:
         self.stored: dict[OffloadKey, int] = dict(stored or {})
         self.pending: set[OffloadKey] = set(pending or ())
         self.retry: set[OffloadKey] = set(retry or ())
         self.secondary: set[OffloadKey] = set(secondary or ())
         self.promote_full = promote_full
+        self.raise_on_create = raise_on_create
+        self.raise_on_promote = raise_on_promote
         self._next_job_id: int = 1000
         self.calls: list[tuple] = []
 
@@ -337,6 +341,8 @@ class FakeParent:
     ) -> dict[OffloadKey, LookupResult]:
         pending = list(probes)
         self.calls.append(("promote_batch", tuple(p.key for p in pending), ctx.req_id))
+        if self.raise_on_promote:
+            raise RuntimeError("promotion failed")
         results: dict[OffloadKey, LookupResult] = {}
         for probe in pending:
             if probe.promotion_tier is None:
@@ -359,6 +365,8 @@ class FakeParent:
     ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
+        if self.raise_on_create:
+            raise RuntimeError("pin failed")
         chunk_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
@@ -1531,6 +1539,70 @@ class TestServerLookupHandling:
         assert len(resps) == 1
         assert resps[0][LookupRespMsg.HITS] == [True, False]
         assert set(_srv_outbound(session, "req-1").available) == {b"hA"}
+
+    def test_create_store_job_failure_reports_misses_and_finishes_once(self):
+        """A pin failure must not escape serve_external_requests, must not
+        report a HIT the peer cannot fetch, and must close the lookup."""
+        cb = FakeParent(stored={b"hA": 1, b"hB": 2}, raise_on_create=True)
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [False, False]
+        assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
+        assert _srv_lookups(session) == []
+        assert _srv_outbound(session, "req-1") is None
+
+    def test_promotion_failure_keeps_pinned_hits(self):
+        """A promotion failure must not downgrade HITs that were already
+        pinned; only the unsettled keys become MISS."""
+        cb = FakeParent(stored={b"hA": 1}, secondary={b"hB"}, raise_on_promote=True)
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [True, False]
+        assert set(_srv_outbound(session, "req-1").available) == {b"hA"}
+        assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
+        assert _srv_lookups(session) == []
+
+    def test_repoll_failure_reports_misses_and_finishes_once(self):
+        """A failure while re-polling a parked lookup is contained the same
+        way: one all-MISS response and one on_request_finished."""
+        cb = FakeParent(stored={b"hA": 1}, pending={b"hA"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+
+        assert _lookup_resps(conn, sent_before) == []
+        assert len(_srv_lookups(session)) == 1
+
+        # The promotion finished, but pinning the HIT now fails.
+        cb.pending.clear()
+        cb.raise_on_create = True
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [False]
+        assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
+        assert _srv_lookups(session) == []
 
     def test_all_misses_no_store_job_finish_fires(self):
         """All-MISS batch: no create_store_job call; one LookupRespMsg

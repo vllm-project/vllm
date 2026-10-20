@@ -198,6 +198,9 @@ class _ActiveLookup:
     # ``pending`` keys are force-resolved to MISS so the consumer
     # can fall back instead of waiting on a stuck producer.
     deadline: float = 0.0
+    # Set by ``_finalize_lookup``; makes a second finalize a no-op so a
+    # failure path and the normal path cannot both answer the peer.
+    finalized: bool = False
 
 
 class _PendingLookup(NamedTuple):
@@ -532,6 +535,12 @@ class ServerRole:
         new_hits = [probe.key for probe in probes if probe.result is LookupResult.HIT]
         if new_hits:
             self._pin_and_register_hits(lookup, new_hits, parent)
+            # Record the pinned HITs before promoting: if a promotion raises,
+            # the caller must not downgrade keys that are already pinned and
+            # registered as this round's supply.
+            for key in new_hits:
+                lookup.resolved[key] = True
+                lookup.pending.discard(key)
 
         promoted = parent.promote_batch(
             [probe for probe in probes if probe.promotion_tier is not None],
@@ -539,18 +548,18 @@ class ServerRole:
         )
 
         for probe in probes:
-            key = probe.key
-            result = probe.result
-            if result is None:
-                result = promoted.get(key, LookupResult.MISS)
-            if result is LookupResult.HIT:
-                lookup.resolved[key] = True
-                lookup.pending.discard(key)
-            elif result is LookupResult.MISS:
-                lookup.resolved[key] = False
-                lookup.pending.discard(key)
+            if probe.result is LookupResult.HIT:
+                continue
+            result = (
+                probe.result
+                if probe.result is not None
+                else promoted.get(probe.key, LookupResult.MISS)
+            )
+            if result is LookupResult.MISS:
+                lookup.resolved[probe.key] = False
+                lookup.pending.discard(probe.key)
             else:
-                lookup.pending.add(key)
+                lookup.pending.add(probe.key)
         return new_hits
 
     def _process_inbound_lookup(
@@ -563,12 +572,12 @@ class ServerRole:
     ) -> None:
         """Resolve one enqueued LookupMsg against ``parent``.
 
-        For each key, query the tiering manager via ``parent.lookup``
-        and pin any HITs immediately via ``parent.create_store_job``
-        (plumbed into the existing ``add_stored_blocks`` matching path so
-        the eventual FetchMsg finds them). HIT_PENDING / RETRY keys park
-        in :class:`_ActiveLookup` for re-polling by
-        :meth:`_resolve_pending_lookups`.
+        Probe the batch via ``parent.probe_batch``, pin its primary HITs in
+        one ``parent.create_store_job`` call (plumbed into the existing
+        ``add_stored_blocks`` matching path so the eventual FetchMsg finds
+        them), and only then start promotions via ``parent.promote_batch``.
+        HIT_PENDING / RETRY keys park in :class:`_ActiveLookup` for
+        re-polling by :meth:`_resolve_pending_lookups`.
 
         The outbound ``LookupRespMsg`` is deferred until every key has
         settled to HIT or MISS (or the batch-level ``deadline`` fires,
@@ -590,29 +599,42 @@ class ServerRole:
 
         # Open per-request bookkeeping for this synthetic ctx before the
         # first lookup; released by ``on_request_finished`` once every
-        # key has settled.
+        # key has settled. Kept outside the try: a failure here has not
+        # created anything that needs cleanup.
         parent.on_new_request(ctx)
 
-        # dict.fromkeys de-duplicates keys within the LookupMsg while
-        # preserving wire order — each unique key is polled once.
-        hit_keys = self._poll_lookup_keys(lookup, dict.fromkeys(lookup.keys), parent)
+        try:
+            # dict.fromkeys de-duplicates keys within the LookupMsg while
+            # preserving wire order — each unique key is polled once.
+            hit_keys = self._poll_lookup_keys(
+                lookup, dict.fromkeys(lookup.keys), parent
+            )
 
-        logger.debug(
-            "P2P LOOKUP server %s: RESOLVED kv_request_id=%s hits=%d misses=%d "
-            "pending=%d",
-            self._peer_id,
-            kv_request_id,
-            len(hit_keys),
-            sum(1 for v in lookup.resolved.values() if not v),
-            len(lookup.pending),
-        )
+            logger.debug(
+                "P2P LOOKUP server %s: RESOLVED kv_request_id=%s hits=%d misses=%d "
+                "pending=%d",
+                self._peer_id,
+                kv_request_id,
+                len(hit_keys),
+                sum(1 for v in lookup.resolved.values() if not v),
+                len(lookup.pending),
+            )
 
-        if lookup.pending:
-            self._get_or_create_request(kv_request_id).lookups[lookup_id] = lookup
-        else:
-            # Every key resolved on first sight — emit the aggregated
-            # response now and close the synthetic request.
-            self._finalize_lookup(lookup, parent)
+            if lookup.pending:
+                self._get_or_create_request(kv_request_id).lookups[lookup_id] = lookup
+            else:
+                # Every key resolved on first sight — emit the aggregated
+                # response now and close the synthetic request.
+                self._finalize_lookup(lookup, parent)
+        except Exception:
+            logger.warning(
+                "P2P LOOKUP server %s: failed to resolve kv_request_id=%s; "
+                "reporting unsettled keys as miss",
+                self._peer_id,
+                kv_request_id,
+                exc_info=True,
+            )
+            self._fail_active_lookup(kv_request_id, lookup, parent)
 
     def _pin_and_register_hits(
         self,
@@ -625,11 +647,12 @@ class ServerRole:
 
         Caller has already confirmed every key is HIT, so the JobMetadata
         returned by ``parent.create_store_job`` carries parallel
-        ``keys``/``block_ids`` of length ``len(keys)``. Nothing can evict
-        between that confirmation and the pin because the whole
-        ``serve_external_requests`` call runs inside one hold of the tiering
-        manager's lock -- which is why that call must never release it
-        partway through.
+        ``keys``/``block_ids`` of length ``len(keys)``.
+
+        This must run before any promotion from the same probe batch. The
+        manager lock keeps other threads out, but it does not keep a
+        promotion started by this same call from allocating primary space
+        and evicting an unpinned HIT.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(
@@ -661,7 +684,18 @@ class ServerRole:
         now = time.monotonic()
         finished_lookups: list[int] = []
         for lookup_id, lookup in st.lookups.items():
-            self._poll_lookup_keys(lookup, list(lookup.pending), parent)
+            try:
+                self._poll_lookup_keys(lookup, list(lookup.pending), parent)
+            except Exception:
+                logger.warning(
+                    "P2P LOOKUP server %s: re-poll failed for kv_request_id=%s "
+                    "lookup_id=%d; reporting unsettled keys as miss",
+                    self._peer_id,
+                    kv_request_id,
+                    lookup_id,
+                    exc_info=True,
+                )
+                self._mark_unresolved_as_miss(lookup)
 
             if lookup.pending and now >= lookup.deadline:
                 for h in lookup.pending:
@@ -682,7 +716,14 @@ class ServerRole:
         key resolved to HIT or MISS, or the deadline forced remaining
         stragglers to MISS. Preserves the wire order of the inbound
         LookupMsg so the client can zip keys and hits positionally.
+
+        Idempotent: a lookup answered by the failure path cannot be answered
+        again by a later pass, so the peer sees exactly one response and
+        ``on_request_finished`` fires exactly once.
         """
+        if lookup.finalized:
+            return
+        lookup.finalized = True
         if lookup.keys:
             hits = [lookup.resolved[h] for h in lookup.keys]
             n_hit = sum(1 for v in hits if v)
@@ -704,6 +745,31 @@ class ServerRole:
                 }
             )
         parent.on_request_finished(lookup.ctx)
+
+    @staticmethod
+    def _mark_unresolved_as_miss(lookup: _ActiveLookup) -> None:
+        for key in lookup.keys:
+            if key not in lookup.resolved:
+                lookup.resolved[key] = False
+        lookup.pending.clear()
+
+    def _fail_active_lookup(
+        self,
+        kv_request_id: str,
+        lookup: _ActiveLookup,
+        parent: ParentManager,
+    ) -> None:
+        """Resolve whatever is left as MISS and close the lookup.
+
+        Used when probing, pinning, or promotion raises. The peer still gets
+        its single aggregated LookupRespMsg and the synthetic request is
+        still released, so one bad key cannot strand the whole session.
+        """
+        self._mark_unresolved_as_miss(lookup)
+        st = self._requests.get(kv_request_id)
+        if st is not None:
+            st.lookups.pop(lookup.lookup_id, None)
+        self._finalize_lookup(lookup, parent)
 
     def _finish_inbound_lookups(self, kv_request_id: str) -> None:
         """Close the server-side lookup phase for ``kv_request_id``.

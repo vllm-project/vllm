@@ -401,9 +401,12 @@ class SecondaryTierManager(ABC):
         a tier-poll round is submitted at the next on_schedule_end().
 
         The parent handle is valid only for the duration of this call, and the
-        caller holds the manager lock throughout it -- so a lookup() HIT taken
-        here stays valid until this call pins it. An implementation must not
-        release that lock partway through.
+        caller holds the manager lock throughout it, so no other thread can
+        mutate tier state. That lock does not protect a HIT from a promotion
+        started by this same call: a promotion allocates primary-tier space
+        and may evict another key of the batch. An implementation must probe
+        the whole batch and pin its primary HITs before starting any
+        promotion, and must not release the lock partway through.
 
         Tiers that don't serve external requests leave this as a no-op. A tier
         that overrides it without setting tolerates_off_thread_polling is served
