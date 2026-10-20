@@ -18,7 +18,7 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
-    MemDescriptor,
+    MemoryRef,
     OpEntryResult,
     OpEntryStatus,
     OpHandle,
@@ -36,7 +36,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
 
@@ -78,11 +80,9 @@ class RecordingKVCR:
         self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
         self.deliver_calls: list[
-            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]], str | None]
+            tuple[OpHandle, dict[BlockKey, list[MemoryRef]], str | None]
         ] = []
-        self.deposit_calls: list[
-            tuple[OpHandle, dict[BlockKey, list[MemDescriptor]]]
-        ] = []
+        self.deposit_calls: list[tuple[OpHandle, dict[BlockKey, list[MemoryRef]]]] = []
         self.completed: list[tuple[OpHandle, dict[BlockKey, OpEntryResult]]] = []
         self._next_op_handle = 1
 
@@ -107,7 +107,7 @@ class RecordingKVCR:
 
     def deliver(
         self,
-        blocks: Mapping[BlockKey, list[MemDescriptor]],
+        blocks: Mapping[BlockKey, list[MemoryRef]],
         request_id: str | None = None,
     ) -> OpHandle:
         op_handle = self._next_op_handle
@@ -118,7 +118,7 @@ class RecordingKVCR:
 
     def deposit(
         self,
-        blocks: Mapping[BlockKey, list[MemDescriptor]],
+        blocks: Mapping[BlockKey, list[MemoryRef]],
     ) -> OpHandle:
         op_handle = self._next_op_handle
         self._next_op_handle += 1
@@ -182,6 +182,7 @@ def _make_tier(
     g3: dict[str, object] | None = None,
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
+    backpressure: dict[str, Any] | None = None,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -198,7 +199,25 @@ def _make_tier(
 
     monkeypatch.setattr(kvcr_manager, "KVCR", make_kvcr)
     monkeypatch.setattr(kvcr_manager, "ZmqPeerControlChannel", make_control)
-    return KVCRSecondaryTierManager(
+    tier_config = {
+        "type": "kvcr",
+        "router_capabilities": ["router_hint"],
+        "control_host": "127.0.0.1",
+        "control_ports": control_ports if control_ports is not None else [7777],
+        "control_advertise_host": "127.0.0.1",
+        "enable_telemetry": enable_telemetry,
+        "secondary_g2_slots": secondary_g2_slots,
+        "kvcr_service_socket_path": kvcr_service_socket_path,
+        "compatibility_digest": compatibility_digest,
+        "policy": policy,
+        "g3": g3,
+        "local_dram_backend": "UCX",
+        "remote_fw_dram_backend": "UCX",
+    }
+    if backpressure is not None:
+        tier_config["backpressure"] = backpressure
+    tier = SecondaryTierFactory.create_secondary_tier(
+        tier_config=tier_config,
         offloading_spec=SimpleNamespace(
             config=SimpleNamespace(
                 parallel=SimpleNamespace(
@@ -211,20 +230,9 @@ def _make_tier(
             ),
         ),
         primary_kv_view=memoryview(np.zeros((4, 16), dtype=np.int8)),
-        tier_type="kvcr",
-        router_capabilities=["router_hint"],
-        control_host="127.0.0.1",
-        control_ports=control_ports if control_ports is not None else [7777],
-        control_advertise_host="127.0.0.1",
-        enable_telemetry=enable_telemetry,
-        secondary_g2_slots=secondary_g2_slots,
-        kvcr_service_socket_path=kvcr_service_socket_path,
-        compatibility_digest=compatibility_digest,
-        policy=policy,
-        g3=g3,
-        local_dram_backend="UCX",
-        remote_fw_dram_backend="UCX",
     )
+    assert isinstance(tier, KVCRSecondaryTierManager)
+    return tier
 
 
 def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
@@ -248,7 +256,11 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
         compatibility_digest="Opaque-Digest",
     )
     assert kvcr.config is not None
-    assert kvcr.config.pool_layouts == [("", tier._primary_row_stride)]
+    assert kvcr.config.pool_layouts == [("", tier.block_size_bytes)]
+    (region,) = kvcr.backend_configs.framework_regions
+    assert region.addr == np.asarray(tier._primary_kv_view).ctypes.data
+    assert (region.size, region.stride or region.size, region.count) == (16, 16, 4)
+    assert (region.label, region.mem_type, region.device_Id) == ("", "DRAM", 0)
     assert kvcr.backend_configs.local_dram is None
 
 
@@ -269,10 +281,19 @@ def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
     )
 
 
-def test_kvcr_tier_adapts_request_and_load(monkeypatch):
-    """Check hint forwarding, key conversion, load descriptors, and cleanup."""
+@pytest.mark.parametrize(
+    "backpressure",
+    [None, {"backpressure_cls": "EMABackpressureDetector"}],
+    ids=["default", "backpressure"],
+)
+def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
+    """Factory-created tiers preserve configuration and complete hinted loads."""
     kvcr = RecordingKVCR()
-    tier = _make_tier(monkeypatch, kvcr)
+    tier = _make_tier(monkeypatch, kvcr, backpressure=backpressure)
+    if backpressure is None:
+        assert tier.bp_detector is None
+    else:
+        assert isinstance(tier.bp_detector, EMABackpressureDetector)
     kv_hint = KvHintsEnvelope(protocol_version="0.1", message_id="msg", actions=[])
     ctx = ReqContext(
         req_id="req",
@@ -306,9 +327,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     assert request_id == "req"
     assert list(blocks) == [key]
     (descriptor,) = blocks[key]
-    assert descriptor.end_point_name == kvcr.nixl_agent_name
-    assert descriptor.addr == tier._primary_base_addr + 2 * 16
-    assert descriptor.size == 16
+    assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
     # Here we verify that request cleanup discards the request-scoped hint in
@@ -351,7 +370,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
-    chunk_ids = {keys[0]: 1, keys[2]: 5}
+    chunk_ids = {keys[0]: 1, keys[2]: 3}
     lifecycle: list[str] = []
 
     class Parent:
@@ -388,7 +407,7 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     block_descriptors = descriptors[keys[2]]
     assert block_descriptors is not None
     (descriptor,) = block_descriptors
-    assert descriptor.addr == (tier._primary_base_addr + 5 * tier._primary_row_stride)
+    assert descriptor == MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=3)
     assert lifecycle == ["new", "finished"]
 
     polls = 0
@@ -482,14 +501,16 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     local_dram = kvcr.backend_configs.local_dram
     assert local_dram is not None
     assert [(name, size) for name, _, size in local_dram.pools] == [
-        ("", 2 * tier._primary_row_stride)
+        ("", 2 * tier.block_size_bytes)
     ]
 
     key = OffloadKey(b"k0")
     tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, chunk_id=2))
 
     _, blocks = kvcr.deposit_calls[0]
-    assert blocks[key][0].addr == tier._primary_base_addr + 2 * 16
+    assert blocks[key] == [
+        MemoryRef(end_point_name=kvcr.nixl_agent_name, element_index=2)
+    ]
     assert list(tier.get_finished_jobs()) == [JobResult(11, True)]
 
     assert kvcr.inventory_sink is not None

@@ -75,7 +75,7 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
 def test_reload_weights_sets_current_config():
     worker = _make_worker(None)
     model_runner = _RecordingModelRunner()
-    worker.model_runner = model_runner  # type: ignore[assignment]
+    worker.model_runner = model_runner
 
     Worker.reload_weights(worker)
 

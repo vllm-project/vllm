@@ -63,21 +63,6 @@ def apply_temperature(
 
 
 @triton.jit
-def tl_rand64(seed, offset, includes_zero: tl.constexpr):
-    lo, hi, _, _ = tl.randint4x(seed, offset)
-    lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
-    hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
-    r = (hi << 32) | lo
-
-    # 1 / 2**64
-    scale = 5.421010862427522170037e-20
-    u = r.to(tl.float64) * scale
-    if not includes_zero:
-        u = tl.maximum(u, 2.2250738585072014e-308)  # float64 tiny
-    return u
-
-
-@triton.jit
 def tl_rand32(seed, offset, includes_zero: tl.constexpr):
     u = tl.rand(seed, offset)
     if not includes_zero:
@@ -235,6 +220,8 @@ def gumbel_block_argmax(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_source_ptr,
+    logits_cache_source_stride,
     vocab_size,
     IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
@@ -255,12 +242,16 @@ def gumbel_block_argmax(
             col = tl.load(logits_cache_col_ptr + token_idx)
         else:
             col = tl.load(logits_cache_col_ptr)
+        cached_logits = tl.load(
+            logits_cache_source_ptr + token_idx * logits_cache_source_stride + block,
+            mask=mask,
+        )
         tl.store(
             logits_cache_ptr
             + req_state_idx * logits_cache_stride_0
             + col * logits_cache_stride_1
             + block,
-            logits,
+            cached_logits,
             mask=mask & is_valid_req,
         )
 
@@ -290,6 +281,8 @@ def _gumbel_sample_kernel(
     logits_cache_stride_0,
     logits_cache_stride_1,
     logits_cache_col_ptr,
+    logits_cache_source_ptr,
+    logits_cache_source_stride,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -327,6 +320,8 @@ def _gumbel_sample_kernel(
         logits_cache_stride_0,
         logits_cache_stride_1,
         logits_cache_col_ptr,
+        logits_cache_source_ptr,
+        logits_cache_source_stride,
         vocab_size,
         IS_DRAFTING=IS_DRAFTING,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -349,6 +344,7 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    logits_cache_source: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -357,11 +353,26 @@ def gumbel_sample(
         logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
     if logits_cache is not None:
+        if logits_cache_source is None:
+            logits_cache_source = logits
+        assert logits_cache_source.shape == logits.shape, (
+            "logits cache source must match sampled logits shape"
+        )
+        assert logits_cache_source.device == logits.device, (
+            "logits cache source must be on the sampled logits device"
+        )
+        assert logits_cache_source.dtype == logits_cache.dtype, (
+            "logits cache source and destination must have the same dtype"
+        )
         assert logits_cache.size(-1) >= vocab_size, (
             f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
             f"than the sampled logits ({vocab_size}). Cached logits would be "
             "truncated."
         )
+    elif logits_cache_source is not None:
+        raise ValueError("logits_cache_source requires logits_cache")
+    if logits_cache_source is not None and logits_cache_source.stride(-1) != 1:
+        logits_cache_source = logits_cache_source.contiguous()
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
@@ -377,6 +388,8 @@ def gumbel_sample(
         logits_cache.stride(0) if logits_cache is not None else 0,
         logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
+        logits_cache_source,
+        logits_cache_source.stride(0) if logits_cache_source is not None else 0,
         logits,
         logits.stride(0),
         expanded_idx_mapping,

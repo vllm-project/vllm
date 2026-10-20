@@ -7,7 +7,7 @@ from typing import Any
 from tqdm.auto import tqdm
 
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.common.offline import OfflineInferenceMixin
 from vllm.inputs import DataPrompt, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -362,6 +362,8 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         assert isinstance(pooling_params, PoolingParams)
         pooling_task = io_processor.pooling_task
+        # Clone to avoid modifying the caller's pooling parameters.
+        pooling_params = pooling_params.clone()
         if pooling_params.task is None:
             pooling_params.task = pooling_task
         elif pooling_params.task != pooling_task:

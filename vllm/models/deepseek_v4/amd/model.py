@@ -30,6 +30,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_fused_experts,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -71,6 +74,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.deepseek_v4.amd.mega_moe import DeepseekV4AiterMegaMoEExperts
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
@@ -529,6 +533,39 @@ def _fuse_shared_experts_enabled(config, parallel_config: ParallelConfig) -> boo
     )
 
 
+def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if not rocm_aiter_ops.is_fused_moe_enabled():
+        raise ValueError(
+            "--moe-backend aiter_mega_moe requires VLLM_ROCM_USE_AITER=1 "
+            " and VLLM_ROCM_USE_AITER_MOE=1."
+        )
+    if not on_gfx950():
+        raise NotImplementedError("AITER MegaMoE requires gfx950.")
+    if (
+        not parallel_config.enable_expert_parallel
+        or parallel_config.tensor_parallel_size != 1
+        or parallel_config.pipeline_parallel_size != 1
+    ):
+        raise NotImplementedError(
+            "AITER MegaMoE requires data parallel attention with expert "
+            "parallel MoE: --data-parallel-size N --enable-expert-parallel "
+            "with TP=1 and PP=1."
+        )
+    if parallel_config.all2all_backend not in (
+        "mori_high_throughput",
+        "mori_low_latency",
+    ):
+        raise ValueError(
+            "AITER MegaMoE runs on MoRI shmem; add "
+            "--all2all-backend mori_high_throughput."
+        )
+    if parallel_config.enable_eplb:
+        raise NotImplementedError("AITER MegaMoE does not support EPLB.")
+    if getattr(vllm_config.model_config.hf_config, "expert_dtype", "fp4") != "fp4":
+        raise NotImplementedError("AITER MegaMoE only supports fp4 experts.")
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -643,6 +680,20 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        if self.use_mega_moe:
+            _validate_aiter_mega_moe_config(vllm_config)
+            self.experts = DeepseekV4AiterMegaMoEExperts(
+                vllm_config,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                swiglu_limit=self.swiglu_limit,
+                prefix=f"{prefix}.experts",
+            )
+            return
+
         fuse_shared_into_routed = (
             self.is_fused_shared_expert_enabled or self.fuse_heterogeneous_shared_expert
         )
@@ -692,6 +743,8 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError("DeepSeek V4 vision MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
+        if self.use_mega_moe:
+            return self._forward_mega_moe(hidden_states, input_ids).view(org_shape)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=hidden_states,
@@ -699,6 +752,30 @@ class DeepseekV4MoE(nn.Module):
         )
 
         return final_hidden_states.view(org_shape)
+
+    def _forward_mega_moe(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> torch.Tensor:
+        router_logits, _ = self.gate(hidden_states)
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            topk=self.n_activated_experts,
+            renormalize=self.renormalize,
+            input_tokens=input_ids,
+            hash_indices_table=self.gate.tid2eid,
+            routed_scaling_factor=self.routed_scaling_factor,
+            bias_vl=self.gate.bias_vl,
+            image_sentinel_lo=self.image_sentinel_lo,
+        )
+        final_hidden_states = self.experts(hidden_states, topk_weights, topk_ids)
+        if self.shared_experts is not None:
+            final_hidden_states = final_hidden_states + self.shared_experts(
+                hidden_states
+            )
+        return final_hidden_states
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
@@ -993,6 +1070,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.fuse_heterogeneous_shared_expert = _heterogeneous_shared_expert_enabled(
             vllm_config
         )
+        self.use_mega_moe = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV4DecoderLayer(
@@ -1315,6 +1393,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=num_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
 
@@ -1453,6 +1532,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+            elif isinstance(module, DeepseekV4AiterMegaMoEExperts):
+                module.finalize_weights()
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",

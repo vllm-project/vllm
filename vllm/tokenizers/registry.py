@@ -4,16 +4,10 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import huggingface_hub
-import transformers
-from packaging.version import Version
-from transformers.models.auto.tokenization_auto import (
-    TOKENIZER_MAPPING_NAMES as _HF_TOKENIZER_MAPPING_NAMES,
-)
-from transformers.utils.import_utils import is_mistral_common_available
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -31,8 +25,6 @@ if TYPE_CHECKING:
     from vllm.config.model import ModelConfig, RunnerType
 
 logger = init_logger(__name__)
-
-_MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL = Version("5.15.0")
 
 
 # Model types whose hub tokenizer_class is incorrect and should be overridden with
@@ -145,13 +137,6 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        kwargs["use_fast"] = False
-
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
@@ -248,26 +233,6 @@ def get_tokenizer(
             revision=revision,
             config_format=config_format,
             token=kwargs.get("token"),
-        )
-
-    # TODO: delete when Transformers version dependency is bumped >= 5.15.0
-    if (
-        tokenizer_mode == "hf"
-        and Version(transformers.__version__) < _MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL
-        and is_mistral_common_available()
-        and _HF_TOKENIZER_MAPPING_NAMES.get(getattr(config, "model_type", None))
-        == "MistralCommonBackend"
-        and any_pattern_in_repo_files(
-            model_name_or_path=str(tokenizer_name),
-            allow_patterns=["tekken.json", "tokenizer.model.v*"],
-            revision=revision,
-            token=kwargs.get("token"),
-        )
-    ):
-        raise ValueError(
-            "Loading Mistral models with tokenizer_mode='hf' requires "
-            f"transformers>={_MIN_TRANSFORMERS_VERSION_FOR_HF_MISTRAL}. "
-            "Please upgrade transformers or delete Mistral tokenizer files."
         )
 
     # Some models have an incorrect tokenizer_class on the hub.

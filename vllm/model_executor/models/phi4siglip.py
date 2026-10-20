@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig, Siglip2VisionConfig
+from transformers import BatchFeature, PreTrainedConfig, Siglip2VisionConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -235,7 +235,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
 

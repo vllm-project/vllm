@@ -44,7 +44,7 @@ class _ProcWithUnpack:
 
 def test_get_processor_kwargs_from_processor_unpack_path_returns_full_union():
     proc = _ProcWithUnpack()
-    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))  # type: ignore[arg-type]
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
 
 
@@ -63,5 +63,5 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     assert hasattr(mod, "_FakeProcessorKwargs")
 
     proc = _ProcWithoutUnpack()
-    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))  # type: ignore[arg-type]
+    keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)

@@ -84,6 +84,40 @@ def resolve_layer_fused_shared_expert(
         else (True, None)
     )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
+
+    # In online shared_expert quantization is used, register it to
+    # `online_quantization_config.quantized_layers` ahead of weight loading.
+    if is_fused_shared_expert_enabled and quant_config is not None:
+        online_quantization_config = quant_config.online_quantization_config
+        if online_quantization_config is not None:
+            from vllm.model_executor.layers.linear import (
+                LinearBase,
+                UnquantizedLinearMethod,
+            )
+
+            for projection_name in ("gate_up_proj", "down_proj"):
+                projection_prefix = f"{prefix}.{shared_expert_name}.{projection_name}"
+                quant_method_metadata = (
+                    online_quantization_config.resolve_quant_method_cls(
+                        LinearBase, projection_prefix
+                    )
+                )
+
+                if quant_method_metadata is None:
+                    continue
+
+                source, quant_key_str, target_pattern, _, quant_method_cls = (
+                    quant_method_metadata
+                )
+
+                if quant_method_cls in (None, UnquantizedLinearMethod):
+                    continue
+
+                online_quantization_config.quantized_layers[projection_prefix] = (
+                    source.value,
+                    quant_key_str,
+                    target_pattern,
+                )
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
@@ -451,35 +485,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
 
 
 def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:

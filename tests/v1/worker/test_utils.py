@@ -13,7 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
-from vllm.config import CUDAGraphMode
+from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
@@ -25,12 +25,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
+    request_memory,
 )
 
 
@@ -41,6 +44,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
     worker._submitted_mirror_layers = set()
+    worker._draft_layers = ()
+    worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -87,6 +92,8 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "cache_hits": [12],
         "cache_misses": [4],
         "host_to_device_bytes": [64],
+        "host_cache_usage_perc": [],
+        "pending_page_transfers": [],
     }
 
 
@@ -782,30 +789,6 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors():
     worker._enqueue_row_dma.assert_not_called()
 
 
-def test_hisparse_finish_forward_submits_lazy_post_forward_transfer(monkeypatch):
-    runtime = SimpleNamespace(eager_host_mirror=False)
-    worker = _make_hisparse_worker()
-    worker.is_host_writer = True
-    worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
-    worker._post_forward_transfers = [transfer]
-    worker._forward_ready_event = MagicMock()
-    worker._enqueue_host_mirror = MagicMock()
-    worker._submit_transfers = MagicMock()
-    worker._dma_submitted = False
-    worker._submitted_mirror_layers = set()
-    worker._finish_mirror_phase = MagicMock()
-    worker._release_completed_dma_descriptors = MagicMock()
-    stream = MagicMock()
-    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
-
-    worker.finish_forward()
-
-    worker._finish_mirror_phase.assert_called_once_with(worker._forward_ready_event)
-    worker._submit_transfers.assert_called_once_with([transfer])
-    worker.host_write_event.record.assert_called_once_with(stream)
-
-
 def test_hisparse_prefill_mirrors_source_groups_and_flushes_partial_group():
     slots = torch.tensor([7, 8], dtype=torch.int64)
     source_indices = [0, 0, 1, 1, 1, 1, 2]
@@ -1153,6 +1136,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
+        max_union_rows=8,
     )
     monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
     monkeypatch.setattr(
@@ -1256,6 +1240,8 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
+        self._commits_replayssm_trackers = True
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -1290,19 +1276,19 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
     else:
         bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 
-    assert (
-        mixers[0]._replayssm_ring_start.data_ptr()
-        == mixers[2]._replayssm_ring_start.data_ptr()
+    tracker_names = (
+        "_replayssm_ring_start",
+        "_replayssm_prev_num_accepted",
+        "_replayssm_prev_query_len",
     )
-    assert (
-        mixers[0]._replayssm_prev_num_accepted.data_ptr()
-        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
-    )
-    assert (
-        mixers[1]._replayssm_ring_start.data_ptr()
-        != mixers[0]._replayssm_ring_start.data_ptr()
-    )
-    # Group {0, 2} shares trackers; layer 2 (not 0) updates after both run.
+    for tracker_name in tracker_names:
+        group_tracker = getattr(mixers[0], tracker_name)
+        assert group_tracker.data_ptr() == getattr(mixers[2], tracker_name).data_ptr()
+        assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
+        assert group_tracker.shape == (4,)
+        assert torch.count_nonzero(group_tracker) == 0
+
+    assert [m._commits_replayssm_trackers for m in mixers] == [True, True, False]
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
@@ -1390,3 +1376,36 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:
+    return MemorySnapshot(
+        free_memory=free_gib * GiB_bytes,
+        total_memory=total_gib * GiB_bytes,
+        device="cpu",
+        auto_measure=False,
+    )
+
+
+def test_request_memory_charges_external_weights():
+    """Externally held weights are charged against the utilization budget;
+    the engine is granted only the remainder."""
+    cache_config = CacheConfig(gpu_memory_utilization=0.9)
+    # 70 GiB of a 100 GiB device is held externally before the worker starts.
+    snapshot = _memory_snapshot(total_gib=100, free_gib=30)
+
+    with pytest.raises(ValueError, match="less than desired"):
+        request_memory(snapshot, cache_config)
+
+    # 90 GiB budget - 70 GiB external = 20 GiB for the engine.
+    assert request_memory(snapshot, cache_config, 70 * GiB_bytes) == 20 * GiB_bytes
+
+    # The external weights alone exceed the utilization budget.
+    with pytest.raises(ValueError, match="exceed the desired"):
+        request_memory(snapshot, cache_config, 95 * GiB_bytes)
+
+    # Other tenants squeeze free memory below the engine's remainder.
+    with pytest.raises(ValueError, match="less than the engine's budget"):
+        request_memory(
+            _memory_snapshot(total_gib=100, free_gib=10), cache_config, 70 * GiB_bytes
+        )

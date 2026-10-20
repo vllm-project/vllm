@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.pooler.tokwise.methods import (
     get_tok_pooling_method,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata, PoolingStates
 
 _CPU = torch.device("cpu")
@@ -66,7 +67,7 @@ def _make_pooling_cursor(
 def _make_metadata(
     prompt_lens: list[int],
     *,
-    tasks: list[str] | None = None,
+    tasks: list[PoolingTask] | None = None,
     token_ids: list[list[int]] | None = None,
     pooling_params: list[PoolingParams] | None = None,
     num_scheduled_tokens: list[int] | None = None,
@@ -315,7 +316,7 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
         model_config=SimpleNamespace(
             pooler_config=pooler_config,
             head_dtype=None,
-            hf_config=PretrainedConfig(num_labels=3),
+            hf_config=PreTrainedConfig(num_labels=3),
         ),
     )
     classifier = torch.nn.Linear(4, 3)

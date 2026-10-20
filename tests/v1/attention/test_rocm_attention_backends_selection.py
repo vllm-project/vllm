@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for attention backend selectors."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,15 @@ def mock_get_cdna_version():
         yield
 
 
+@pytest.fixture
+def cleared_attention_selector_cache():
+    from vllm.v1.attention.selector import _cached_get_attn_backend
+
+    _cached_get_attn_backend.cache_clear()
+    yield
+    _cached_get_attn_backend.cache_clear()
+
+
 def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionBackend,
@@ -49,6 +59,216 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
         RocmAiterUnifiedAttentionBackend.get_builder_cls()
         is RocmAiterUnifiedAttentionMetadataBuilder
     )
+
+
+def test_segmented_attention_uses_dedicated_backend_components():
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionBackend,
+        RocmSegmentedAttentionImpl,
+        RocmSegmentedAttentionMetadataBuilder,
+    )
+
+    assert (
+        RocmSegmentedAttentionBackend.get_builder_cls()
+        is RocmSegmentedAttentionMetadataBuilder
+    )
+    assert RocmSegmentedAttentionBackend.get_impl_cls() is RocmSegmentedAttentionImpl
+    assert RocmSegmentedAttentionBackend.get_name() == "ROCM_SEGMENTED_ATTN"
+    assert RocmSegmentedAttentionBackend.supports_non_causal()
+    assert RocmSegmentedAttentionBackend.supports_sliding_window()
+    assert RocmSegmentedAttentionBackend.supports_sink()
+    assert not RocmSegmentedAttentionBackend.supports_mm_prefix()
+
+
+@pytest.mark.parametrize(
+    "sliding_window,logits_soft_cap,has_sinks",
+    [(4096, None, False), (None, 50.0, False), (None, None, True)],
+)
+def test_segmented_attention_admits_unified_fallback_features(
+    monkeypatch, sliding_window, logits_soft_cap, has_sinks
+):
+    from vllm.platforms import rocm
+    from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionImpl,
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx12x", lambda: True)
+    sinks = torch.zeros(8) if has_sinks else None
+
+    impl = RocmSegmentedAttentionImpl(
+        num_heads=8,
+        head_size=128,
+        scale=128**-0.5,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="auto",
+        logits_soft_cap=logits_soft_cap,
+        attn_type=AttentionType.DECODER,
+        sinks=sinks,
+    )
+
+    assert isinstance(impl, RocmSegmentedAttentionImpl)
+
+
+@pytest.mark.parametrize(
+    "platform,rdna",
+    [("cuda", False), ("cpu", False), ("xpu", False), ("rocm", False), ("rocm", True)],
+)
+def test_segmented_attention_requires_rocm_rdna(monkeypatch, platform, rdna):
+    """Reject unsupported platforms before probing ROCm or constructing kernels."""
+    from vllm.platforms import rocm
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import rocm_segmented_attn as segmented
+
+    monkeypatch.setattr(
+        segmented,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: platform == "rocm"),
+    )
+
+    def on_rdna():
+        assert platform == "rocm", "Must not probe ROCm on another platform"
+        return rdna
+
+    monkeypatch.setattr(rocm, "on_gfx1x", on_rdna)
+    reason = segmented.RocmSegmentedAttentionBackend.supports_combination(
+        128,
+        torch.bfloat16,
+        "auto",
+        32,
+        False,
+        False,
+        False,
+        False,
+        DeviceCapability(12, 0),
+    )
+    if rdna:
+        assert reason is None
+        segmented.RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+    else:
+        assert reason == "ROCM_SEGMENTED_ATTN requires AMD RDNA GPUs on ROCm"
+        with pytest.raises(ValueError, match="requires AMD RDNA GPUs on ROCm"):
+            segmented.RocmSegmentedAttentionImpl(
+                8, 128, 128**-0.5, 2, None, None, "auto"
+            )
+
+
+@pytest.mark.parametrize("explicit_cache", [False, True])
+def test_segmented_triton_cache_survives_standalone_compilation(
+    monkeypatch, tmp_path, explicit_cache
+):
+    """Backend initialization preserves one cache across model compilations."""
+    import os
+
+    from vllm.compilation.compiler_interface import InductorStandaloneAdaptor
+    from vllm.platforms import rocm
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionImpl,
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    expected = tmp_path / "rocm_segmented_attention" / "triton"
+    if explicit_cache:
+        expected = tmp_path / "custom"
+        monkeypatch.setenv("TRITON_CACHE_DIR", str(expected))
+    for model in ("target", "draft", "restart_target"):
+        RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+        assert os.environ["TRITON_CACHE_DIR"] == str(expected)
+        assert expected.is_dir()
+        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
+        assert os.environ["TRITON_CACHE_DIR"] == str(expected)
+
+
+def test_segmented_attention_is_opt_in(monkeypatch):
+    from vllm.platforms import rocm
+    from vllm.platforms.rocm import RocmPlatform, _get_backend_priorities
+
+    assert AttentionBackendEnum.ROCM_SEGMENTED_ATTN not in _get_backend_priorities(
+        use_mla=False, use_sparse=False
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    monkeypatch.setattr(rocm, "on_gfx12x", lambda: True)
+    config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        block_size=32,
+    )
+
+    path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=AttentionBackendEnum.ROCM_SEGMENTED_ATTN,
+        attn_selector_config=config,
+    )
+
+    assert path == AttentionBackendEnum.ROCM_SEGMENTED_ATTN.get_path()
+
+
+def test_segmented_attention_rejects_mm_prefix_at_selection(monkeypatch):
+    from vllm.platforms import rocm
+    from vllm.platforms.rocm import RocmPlatform
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=32,
+        use_mm_prefix=True,
+    )
+
+    with pytest.raises(ValueError, match="multimodal token full attention"):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_SEGMENTED_ATTN,
+            attn_selector_config=config,
+        )
+
+
+def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
+    from vllm.config import KernelConfig
+    from vllm.platforms import rocm
+    from vllm.v1.attention.backends.rocm_segmented_attn import (
+        RocmSegmentedAttentionImpl,
+    )
+
+    monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
+    impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
+    impl._segmented_attention_config = SimpleNamespace(
+        kernel_config=KernelConfig(),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=3),
+        model_config=SimpleNamespace(max_model_len=16),
+    )
+    query = torch.empty(3, 8, 128, dtype=torch.bfloat16)
+    key = torch.empty(3, 2, 128, dtype=torch.bfloat16)
+    value = torch.empty_like(key)
+    output = torch.empty_like(query)
+    kv_cache = torch.empty(2, 2, 16, 256, dtype=torch.bfloat16)
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        num_actual_tokens=3,
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([3], dtype=torch.int32),
+        max_seq_len=3,
+        max_query_len=3,
+        causal=True,
+    )
+    layer = SimpleNamespace(_k_scale=torch.ones(()), _v_scale=torch.ones(()))
+
+    with patch(
+        "vllm.v1.attention.backends.rocm_segmented_attn.segmented_attention"
+    ) as dispatch:
+        result = impl.forward(layer, query, key, value, kv_cache, metadata, output)
+
+    assert result is output
+    dispatch.assert_called_once()
+    assert dispatch.call_args.kwargs["key_cache"].shape == (2, 16, 2, 128)
 
 
 def test_aiter_unified_attention_capture_preserves_query_start_locations():
@@ -432,6 +652,139 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
             selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
             attn_selector_config=attn_selector_config,
         )
+
+
+@pytest.fixture
+def turboquant_run_config():
+    """Current config of a run whose KV cache dtype is a turboquant_* preset."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="turboquant_k8v4")
+    )
+    with patch(
+        "vllm.config.get_current_vllm_config_or_none",
+        return_value=config,
+    ):
+        yield config
+
+
+def test_turboquant_boundary_selection_is_not_cached_from_ordinary_run(
+    cleared_attention_selector_cache,
+):
+    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+    from vllm.v1.attention.selector import get_attn_backend
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    ordinary_config = VllmConfig(cache_config=CacheConfig(cache_dtype="auto"))
+    turboquant_config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype="turboquant_k8v4")
+    )
+
+    backend_priorities = [
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.TURBOQUANT,
+    ]
+    with patch(
+        "vllm.platforms.rocm._get_backend_priorities",
+        return_value=backend_priorities,
+    ):
+        with set_current_vllm_config(ordinary_config):
+            ordinary_backend = get_attn_backend(128, torch.float16, "auto")
+
+        with set_current_vllm_config(turboquant_config):
+            boundary_backend = get_attn_backend(128, torch.float16, "auto")
+            quantized_backend = get_attn_backend(128, torch.float16, "turboquant_k8v4")
+
+    assert ordinary_backend is AttentionBackendEnum.ROCM_ATTN.get_class()
+    assert quantized_backend is AttentionBackendEnum.TURBOQUANT.get_class()
+    assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend]) == [
+        KVCacheLayout.LBNHC
+    ]
+
+
+def test_turboquant_run_does_not_mask_unsupported_selected_backend(
+    turboquant_run_config,
+):
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+    )
+
+    with (
+        patch("vllm.platforms.rocm.get_cdna_version", return_value=1),
+        pytest.raises(ValueError, match="compute capability not supported"),
+    ):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            attn_selector_config=attn_selector_config,
+        )
+
+
+def test_turboquant_layout_check_respects_backend_override():
+    from vllm.platforms.rocm import _shares_layout_with_turboquant
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    boundary_backend = MagicMock()
+    boundary_backend.supported_kv_cache_layouts.return_value = (KVCacheLayout.LBHNC,)
+    turboquant_override = MagicMock()
+    turboquant_override.supported_kv_cache_layouts.return_value = (KVCacheLayout.LBHNC,)
+
+    with patch.object(
+        AttentionBackendEnum.TURBOQUANT,
+        "get_class",
+        return_value=turboquant_override,
+    ) as get_turboquant_class:
+        assert _shares_layout_with_turboquant(boundary_backend)
+    get_turboquant_class.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "selected_backend",
+    [None, "ROCM_ATTN", "ROCM_AITER_FA", "TURBOQUANT"],
+)
+def test_turboquant_boundary_layers_share_a_layout(
+    selected_backend,
+    turboquant_run_config,
+    mock_get_cdna_version,
+):
+    """A turboquant_* run must resolve to backends with a common KV layout.
+
+    The boundary layers keep the native dtype and pick their own backend while
+    every other layer picks TURBOQUANT. Engine startup hard-errors when the two
+    share no layout, so the boundary layers must not land on a native ROCm or
+    AITER backend, whichever backend the run asked for.
+    """
+    from vllm.platforms.rocm import RocmPlatform
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+
+    backend_enum = (
+        getattr(AttentionBackendEnum, selected_backend) if selected_backend else None
+    )
+
+    def resolve(kv_cache_dtype):
+        path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=backend_enum,
+            attn_selector_config=AttentionSelectorConfig(
+                head_size=128,
+                dtype=torch.float16,
+                kv_cache_dtype=kv_cache_dtype,
+                block_size=16,
+            ),
+        )
+        return resolve_obj_by_qualname(path)
+
+    boundary_backend = resolve("auto")
+    quantized_backend = resolve("turboquant_k8v4")
+
+    assert quantized_backend is AttentionBackendEnum.TURBOQUANT.get_class()
+    # Raises when the intersection is empty, which is the startup failure.
+    assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend])
 
 
 def test_sparse_not_supported(mock_vllm_config):

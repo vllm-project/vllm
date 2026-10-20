@@ -1,0 +1,277 @@
+{
+  "model_id": "Qwen/Qwen3-0.6B",
+  "vocab_size": 151936,
+  "all_stop_token_ids": [151643, 151645],
+  "cases": {
+    "auto": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "sequence",
+                "elements": [
+                  {
+                    "type": "tag",
+                    "begin": "<think>",
+                    "content": {
+                      "type": "any_text",
+                      "excludes": [],
+                      "max_tokens": null,
+                      "max_chars": null
+                    },
+                    "end": "</think>"
+                  },
+                  {
+                    "type": "const_string",
+                    "value": "\n\n"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>"
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": ",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "json",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "}\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n{\"name\": \"add\", \"arguments\": ",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "json",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "}\n</tool_call>"
+                }
+              ],
+              "at_least_one": false,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "<think>\nNeed call the weather and add tools.\n</think>\n\nI will call the tools.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"add\", \"arguments\": {\"y\": 1.0, \"x\": 2, \"items\": [\"left\", \"right\"]}}\n</tool_call>",
+      "generation_token_ids": [151667, 198, 23657, 1618, 279, 9104, 323, 912, 7375, 624, 151668, 271, 40, 686, 1618, 279, 7375, 624, 151657, 198, 4913, 606, 788, 330, 455, 69364, 497, 330, 16370, 788, 5212, 2527, 788, 330, 2016, 30070, 95642, 151658, 198, 151657, 198, 4913, 606, 788, 330, 718, 497, 330, 16370, 788, 5212, 88, 788, 220, 16, 13, 15, 11, 330, 87, 788, 220, 17, 11, 330, 3615, 788, 4383, 2359, 497, 330, 1291, 1341, 11248, 151658, 151645]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "sequence",
+                "elements": [
+                  {
+                    "type": "tag",
+                    "begin": "<think>",
+                    "content": {
+                      "type": "any_text",
+                      "excludes": [],
+                      "max_tokens": null,
+                      "max_chars": null
+                    },
+                    "end": "</think>"
+                  },
+                  {
+                    "type": "const_string",
+                    "value": "\n\n"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<tool_call>"
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": ",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "json",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "}\n</tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<tool_call>\n{\"name\": \"add\", \"arguments\": ",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "json",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "}\n</tool_call>"
+                }
+              ],
+              "at_least_one": true,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "<think>\nNeed call the weather and add tools.\n</think>\n\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"add\", \"arguments\": {\"y\": 1.0, \"x\": 2, \"items\": [\"left\", \"right\"]}}\n</tool_call>",
+      "generation_token_ids": [151667, 198, 23657, 1618, 279, 9104, 323, 912, 7375, 624, 151668, 271, 151657, 198, 4913, 606, 788, 330, 455, 69364, 497, 330, 16370, 788, 5212, 2527, 788, 330, 2016, 30070, 95642, 151658, 198, 151657, 198, 4913, 606, 788, 330, 718, 497, 330, 16370, 788, 5212, 88, 788, 220, 16, 13, 15, 11, 330, 87, 788, 220, 17, 11, 330, 3615, 788, 4383, 2359, 497, 330, 1291, 1341, 11248, 151658, 151645]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "optional",
+              "content": {
+                "type": "sequence",
+                "elements": [
+                  {
+                    "type": "tag",
+                    "begin": "<think>",
+                    "content": {
+                      "type": "any_text",
+                      "excludes": [],
+                      "max_tokens": null,
+                      "max_chars": null
+                    },
+                    "end": "</think>"
+                  },
+                  {
+                    "type": "const_string",
+                    "value": "\n\n"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "tag",
+              "begin": "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": ",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "json",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "}\n</tool_call>"
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "<think>\nNeed call the weather and add tools.\n</think>\n\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}}\n</tool_call>",
+      "generation_token_ids": [151667, 198, 23657, 1618, 279, 9104, 323, 912, 7375, 624, 151668, 271, 151657, 198, 4913, 606, 788, 330, 455, 69364, 497, 330, 16370, 788, 5212, 2527, 788, 330, 2016, 30070, 95642, 151658, 151645]
+    }
+  }
+}

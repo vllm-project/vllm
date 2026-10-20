@@ -18,7 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding,
@@ -1152,7 +1152,7 @@ class WindowQformer(nn.Module):
 class AudioEmbedding(nn.Module):
     """Image embedding."""
 
-    def __init__(self, config: PretrainedConfig, **kwargs: Any) -> None:
+    def __init__(self, config: PreTrainedConfig, **kwargs: Any) -> None:
         super().__init__()
         self.config = config
         # n_embed or hidden_size for text LM

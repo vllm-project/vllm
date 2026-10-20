@@ -162,8 +162,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -199,8 +205,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine."""
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod
@@ -266,6 +272,10 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
+
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        """Return rank-qualified weight digests from every worker of every engine."""
         raise NotImplementedError
 
     async def handle_fault(

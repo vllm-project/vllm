@@ -116,6 +116,7 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
+    prompt_token_id_logprobs: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):

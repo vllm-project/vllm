@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
@@ -299,6 +301,7 @@ fn handshake_test_config(
         coordinator_mode,
         model_name: model_name.to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -310,10 +313,17 @@ fn bootstrapped_test_config(
     client_index: u32,
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
+    fn listener(address: &str) -> i32 {
+        let path = address.strip_prefix("ipc://").expect("bootstrapped tests use IPC listeners");
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).expect("bind inherited test listener");
+        listener.into_raw_fd()
+    }
+
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_address,
-            output_address,
+            input_listener_fd: listener(&input_address),
+            output_listener_fd: listener(&output_address),
             engine_start_index: 0,
             engine_count,
             data_parallel_size: engine_count,
@@ -322,6 +332,7 @@ fn bootstrapped_test_config(
         coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -360,15 +371,22 @@ fn bootstrapped_test_config_with_start_index(
 
 #[test]
 fn client_config_validates_bootstrapped_dp_range() {
-    let mut config = bootstrapped_test_config_with_start_index(
-        "ipc://unused-input".to_string(),
-        "ipc://unused-output".to_string(),
-        1,
-        2,
-        Duration::from_secs(1),
-        0,
-        None,
-    );
+    // Validation never consumes the descriptors, so placeholders avoid opening
+    // listeners that nothing would close.
+    let mut config = EngineCoreClientConfig {
+        transport_mode: TransportMode::Bootstrapped {
+            input_listener_fd: -1,
+            output_listener_fd: -1,
+            engine_start_index: 1,
+            engine_count: 2,
+            data_parallel_size: 3,
+            ready_timeout: Duration::from_secs(1),
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index: 0,
+        engine_stats_enabled: true,
+    };
     config.validate().expect("frontend may own a subset of global DP ranks");
 
     let TransportMode::Bootstrapped {
@@ -2289,6 +2307,89 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_up_requires_every_engine_to_be_fully_awake() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2 {
+        let engine = spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let results = if engine_index == 0 {
+                        [true, false, true]
+                    } else {
+                        [false, true, true]
+                    };
+                    for (attempt, fully_awake) in results.into_iter().enumerate() {
+                        let utility = recv_engine_message(dealer).await;
+                        assert_eq!(utility[0].as_ref(), &[0x03]);
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from("wake_up"));
+                        let tags = if attempt == 1 {
+                            Value::Array(vec![Value::from("weights")])
+                        } else {
+                            Value::Nil
+                        };
+                        assert_eq!(array[3], Value::Array(vec![tags]));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: Some(utility_result_value(fully_awake)),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        );
+        engines.push(engine);
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    for (tags, expected) in [
+        (None, false),
+        (Some(vec!["weights".to_owned()]), false),
+        (None, true),
+    ] {
+        assert_eq!(
+            timeout(Duration::from_secs(2), client.wake_up(tags))
+                .await
+                .expect("wake timeout")
+                .expect("wake result"),
+            expected
+        );
+    }
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -2684,6 +2785,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -2770,6 +2873,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
+                        prompt_token_id_logprobs: None,
                     },
                 ],
                 scheduler_stats: None,

@@ -94,6 +94,8 @@ For best results, we recommend ensuring that the expected output format / schema
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
+In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
+
 ## Required Function Calling
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
@@ -170,6 +172,29 @@ template configured in the `tokenizer_config.json`. In this case, it will be use
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
+
+### Checkpoint Response Templates (`hf`)
+
+Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the
+`hf` parser to parse output from this metadata instead of a model-specific parser. Like `--tokenizer-mode hf`, it relies on the checkpoint's
+Hugging Face metadata rather than model-specific code:
+
+```bash
+vllm serve <model> \
+    --enable-auto-tool-choice \
+    --tool-call-parser hf \
+    --reasoning-parser hf
+```
+
+Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
+field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
+
+When streaming, each tool call is emitted whole once its region parses. A call cut off before its closer, for example by a closer that is also a
+stop token, is parsed from the text generated so far; a call that does not parse is dropped.
+
+Response templates currently provide parsing, not format-specific constrained decoding. The parser therefore rejects requests for strict tools,
+required or named tool choice, or `parallel_tool_calls=false`. A custom server or request chat template is allowed, but the parser still expects the
+checkpoint's output format.
 
 !!! note
     With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
@@ -457,6 +482,29 @@ Supported models:
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
+
+### MiMo-V2.6 Models (`mimo`)
+
+Supported models:
+
+* `XiaomiMiMo/MiMo-V2.6-Pro-RL`
+* `XiaomiMiMo/MiMo-V2.6-Flash-RL`
+
+Use the checkpoint's chat template with `--tool-call-parser mimo --reasoning-parser mimo --enable-auto-tool-choice`.
+For schema-constrained tool arguments, set `strict: true` inside each tool's `function`, or use `--tool-strict-level parameter`.
+The parser supports `auto`, `required`, named tools, and `parallel_tool_calls=False`, preserving leading/trailing whitespace in string arguments.
+
+### Step-3.5 and Step-3.7 Models (`step3p5`)
+
+Supported models:
+
+* `stepfun-ai/Step-3.5-Flash`
+* `stepfun-ai/Step-3.5-Flash-FP8`
+* `stepfun-ai/Step-3.7-Flash`
+
+Flags: `--tool-call-parser step3p5 --reasoning-parser step3p5 --enable-auto-tool-choice`
+
+The parser supports `auto`, `required`, and named tools.
 
 ### Olmo 3 Models (`olmo3`)
 

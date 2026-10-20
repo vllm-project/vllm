@@ -48,13 +48,27 @@ def truncate_text_to_tokens(
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count by 1-3 tokens due to BPE merge boundary changes.
+    the token count due to BPE merge boundary changes.
     """
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    if len(encoding["input_ids"]) <= max_tokens:
-        return text
-    char_end = encoding["offset_mapping"][max_tokens - 1][1]
-    return text[:char_end]
+    if max_tokens <= 0:
+        return ""
+
+    while text:
+        encoding = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offsets = encoding["offset_mapping"]
+        if len(encoding["input_ids"]) <= max_tokens:
+            break
+
+        char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+        if char_end >= len(text):
+            char_end = len(text) - 1
+        text = text[:char_end]
+
+    return text
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:

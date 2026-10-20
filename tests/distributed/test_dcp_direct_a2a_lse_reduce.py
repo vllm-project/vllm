@@ -455,13 +455,29 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
     )
 
 
-def test_dcp_workspace_covers_parallel_drafting():
+@pytest.mark.parametrize(
+    ("parallel_drafting", "use_v2_model_runner", "expected"),
+    [
+        # Model runner V1's parallel drafter widens requests to 1 + 2 * 3.
+        (True, False, 28),
+        (True, True, 16),
+        # A diffusion canvas of 3 without a speculative config.
+        (None, True, 16),
+    ],
+)
+def test_dcp_workspace_covers_decode_width(
+    parallel_drafting, use_v2_model_runner, expected
+):
     config = _manager_config()
     config.scheduler_config.max_num_batched_tokens = 128
     config.num_speculative_tokens = 3
-    config.speculative_config = MagicMock(parallel_drafting=True)
+    config.use_v2_model_runner = use_v2_model_runner
+    if parallel_drafting is not None:
+        config.speculative_config = MagicMock(
+            num_speculative_tokens=3, parallel_drafting=parallel_drafting
+        )
 
-    assert dcp.get_dcp_workspace_max_num_tokens(config) == 28
+    assert dcp.get_dcp_workspace_max_num_tokens(config) == expected
 
 
 def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):

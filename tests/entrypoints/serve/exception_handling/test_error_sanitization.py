@@ -18,6 +18,10 @@ def test_sanitize_message():
         sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
         == "<_io.BytesIO object>"
     )
+    assert (
+        sanitize_message("<PIL.Image.Image image mode=RGB size=2x2 at 0x7D52EAF07BF0>")
+        == "<PIL.Image.Image image mode=RGB size=2x2>"
+    )
 
 
 class TestSanitizeMessageFilePaths:

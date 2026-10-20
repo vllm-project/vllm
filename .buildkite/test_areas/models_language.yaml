@@ -16,9 +16,9 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Standard)"
+      label: ":amd: (MI355 DPX) Language Models (Standard)"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -40,9 +40,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extra Standard) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Extra Standard) Shard %N"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -82,9 +82,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Hybrid) Shard %N"
+      label: ":amd: (MI355 DPX) Language Models (Hybrid) Shard %N"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -113,9 +113,9 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   mirror:
     amd:
-      label: ":amd: (MI355) Granite Language Model Compatibility"
+      label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 80
       working_dir: /vllm-workspace/tests
@@ -151,9 +151,9 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Extended Generation)"
+      label: ":amd: (MI355 DPX) Language Models (Extended Generation)"
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd
@@ -184,8 +184,6 @@ steps:
       source_file_dependencies:
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
       - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py
@@ -222,10 +220,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (MTEB)"
   key: language-models-test-mteb
   timeout_in_minutes: 68
-  device: h200_18gb
+  device: h200_35gb
   optional: true
   source_file_dependencies:
   - vllm/

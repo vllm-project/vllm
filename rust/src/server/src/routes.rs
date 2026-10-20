@@ -18,6 +18,7 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod weight_checker;
 mod weight_transfer;
 mod world_size;
 
@@ -142,6 +143,7 @@ fn build_router_with_options(
                 post(weight_transfer::update_weight_version),
             )
             .route("/weight_info", get(weight_transfer::weight_info))
+            .route("/weight_checker", post(weight_checker::weight_checker))
             .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
             .route(

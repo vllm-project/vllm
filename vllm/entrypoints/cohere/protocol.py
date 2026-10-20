@@ -175,6 +175,12 @@ class CohereChatV2Request(BaseModel):
     # vLLM-specific extensions (not in Cohere spec). These mirror what the
     # Anthropic and OpenAI surfaces already expose so V2 callers can reach
     # the same engine knobs when needed.
+    watermarking: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to apply the engine's configured watermark to this request."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",

@@ -61,8 +61,12 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(dflash_model, "lm_head", None)
-    if target_lm_head is not None and _should_share(
-        dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
+    if (
+        target_lm_head is not None
+        and not getattr(dflash_model.config, "has_own_lm_head", False)
+        and _should_share(
+            dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
+        )
     ):
         if draft_lm_head is not None:
             del dflash_model.lm_head

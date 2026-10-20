@@ -34,6 +34,7 @@ pub use kimi_k2::KimiK2ToolParser;
 pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub(crate) use parameters::{ToolSchemas, convert_integer_text, convert_number_text};
 pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,9 @@ pub struct Tool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: Option<bool>,
+    /// Whether the tool's schema is loaded on demand (tool search). Only chat
+    /// templates consume it; the tool stays callable for parsing and grammars.
+    pub defer_loading: Option<bool>,
 }
 
 /// One tool-call update emitted while parsing assistant text.

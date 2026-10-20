@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.rotary import apply_rotary_emb
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
@@ -134,6 +135,46 @@ def _fused_add_gemma_rms_norm_impl(
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def _layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def _nemotron_layer_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.nemotron_layer_norm(out, input, weight, bias, epsilon)
+
+
+def _fused_add_nemotron_layer_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias, epsilon)
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -247,6 +288,24 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
+
+
+def _xpu_apply_rotary_emb_impl(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return apply_rotary_emb(x, cos, sin, is_neox_style)
+
+
+def _xpu_apply_rotary_emb_fake(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox_style: bool,
+) -> torch.Tensor:
+    return torch.empty_like(x)
 
 
 def _xpu_fp8_bmm_impl(
@@ -1249,12 +1308,44 @@ class xpu_ops:
                     mutates_args=["input", "residual"],
                 )
 
+            if hasattr(torch.ops._C, "layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_layer_norm",
+                    op_func=_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_layer_norm",
+                    op_func=_fused_add_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
+            if hasattr(torch.ops._C, "nemotron_layer_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_nemotron_layer_norm",
+                    op_func=_nemotron_layer_norm_impl,
+                    mutates_args=["out"],
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_nemotron_layer_norm",
+                    op_func=_fused_add_nemotron_layer_norm_impl,
+                    mutates_args=["input", "residual"],
+                )
+
             direct_register_custom_op(
                 op_name="xpu_ops_deepseek_scaling_rope",
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_apply_rotary_emb",
+                op_func=_xpu_apply_rotary_emb_impl,
+                fake_impl=_xpu_apply_rotary_emb_fake,
             )
 
             direct_register_custom_op(

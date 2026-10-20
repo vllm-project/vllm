@@ -175,6 +175,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
+    "minimax_m3": VitCudagraphTestConfig(
+        model="MiniMaxAI/MiniMax-M3",
+        modalities=["image"],
+        image_prompt=("]~b]user\n]<]image[>[What is in this image?[e~[\n]~b]ai\n"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="MiniMaxM3SparseForConditionalGeneration",
+            ),
+            "mm_processor_kwargs": {"max_long_side_pixel": 336},
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "qwen3_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen3-VL-2B-Instruct",
         image_prompt=qwen_vl_chat_template(

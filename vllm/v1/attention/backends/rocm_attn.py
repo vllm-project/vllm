@@ -176,7 +176,7 @@ class RocmAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
@@ -193,7 +193,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return True
+        # Not implemented
+        return False
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -480,7 +481,9 @@ class RocmAttentionImpl(AttentionImpl):
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,
             alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window[0],
+            # self.sliding_window[0] is the FlashAttention-style left span (W - 1).
+            # chunked_prefill_paged_decode expects the full window length W.
+            sliding_window=1 + self.sliding_window[0],
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,

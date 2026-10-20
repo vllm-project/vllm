@@ -61,7 +61,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponseVerbose,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -289,6 +289,7 @@ def make_arg_parser(parser: FlexibleArgumentParser):
 def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
     args = make_arg_parser(parser).parse_args()
+    configure_logging_from_args(args)
 
     # Backward compatibility: If --url is set, use it for host
     url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
@@ -384,7 +385,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                 if from_file:
                     with open(data_or_file, "rb") as file:
                         async with session.put(output_url, data=file) as response:
-                            if response.status != 200:
+                            if not 200 <= response.status < 300:
                                 error_text = await response.text()
                                 raise Exception(
                                     f"Failed to upload file.\n"
@@ -393,7 +394,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
-                        if response.status != 200:
+                        if not 200 <= response.status < 300:
                             error_text = await response.text()
                             raise Exception(
                                 f"Failed to upload data.\n"

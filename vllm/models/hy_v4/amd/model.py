@@ -30,7 +30,7 @@ from itertools import islice
 import regex as re
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -75,7 +75,7 @@ from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
 logger = init_logger(__name__)
 
 
-def _normalize_hyv4_config(config: PretrainedConfig) -> PretrainedConfig:
+def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
     """Populate the aliases consumed by the shared MoE implementation."""
     config.router_scaling_factor = config.routed_scaling_factor
     config.num_experts = config.n_routed_experts
@@ -95,7 +95,7 @@ class HYV4DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vllm_config: VllmConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,

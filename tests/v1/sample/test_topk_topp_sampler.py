@@ -25,7 +25,7 @@ def _flashinfer_topk_topp_supported() -> bool:
 
     Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
     importable + GPU compute capability supported by the FlashInfer
-    backend.
+    backend + more than 16 SMs.
     """
     if not current_platform.is_cuda():
         return False
@@ -38,7 +38,10 @@ def _flashinfer_topk_topp_supported() -> bool:
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    return FlashInferBackend.supports_compute_capability(capability)
+    return FlashInferBackend.supports_compute_capability(capability) and (
+        current_platform.num_compute_units(torch.accelerator.current_device_index())
+        > 16
+    )
 
 
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
@@ -162,79 +165,6 @@ def test_topk_impl_equivalence():
     result2 = apply_top_k_top_p_pytorch(logits=logits.clone(), k=k, p=no_op_top_p)
 
     assert torch.allclose(result1, result2)
-
-
-@pytest.mark.skip(
-    reason="FlashInfer top-k/top-p renorm comparison fails; "
-    "needs investigation of tolerance threshold or "
-    "interface differences between Python and FlashInfer implementations"
-)
-def test_flashinfer_sampler():
-    """This test verifies that the FlashInfer top-k and top-p sampling
-    implementation produces the same results as the Python implementation.
-
-    NOTE: FlashInfer did not directly expose an interface for fused top-k and
-    top-p prob renorm (it did provide fused sampling but we cannot compare
-    sampling results due to randomness), so we will compare the probability
-    renormed consequently by top-k and then top-p of FlashInfer implementation.
-    """
-    try:
-        from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
-
-        is_flashinfer_available = True
-    except ImportError:
-        is_flashinfer_available = False
-
-    FLASHINFER_ENABLED = current_platform.is_cuda() and is_flashinfer_available
-
-    if not FLASHINFER_ENABLED:
-        pytest.skip("FlashInfer not installed or not available on this platform.")
-
-    torch.set_default_device(DEVICE_TYPE)
-    generator = Generator(device=DEVICE_TYPE).manual_seed(42)
-
-    # Generate random logits
-    logits = torch.rand((BATCH_SIZE, VOCAB_SIZE), generator=generator)
-
-    # Generate various top-k and top-p values
-    k_values = torch.randint(1, 1000, (BATCH_SIZE,), generator=generator)
-    p_values = (
-        torch.rand((BATCH_SIZE,), generator=generator) * 0.5 + 0.5
-    )  # range in [0.5, 1.0]
-
-    # Sometimes disable top-k (k=vocab_size)
-    k_values.masked_fill_(
-        torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool),
-        VOCAB_SIZE,
-    )
-
-    # Sometimes disable top-p (p=1.0)
-    p_values.masked_fill_(
-        torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool), 1.0
-    )
-
-    python_logits = apply_top_k_top_p_pytorch(
-        logits=logits.clone(),
-        k=k_values,
-        p=p_values,
-    )
-    python_probs = torch.softmax(python_logits, dim=-1)
-
-    # FlashInfer only exposed renorm interfaces for probs so convert first
-    flashinfer_probs = torch.softmax(logits.clone(), dim=-1)
-    flashinfer_probs = top_k_renorm_probs(
-        probs=flashinfer_probs,
-        top_k=k_values,
-    )
-    flashinfer_probs = top_p_renorm_probs(
-        probs=flashinfer_probs,
-        top_p=p_values,
-    )
-
-    # Compare the results
-    assert torch.allclose(python_probs, flashinfer_probs, atol=2e-2), (
-        "FlashInfer and Python sampling implementations do not match!"
-    )
 
 
 @pytest.mark.skipif(

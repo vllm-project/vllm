@@ -165,9 +165,9 @@ fn image_part(uuid: &str) -> ChatContentPart {
 #[test]
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
-        (None, 50),
-        (Some(EffortValue::from("low")), 25),
-        (Some(EffortValue::from("high")), 50),
+        (None, 75),
+        (Some(EffortValue::from("low")), 50),
+        (Some(EffortValue::from("high")), 75),
         (Some(EffortValue::from("xhigh")), 75),
         (Some(EffortValue::from("max")), 100),
         (Some(EffortValue::Number(37.into())), 37),
@@ -189,7 +189,7 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         (json!(1), 1),
         (json!(42), 42),
         (json!(100), 100),
-        (json!("low"), 25),
+        (json!("low"), 50),
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
@@ -286,11 +286,11 @@ fn system_after_dropped_developer_becomes_leading_system() {
         ],
         ..ChatRequest::for_test()
     };
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
         .assert_eq(&render(&request));
 
     request.messages.push(ChatMessage::user("question"));
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 }
 
@@ -322,7 +322,7 @@ fn last_user_turn_omits_generation_prompt_when_disabled() {
     let mut request = request();
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
 
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
         .assert_eq(&render(&request));
 }
 

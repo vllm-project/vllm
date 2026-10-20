@@ -5,7 +5,7 @@
 
 mod unified;
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
@@ -20,7 +20,9 @@ use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::parser::unified::UnifiedParserFactory;
+use crate::parser::unified::{
+    HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory, names,
+};
 use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
@@ -64,11 +66,48 @@ impl DefaultChatOutputProcessor {
         reasoning_parser: &ParserSelection,
         tool_strict_level: ToolStrictLevel,
     ) -> ChatResult<Self> {
+        Self::with_response_template(
+            request,
+            model_id,
+            tokenizer,
+            &Err(HfTemplateError::Missing),
+            tool_call_parser,
+            reasoning_parser,
+            tool_strict_level,
+        )
+    }
+
+    /// Like [`Self::new`], additionally providing the model's `response_template`
+    /// for the `hf` parser, or why it is unavailable.
+    pub fn with_response_template(
+        request: &mut ChatRequest,
+        model_id: &str,
+        tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+        tool_call_parser: &ParserSelection,
+        reasoning_parser: &ParserSelection,
+        tool_strict_level: ToolStrictLevel,
+    ) -> ChatResult<Self> {
+        let tool_name = tool_call_parser.resolve_tool_name(model_id);
+        let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
+        // `hf` is opt-in: `Auto` never selects it, but a usable template is worth a hint.
+        let auto = [tool_call_parser, reasoning_parser]
+            .iter()
+            .any(|selection| matches!(selection, ParserSelection::Auto));
+        if auto && tool_name.is_none() && reasoning_name.is_none() && response_template.is_ok() {
+            RESPONSE_TEMPLATE_HINT_ONCE.call_once(|| {
+                info!(
+                    "the model ships a response_template; pass `--tool-call-parser hf \
+                     --reasoning-parser hf` to parse with it"
+                );
+            });
+        }
         let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
             request.tools(),
             tokenizer.clone(),
-            tool_call_parser.resolve_tool_name(model_id),
-            reasoning_parser.resolve_reasoning_name(model_id),
+            response_template,
+            tool_name,
+            reasoning_name,
         )? {
             parser
         } else {
@@ -141,6 +180,7 @@ impl DefaultChatOutputProcessor {
     fn resolve_optional_unified_parser(
         tools: &[ChatTool],
         tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
         tool_name: Option<&str>,
         reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
@@ -157,7 +197,18 @@ impl DefaultChatOutputProcessor {
             });
         }
 
-        let parser = factory.create(parser_name, tools, tokenizer)?;
+        // `hf` is built from the model's template, never by its registry constructor.
+        let parser = if parser_name == names::HF {
+            let template =
+                response_template.as_ref().map_err(|error| Error::ParserInitialization {
+                    kind: "unified",
+                    name: parser_name.to_string(),
+                    error: Box::new(error.clone()),
+                })?;
+            Box::new(HfUnifiedParser::new(template.clone(), tools, tokenizer))
+        } else {
+            factory.create(parser_name, tools, tokenizer)?
+        };
 
         UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
         Ok(Some(parser))
@@ -186,6 +237,7 @@ impl DefaultChatOutputProcessor {
 static TOOL_PARSER_LOG_ONCE: Once = Once::new();
 static REASONING_PARSER_LOG_ONCE: Once = Once::new();
 static UNIFIED_PARSER_LOG_ONCE: Once = Once::new();
+static RESPONSE_TEMPLATE_HINT_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -230,10 +282,12 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
+    use thiserror_ext::AsReport as _;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
     use crate::output::ChatOutputProcessor;
+    use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
     use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
 
@@ -257,6 +311,7 @@ mod tests {
                     "required": ["query"]
                 }),
                 strict,
+                defer_loading: None,
             }];
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
@@ -292,6 +347,7 @@ mod tests {
                 description: None,
                 parameters: serde_json::json!({"type": "object"}),
                 strict: Some(true),
+                defer_loading: None,
             }];
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(
@@ -388,6 +444,92 @@ mod tests {
         };
 
         expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+            .assert_eq(&format!("{error}"));
+    }
+
+    type TemplateResult = Result<Arc<ResponseTemplate>, HfTemplateError>;
+
+    fn loaded_template() -> TemplateResult {
+        Ok(Arc::new(
+            ResponseTemplate::from_json(&serde_json::json!({
+                "start_anchor": "<|turn>model\n",
+                "fields": {
+                    "thinking": {"open": "<|channel>thought\n", "close": "<channel|>"},
+                    "content": {"close": "<turn|>"},
+                },
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn invalid_template() -> TemplateResult {
+        let error = ResponseTemplate::from_json(&serde_json::json!({"fields": {"content": {}}}))
+            .unwrap_err();
+        Err(error)
+    }
+
+    /// Build a processor for `model_id`, returning whether it keeps special
+    /// tokens (only parsers that need them, such as `hf`, turn this on).
+    fn keeps_special_tokens(
+        model_id: &str,
+        template: &TemplateResult,
+        tool: &ParserSelection,
+        reasoning: &ParserSelection,
+    ) -> crate::Result<bool> {
+        let mut request = ChatRequest::for_test();
+        DefaultChatOutputProcessor::with_response_template(
+            &mut request,
+            model_id,
+            tokenizer(),
+            template,
+            tool,
+            reasoning,
+            ToolStrictLevel::Auto,
+        )?;
+        Ok(!request.decode_options.skip_special_tokens)
+    }
+
+    #[test]
+    fn explicit_hf_uses_the_model_response_template() {
+        let hf = ParserSelection::Explicit("hf".to_string());
+        assert!(keeps_special_tokens("other-model", &loaded_template(), &hf, &hf).unwrap());
+    }
+
+    #[test]
+    fn explicit_hf_without_usable_template_fails() {
+        let hf = ParserSelection::Explicit("hf".to_string());
+        let error = |template| {
+            keeps_special_tokens("other-model", &template, &hf, &hf)
+                .unwrap_err()
+                .to_report_string()
+        };
+        expect_test::expect!["failed to initialize unified parser `hf`: the model's tokenizer_config.json provides no response_template"]
+            .assert_eq(&error(Err(HfTemplateError::Missing)));
+        expect_test::expect!["failed to initialize unified parser `hf`: invalid response_template: response_template must define 'start_anchor' or 'start_anchor_pattern'."]
+            .assert_eq(&error(invalid_template()));
+    }
+
+    #[test]
+    fn auto_never_selects_hf() {
+        let auto = ParserSelection::Auto;
+        // Without a matching parser, parsing stays disabled even with a usable template.
+        assert!(!keeps_special_tokens("other-model", &loaded_template(), &auto, &auto).unwrap());
+        // An unusable template is not consulted unless `hf` is selected.
+        assert!(!keeps_special_tokens("other-model", &invalid_template(), &auto, &auto).unwrap());
+        keeps_special_tokens("google/gemma-4-27b-it", &invalid_template(), &auto, &auto).unwrap();
+    }
+
+    #[test]
+    fn hf_requires_matching_parser_selections() {
+        let error = keeps_special_tokens(
+            "other-model",
+            &loaded_template(),
+            &ParserSelection::Explicit("hf".to_string()),
+            &ParserSelection::None,
+        )
+        .unwrap_err();
+
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hf, reasoning=none"]
             .assert_eq(&format!("{error}"));
     }
 }

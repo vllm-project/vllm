@@ -30,6 +30,7 @@ from ..vllm_inductor_pass import (
     VllmPatternReplacement,
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
+    remove_noop_reshapes,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -452,9 +453,9 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     """Matches decomposed RMSNormGated + reshape + group FP8 quant and replaces
     with rocm_aiter_fused_rms_gated_fp8_group_quant.
 
-    The norm operates per-head on (N*H, D) tensors. The compiler folds the
-    reshape chain so after norm the result goes through reshape->merge->quant.
-    The pattern reshapes from (N*H, D) to (N, H*D) before calling
+    The norm operates per-head, on either (N*H, D) or (N, H, D). The compiler
+    folds the reshape chain so after norm the result goes through
+    reshape->merge->quant. The pattern reshapes to (N, H*D) before calling
     MatcherQuantFP8 so that _quantize_group_native sees the full hidden dim
     and computes the correct num_groups.
     """
@@ -482,6 +483,16 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         self.head_dim = head_dim
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
+        self._register_layout(pm_pass, flatten_heads=True)
+        # Both layouts reach the norm. With an opaque quant op they trace to
+        # the same pattern; with a native quant they differ, because its group
+        # reshape back to (N, H, D) is a no-op the compiler already dropped.
+        if not self.quant_matcher.enabled:
+            self._register_layout(pm_pass, flatten_heads=False)
+
+    def _register_layout(
+        self, pm_pass: PatternMatcherPass, *, flatten_heads: bool
+    ) -> None:
         num_heads = self.num_heads
         head_dim = self.head_dim
         hidden_dim = num_heads * head_dim
@@ -502,6 +513,11 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             z: torch.Tensor,
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # The pattern matches on op structure rather than rank, so either
+            # per-head layout can land here. The fused op takes (M, D), and
+            # both operands are contiguous, so collapsing the heads is a view.
+            x = x.reshape(-1, head_dim)
+            z = z.reshape(-1, head_dim)
             fused = self.FUSED_OP(
                 x=x,
                 weight=weight,
@@ -519,14 +535,21 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return fp8_reshaped, scales_reshaped
 
         n_tokens = 2
-        x = self.empty(n_tokens * num_heads, head_dim)
-        z = self.empty(n_tokens * num_heads, head_dim)
+        shape = (
+            (n_tokens * num_heads, head_dim)
+            if flatten_heads
+            else (n_tokens, num_heads, head_dim)
+        )
+        x = self.empty(*shape)
+        z = self.empty(*shape)
         w = self.empty(head_dim)
 
         def trace_fn(*args, **kwargs):
             gm = pm.fwd_only(*args, **kwargs)
             _fx_view_to_reshape(gm)
             fold_consecutive_reshapes(gm)
+            if not flatten_heads:
+                remove_noop_reshapes(gm)
             return gm
 
         pm.register_replacement(
@@ -1051,16 +1074,148 @@ class MLADualRMSPerTokenQuantPattern(
         return _replacement
 
 
+class MLADualRMSGroupQuantPattern(
+    VllmPatternReplacement[
+        ...,
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+    ]
+):
+    """Fuse the MLA FP8 *block-scale* attention path -- q-latent RMSNorm + FP8
+    group quant plus kv-latent RMSNorm -- into AITER's
+    ``fused_qk_rmsnorm_group_quant``.
+
+    With a block-scale FP8 ``q_b_proj`` (DeepSeek fp8), the earlier
+    ``RocmAiterRMSNormQuantFusionPass`` folds the q side into
+    ``rocm_aiter_rmsnorm_fp8_group_quant`` (the Triton rms+group-quant kernel)
+    and leaves the kv side a plain ``vllm_ir.rms_norm``. This pattern matches
+    that asymmetric pair::
+
+        gemm -> split_with_sizes([q_dim, kv_dim])
+            +-- q_c     -> rocm_aiter_rmsnorm_fp8_group_quant -> (q_fp8, q_scale)
+            +-- kv_lora -> split_with_sizes([kv_c_dim, k_pe_dim])
+                            +-- kv_c -> vllm_ir.rms_norm -> kv_normed (bf16)
+                            +-- k_pe
+    """
+
+    GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_fused_mla_dual_rms_norm_group_quant_op()
+
+    def __init__(self, epsilon: float) -> None:
+        self._epsilon = epsilon
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        q_dim, kv_c_dim, k_pe_dim = 256, 128, 64
+        return [
+            self.empty_bf16(5, q_dim + kv_c_dim + k_pe_dim),
+            self.empty_bf16(q_dim),
+            self.empty_bf16(kv_c_dim),
+        ]
+
+    @property
+    def pattern(
+        self,
+    ) -> Callable[
+        ...,
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+    ]:
+        eps = self._epsilon
+        group_quant_op = self.GROUP_QUANT_OP
+
+        def _pattern(
+            projected: torch.Tensor,
+            q_weight: torch.Tensor,
+            kv_weight: torch.Tensor,
+        ) -> tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]:
+            q_dim = q_weight.shape[0]
+            kv_dim = projected.shape[-1] - q_dim
+            kv_c_dim = kv_weight.shape[0]
+            k_pe_dim = kv_dim - kv_c_dim
+            q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
+            kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
+            quant_kwargs = dict(
+                x=q_c,
+                weight=q_weight,
+                variance_epsilon=eps,
+                group_size=128,
+            )
+            q_quant = group_quant_op(**quant_kwargs)
+            kv_normed = vllm.ir.ops.rms_norm(kv_c, kv_weight, eps)
+            return q_quant[0], q_quant[1], kv_normed, k_pe
+
+        return _pattern
+
+    @property
+    def replacement(
+        self,
+    ) -> Callable[
+        ...,
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+    ]:
+        eps = self._epsilon
+        fused_op = self.FUSED_OP
+
+        def _replacement(
+            projected: torch.Tensor,
+            q_weight: torch.Tensor,
+            kv_weight: torch.Tensor,
+        ) -> tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]:
+            q_dim = q_weight.shape[0]
+            kv_dim = projected.shape[-1] - q_dim
+            kv_c_dim = kv_weight.shape[0]
+            k_pe_dim = kv_dim - kv_c_dim
+            q_c, kv_lora = projected.split([q_dim, kv_dim], dim=-1)
+            kv_c, k_pe = kv_lora.split([kv_c_dim, k_pe_dim], dim=-1)
+            at = fused_op(
+                q_c,
+                q_weight,
+                kv_c,
+                kv_weight,
+                eps,
+                eps,
+                128,
+                False,
+            )
+            # q_fp8, q_scale, kv_normed, k_pe
+            return at[0], at[1], at[2], k_pe
+
+        return _replacement
+
+
 class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     """Post-grad PatternMatcher pass that fuses paired q / kv RMS norms in
     MLA attention into ``fused_mla_dual_rms_norm`` backed by aiter's
     ``fused_qk_rmsnorm`` HIP kernel.
 
     The FP8 attention path is also handled via
-    :class:`MLADualRMSPerTokenQuantPattern`, which fuses the q-latent RMSNorm +
-    FP8 per-token quant together with the kv-latent RMSNorm into
-    ``fused_mla_dual_rms_norm_per_token_quant`` backed by aiter's
-    ``fused_qk_rmsnorm_per_token_quant`` HIP kernel.
+    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`,
+    which fuse the q-latent RMSNorm + FP8 per-token/group quant together with
+    the kv-latent RMSNorm into ``fused_mla_dual_rms_norm_<per_token|group>_quant``
+    backed by aiter's ``fused_qk_rmsnorm_<per_token|group>_quant`` HIP kernel.
     """
 
     def __init__(self, config: VllmConfig) -> None:
@@ -1069,3 +1224,4 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
+            self.register(MLADualRMSGroupQuantPattern(epsilon))

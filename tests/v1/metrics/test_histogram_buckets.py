@@ -271,3 +271,49 @@ def test_prometheus_logger_default_buckets():
             assert found[metric_name] == [float(b) for b in expected], metric_name
     finally:
         unregister_vllm_metrics()
+
+
+def test_histogram_buckets_override_precedence():
+    """A present family key wins verbatim; absent keys keep defaults."""
+    overrides = {
+        "request_latency": [0.5, 1.0],
+        "request_tokens": [16.0, 4096.0],
+    }
+    got = histogram_buckets("request_latency", overrides=overrides)
+    assert got == [0.5, 1.0]
+    assert got is not overrides["request_latency"]
+    # An override replaces the max_model_len-derived series entirely.
+    assert histogram_buckets("request_tokens", overrides=overrides) == [
+        16.0,
+        4096.0,
+    ]
+    assert (
+        histogram_buckets("time_to_first_token", overrides=overrides)
+        == DEFAULT_BUCKET_SNAPSHOTS["time_to_first_token"]
+    )
+
+
+def test_prometheus_logger_applies_overrides():
+    """Every family must honour an override, with a distinct list each.
+
+    Overriding all of them at once is what catches a histogram wired to the
+    defaults instead of the override, and a family wired to the wrong list.
+    """
+    overridden: dict[str, list[float]] = {
+        family: [index + 1.0, index + 2.0]
+        for index, family in enumerate(sorted(BUCKET_FAMILY_KEYS))
+    }
+    config = build_logger_config(
+        ObservabilityConfig(
+            kv_cache_metrics=True,
+            custom_histogram_buckets=overridden,
+        )
+    )
+    try:
+        PrometheusStatLogger(config)
+        found = collect_histogram_buckets()
+        assert set(found) == set(METRIC_FAMILIES)
+        for metric_name, family in METRIC_FAMILIES.items():
+            assert found[metric_name] == overridden[family], metric_name
+    finally:
+        unregister_vllm_metrics()

@@ -50,6 +50,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
+    "ultraquant_4bit": torch.uint8,
     "nvfp4": torch.uint8,
     "nvfp4_4over6": torch.uint8,
 }
@@ -530,8 +531,12 @@ def kv_cache_dtype_str_to_dtype(
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
-def set_random_seed(seed: int | None) -> None:
+def set_random_seed(seed: int | None, data_parallel_index: int = 0) -> None:
     if seed is not None:
+        if data_parallel_index:
+            # DP engines share the seed but must not sample unseeded requests alike.
+            ss = np.random.SeedSequence((seed, data_parallel_index))
+            seed = int(ss.generate_state(1)[0])
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -912,10 +917,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
         if cpu_tensor.numel() == 0:
             return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
         if not cpu_tensor.is_pinned():
-            contiguous_cpu = cpu_tensor.contiguous()
-            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
-            pinned.copy_(contiguous_cpu)
-            cpu_tensor = pinned
+            pinned = torch.empty_strided(
+                cpu_tensor.size(),
+                cpu_tensor.stride(),
+                dtype=cpu_tensor.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            pinned.copy_(cpu_tensor)
+            return torch.ops._C.get_xpu_view_from_cpu_tensor(pinned)
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)

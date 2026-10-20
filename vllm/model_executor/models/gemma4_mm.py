@@ -222,12 +222,11 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    def has_audio(self) -> bool:
+        return self.get_hf_config().audio_config is not None
+
     def validate_num_items(self, modality: str, num_items: int) -> None:
-        if (
-            modality == "audio"
-            and num_items > 0
-            and self.get_hf_config().audio_config is None
-        ):
+        if modality == "audio" and num_items > 0 and not self.has_audio():
             model_config = self.ctx.model_config
             model = get_served_model_name(
                 model_config.model, model_config.served_model_name
@@ -243,7 +242,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {"image": None}
-        if self.get_hf_config().audio_config is not None:
+        if self.has_audio():
             limits["audio"] = None
         limits["video"] = None
         return limits
@@ -261,7 +260,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
             tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
-        if config.audio_config is not None:
+        if self.has_audio():
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
@@ -275,9 +274,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
-        config = self.get_hf_config()
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
-        if getattr(config, "audio_config", None) is not None:
+        if self.has_audio():
             processor = self.get_hf_processor()
             kwargs["target_sr"] = processor.feature_extractor.sampling_rate
         return MultiModalDataParser(**kwargs)

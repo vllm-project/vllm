@@ -136,7 +136,7 @@ class TestCohereChatV2Response:
         with pytest.raises(ValidationError):
             CohereChatV2Response(
                 id="r1",
-                finish_reason="NOT_A_REASON",  # type: ignore[arg-type]
+                finish_reason="NOT_A_REASON",
                 message=msg,
             )
 
@@ -246,5 +246,5 @@ class TestStreamingEventTypeField:
             MessageStartEvent(
                 id="a",
                 delta={"message": {"role": "assistant"}},
-                type="other",  # type: ignore[arg-type]
+                type="other",
             )

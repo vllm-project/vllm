@@ -4,12 +4,11 @@
 
 import pickle
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import pybase64 as base64
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
-from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig

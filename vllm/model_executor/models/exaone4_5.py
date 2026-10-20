@@ -311,7 +311,6 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Exaone4_5_Processor:
         return self.ctx.get_hf_processor(
             Exaone4_5_Processor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 

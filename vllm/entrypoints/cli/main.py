@@ -9,7 +9,7 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 
 logger = init_logger(__name__)
 
@@ -44,6 +44,7 @@ def main():
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch
     import vllm.entrypoints.cli.openai
+    import vllm.entrypoints.cli.preload
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
     import vllm.entrypoints.cli.snapshot
@@ -59,6 +60,7 @@ def main():
         vllm.entrypoints.cli.launch,
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
+        vllm.entrypoints.cli.preload,
         vllm.entrypoints.cli.run_batch,
         vllm.entrypoints.cli.snapshot,
     ]
@@ -108,7 +110,9 @@ def main():
             cmds[cmd.name] = cmd
     args = parser.parse_args()
     if args.subparser in cmds:
-        cmds[args.subparser].validate(args)
+        cmd = cmds[args.subparser]
+        configure_logging_from_args(args)
+        cmd.validate(args)
 
     if hasattr(args, "dispatch_function"):
         args.dispatch_function(args)

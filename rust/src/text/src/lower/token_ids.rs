@@ -12,6 +12,8 @@ use crate::SamplingLimits;
 pub enum TokenIdsError {
     #[error("allowed_token_ids should not be empty")]
     EmptyAllowedTokenIds,
+    #[error("bad_words_token_ids must not contain empty sequences")]
+    EmptyBadWordSequence,
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -96,6 +98,9 @@ pub(crate) fn validate_vocab_range(
     }
 
     if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
+        if bad_words_token_ids.iter().any(Vec::is_empty) {
+            return Err(TokenIdsError::EmptyBadWordSequence);
+        }
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),

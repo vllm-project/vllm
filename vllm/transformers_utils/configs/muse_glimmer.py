@@ -15,7 +15,7 @@ and vision configs are consumed by the native multimodal serving path.
 from __future__ import annotations
 
 from transformers import Qwen3Config
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
 def _default_no_rope_layers(num_hidden_layers: int) -> list[int]:
@@ -27,7 +27,7 @@ def _default_no_rope_layers(num_hidden_layers: int) -> list[int]:
     ]
 
 
-class MuseGlimmerTextConfig(PretrainedConfig):
+class MuseGlimmerTextConfig(PreTrainedConfig):
     model_type = "muse_glimmer_text"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -127,7 +127,7 @@ class MuseGlimmerTextConfig(PretrainedConfig):
         )
 
 
-class MuseGlimmerVisionConfig(PretrainedConfig):
+class MuseGlimmerVisionConfig(PreTrainedConfig):
     model_type = "muse_glimmer_vision"
 
     def __init__(
@@ -177,7 +177,7 @@ class MuseGlimmerVisionConfig(PretrainedConfig):
         self.layer_types = layer_types
 
 
-class MuseGlimmerConfig(PretrainedConfig):
+class MuseGlimmerConfig(PreTrainedConfig):
     model_type = "muse_glimmer"
     sub_configs = {
         "text_config": MuseGlimmerTextConfig,
