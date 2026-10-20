@@ -1048,7 +1048,7 @@ def test_take_events_prunes_retried_cleanup_and_drains_once():
     assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
     manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
-    drain = manager.take_events()
+    drain = iter(manager.take_events())
     cleanup = next(drain)
     assert cleanup.removed and cleanup.metadata_only
     assert cleanup.keys == to_keys([2])
