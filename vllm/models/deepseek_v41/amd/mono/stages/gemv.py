@@ -12,24 +12,24 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.arch import GFX942
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.gfx942 import (
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
     mfma_fp8_scaled,
     pair_i64,
     pin_acc,
 )
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.mx import (
+from vllm.models.deepseek_v41.amd.mono.common.mx import (
     UNIT_SCALE,
     mfma_scaled,
 )
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.ops import (
+from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_NT,
     fresh,
     rsrc,
     traced,
 )
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import WAVES
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.sync import POLL_MAX
+from vllm.models.deepseek_v41.amd.mono.common.plan import WAVES
+from vllm.models.deepseek_v41.amd.mono.common.sync import POLL_MAX
 
 ROWS = 16  # GEMV rows a task
 # An MFMA's N: the tokens or picks that one 16x16 MFMA takes.

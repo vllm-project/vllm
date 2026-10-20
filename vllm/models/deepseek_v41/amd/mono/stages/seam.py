@@ -31,7 +31,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.ops import (
+from vllm.models.deepseek_v41.amd.mono.common.ops import (
     batched_rounds,
     bf16_round,
     bf_hi,
@@ -45,13 +45,9 @@ from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.ops import (
     sum_partials,
     traced,
 )
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import (
-    THREADS,
-    WAVES,
-    pair_layout,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.sync import preg
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.gemv import (
+from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES, pair_layout
+from vllm.models.deepseek_v41.amd.mono.common.sync import preg
+from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
     ld_bf,
     ld_f32,
     plus,

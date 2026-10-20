@@ -12,25 +12,11 @@ from dataclasses import dataclass, field
 
 import flydsl.expr as fx
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import (
-    BLOCKS,
-    WAVES,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages import (
-    moe_plan as mplan,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.dims import (
-    UG_PART,
-    Dims,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.gemv import (
-    ROWS,
-    TILE,
-    token_tiles,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.stages.router import (
-    PARTS as ROUTER_PARTS,
-)
+from vllm.models.deepseek_v41.amd.mono.common.plan import BLOCKS, WAVES
+from vllm.models.deepseek_v41.amd.mono.stages import moe_plan as mplan
+from vllm.models.deepseek_v41.amd.mono.stages.dims import UG_PART, Dims
+from vllm.models.deepseek_v41.amd.mono.stages.gemv import ROWS, TILE, token_tiles
+from vllm.models.deepseek_v41.amd.mono.stages.router import PARTS as ROUTER_PARTS
 
 EXPERTS, TOPK = 384, 6  # the target's routing (a build's: ``MoeBuild``)
 ROUTER0 = 8  # the router's first task: past the xq tasks (a token each)

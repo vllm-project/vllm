@@ -35,14 +35,9 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.arch import GFX942
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.gfx942 import (
-    mfma_bf16_k32,
-)
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import (
-    THREADS,
-    WAVES,
-)
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import mfma_bf16_k32
+from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES
 
 # ---------------------------------------------------------------- primitives
 # gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is device

@@ -14,7 +14,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.ops import (
+from vllm.models.deepseek_v41.amd.mono.common.ops import (
     CM_DEV,
     CM_SYS,
     bf16_pair,

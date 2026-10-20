@@ -15,8 +15,8 @@ slots' flags (``polled_tile`` its tiles) before it reads their MID rows. Called
 by the kernel on traced Int32 and by the CPU property test on Python ints.
 """
 
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.arch import GFX942
-from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.plan import cdiv, imin
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.plan import cdiv, imin
 
 # The picks a pick tile takes: a token tile's (``stages.gemv.TILE``), whose x
 # rows the ug task of the tile gathers into LDS. 6 on gfx942, 16 elsewhere.

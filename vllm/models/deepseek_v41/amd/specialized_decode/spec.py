@@ -101,7 +101,7 @@ def _refuse_config(vllm_config) -> list[str]:
             "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"
         )
     try:
-        import vllm.models.deepseek_v41.amd.specialized_decode.mono.runner  # noqa: F401
+        import vllm.models.deepseek_v41.amd.mono.runner  # noqa: F401
     except ImportError as err:
         reasons.append(f"needs FlyDSL and AITER's FlyDSL helpers ({err})")
     return reasons
@@ -112,10 +112,10 @@ def _refuse_model(model) -> list[str]:
     kernels read every one of the 384 experts on each rank, TP-sharded, in
     AITER's A8W4 MXFP4 layout, from CTAs that all stay resident."""
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-    from vllm.models.deepseek_v41.amd.specialized_decode.mono.common.arch import (
+    from vllm.models.deepseek_v41.amd.mono.common.arch import (
         target_arch,
     )
-    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import BLOCKS
+    from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
     from vllm.platforms.rocm import get_cdna_version
 
     reasons = []

@@ -50,7 +50,7 @@ class _StubRunner:
         return ("ffn", args)
 
 
-_MONO = "vllm.models.deepseek_v41.amd.specialized_decode.mono"
+_MONO = "vllm.models.deepseek_v41.amd.mono"
 
 
 def _stub_modules(monkeypatch) -> None:

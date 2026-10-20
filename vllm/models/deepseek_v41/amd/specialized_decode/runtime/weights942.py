@@ -48,7 +48,7 @@ def _capture_plain_experts(experts) -> None:
 
     def process_weights_after_loading(layer):
         if layer is experts:
-            from ..mono.weights942 import moe_copies
+            from ...mono.weights942 import moe_copies
 
             _keep(
                 layer,
@@ -75,7 +75,7 @@ def _copy_linear(linear) -> None:
     def process_weights_after_loading(layer):
         out = original(layer)
         if layer is linear:
-            from ..mono.weights942 import linear_copy
+            from ...mono.weights942 import linear_copy
 
             _keep(layer, linear_copy(layer.weight, layer.weight_scale))
         return out
@@ -100,7 +100,7 @@ def copy_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> None:
 def layer_weights(layer: "DeepseekV4DecoderLayer", ffn_only: bool, world: int):
     """The layer's tensors as the gfx942 kernels read them: the dense MXFP8
     linears and the routed experts as the copies made at load."""
-    from ..mono.runner import MonoLayerWeights
+    from ...mono.runner import MonoLayerWeights
 
     f = layer.ffn
     e, sh = f.experts.routed_experts, f.shared_experts
@@ -134,8 +134,8 @@ def layer_weights(layer: "DeepseekV4DecoderLayer", ffn_only: bool, world: int):
 
 
 def _attn_weights(a, world: int):
-    from ..mono.attention.plan import Dims
-    from ..mono.runner import AttnWeights
+    from ...mono.attention.plan import Dims
+    from ...mono.runner import AttnWeights
 
     wqkv, wq_b, wo_a, wo_b = (getattr(a, name).mono942 for name in ATTN_LINEARS)
     attn = AttnWeights(

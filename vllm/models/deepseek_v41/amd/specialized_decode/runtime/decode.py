@@ -110,7 +110,7 @@ class LayerLaunches:
         swa_width: int,
     ):
         from vllm.models.common.specialized_decode.guards import tp_group
-        from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
+        from vllm.models.deepseek_v41.amd.mono.runner import (
             MAX_TOKENS,
             DSV41MonoLayer,
         )
@@ -563,7 +563,7 @@ def _skip_layer(layer, experts: int, topk: int, tp_size: int) -> str | None:
 
 
 def _weights(layer, ffn_only: bool, world: int, experts: int):
-    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import (
+    from vllm.models.deepseek_v41.amd.mono.runner import (
         MonoLayerWeights,
     )
 
@@ -599,8 +599,8 @@ def _weights(layer, ffn_only: bool, world: int, experts: int):
 
 
 def _attn_weights(a, world: int):
-    from vllm.models.deepseek_v41.amd.specialized_decode.mono.attention.plan import Dims
-    from vllm.models.deepseek_v41.amd.specialized_decode.mono.runner import AttnWeights
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
+    from vllm.models.deepseek_v41.amd.mono.runner import AttnWeights
 
     attn = AttnWeights(
         layer_id=a.layer_id,
