@@ -131,7 +131,11 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        max_model_len: int | None = None,
     ) -> "InputBatch":
+        if max_model_len is not None:
+            # Block tables back at most max_model_len tokens per request.
+            num_reqs = max(num_reqs, cdiv(num_tokens, max_model_len))
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 

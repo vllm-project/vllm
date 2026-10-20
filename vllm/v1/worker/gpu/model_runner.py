@@ -1855,6 +1855,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
+                # An idle DP rank pads its one dummy request to the busiest
+                # rank's token count, which can exceed max_model_len.
+                max_model_len=self.max_model_len,
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.
