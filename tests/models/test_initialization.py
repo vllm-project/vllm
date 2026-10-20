@@ -14,7 +14,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_planning import (
+    get_global_kv_cache_groups,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
@@ -135,6 +138,7 @@ def can_initialize(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
+            get_global_kv_cache_groups(vllm_config, kv_cache_specs),
         )
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks

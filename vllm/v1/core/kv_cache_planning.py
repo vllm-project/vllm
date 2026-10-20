@@ -1462,7 +1462,7 @@ def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
-    global_kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+    global_kv_cache_groups: list[KVCacheGroupSpec],
 ) -> list[KVCacheConfig]:
     """Generates the KV cache configurations for a model.
     Since we use a shared centralized controller for all workers, we need the
@@ -1475,6 +1475,7 @@ def get_kv_cache_configs(
        the whole model.
     2. Generate the KV cache groups based on the layer ratio of the whole model.
        This also handles spec unification for hybrid models.
+       (Steps 1-2 are done by `get_global_kv_cache_groups`.)
     3. Handle auto-fit max_model_len and memory checks using per-worker
        projected groups to account for PP sharding.
     4. Generate the KV cache configs for each worker based on the KV cache
@@ -1488,7 +1489,7 @@ def get_kv_cache_configs(
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
         available_memory: Memory available for KV cache in bytes for each
             worker.
-        global_kv_cache_groups: Precomputed `get_global_kv_cache_groups`.
+        global_kv_cache_groups: From `get_global_kv_cache_groups`.
 
     Returns:
         The generated KVCacheConfigs for each worker.
@@ -1497,9 +1498,6 @@ def get_kv_cache_configs(
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
     builder = get_kv_cache_config_builder(vllm_config)
-
-    if global_kv_cache_groups is None:
-        global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
