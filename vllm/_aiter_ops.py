@@ -1227,6 +1227,74 @@ def _rocm_aiter_fused_add_rmsnorm_mxfp4_quant_fake(
     return out_fp4, out_bs, torch.empty_like(x)
 
 
+def _mxfp4_asm_scale_shuffled(m: int) -> bool:
+    # the scale layout gemm_with_dynamic_quant reads on the ASM path:
+    # gemm_afp4wfp4_preshuffle takes row-major scales below 32 rows, shuffled
+    # ones from 32 rows, gemm_a4w4 (M > 64 or batch invariant) shuffled ones
+    return m >= 32 or envs.VLLM_BATCH_INVARIANT
+
+
+def _mxfp4_asm_quant_outputs(m: int, n: int, device: torch.device):
+    # The buffers per_1x32_f4_quant_hip(shuffle=True) returns, scales padded to
+    # M rounded up to 256. Below 32 rows the first M rows hold the row-major
+    # scales instead. A layer only takes the ASM path with N // 32 % 8 == 0,
+    # so the shuffle never pads the scale columns.
+    x_fp4 = torch.empty((m, n // 2), dtype=torch.float4_e2m1fn_x2, device=device)
+    bs = torch.empty(
+        ((m + 255) // 256 * 256, n // 32), dtype=torch.float8_e8m0fnu, device=device
+    )
+    return x_fp4, bs
+
+
+def _rocm_aiter_dynamic_mxfp4_asm_quant_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import dynamic_per_group_scaled_quant_fp4
+
+    # the kernel behind per_1x32_f4_quant_hip, called with our own scale buffer:
+    # per_1x32_f4_quant_hip only allocates (M, N // 32) when it doesnt shuffle
+    # and rejects a caller-supplied scale
+    m, n = x.shape
+    x_fp4, bs = _mxfp4_asm_quant_outputs(m, n, x.device)
+    dynamic_per_group_scaled_quant_fp4(
+        x_fp4, x, bs, 32, shuffle_scale=_mxfp4_asm_scale_shuffled(m)
+    )
+    return x_fp4, bs
+
+
+def _rocm_aiter_dynamic_mxfp4_asm_quant_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _mxfp4_asm_quant_outputs(x.shape[0], x.shape[-1], x.device)
+
+
+def _rocm_aiter_act_mul_and_mxfp4_asm_quant_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant.fused_mxfp4_quant import (
+        fused_reduce_act_mul_and_mxfp4_quant,
+    )
+
+    # "ceil" is the RoundUp e8m0 scale of per_1x32_f4_quant_hip, so with the
+    # silu-mul rounded to the input dtype first this writes the same bytes as
+    # the compiled silu_and_mul + the HIP quant
+    (y, y_scale), _ = fused_reduce_act_mul_and_mxfp4_quant(
+        x,
+        activation="silu",
+        scaling_mode="ceil",
+        shuffle=_mxfp4_asm_scale_shuffled(x.shape[0]),
+        scale_shuffle_padding=True,
+        round_to_input_dtype=True,
+    )
+    return y.view(torch.float4_e2m1fn_x2), y_scale.view(torch.float8_e8m0fnu)
+
+
+def _rocm_aiter_act_mul_and_mxfp4_asm_quant_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _mxfp4_asm_quant_outputs(x.shape[0], x.shape[-1] // 2, x.device)
+
+
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -2722,6 +2790,29 @@ class rocm_aiter_ops:
         # fuse_norm_mxfp4_quant in the pass config
         return cls._AITER_ENABLED and cls._fused_mxfp4_quant_supported()
 
+    @staticmethod
+    @functools.cache
+    def _fused_mxfp4_asm_quant_supported() -> bool:
+        """The SiLU-mul fold on the ASM layout needs scaling_mode="ceil" on the
+        AITER fused act_mul kernel. Older AITER takes scaling_mode but quietly
+        keeps the "even" scale, so the signature can't tell, look at the source.
+        """
+        import inspect
+
+        from aiter.ops.triton.quant.fused_mxfp4_quant import (
+            fused_reduce_act_mul_and_mxfp4_quant,
+        )
+
+        return '"ceil"' in inspect.getsource(fused_reduce_act_mul_and_mxfp4_quant)
+
+    @classmethod
+    @if_aiter_supported
+    def is_mxfp4_asm_quant_fusion_supported(cls) -> bool:
+        return (
+            cls.is_mxfp4_quant_fusion_supported()
+            and cls._fused_mxfp4_asm_quant_supported()
+        )
+
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_supported(cls) -> bool:
@@ -3356,6 +3447,20 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_dynamic_mxfp4_asm_quant",
+                op_func=_rocm_aiter_dynamic_mxfp4_asm_quant_impl,
+                fake_impl=_rocm_aiter_dynamic_mxfp4_asm_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_mxfp4_asm_quant",
+                op_func=_rocm_aiter_act_mul_and_mxfp4_asm_quant_impl,
+                fake_impl=_rocm_aiter_act_mul_and_mxfp4_asm_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_mxfp4_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_mxfp4_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fused_mxfp4_quant_fake,
@@ -3522,6 +3627,14 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_mxfp4_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_mxfp4_quant.default
+
+    @staticmethod
+    def get_dynamic_mxfp4_asm_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_dynamic_mxfp4_asm_quant.default
+
+    @staticmethod
+    def get_act_mul_fused_mxfp4_asm_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_act_mul_and_mxfp4_asm_quant.default
 
     @staticmethod
     def get_rmsnorm_fused_mxfp4_quant_op() -> OpOverload:
