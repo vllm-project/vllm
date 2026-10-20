@@ -7,6 +7,8 @@ from vllm import LLM
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
+# XPU attention needs a multiple of 64; other platforms accept it too.
+BLOCK_SIZE = 64
 
 
 @pytest.fixture(scope="module")
@@ -18,7 +20,7 @@ def llm() -> LLM:
         long_prefill_token_threshold=2,
         max_num_batched_tokens=6,
         max_num_seqs=3,
-        block_size=16,
+        block_size=BLOCK_SIZE,
     )
 
 
@@ -30,8 +32,8 @@ def test_concurrent_partial_prefill(llm):
 
 
 def test_prefix_cache_stats_is_recorded(llm):
-    # 17 tokens will make sure first 16 tokens are cached in a block
-    input_tokens = {"prompt_token_ids": [101] * 17}
+    # One token past a full block, so exactly the first block is cached.
+    input_tokens = {"prompt_token_ids": [101] * (BLOCK_SIZE + 1)}
     _ = llm.generate([input_tokens])
     outputs = llm.generate([input_tokens])
-    assert outputs[0].num_cached_tokens == 16
+    assert outputs[0].num_cached_tokens == BLOCK_SIZE
