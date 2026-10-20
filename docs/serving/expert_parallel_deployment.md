@@ -105,6 +105,16 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 
 On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
 
+Choosing a MoRI backend: use EPv2 wherever it applies, and EPv1 for deployments EPv2 does not support. EPv2 cuts its receive buffers to the rows a step can actually receive and lets AITER fused MoE write its output straight into the combine buffer, so it does less work per step than EPv1.
+
+| Deployment | Backend |
+| ---------- | ------- |
+| EP within one node (or one gfx1250 UALink fabric), BF16 model, AITER fused MoE | `mori` (runs EPv2) |
+| EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | `mori` with `VLLM_MORI_EP_V2=0` (EPv1); EPv2 rejects these experts at startup |
+| EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1) |
+
+Within one node, all EPv1 options run the same IntraNode kernel. To pin the inter-node kernel, set the threshold: `0` always picks InterNodeV1, and a value at least the per-rank token budget always picks InterNodeV1LL. `mori_high_throughput` and `mori_low_latency` do the same pinning and are kept for compatibility; they will be deprecated in favor of `mori`.
+
 EPv2 limitations:
 
 - All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
