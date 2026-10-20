@@ -139,6 +139,36 @@ async def test_derender_chat_passes_stop_reason_through(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_derender_chat_returns_requested_prompt_token_ids(
+    client, return_token_ids, stream
+):
+    """Like the coupled endpoint, prompt_token_ids is returned only on request."""
+    gen_req = await _render_chat(client)
+    prompt_ids = gen_req["token_ids"]
+    generate_response = _make_generate_response(prompt_ids[:3])
+    generate_response["prompt_token_ids"] = prompt_ids
+    chat_request = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "return_token_ids": return_token_ids,
+    }
+    body: dict = {"model": MODEL_NAME, "chat_request": chat_request}
+    if stream:
+        body["stream"] = True
+        body["generate_chunk"] = generate_response
+    else:
+        body["generate_response"] = generate_response
+
+    response = await client.post("/v1/chat/completions/derender", json=body)
+
+    assert response.status_code == 200
+    data = response.json()["chunk"] if stream else response.json()
+    assert data.get("prompt_token_ids") == (prompt_ids if return_token_ids else None)
+
+
+@pytest.mark.asyncio
 async def test_derender_completion_passes_stop_reason_through(client):
     gen_req = await _render_completion(client, "Hello world")
     generate_response = _make_completion_generate_response(
@@ -1606,7 +1636,9 @@ async def test_derender_completion_preserves_requested_token_ids(
     request = CompletionRequest(
         model=MODEL_NAME, prompt="Hi", return_token_ids=return_token_ids
     )
+    prompt_ids = tokenizer.encode("Hi")
     payload = _make_generate_response(token_ids, finish_reason="length")
+    payload["prompt_token_ids"] = prompt_ids
     if stream:
         response, _ = await derenderer.derender_completion_stream(
             MODEL_NAME,
@@ -1619,5 +1651,5 @@ async def test_derender_completion_preserves_requested_token_ids(
             [GenerateTokensResponse.model_validate(payload)],
             completion_request=request,
         )
-    assert choices[0].text == tokenizer.decode(token_ids)
     assert choices[0].token_ids == (token_ids if return_token_ids else None)
+    assert choices[0].prompt_token_ids == (prompt_ids if return_token_ids else None)
