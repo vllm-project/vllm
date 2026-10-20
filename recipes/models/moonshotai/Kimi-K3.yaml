@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-18
+  date_updated: 2026-10-20
   tasks:
     - multimodal
     - text
@@ -462,6 +462,14 @@ strategy_overrides:
           UCX_MEMTYPE_REG_WHOLE: "n"
           UCX_RCACHE_MAX_UNRELEASED: "1024"
           UCX_TCP_AF_PRIO: "inet"
+          # The qualified workers left UCX on its default transports; this
+          # replaces the Blackwell PD block's rc,cuda_copy restriction.
+          UCX_TLS: "all"
+          # The pd_cluster Blackwell block replaces the recipe baseline, so the
+          # startup timeouts are restated: loading and autotune take ~25 min.
+          VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+          VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+          VLLM_RPC_TIMEOUT: "600000"
     prefill:
       parallelism: tep
       tp: 8
@@ -610,7 +618,7 @@ guide: |
   docker pull vllm/vllm-openai:nightly
   ```
 
-  For client concurrency 1 or 2, use TP16/DCP16 with five DSpark draft tokens. For concurrency 2 or 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
+  At client concurrency 1, use TP16/DCP16 with five DSpark draft tokens. At concurrency 2 and 4, use TP8/DCP8 with seven draft tokens. Both presets keep `--max-num-seqs 8` and `--max-num-batched-tokens 16384`.
 
   The explicit opt-in is `--additional-config '{"decode_backend":"latency_specialized"}'`; `auto` keeps the stock decode path in this image. The specialized path requires the V2 model runner, FULL decode CUDA graphs, and BF16 convolution state with FP32 recurrent state (`--mamba-ssm-cache-dtype float32`). Keep `FULL_AND_PIECEWISE` and the capture sizes together: the lists cover DSpark draft and verification shapes. Prefill and eager/piecewise steps still use the stock implementation. This recipe uses PP1, no expert parallelism, and at most seven draft tokens; do not combine it with `--enforce-eager`, ReplaySSM/RecoverSSM, or adaptive verification. See the pinned [backend requirements](https://github.com/vllm-project/vllm/blob/49cb2bbf71cfd36ee5aa33d1e184b1cddff55294/vllm/models/kimi_k3/nvidia/specialized_decode/runtime/__init__.py).
 
@@ -752,7 +760,9 @@ guide: |
 
   Prefill workers always use `--max-num-seqs 64`.
 
-  The command builder renders one prefill pool and one decode pool of this profile: select GB300, **Prefill/Decode Disaggregation** and the **Dynamo** PD router. Worker counts beyond 1P1D, the Mooncake store connector and services, and the frontend's router mode and session affinity below are documented here only.
+  The command builder renders one prefill pool and one decode pool of this profile: select GB300, **Prefill/Decode Disaggregation** and the **Dynamo** PD router, and keep the default TP prefill and TP decode pools. Its decode uses `--max-num-seqs 8` (the 1P2D row). The profile already includes the DSpark K4 draft and `--language-model-only`, so leave **Spec decoding** off: turning it on swaps in the generic `RedHatAI/Kimi-K3-speculator.dspark` K8 draft, which this profile was not qualified with. Untick **Tool calling** as well; see the parser note under Workers. Other pool modes are not supported on GB300: the DEP decode pool renders TP1 with `--decode-context-parallel-size 8`, which vLLM rejects.
+
+  Documented here only: worker counts beyond one pool per role, the Mooncake store connector (the builder's Mooncake option renders a plain `MooncakeStoreConnector` without the qualified NIXL MultiConnector, recompute policy and load options), the Mooncake services, prefill `--kv-events-config`, and the frontend's router mode and session affinity (the builder renders round-robin).
 
   ### Services
 
@@ -778,10 +788,11 @@ guide: |
   export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576 MC_MAX_MR_SIZE=4294967296 MC_ENABLE_DEST_DEVICE_AFFINITY=1
   export VLLM_CONNECTOR_PREFETCH_DEPTH=8 VLLM_CONNECTOR_PREFETCH_KV_CAP=0.65
   export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n UCX_RCACHE_MAX_UNRELEASED=1024 UCX_TCP_AF_PRIO=inet
-  export DYN_REQUEST_PLANE=tcp
+  export DYN_REQUEST_PLANE=tcp DYN_TCP_REQUEST_TIMEOUT=120 ETCD_LEASE_TTL=600
+  export VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 VLLM_RPC_TIMEOUT=600000
   ```
 
-  Set `VLLM_ENABLE_GEMM_RS=1` on prefill workers and `VLLM_ENABLE_GEMM_RS=0` on decode workers. Loading the 2.8T checkpoint across trays takes a while, so raise `VLLM_ENGINE_READY_TIMEOUT_S`, `VLLM_RPC_TIMEOUT` and `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` well above their defaults.
+  Set `VLLM_ENABLE_GEMM_RS=1` on prefill workers and `VLLM_ENABLE_GEMM_RS=0` on decode workers. Loading the 2.8T checkpoint across trays and autotuning takes a while, which is why the engine-ready, execute-model and RPC timeouts are raised.
 
   ### Workers
 
@@ -825,16 +836,16 @@ guide: |
     --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"compact_group_io":true,"max_load_batch_keys":2,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}'
   ```
 
-  Add `--enable-auto-tool-choice --tool-call-parser kimi_k3 --reasoning-parser kimi_k3` for tool calling and reasoning output.
+  For tool calling and reasoning output, add `--reasoning-parser kimi_k3 --dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` to both roles. `python3 -m dynamo.vllm` parses the remaining arguments as vLLM engine arguments only, so the vLLM API-server flags `--enable-auto-tool-choice` and `--tool-call-parser` are rejected there.
 
   ### Frontend
 
   ```bash
-  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592
+  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592 DYN_TCP_REQUEST_TIMEOUT=120
   python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 900
   ```
 
-  Session affinity keeps each conversation on one worker so it reuses that worker's prefix cache; send the conversation ID as the Dynamo session ID.
+  Session affinity keeps each conversation on one worker so it reuses that worker's prefix cache; send the conversation ID in the `X-Dynamo-Session-Id` request header.
 
   ## AMD MI355X: InferenceX AgentX alignment
 
