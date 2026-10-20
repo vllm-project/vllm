@@ -1185,10 +1185,22 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             buffer_kwargs, deep_ep.ElasticBuffer
         )
         if self._num_sms is None:
-            self._num_sms = handle.get_theoretical_num_sms(
-                num_experts=num_experts,
-                num_topk=kwargs["num_topk"],
-            )
+            try:
+                self._num_sms = handle.get_theoretical_num_sms(
+                    num_experts=num_experts,
+                    num_topk=kwargs["num_topk"],
+                )
+            except (ZeroDivisionError, RuntimeError, FileNotFoundError) as e:
+                # If ibstat is unavailable or bandwidth detection fails,
+                # fall back to None. The SM count is used for optimization
+                # heuristics only; missing it doesn't prevent operation.
+                logger.warning(
+                    "Failed to determine theoretical SM count for DeepEPv2 "
+                    "(ibstat may be unavailable): %s. Continuing with "
+                    "default heuristics.",
+                    e,
+                )
+                self._num_sms = None
         return handle
 
     def max_sms_used(self) -> int | None:
