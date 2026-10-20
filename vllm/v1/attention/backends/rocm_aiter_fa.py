@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends import rocm_aiter_triton_fp8_prefill as _fp8_prefill
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
@@ -1075,7 +1076,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
-        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
+        out, lse = _fp8_prefill.maybe_triton_prefill_attn(
+            orig=rocm_aiter_ops.flash_attn_varlen_func,
             q=query,
             k=key,
             v=value,
@@ -1123,10 +1125,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
+            # Rows past total_tokens are stale or uninitialised.
+            n_ctx = total_token_per_batch[chunk_idx]
+            suf_out, suf_lse = _fp8_prefill.maybe_triton_prefill_attn(
+                orig=rocm_aiter_ops.flash_attn_varlen_func,
                 q=query,
-                k=key_fetched,
-                v=value_fetched,
+                k=key_fetched[:n_ctx],
+                v=value_fetched[:n_ctx],
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
@@ -1275,7 +1280,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             prefill_key = key[num_decode_tokens + num_extend_tokens :]
             prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-            rocm_aiter_ops.flash_attn_varlen_func(
+            _fp8_prefill.maybe_triton_prefill_attn(
+                orig=rocm_aiter_ops.flash_attn_varlen_func,
                 q=prefill_query,
                 k=prefill_key,
                 v=prefill_value,
