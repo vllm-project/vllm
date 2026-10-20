@@ -61,38 +61,6 @@ def test_sleep_preservation_allows_empty_draft_but_rejects_target_typo(
         worker._save_sleep_parameters(target)
 
 
-@pytest.mark.parametrize("level", [1, 2])
-def test_weights_wake_resets_lora_state_after_level2_sleep(monkeypatch, level):
-    """Level-2 sleep discards LoRA GPU state with the weights pool; the weights
-    wake-up must reset it, since reload_weights() may never run."""
-    resets = []
-    worker = object.__new__(gpu_worker.Worker)
-    worker._sleep_mode_backend = SimpleNamespace(
-        suspend=lambda level: None, resume=lambda tags: None
-    )
-    worker._sleep_saved_parameters = {}
-    worker._sleep_saved_buffers = None
-    worker._sleep_saved_draft_buffers = {}
-    worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
-    worker.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
-    )
-    worker.model_runner = SimpleNamespace(
-        model=torch.nn.Module(),
-        get_draft_model=lambda: None,
-        reset_lora_state=lambda: resets.append(level),
-    )
-    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
-    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
-
-    worker.sleep(level=level)
-    worker.wake_up(tags=["kv_cache"])
-    assert resets == []
-    worker.wake_up(tags=["weights"])
-    worker.wake_up(tags=["weights"])
-    assert len(resets) == (1 if level == 2 else 0)
-
-
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter

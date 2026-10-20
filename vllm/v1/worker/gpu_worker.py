@@ -221,7 +221,7 @@ class Worker(WorkerBase):
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] | None = None
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
@@ -346,13 +346,12 @@ class Worker(WorkerBase):
         wake_weights = tags is None or "weights" in tags
         if wake_weights and self._sleep_saved_parameters:
             self._restore_sleep_parameters(self.model_runner.model)
-        if wake_weights and self._sleep_saved_buffers is not None:
+        if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = None
-            self.model_runner.reset_lora_state()
+            self._sleep_saved_buffers = {}
 
         if wake_weights and len(self._sleep_saved_draft_buffers):
             draft = self.get_draft_model()
