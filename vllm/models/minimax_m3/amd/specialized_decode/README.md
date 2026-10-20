@@ -39,3 +39,16 @@ the check is two small kernels a forward (inside the FULL graph when one is
 replayed). The cause (rank, epoch, site) stays in the device word: the worker
 reports only the GPU queue exception. `test_failstop.py` checks that the
 assert traps on the installed torch build.
+
+## Toolchain
+
+The hand-offs (`mono/sync.py`) rely on LLVM's AMDGPU memory model
+(`llvm/docs/AMDGPUMemoryModel.md`: store-available / load-visible operations
+and the `amdgcn-av` metadata) as implemented by the LLVM bundled with FlyDSL
+0.3.4.1: upstream llvm-project
+[`e2a39f504fee`](https://github.com/llvm/llvm-project/commit/e2a39f504fee836e4def9581bed817ecc327b9dc)
+(FlyDSL `thirdparty/llvm-build-info.json`; the wheel reports
+`24.0.0git e2a39f504fee...`). FlyDSL comes in through AITER (`v0.1.25` in
+`docker/Dockerfile.rocm_base`). Like DS V4.1, startup does not check the
+FlyDSL version; `test_ffn_kernel.py` checks the gfx950 lowering of the linked
+kernel instead.
