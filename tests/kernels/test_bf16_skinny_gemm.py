@@ -73,17 +73,17 @@ RESIDUAL_CUTE_CASES = [
     for num_tokens, _ in spec.residual_configs
 ]
 
-GLM_CUTE_CASES = list(
-    dict.fromkeys(
-        (spec, config)
-        for table in (
-            glm52_gemm.GLM52_PROJECTIONS,
-            glm52_gemm.GLM52_PROJECTIONS_SM107,
-        )
-        for spec in table.values()
-        for _, config in spec.cute_configs
-    )
+GLM_GPU_TABLES = (
+    ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
+    ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
 )
+
+GLM_CUTE_CASES = [
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens, _ in spec.cute_configs
+]
 
 QWEN4_EXP_SM90_CASES = [
     (n, k, num_tokens, config)
@@ -217,8 +217,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
         *KIMI_K3_PROJECTIONS.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM100.values(),
         *k3_gemm.KIMI_K3_PROJECTIONS_SM90.values(),
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
+        *(spec for _, table in GLM_GPU_TABLES for spec in table.values()),
     ]
     missing = sorted(
         (spec.n, spec.k)
@@ -476,72 +475,67 @@ def test_glm52_projection_plans_are_separate() -> None:
 
 
 @pytest.mark.parametrize(
-    "capability,supported",
-    [((10, 3), "sm103"), ((10, 7), "sm107"), ((10, 0), None), ((9, 0), None)],
+    "capability,expected",
+    [
+        ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
+        ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
+        ((10, 0), None),
+        ((9, 0), None),
+    ],
 )
 def test_glm52_low_latency_table_capability_routing(
     monkeypatch: pytest.MonkeyPatch,
     capability: tuple[int, int],
-    supported: str | None,
+    expected: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec] | None,
 ) -> None:
     monkeypatch.setattr(
         glm52_gemm.current_platform,
         "is_device_capability",
         lambda cc: cc == capability,
     )
-    monkeypatch.delenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", raising=False)
-    table = glm52_gemm._low_latency_table()
-    expected = {
-        "sm103": glm52_gemm.GLM52_PROJECTIONS,
-        "sm107": glm52_gemm.GLM52_PROJECTIONS_SM107,
-        None: None,
-    }[supported]
-    assert table is expected
+    assert glm52_gemm._low_latency_table() is expected
 
-
-def test_glm52_low_latency_gemm_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        glm52_gemm.current_platform,
-        "is_device_capability",
-        lambda cc: cc == (10, 7),
+    # The MTP eh_proj is a plain nn.Linear and gets its plan from the same table.
+    eh_weight = torch.empty(6144, 12288, dtype=torch.bfloat16, device="meta")
+    eh_plan = glm52_gemm.build_glm52_plan(eh_weight, torch.bfloat16)
+    assert eh_plan == (
+        None if expected is None else expected[(6144, 12288)].build_plan()
     )
-    monkeypatch.setenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", "1")
-    assert glm52_gemm._low_latency_table() is None
-
-    eh = glm52_gemm.GLM52_EH_PROJECTION
-    weight = torch.empty(eh.n, eh.k, dtype=torch.bfloat16, device="meta")
-    assert glm52_gemm.build_glm52_plan(weight, torch.bfloat16) is None
 
 
-@pytest.mark.parametrize("has_bf16_impl", [True, False])
-def test_glm52_low_latency_table_defers_to_explicit_linear_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    has_bf16_impl: bool,
+def test_glm52_sm107_table_plans() -> None:
+    table = glm52_gemm.GLM52_PROJECTIONS_SM107
+
+    def backends(n: int, k: int) -> tuple[set[int], set[int]]:
+        plan = table[(n, k)].build_plan()
+        cute = {m for m, (backend, _) in plan.items() if backend == "cute"}
+        return cute, set(plan) - cute
+
+    assert all((spec.n, spec.k) == key for key, spec in table.items())
+    assert backends(2624, 6144) == (set(range(1, 6)), {6, 7, 8})
+    assert backends(4096, 2048) == (set(range(1, 7)), set())
+    assert backends(6144, 4096) == ({1, 2, 3}, set())
+    assert backends(160, 6144) == ({1, 2, 3, 4, 5, 6, 8, 12, 16}, set())
+    assert backends(1024, 6144) == ({1, 2, 3, 4, 5, 6, 8}, set())
+    assert backends(6144, 512) == ({1, 2, 3, 4, 6}, set())
+    assert backends(6144, 12288) == ({1, 2, 3, 4}, set())
+    assert table[(2048, 2048)] is glm52_gemm.GLM52_Q_B_PROJECTION
+    assert len(table) == 8
+
+
+@pytest.mark.parametrize(
+    "table", [table for _, table in GLM_GPU_TABLES], ids=["sm103", "sm107"]
+)
+def test_glm52_tables_satisfy_kernel_constraints(
+    table: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec],
 ) -> None:
-    def fake_dispatch(linear_backend: str) -> Any:
-        assert linear_backend == "flashinfer_cutedsl"
-        if has_bf16_impl:
-            return lambda *args, **kwargs: None
-        return glm52_gemm.default_unquantized_gemm
-
-    config = SimpleNamespace(
-        kernel_config=SimpleNamespace(linear_backend="flashinfer_cutedsl")
-    )
-    monkeypatch.setattr(
-        glm52_gemm.current_platform,
-        "is_device_capability",
-        lambda cc: cc == (10, 7),
-    )
-    monkeypatch.delenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", raising=False)
-    monkeypatch.setattr(glm52_gemm, "get_current_vllm_config_or_none", lambda: config)
-    monkeypatch.setattr(glm52_gemm, "dispatch_unquantized_gemm", fake_dispatch)
-
-    table = glm52_gemm._low_latency_table()
-
-    if has_bf16_impl:
-        assert table is None
-    else:
-        assert table is glm52_gemm.GLM52_PROJECTIONS_SM107
+    for spec in table.values():
+        assert {m for m, _ in spec.cute_configs}.isdisjoint(spec.dsv3_tokens)
+        for num_tokens, config in spec.cute_configs:
+            assert config.num_rows == num_tokens
+            assert spec.n % config.outputs_per_block == 0
+            assert spec.k % (config.block_size * config.vector_width) == 0
+            assert config.static_k in (None, spec.k)
 
 
 def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
@@ -553,8 +547,11 @@ def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     assert not glm52_gemm._is_supported_row_major(multiple_rows)
 
 
+@pytest.mark.parametrize("capability,table", GLM_GPU_TABLES)
 def test_glm52_installer_maps_only_selected_unquantized_shapes(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    table: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec],
 ) -> None:
     class FakeLinearBase(nn.Module):
         def __init__(
@@ -594,9 +591,14 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
     root.wrong_shape.fused_qkv_a_proj = FakeLinearBase(
         qkv_a.n + 1, qkv_a.k, glm52_gemm.UnquantizedLinearMethod()
     )
+    # o_proj at TP4 is only in the SM107 table.
+    root.attn.o_proj = FakeLinearBase(6144, 4096, glm52_gemm.UnquantizedLinearMethod())
     monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
-    monkeypatch.setattr(glm52_gemm, "_is_sm103", lambda: True)
-    monkeypatch.delenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", raising=False)
+    monkeypatch.setattr(
+        glm52_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == capability,
+    )
     monkeypatch.setattr(
         glm52_gemm.shape_dynamic_skinny_gemm,
         "is_available",
@@ -616,8 +618,15 @@ def test_glm52_installer_maps_only_selected_unquantized_shapes(
         root.attn.q_b_proj.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
     )
-    assert root.attn.fused_qkv_a_proj.quant_method._plan == qkv_a.build_plan()
+    assert (
+        root.attn.fused_qkv_a_proj.quant_method._plan
+        == table[(qkv_a.n, qkv_a.k)].build_plan()
+    )
     assert root.attn.q_b_proj.quant_method._plan == q_b.build_plan()
+    if (6144, 4096) in table:
+        assert root.attn.o_proj.quant_method._plan == table[(6144, 4096)].build_plan()
+    else:
+        assert type(root.attn.o_proj.quant_method) is glm52_gemm.UnquantizedLinearMethod
     assert isinstance(
         root.same_shape_other_name.quant_method,
         glm52_gemm.GLM52LowLatencyLinearMethod,
@@ -956,39 +965,24 @@ def _require_sm103_and_cute() -> None:
     _require_capability_and_cute((10, 3))
 
 
-def _glm52_capability() -> tuple[int, int]:
-    """The GLM-5.2 table is served on SM103 and, reused, on SM107."""
-    if not torch.cuda.is_available():
-        pytest.skip("GLM-5.2 low-latency GEMM requires CUDA")
-    capability = torch.cuda.get_device_capability()
-    if capability not in ((10, 3), (10, 7)):
-        pytest.skip("GLM-5.2 low-latency GEMM requires SM103 or SM107")
-    return capability
+def _glm52_device_plan(
+    weight: torch.Tensor, num_tokens: int, backend: str
+) -> dict[int, glm52_gemm.ResolvedCall]:
+    """Plan from the device's own table, checked to route M to ``backend``."""
+    plan = glm52_gemm.build_glm52_plan(weight, torch.bfloat16)
+    assert plan is not None and plan[num_tokens][0] == backend
+    return plan
 
 
-def _require_glm52_device_and_dsv3() -> None:
-    _require_capability_and_dsv3(_glm52_capability())
-
-
-def _require_glm52_device_and_cute() -> None:
-    _require_capability_and_cute(_glm52_capability())
-
-
-@pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_CUTE_CASES)
 def test_glm_cute_selected_shapes(
-    spec: glm52_gemm.GLM52ProjectionSpec,
-    config: SkinnyGemmConfig,
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
 ) -> None:
-    _require_glm52_device_and_cute()
+    _require_capability_and_cute(capability)
     torch.manual_seed(42)
-    x = torch.randn(
-        config.num_rows,
-        spec.k,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
-    plan = spec.build_plan()
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "cute")
 
     output = glm52_gemm.run_glm52_plan(plan, x, weight)
 
@@ -1067,7 +1061,7 @@ def test_qwen4_exp_sm121_selected_shapes(
 
 
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
-    _require_glm52_device_and_cute()
+    _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION
     storage = torch.randn(
         1,
@@ -1085,20 +1079,14 @@ def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     assert output is None
 
 
-@pytest.mark.parametrize("spec,config", GLM_CUTE_CASES)
+@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_CUTE_CASES)
 def test_glm_cute_selected_shapes_cuda_graph_capture(
-    spec: glm52_gemm.GLM52ProjectionSpec,
-    config: SkinnyGemmConfig,
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
 ) -> None:
-    _require_glm52_device_and_cute()
-    x = torch.randn(
-        config.num_rows,
-        spec.k,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
-    plan = spec.build_plan()
+    _require_capability_and_cute(capability)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "cute")
     glm52_gemm.run_glm52_plan(plan, x, weight)
     torch.accelerator.synchronize()
 
@@ -1207,15 +1195,12 @@ DSV3_CASES = sorted(
     for num_tokens in _dsv3_probe_tokens(spec.dsv3_tokens)
 )
 
-GLM_DSV3_CASES = [
-    (num_tokens, spec)
-    for spec in (
-        glm52_gemm.GLM52_QKV_A_PROJECTION,
-        glm52_gemm.GLM52_Q_B_PROJECTION,
-        glm52_gemm._SM107_QKV_A_PROJECTION,
-    )
-    for num_tokens in sorted(_dsv3_probe_tokens(spec.dsv3_tokens))
-]
+GLM_DSV3_CASES = sorted(
+    (capability, num_tokens, spec.n, spec.k)
+    for capability, table in GLM_GPU_TABLES
+    for spec in table.values()
+    for num_tokens in _dsv3_probe_tokens(spec.dsv3_tokens)
+)
 
 
 @pytest.mark.parametrize("capability,num_tokens,n,k", DSV3_CASES)
@@ -1237,17 +1222,17 @@ def test_dsv3_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("num_tokens,spec", GLM_DSV3_CASES)
+@pytest.mark.parametrize("capability,num_tokens,n,k", GLM_DSV3_CASES)
 def test_glm_dsv3_selected_shapes(
-    num_tokens: int,
-    spec: glm52_gemm.GLM52ProjectionSpec,
+    capability: tuple[int, int], num_tokens: int, n: int, k: int
 ) -> None:
-    _require_glm52_device_and_dsv3()
+    _require_capability_and_dsv3(capability)
     torch.manual_seed(42)
-    x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    plan = _glm52_device_plan(weight, num_tokens, "dsv3_fused_a")
 
-    output = glm52_gemm.run_glm52_plan(spec.build_plan(), x, weight)
+    output = glm52_gemm.run_glm52_plan(plan, x, weight)
 
     assert output is not None
     reference = torch.nn.functional.linear(x, weight)

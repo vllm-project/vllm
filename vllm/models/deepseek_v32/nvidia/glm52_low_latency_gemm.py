@@ -7,10 +7,6 @@ Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
 :data:`GLM52_PROJECTIONS_SM107` on VR200 (SM107). The SM107 table also covers
 the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
 projections, which run as BF16 GEMMs at decode batch sizes.
-
-``VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM=1`` restores the default unquantized
-GEMM. An explicit ``--linear-backend`` that provides its own unquantized BF16
-GEMM also takes precedence over this selection.
 """
 
 from __future__ import annotations
@@ -23,7 +19,6 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
@@ -32,10 +27,6 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
-)
-from vllm.model_executor.layers.utils import (
-    default_unquantized_gemm,
-    dispatch_unquantized_gemm,
 )
 from vllm.platforms import current_platform
 
@@ -83,7 +74,7 @@ GLM52_Q_B_PROJECTION = GLM52ProjectionSpec(
 )
 
 # The MTP eh_proj is a plain nn.Linear, so it gets its plan through
-# build_glm52_plan rather than a quant_method swap. cuBLAS wins from M=4.
+# build_glm52_plan rather than a quant_method swap. cuBLAS wins from M=4 on SM103.
 GLM52_EH_PROJECTION = GLM52ProjectionSpec(
     n=6144,
     k=12288,
@@ -104,11 +95,12 @@ GLM52_PROJECTIONS = {
 }
 
 # SM107 (VR200): tuned CuTe DSL skinny-GEMM configs, swept against cuBLAS on one
-# GPU. A (shape, M) is listed only where CuTe beat cuBLAS by more than the 0.15 us
-# noise band; every other M stays on cuBLAS. The times are CuTe / cuBLAS at M=4
-# (one request with MTP K=3) unless noted.
-# q_a + kv_a, replicated: 5.84 / 6.91 us. On SM107 dsv3_fused_a_gemm wins only
-# at M=6..8 and loses to cuBLAS from M=12.
+# GPU. A (shape, M) is listed only where its backend beat cuBLAS by at least
+# max(3%, 0.15 us) in serialized timing; every other M stays on cuBLAS. The
+# times are table backend / cuBLAS at M=4 (one request with MTP K=3) unless noted.
+# q_a + kv_a, replicated: 5.84 / 6.91 us. dsv3_fused_a_gemm is the fastest backend
+# only at M=6..8 (M=7 shares the measured M<=8 kernel) and loses to cuBLAS from
+# M=12.
 _SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
     n=2624,
     k=6144,
@@ -204,11 +196,15 @@ _SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
     ),
 )
 
+# q_b_proj at TP8: the SM103 entry, re-measured on VR200 and kept (CuTe at M=1-2
+# 3.3 / 5.0 us; dsv3_fused_a_gemm at M=3-16 4.0-4.2 / 4.9-5.1 us).
+_SM107_Q_B_TP8_PROJECTION = GLM52_Q_B_PROJECTION
+
 GLM52_PROJECTIONS_SM107 = {
     (spec.n, spec.k): spec
     for spec in (
         _SM107_QKV_A_PROJECTION,
-        GLM52_Q_B_PROJECTION,
+        _SM107_Q_B_TP8_PROJECTION,
         _SM107_EH_PROJECTION,
         _SM107_Q_B_TP4_PROJECTION,
         _SM107_O_PROJ_TP4_PROJECTION,
@@ -223,42 +219,13 @@ def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
 
 
-def _is_sm107() -> bool:
-    return current_platform.is_device_capability((10, 7))
-
-
-def _explicit_bf16_linear_backend() -> str | None:
-    """The ``--linear-backend`` that replaces the default BF16 GEMM, if any."""
-    config = get_current_vllm_config_or_none()
-    if config is None:
-        return None
-    linear_backend = config.kernel_config.linear_backend
-    if linear_backend == "auto":
-        return None
-    # Backends without an unquantized implementation leave these layers on
-    # automatic selection, which includes this table.
-    if dispatch_unquantized_gemm(linear_backend) is default_unquantized_gemm:
-        return None
-    return linear_backend
-
-
 def _low_latency_table() -> dict[tuple[int, int], GLM52ProjectionSpec] | None:
     """Measured dispatch table for the current device, or None if unsupported."""
-    if envs.VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM:
-        return None
-    if not (_is_sm103() or _is_sm107()):
-        return None
-    linear_backend = _explicit_bf16_linear_backend()
-    if linear_backend is not None:
-        logger.info_once(
-            "GLM-5.2 low-latency BF16 GEMM disabled: --linear-backend=%s "
-            "selects the unquantized BF16 GEMM.",
-            linear_backend,
-        )
-        return None
-    if _is_sm107():
+    if current_platform.is_device_capability((10, 7)):
         return GLM52_PROJECTIONS_SM107
-    return GLM52_PROJECTIONS
+    if _is_sm103():
+        return GLM52_PROJECTIONS
+    return None
 
 
 def _is_supported_row_major(tensor: torch.Tensor) -> bool:
@@ -386,4 +353,5 @@ def enable_glm52_low_latency_gemm(
             shape_dynamic_skinny_gemm.is_available(),
             hasattr(torch.ops._C, "dsv3_fused_a_gemm"),
         )
+
     _request_warmup(dtype, warmup_configs)
