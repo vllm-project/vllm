@@ -105,8 +105,9 @@ class RoutedExpertsCapturer:
             )
         if local_topk_ids.shape[0] > self.device_buffer.shape[0]:
             raise ValueError(
-                f"routed-experts capture returned {local_topk_ids.shape[0]} rows "
-                f"for a {self.device_buffer.shape[0]}-row buffer"
+                f"{type(current_platform).__name__} routed-experts capture returned "
+                f"{local_topk_ids.shape[0]} rows for a "
+                f"{self.device_buffer.shape[0]}-row buffer"
             )
         self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
 
