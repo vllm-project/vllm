@@ -187,10 +187,11 @@ class TritonWarmupTensor:
     ``strides=None`` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
 
-    ``storage_bytes`` must be set via ``triton_ptr_range`` whenever the runtime
-    tensor's storage can exceed 2 GiB. The ROCm backend specializes pointers on
-    it (``tt.pointer_range``), so a KV-cache view left at the 0 default value
-    warms a variant the live launch never uses.
+    On platforms where triton specializes on buffer sizes (ROCm):
+        ``storage_bytes`` should be set via ``triton_ptr_range`` whenever the runtime
+        tensor's storage can exceed 2 GiB. The ROCm backend specializes pointers on
+        it (``tt.pointer_range``) to enable lowering to buffer load/store intrinsics.
+        Otherwise warmup may compile a variant that the live launch never uses.
     """
 
     dtype: Any
