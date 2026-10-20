@@ -770,6 +770,17 @@ class TestResponseFormat:
         dumped = result.response_format.json_schema.model_dump(exclude_none=True)
         assert dumped["json_schema"] == schema
 
+    def test_json_schema_reaches_sampling_params(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        request = _make_request(
+            response_format={"type": "json_object", "json_schema": schema}
+        )
+
+        params = _convert(request).to_sampling_params(16, {})
+
+        assert params.structured_outputs is not None
+        assert params.structured_outputs.json == schema
+
 
 # ======================================================================
 # Tools / tool_choice
