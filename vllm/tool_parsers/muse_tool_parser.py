@@ -91,9 +91,15 @@ _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
 # --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
-_NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
+# `[^<>]` and not `[^>]` for the attribute runs: a tag's attributes cannot
+# contain either bracket, and stopping at `<` keeps the scan linear. With
+# `[^>]`, model output that repeats an opening tag without ever closing it --
+# `"<atem:invoke " * n` -- retries the attribute search from every one of those
+# n positions, and each retry runs to the end of the text, so the cost grows
+# with the square of the output length (52 KB took 7.5 s).
+_NAME_RE = re.compile(r'<atem:invoke\b[^<>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(
-    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
+    r'<atem:parameter\b[^<>]*?\bname="(?P<key>[^"]+)"[^<>]*?>(?P<value>.*?)</atem:parameter>',
     re.DOTALL,
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"

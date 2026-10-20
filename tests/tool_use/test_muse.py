@@ -26,6 +26,7 @@ a real tokenizer live in ``test_muse_parse_delta.py``.
 """
 
 import json
+import time
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
@@ -98,6 +99,31 @@ def _call(name):
 
 
 # ---------------------------------------------------------------- tool calls
+
+
+def test_repeated_open_invoke_tags_are_not_quadratic():
+    """A 52 KB model output must not cost seconds of CPU to parse.
+
+    The attribute runs in ``_NAME_RE`` and ``_PARAM_RE`` were ``[^>]*?``, so
+    output that opens tags without ever closing one retried the ``name="..."``
+    search from every ``<atem:invoke`` position, each retry scanning to the end
+    of the block: 13 KB cost 0.48 s and 52 KB cost 7.9 s, on the event loop.
+    The output below is one complete invoke block on the tool channel, so
+    extraction reaches both patterns. The bound sits far above the repaired cost
+    (~2 ms) and far below the old one, so it does not depend on runner speed.
+    """
+    raw = (
+        "<|start|>assistant to=weather.get<|message|>"
+        + "<atem:invoke " * 4000
+        + "</atem:invoke><|eot|>"
+    )
+
+    started = time.perf_counter()
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    elapsed = time.perf_counter() - started
+
+    assert not out.tools_called
+    assert elapsed < 1.0, f"parsing {len(raw)} bytes took {elapsed:.1f}s"
 
 
 def test_single_tool_call_after_reasoning():
