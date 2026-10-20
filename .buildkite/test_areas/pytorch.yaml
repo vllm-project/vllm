@@ -176,6 +176,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
   key: pytorch-fullgraph-test
+  automatic_shard: true
   timeout_in_minutes: 90
   source_file_dependencies:
   - vllm/__init__.py
@@ -206,17 +207,19 @@ steps:
   - tests/compile
   - csrc/
   commands:
-  # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
-  # as it is a heavy test that is covered in other steps.
-  # Use `find` to launch multiple instances of pytest so that
-  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  # Smoke tests under the fullgraph directory, except test_full_cudagraph.py,
+  # a heavy test covered in other steps.
+  - pytest -s -v compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) PyTorch Fullgraph"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
+      # A pytest per file, as before the NVIDIA step sharded automatically
+      # (https://github.com/vllm-project/vllm/issues/28965).
+      commands:
+      - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
       # Remove once the ROCm Triton pin includes triton-lang/triton#11567.
       # Avoid overlapping LLVM codegen/LLD by disabling background precompilation.
       env:
