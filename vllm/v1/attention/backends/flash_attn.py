@@ -16,7 +16,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -78,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     SlidingWindowSpec,
+    is_quantized_kv_cache,
 )
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
@@ -593,7 +593,7 @@ def _maybe_symmetrize_window(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
-    # FA3:
+    # FA3/FA4:
     # Supports full cudagraphs for all cases.
     #
     # FA2:
@@ -613,7 +613,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
+        if get_flash_attn_version() in (3, 4)
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
