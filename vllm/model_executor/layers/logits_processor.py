@@ -16,6 +16,11 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.vocab_parallel_argmax import (
+    MAX_VOCAB_SIZE,
+    local_argmax_partials,
+    merge_argmax_partials,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -222,6 +227,23 @@ class LogitsProcessor(PluggableLayer):
             logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
         if self.scale != 1.0:
             logits = logits * self.scale
+
+        shard_indices = lm_head.shard_indices
+        if (
+            logits.is_cuda
+            and logits.ndim == 2
+            and logits.stride(-1) == 1
+            and lm_head.num_added_embeddings == 0
+            and shard_indices.org_vocab_end_index <= MAX_VOCAB_SIZE
+        ):
+            # Fused path: same result, fewer kernels and a dim-0 gather.
+            vocab_start = shard_indices.org_vocab_start_index
+            partials = local_argmax_partials(
+                logits, shard_indices.org_vocab_end_index - vocab_start, vocab_start
+            )
+            if tp_size > 1:
+                partials = tensor_model_parallel_all_gather(partials, dim=0)
+            return merge_argmax_partials(partials, tp_size)
 
         # Mask out padding entries beyond org_vocab_size on this shard.
         num_pad = lm_head.shard_indices.num_org_vocab_padding
