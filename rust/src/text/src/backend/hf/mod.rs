@@ -179,6 +179,8 @@ fn build_sampling_hints(
         default_top_k: sampling_config.and_then(|config| config.top_k),
         default_min_p: sampling_config.and_then(|config| config.min_p),
         default_repetition_penalty: sampling_config.and_then(|config| config.repetition_penalty),
+        default_presence_penalty: sampling_config.and_then(|config| config.presence_penalty),
+        default_frequency_penalty: sampling_config.and_then(|config| config.frequency_penalty),
         default_max_tokens: sampling_config.and_then(|config| config.max_new_tokens),
     }
 }
@@ -273,6 +275,8 @@ mod tests {
                 "top_k": 20,
                 "min_p": 0.1,
                 "repetition_penalty": 1.1,
+                "presence_penalty": 1.5,
+                "frequency_penalty": 0.5,
                 "max_new_tokens": 4096
             }"#,
         )
@@ -318,6 +322,12 @@ mod tests {
                     default_repetition_penalty: Some(
                         1.1,
                     ),
+                    default_presence_penalty: Some(
+                        1.5,
+                    ),
+                    default_frequency_penalty: Some(
+                        0.5,
+                    ),
                     default_max_tokens: Some(
                         4096,
                     ),
@@ -334,6 +344,8 @@ mod tests {
                     default_top_k: None,
                     default_min_p: None,
                     default_repetition_penalty: None,
+                    default_presence_penalty: None,
+                    default_frequency_penalty: None,
                     default_max_tokens: None,
                 },
             )
