@@ -906,6 +906,39 @@ guide: |
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
   server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`.
 
+  ### Aggregate serving on B300
+
+  The B300 aggregate lanes in
+  [InferenceX #4332](https://github.com/SemiAnalysisAI/InferenceX/pull/4332)
+  ([full config](https://github.com/SemiAnalysisAI/InferenceX/blob/ad96b211c783aece9914b332bff96842b2d9ae43/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/b300-fp4-mtp/agentic.yaml))
+  serve the original
+  [DeepSeek-V4.1-Flash checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
+  on `vllm/vllm-openai:cu134-nightly-x86_64-dev-20261019-mk` with
+  `--kernel-config '{"enable_flashinfer_autotune":true}'` and `--max-model-len 1048576`.
+
+  | Lane | Concurrency | `--max-num-seqs` | `--max-num-batched-tokens` | `--prefill-schedule-interval` | Attention backend |
+  |---|---|---|---|---|---|
+  | TP4 | 1, 8, 16 | 1, 16, 32 | 4096, 8192, 8192 | 1, 160, 128 | `FLASHINFER_MLA_SPARSE_DSV41` |
+  | DEP2 | 8, 16, 32, 64 | 16, 16, 32, 64 | 16384, 16384, 16384, 32768 | 80, 80, 80, 56 | `FLASHINFER_MLA_SPARSE_DSV41` |
+  | DEP2 + KV offload | 128, 192 | 128, 192 | 16384 | 32 | `FLASHMLA_MEGA_ATTN_DSV41` |
+
+  TP4 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'` and
+  `--additional-config '{"decode_backend":"latency_specialized"}'`. The specialized decode
+  comes from [#61868](https://github.com/vllm-project/vllm/pull/61868) and
+  [#61869](https://github.com/vllm-project/vllm/pull/61869), which are not yet on main,
+  and serves pure decode steps only, hence the long prefill interval at c8 and c16.
+  TP4 adds graph capture size 5, so the DSpark draft gets a one-request graph.
+
+  DEP2 (TP1 x DP2 with expert parallelism) runs behind a consistent-hash vLLM Router with
+  `--kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe"}'`
+  and `--engram-config '{"cpu_offload":true,"embedding_across_dp":true}'`. At c128 and
+  c192, KV blocks are offloaded lazily to DRAM, 50 GiB per DP rank, and are written only
+  when evicted from HBM:
+
+  ```
+  --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":53687091200,"lazy_offload":true}}'
+  ```
+
   ### Dynamo disaggregated serving on B300 and GB300
 
   The AgentX lanes in
