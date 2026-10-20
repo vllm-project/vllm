@@ -583,6 +583,20 @@ def test_fused_topk_bias(
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
 
 
+@pytest.mark.parametrize("scoring_func", [0, 1])
+def test_fused_grouped_topk_accepts_idle_rank(scoring_func):
+    """Zero-token routing must leave CUDA ready for the next batch."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA required")
+    from vllm import _custom_ops as ops
+
+    scores = torch.empty((0, 8), device="cuda", dtype=torch.float32)
+    bias = torch.zeros(8, device="cuda")
+    weights, ids = ops.grouped_topk(scores, 2, 1, 2, True, 1.0, bias, scoring_func)
+    torch.testing.assert_close(weights, scores.new_empty((0, 2)))
+    torch.testing.assert_close(ids, scores.new_empty((0, 2), dtype=torch.int32))
+
+
 @pytest.mark.parametrize("m,k", MK_S)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize(
