@@ -1252,10 +1252,12 @@ def unified_attention(
 
     # RDNA launch tuning, after vLLM's 2D/3D choice (it keeps vLLM's split-KV
     # threshold). Only launch parameters change; sliding window, sinks, softcap and
-    # ALiBi are applied per element inside each tile.
-    if is_gfx1201 or is_gfx1100:
+    # ALiBi are applied per element inside each tile. Batch-invariant mode keeps the
+    # default launch (vLLM then always runs 2D).
+    if (is_gfx1201 or is_gfx1100) and not is_batch_invariant:
         grid_fill = num_seqs * num_kv_heads
-        # gfx1100 sliding-window decode: 2D is faster from this requests x KV heads.
+        # gfx1100 sliding-window decode: move a split-KV batch to 2D from this
+        # requests x KV heads (2D is faster there); it then gets the 2D tuning below.
         sw_2d_fill = _GFX1100_SW_2D_MIN_FILL.get(head_size_padded)
         if (
             use_3d
@@ -1268,7 +1270,7 @@ def unified_attention(
             and grid_fill >= sw_2d_fill
         ):
             use_3d = False
-        if use_3d:  # never with batch invariance (vLLM then always runs 2D)
+        if use_3d:
             # Split-KV segment count and launch. The count depends only on the batch
             # size and the model shape, so it is fixed per CUDA graph.
             if is_gfx1201 and head_size_padded in _GFX1201_3D_HEADS:
@@ -1321,7 +1323,7 @@ def unified_attention(
                     TILE_SIZE_DECODE, launch_num_warps, launch_num_stages = (
                         _GFX1100_3D_CONFIGS[head_size_padded][1]
                     )
-        elif not is_batch_invariant:  # batch-invariant mode keeps the default launch
+        else:
             if (
                 is_gfx1100
                 and num_queries_per_kv <= 16
