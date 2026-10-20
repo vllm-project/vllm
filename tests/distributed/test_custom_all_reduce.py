@@ -313,8 +313,9 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
         (4, (10, 7), True, True),
         (6, (10, 7), True, False),
         (6, (10, 3), True, False),
-        (8, (10, 1), True, False),
+        (8, (10, 1), True, True),
         (8, (9, 0), True, False),
+        (8, (11, 0), True, False),
         (8, (10, 3), False, False),
     ],
 )
@@ -325,15 +326,15 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
     local_multicast,
     expected,
 ):
-    def is_device_capability(capability, device_id):
-        assert capability in ((10, 0), (10, 3), (10, 7))
+    def is_device_capability_family(capability, device_id):
+        assert capability == 100
         assert device_id == 3
-        return device_capability == capability
+        return device_capability[0] == capability // 10
 
     monkeypatch.setattr(
         car.current_platform,
-        "is_device_capability",
-        is_device_capability,
+        "is_device_capability_family",
+        is_device_capability_family,
     )
     monkeypatch.setattr(
         car,
