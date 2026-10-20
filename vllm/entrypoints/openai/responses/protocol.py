@@ -53,6 +53,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
     Field,
+    PrivateAttr,
     ValidationError,
     field_serializer,
     model_validator,
@@ -463,11 +464,19 @@ class ResponsesRequest(OpenAIBaseModel):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=self.max_output_tokens or 0,
+            max_output_tokens=self.max_output_tokens,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
+
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
+
+    _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
+        default=None
+    )
+    """Parser-derived constraints that preserve the public request's text metadata."""
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
@@ -478,6 +487,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
+        if self._parser_structured_outputs is not None:
+            return self._parser_structured_outputs
         if self.text is None or self.text.format is None:
             return self.structured_outputs
 
