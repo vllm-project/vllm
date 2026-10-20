@@ -15,15 +15,15 @@ from vllm import (
     SamplingParams,
 )
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     parse_model_prompt,
@@ -54,6 +54,7 @@ class OfflineInferenceMixin:
     renderer: BaseRenderer
     llm_engine: "LLMEngine"
     model_config: ModelConfig
+    chat_template: str | None
 
     def _resolve_mm_lora(
         self,
@@ -180,7 +181,9 @@ class OfflineInferenceMixin:
         renderer = self.renderer
 
         chat_params = ChatParams(
-            chat_template=chat_template,
+            chat_template=(
+                self.chat_template if chat_template is None else chat_template
+            ),
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 chat_template_kwargs,
@@ -281,10 +284,13 @@ class OfflineInferenceMixin:
 
     def _priority_to_seq(
         self,
-        priority: list[int] | None,
+        priority: int | Sequence[int] | None,
         num_requests: int,
     ) -> Sequence[int]:
-        if priority is not None:
+        if priority is None:
+            priority = 0
+
+        if isinstance(priority, Sequence):
             if len(priority) != num_requests:
                 raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
@@ -293,7 +299,7 @@ class OfflineInferenceMixin:
 
             return priority
 
-        return [0] * num_requests
+        return [priority] * num_requests
 
     def _add_completion_requests(
         self,
@@ -304,7 +310,7 @@ class OfflineInferenceMixin:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
-        priority: list[int] | None = None,
+        priority: int | Sequence[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
@@ -341,7 +347,7 @@ class OfflineInferenceMixin:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
-        priority: list[int] | None = None,
+        priority: int | Sequence[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
     ):
@@ -367,6 +373,7 @@ class OfflineInferenceMixin:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: int | Sequence[int] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -381,6 +388,7 @@ class OfflineInferenceMixin:
             params=params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            priority=priority,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             chat_template_kwargs=chat_template_kwargs,
@@ -402,7 +410,7 @@ class OfflineInferenceMixin:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
-        priority: list[int] | None = None,
+        priority: int | Sequence[int] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,

@@ -23,6 +23,13 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+from vllm.v1.worker.utils import AttentionGroup
+
+
+def _recoverssm_attn_groups(layer_name: str) -> list[list[AttentionGroup]]:
+    """RecoverSSMState.record_step reads only each group's ``layer_names``."""
+    group = SimpleNamespace(layer_names=[layer_name])
+    return [[group]]  # type: ignore[list-item]  # layer_names-only stand-in
 
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,6 +321,17 @@ def test_padded_rows_keep_the_sentinel(monkeypatch):
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
 
 
+def test_rows_wider_than_the_speculative_state_window_keep_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _mamba_hybrid_state(num_speculative_tokens=7)
+    input_batch = _input_batch([12, 8, 1], None, [False, False, False])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, 0, 0]
+
+
 def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     monkeypatch,
 ):
@@ -356,9 +374,9 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
     num_accepted_tokens = torch.ones(2, dtype=torch.int32)
-    group = SimpleNamespace(layer_names=["layer"])
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.record_step({"layer": metadata}, attn_groups, for_capture=False)
     state.commit_step(
         num_sampled,
         idx_mapping,
@@ -376,7 +394,13 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -> None:
+@pytest.mark.parametrize(
+    ("computed", "sampled", "expected_column"),
+    [(4, 3, 0), (4, 4, 0), (4, 5, 1), (8, 8, 1), (8, 9, 2)],
+)
+def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
+    computed: int, sampled: int, expected_column: int
+) -> None:
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
     state._mamba_ctx = None
@@ -389,19 +413,21 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     metadata.commit_recoverssm_state.return_value = RecoverSSMPostprocessMetadata(
         num_spec_decodes=1,
         request_indices=torch.tensor([1], dtype=torch.int32, device="cuda"),
-        num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
+        num_computed_tokens=torch.tensor(
+            [6, computed], dtype=torch.int32, device="cuda"
+        ),
         block_size=8,
         block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
     )
-    num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
+    num_sampled = torch.tensor([2, sampled], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
-    group = SimpleNamespace(layer_names=["layer"])
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.recoverssm.record_step({"layer": metadata}, attn_groups, for_capture=False)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
-    expected_state_indices = [-1, 1, -1, -1, -1]
+    expected_state_indices = [-1, expected_column, -1, -1, -1]
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted

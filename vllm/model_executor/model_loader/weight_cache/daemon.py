@@ -107,16 +107,20 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
+    hash_rope_parameters,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -184,6 +188,8 @@ class WeightCacheDaemon:
         pp_rank: int = 0,
     ):
         parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_eplb:
+            raise ValueError("The weight cache daemon does not support EPLB.")
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
@@ -223,6 +229,7 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
+        key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -231,10 +238,47 @@ class WeightCacheDaemon:
             tp_rank=self.tp_rank,
             pp_size=self.pp_size,
             pp_rank=self.pp_rank,
-            dp_size=self.dp_size,
-            dp_rank=dp_rank,
+            dp_size=key_dp_size,
+            dp_rank=key_dp_rank,
             is_draft=is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            expert_placement_strategy=parallel_config.expert_placement_strategy,
         )
+
+    def warmup(self) -> None:
+        """Run the FlashInfer autotune pass against the cached model."""
+        vllm_config = self.vllm_config
+        # Mirrors the gate in the engine's kernel warmup.
+        if (
+            vllm_config.kernel_config.enable_flashinfer_autotune is False
+            or not has_flashinfer()
+            or not current_platform.has_device_capability(90)
+            or is_draft_model_cacheable(vllm_config.speculative_config)
+        ):
+            return
+        try:
+            current_platform.update_block_size_for_backend(vllm_config)
+            runner = build_warmup_runner(
+                vllm_config,
+                self.local_rank,
+                is_draft=self.is_draft,
+                model_config=self.model_config,
+            )
+            assert self.model is not None, "warmup ran before load_model"
+            runner.load_model(model=self.model)
+            # The V2 runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            logger.info(
+                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
+                "configs are in the on-disk autotune cache",
+                self.role,
+                self.global_rank,
+            )
+        finally:
+            # Free the runner and the dummy-run activations; the daemon's
+            # weights are untouched.
+            gc.collect()
+            torch.accelerator.empty_cache()
 
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
@@ -251,6 +295,8 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        # In-place reloads use configs already normalized by model construction.
+        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -397,6 +443,12 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Missing cache_config"})
             return
         mismatched = self.cache_config.mismatched_fields(client_config)
+        if (
+            request.get("is_reload", False)
+            and "rope_parameters_hash" in mismatched
+            and client_config.rope_parameters_hash == self.loaded_rope_parameters_hash
+        ):
+            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
@@ -457,6 +509,7 @@ def _run_daemon(
         pp_rank,
     )
     daemon.load_model()
+    daemon.warmup()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )
@@ -490,6 +543,17 @@ def plan_local_ranks(
         pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
         placements.append((local_rank, dp_rank, pp_rank, tp_rank))
     return placements
+
+
+def get_engine_dp_placement(vllm_config: VllmConfig, dp_rank: int) -> tuple[int, int]:
+    """``(dp_size, dp_rank)`` as the engine fingerprints this DP rank.
+
+    The engine runs the DP ranks of a non-MoE target as independent DP=1
+    replicas, so their workers all report ``(1, 0)``.
+    """
+    if vllm_config.model_config.is_moe:
+        return vllm_config.parallel_config.data_parallel_size, dp_rank
+    return 1, 0
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:

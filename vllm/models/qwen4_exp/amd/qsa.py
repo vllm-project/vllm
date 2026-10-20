@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.qwen3_vl import mrope_positions_factor
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -248,6 +249,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
         )
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
