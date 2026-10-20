@@ -10,6 +10,7 @@ To implement non-causal attention, we leverage the sparse attention implementati
 include the future query tokens in the top-k indices for each query token.
 """
 
+import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -225,6 +226,13 @@ class DSparkDeepseekV4Model(nn.Module):
         return hidden_states
 
 
+def _draft_ctxkv_dummyq_disabled() -> bool:
+    """VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ=1 restores the stock dummy-Q insert
+    (read per call, so eager in-process A/B works; under CUDA graphs the
+    choice is baked at capture)."""
+    return os.environ.get("VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ", "0") == "1"
+
+
 def _insert_context_kv(
     attn: nn.Module,
     kv: torch.Tensor,
@@ -236,12 +244,40 @@ def _insert_context_kv(
     Reuses the DSV4 fused insert ops (which also process a query; we pass a dummy
     query and discard it, since context tokens have no query). Mirrors
     ``DeepseekV4Attention._fused_qnorm_rope_kv_insert``.
+
+    On the fp8_ds_mla/uint8 cache path the op supports
+    ``q_head_padded=0`` -- a KV-only launch that writes no query at all -- so
+    the dummy-Q allocation, its zero-fill and the quantized dummy-Q write
+    disappear; the cache contents are identical by construction (verified
+    in tests/kernels/test_dspark_ctxkv_dummyq_removal.py).
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
     n_ctx = kv.shape[0]
+    if cache_dtype == torch.uint8 and not _draft_ctxkv_dummyq_disabled():
+        # fp8_ds_mla UE8M0 paged layout, KV-only fused insert (no dummy Q).
+        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
+        empty_q = kv.new_empty((n_ctx, 0, attn.head_dim), dtype=kv.dtype)
+        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            empty_q,
+            kv,
+            swa_2d,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            0,  # q_head_padded: KV-only launch, Q untouched
+            attn.eps,
+            block_size,
+            True,  # apply_q_norm (no Q is processed at all)
+            attn.kv_mxfp8,
+        )
+        logger.warning_once(
+            "draft context-KV dummy-Q removal engaged (KV-only fused insert, "
+            "q_head_padded=0; disable var VLLM_DISABLE_DRAFT_CTXKV_DUMMYQ)"
+        )
+        return
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
