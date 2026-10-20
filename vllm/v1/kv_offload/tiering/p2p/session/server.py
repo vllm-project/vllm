@@ -191,8 +191,8 @@ class _ActiveLookup:
     # here once definitively resolved; still-pending keys are only
     # in ``pending``.
     resolved: dict[OffloadKey, bool] = field(default_factory=dict)
-    # Keys still awaiting resolution (HIT_PENDING / RETRY from
-    # ``parent.lookup``); re-polled by ``_resolve_pending_lookups``.
+    # Keys still awaiting resolution (HIT_PENDING / RETRY from the
+    # probe/promote pair); re-polled by ``_resolve_pending_lookups``.
     pending: set[OffloadKey] = field(default_factory=set)
     # Absolute deadline (``time.monotonic``). Once reached, remaining
     # ``pending`` keys are force-resolved to MISS so the consumer
@@ -506,35 +506,48 @@ class ServerRole:
         keys: Iterable[OffloadKey],
         parent: ParentManager,
     ) -> list[OffloadKey]:
-        """Poll ``keys`` against the tiering manager and pin any HITs.
+        """Probe ``keys`` as one batch, pin the primary HITs, then promote.
 
-        For each key not already definitively resolved, query
-        ``parent.lookup`` and record the outcome on ``lookup``: HIT / MISS
-        land in ``resolved`` and clear ``pending``; HIT_PENDING / RETRY park
-        in ``pending`` for a later serve. Newly-HIT keys are pinned in one
-        batch via :meth:`_pin_and_register_hits` and also returned (for
-        caller logging).
+        The whole batch is probed before anything is pinned: a secondary-tier
+        HIT starts a promotion, and that promotion may evict an earlier
+        primary HIT of the same batch while it is still unpinned. Pinning the
+        primary HITs in a single ``create_store_job`` call before
+        ``promote_batch`` fixes that ordering and keeps one LookupMsg down to
+        one batched transfer.
+
+        For each key not already definitively resolved, the probe outcome is
+        recorded on ``lookup``: HIT / MISS land in ``resolved`` and clear
+        ``pending``; HIT_PENDING / RETRY park in ``pending`` for a later
+        serve. Newly-pinned keys are also returned (for caller logging).
 
         Shared by the first-sighting pass (:meth:`_process_inbound_lookup`)
         and the re-poll pass (:meth:`_resolve_pending_lookups`); callers pass
         a de-duplicated ``keys`` collection.
         """
-        new_hits: list[OffloadKey] = []
-        for h in keys:
-            if h in lookup.resolved:
-                continue
-            result = parent.lookup(h, lookup.ctx)
-            if result is LookupResult.HIT:
-                new_hits.append(h)
-                lookup.resolved[h] = True
-                lookup.pending.discard(h)
-            elif result is LookupResult.MISS:
-                lookup.resolved[h] = False
-                lookup.pending.discard(h)
-            else:
-                lookup.pending.add(h)
+        unresolved = [h for h in keys if h not in lookup.resolved]
+        if not unresolved:
+            return []
+
+        probes = parent.probe_batch(unresolved, lookup.ctx)
+        new_hits = [probe.key for probe in probes if probe.result is LookupResult.HIT]
         if new_hits:
             self._pin_and_register_hits(lookup, new_hits, parent)
+
+        promoted = parent.promote_batch(probes, lookup.ctx)
+
+        for probe in probes:
+            key = probe.key
+            result = probe.result
+            if result is None:
+                result = promoted.get(key, LookupResult.MISS)
+            if result is LookupResult.HIT:
+                lookup.resolved[key] = True
+                lookup.pending.discard(key)
+            elif result is LookupResult.MISS:
+                lookup.resolved[key] = False
+                lookup.pending.discard(key)
+            else:
+                lookup.pending.add(key)
         return new_hits
 
     def _process_inbound_lookup(
@@ -547,11 +560,12 @@ class ServerRole:
     ) -> None:
         """Resolve one enqueued LookupMsg against ``parent``.
 
-        For each key, query the tiering manager via ``parent.lookup``
-        and pin any HITs immediately via ``parent.create_store_job``
-        (plumbed into the existing ``add_stored_blocks`` matching path so
-        the eventual FetchMsg finds them). HIT_PENDING / RETRY keys park
-        in :class:`_ActiveLookup` for re-polling by
+        Probe every key with ``parent.probe_batch``, pin the primary HITs
+        in one ``parent.create_store_job`` call (plumbed into the existing
+        ``add_stored_blocks`` matching path so the eventual FetchMsg finds
+        them), then start secondary promotions with
+        ``parent.promote_batch``. HIT_PENDING / RETRY keys park in
+        :class:`_ActiveLookup` for re-polling by
         :meth:`_resolve_pending_lookups`.
 
         The outbound ``LookupRespMsg`` is deferred until every key has
@@ -631,9 +645,10 @@ class ServerRole:
         """Re-poll a request's deferred LookupMsg keys; finalize when ready.
 
         Walks every parked :class:`_ActiveLookup` for ``kv_request_id`` and
-        re-calls ``parent.lookup`` per still-pending key, moving HIT/MISS
-        results into ``resolved``. If ``deadline`` has passed, remaining
-        ``pending`` keys are force-resolved to MISS so the consumer
+        re-polls the still-pending keys through :meth:`_poll_lookup_keys`
+        (probe, pin, promote), moving HIT/MISS results into ``resolved``.
+        If ``deadline`` has passed, remaining ``pending`` keys are
+        force-resolved to MISS so the consumer
         can fall back instead of waiting on a stuck producer. Newly-HIT
         keys are pinned via ``parent.create_store_job`` in one call per
         affected lookup. Lookups whose ``pending`` empties out get their

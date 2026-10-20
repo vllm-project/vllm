@@ -42,6 +42,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    LookupProbe,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
@@ -1276,7 +1277,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
+        self.manager.primary_tier.lookup = lambda key, req_context: LookupResult.RETRY
 
         with pytest.raises(AssertionError):
             self.manager._cascade_existing_chunks_to_request_level_tiers(keys, ctx, {0})
@@ -1759,3 +1760,93 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+class TestProbeBatch:
+    """Batch probes must not promote until the caller pinned every HIT.
+
+    A secondary-tier HIT starts a promotion, and a promotion allocates
+    primary-tier capacity. Probing a whole LookupMsg through the single-key
+    lookup() call therefore promoted mid-batch and could evict an earlier
+    HIT of the same batch before it was pinned, which made the later
+    create_store_job() fail on a chunk the lookup had just reported as HIT.
+    """
+
+    @pytest.fixture
+    def capacity_one(self):
+        mock_region = _mock_mmap_region(1)
+        primary = CPUPrimaryTierOffloadingManager(num_chunks=1, mmap_region=mock_region)
+        secondary = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary, secondary_tiers=[secondary]
+        )
+        ctx = ReqContext(req_id="probe-batch")
+        manager.on_new_request(ctx)
+        return manager, primary, secondary, ctx
+
+    def test_probe_batch_does_not_promote(self, capacity_one):
+        manager, primary, secondary, ctx = capacity_one
+        key = to_keys([7])[0]
+        secondary.chunks[key] = True
+
+        assert manager.probe_batch([key], ctx) == [LookupProbe(key, None, 0)]
+        # There is no public signal for "no promotion started"; the deferred
+        # submission queue is the only place a probe-side promotion would show.
+        assert manager._pending_load_submissions == {}
+        assert primary.lookup(key, ctx) is LookupResult.MISS
+
+    def test_probe_batch_of_no_keys_is_a_no_op(self, capacity_one):
+        manager, _, _, ctx = capacity_one
+        assert manager.probe_batch([], ctx) == []
+
+    def test_secondary_tier_parent_excludes_its_own_tier(self, capacity_one):
+        """The only production parent wrapper must skip the tier it serves.
+
+        ``_SecondaryTierFacingParent`` is where ``exclude_tier_idx`` is
+        applied. Without it, a serving tier would probe its own chunks, report
+        them as promotable instead of pinning them, and silently stop serving
+        pins.
+        """
+        manager, _, secondary, ctx = capacity_one
+        key = to_keys([7])[0]
+        secondary.chunks[key] = True
+
+        parent = manager._tier_parents[secondary]
+        assert parent.probe_batch([key], ctx) == [LookupProbe(key, LookupResult.MISS)]
+
+    def test_promote_batch_reports_pending_when_primary_has_room(self, capacity_one):
+        manager, _, secondary, ctx = capacity_one
+        key = to_keys([7])[0]
+        secondary.chunks[key] = True
+
+        probes = manager.probe_batch([key], ctx)
+        assert manager.promote_batch(probes, ctx) == {key: LookupResult.HIT_PENDING}
+
+    def test_pin_before_promote_keeps_the_primary_hit(self, capacity_one):
+        manager, primary, secondary, ctx = capacity_one
+        hit, secondary_hit = to_keys([1, 2])
+
+        manager.prepare_store([hit], ctx)
+        manager.complete_store([hit], ctx, success=True)
+        # Drain the cascade so the primary chunk is no longer pinned by it.
+        manager._process_finished_jobs()
+        secondary.chunks[secondary_hit] = True
+
+        probes = manager.probe_batch([hit, secondary_hit], ctx)
+        assert probes[0].result is LookupResult.HIT
+        assert probes[0].promotion_tier is None
+        assert probes[1].result is None
+        assert probes[1].promotion_tier == 0
+
+        manager.create_store_job([hit], ctx)
+        results = manager.promote_batch([probes[1]], ctx)
+
+        # The only primary slot is pinned by the HIT, so the promotion
+        # cannot evict it and reports the secondary key as unavailable.
+        assert results == {secondary_hit: LookupResult.MISS}
+        # The promotion could not evict the pinned HIT, so it is still a HIT.
+        assert primary.lookup(hit, ctx) is LookupResult.HIT
