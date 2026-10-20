@@ -62,13 +62,21 @@ class QuestionType(ABC):
             else f"{label}: {option.name}"
         )
 
-    def prompt(self, question: Question) -> str:
-        """The question as the model reads it, after the state."""
-        lines = [f"Question: {question.instructions}"] if question.instructions else []
-        for label, o in zip(question.labels, question.options):
-            lines.append(self.reply_line(label, o))
+    def body(self, question: Question) -> str:
+        """The options and the reply instruction, after the question's heading."""
+        lines = [
+            self.reply_line(label, o)
+            for label, o in zip(question.labels, question.options)
+        ]
         lines.append(self.reply_instruction)
         return "\n".join(lines)
+
+    def prompt(self, question: Question) -> str:
+        """The question as the model reads it, after the state."""
+        body = self.body(question)
+        if not question.instructions:
+            return body
+        return f"Question: {question.instructions}\n{body}"
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
