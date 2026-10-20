@@ -108,7 +108,7 @@ def prepare_rotation_transforms(
         unresolved,
         owns_registry,
     )
-    object.__setattr__(model, "_rotation_transform_state", state)
+    model._rotation_transform_state = state
 
 
 def _bind_consumers(

@@ -133,6 +133,19 @@ def test_empty_batch_does_not_launch_kernel(rotation_api):
     assert result.shape == x.shape
 
 
+def test_cpu_reference_preserves_empty_batch():
+    """CPU butterflies accept empty inputs without ambiguous reshape dimensions."""
+    from vllm.model_executor.kernels.rotation.composite_hadamard import (
+        composite_hadamard_torch,
+    )
+
+    x = torch.empty((0, 8), device="cpu", dtype=torch.float32)
+    sign = torch.ones(8, device="cpu", dtype=torch.int8)
+    hk = torch.ones((1, 1), device="cpu", dtype=torch.float32)
+    result = composite_hadamard_torch(x, sign, hk, inverse=True, k=1, p=8)
+    torch.testing.assert_close(result, x)
+
+
 def test_invalid_dimensions_are_rejected(rotation_api):
     """Invalid width or K/P factorization fails before compiling a GPU kernel."""
     op = rotation_api
