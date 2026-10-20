@@ -336,13 +336,8 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace and stream the
-        # "language_model." group first, so it reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model). Streaming keeps the load
-        # lazy; sorting here would materialize the whole checkpoint in host
-        # RAM per rank.
+        # The child finalizes in load_weights, so its weights must reach it as
+        # one contiguous group.
         mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(mapped)
