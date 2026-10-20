@@ -4937,9 +4937,18 @@ steps:
   - vllm/models/step5/
   - tests/models/step5/
   - vllm/model_executor/models/step3p5.py
+  - vllm/model_executor/models/step3p7.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/transformers_utils/configs/step5.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/triton_utils/
   - vllm/platforms/rocm.py
+  - tests/v1/attention/utils.py
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
   - pytest -v -s models/step5
+  - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
