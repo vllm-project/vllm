@@ -14,6 +14,7 @@ from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
+from pydantic import ValidationError
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -53,9 +54,11 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.parser.metrics import record_tool_call_response
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tracing import get_request_trace
 
 logger = init_logger(__name__)
 
@@ -346,6 +349,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._handle_thinking(req, anthropic_request, disabled_thinking_effort)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
+        req._api_surface = "messages"
         return req
 
     @classmethod
@@ -800,6 +804,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
+        trace = get_request_trace()
+        if trace is not None:
+            trace.capture_tool_request(request, "messages")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
         disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
@@ -818,20 +825,36 @@ class AnthropicServingMessages(OpenAIServingChat):
             return generator
 
         elif isinstance(generator, ChatCompletionResponse):
-            return self.messages_full_converter(generator)
+            response = self.messages_full_converter(generator, request=chat_req)
+            if chat_req.tools or (
+                trace is not None and trace.tool_attributes is not None
+            ):
+                tool_calls_count = sum(
+                    block.type == "tool_use" for block in response.content
+                )
+                if chat_req.tools:
+                    record_tool_call_response(
+                        chat_req, tool_calls_count=tool_calls_count
+                    )
+                if trace is not None:
+                    trace.record_tool_response(tool_calls_count=tool_calls_count)
+            return response
 
         return generator
 
     def chat_completion_stream_generator(
-        self, *args: Any, **kwargs: Any
+        self, request: ChatCompletionRequest, *args: Any, **kwargs: Any
     ) -> AsyncGenerator[str, None]:
         return self.message_stream_converter(
-            self.chat_completion_stream_generator_raw(*args, **kwargs)
+            self.chat_completion_stream_generator_raw(request, *args, **kwargs),
+            request=request,
         )
 
     def messages_full_converter(
         self,
         generator: ChatCompletionResponse,
+        *,
+        request: ChatCompletionRequest | None = None,
     ) -> AnthropicMessagesResponse:
         result = AnthropicMessagesResponse(
             id=generator.id,
@@ -868,12 +891,19 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
         for tool_call in choice.message.tool_calls:
-            anthropic_tool_call = AnthropicContentBlock(
-                type="tool_use",
-                id=tool_call.id,
-                name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
-            )
+            try:
+                anthropic_tool_call = AnthropicContentBlock(
+                    type="tool_use",
+                    id=tool_call.id,
+                    name=tool_call.function.name,
+                    input=json.loads(tool_call.function.arguments),
+                )
+            except (json.JSONDecodeError, ValidationError):
+                if request is not None and request.tools:
+                    record_tool_call_response(request, parse_failed=True)
+                if trace := get_request_trace():
+                    trace.record_tool_response(parse_failed=True)
+                raise
             content += [anthropic_tool_call]
 
         # Anthropic's canonical shape for an empty completion is a single
@@ -889,7 +919,13 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None],
+        *,
+        request: ChatCompletionRequest | None = None,
     ) -> AsyncGenerator[str, None]:
+        trace = get_request_trace()
+        emitted_tool_calls = 0
+        stream_completed = False
+        stream_failed = False
         try:
 
             class _ActiveBlockState:
@@ -1143,6 +1179,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         input={},
                                     )
                                 )
+                                emitted_tool_calls += 1
                                 yield start_event
                             # Handle initial arguments if present
                             if (
@@ -1194,9 +1231,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                 yield event
             stop_message = AnthropicStreamEvent(type="message_stop")
             data = stop_message.model_dump_json(exclude_unset=True, exclude_none=True)
+            stream_completed = finish_reason is not None
             yield wrap_data_with_event(data, "message_stop")
 
         except Exception as e:
+            stream_failed = True
             logger.exception("Error in message stream converter.")
             for event in stop_active_block():
                 yield event
@@ -1208,6 +1247,26 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
+        finally:
+            # Closing here also finalizes parser-failure reporting in Chat.
+            try:
+                await generator.aclose()
+            except Exception:
+                logger.error("Error closing Messages stream generator.")
+            finally:
+                if request is not None and request.tools:
+                    record_tool_call_response(
+                        request,
+                        tool_calls_count=emitted_tool_calls,
+                        completed=stream_completed,
+                    )
+                if trace is not None:
+                    if stream_failed:
+                        trace.failed = True
+                    trace.record_tool_response(
+                        tool_calls_count=emitted_tool_calls,
+                        completed=stream_completed and not stream_failed,
+                    )
 
     async def count_tokens(
         self,

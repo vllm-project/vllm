@@ -3,6 +3,7 @@
 
 import math
 import time
+from copy import copy
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -2060,3 +2061,219 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+@pytest.fixture
+def request_span_exporter(monkeypatch):
+    sdk = pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON, ParentBased
+
+    from vllm.tracing import otel
+
+    if not otel.is_otel_available():
+        pytest.skip("OTel required")
+    provider = sdk.TracerProvider(sampler=ParentBased(ALWAYS_ON))
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
+    yield exporter
+    provider.shutdown()
+
+
+@pytest.fixture
+def traced_request():
+    request = _make_streaming_input_request("traced", [1, 2, 3])
+    request.resumable = False
+    request.arrival_time = time.time()
+    request.trace_headers = {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    }
+    return request
+
+
+@pytest.mark.parametrize("log_stats", [True, False])
+@pytest.mark.parametrize("sampled", [True, False])
+def test_request_span_starts_at_admission(
+    request_span_exporter, traced_request, log_stats, sampled
+):
+    """Create the span before generation and finish it once, with existing stats."""
+    from vllm.tracing import SpanAttributes, SpanKind
+
+    traced_request.trace_headers["traceparent"] = traced_request.trace_headers[
+        "traceparent"
+    ][:-2] + ("01" if sampled else "00")
+    headers = dict(traced_request.trace_headers)
+    processor = OutputProcessor(None, log_stats=log_stats, tracing_enabled=True)
+    processor.add_request(traced_request, None)
+    state = processor.request_states[traced_request.request_id]
+    span = state.trace_span
+    assert span is not None and span.is_recording() == sampled
+    assert not request_span_exporter.get_finished_spans()
+    assert traced_request.trace_headers == headers
+
+    timestamp = time.monotonic()
+    for index in range(2):
+        processed = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=traced_request.request_id,
+                    new_token_ids=[4 + index],
+                    finish_reason=FinishReason.STOP if index else None,
+                    events=[
+                        EngineCoreEvent(EngineCoreEventType.QUEUED, timestamp - 2),
+                        EngineCoreEvent(EngineCoreEventType.SCHEDULED, timestamp - 1),
+                    ]
+                    if index == 0
+                    else None,
+                )
+            ],
+            timestamp + index,
+            IterationStats(),
+        )
+        assert processed.request_outputs[0].finished == bool(index)
+        if not index:
+            assert state.trace_span is span
+            assert not request_span_exporter.get_finished_spans()
+
+    assert not processor.has_unfinished_requests()
+    assert state.trace_span is None
+    spans = request_span_exporter.get_finished_spans()
+    assert len(spans) == int(sampled)
+    if sampled:
+        (finished,) = spans
+        assert finished.name == "llm_request"
+        assert finished.kind == SpanKind.SERVER
+        assert finished.start_time == int(traced_request.arrival_time * 1e9)
+        assert finished.context.trace_id == int("4bf92f3577b34da6a3ce929d0e0e4736", 16)
+        assert finished.parent.span_id == int("00f067aa0ba902b7", 16)
+        assert finished.attributes[SpanAttributes.GEN_AI_REQUEST_ID] == "traced-ext"
+        assert finished.attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 3
+        assert finished.attributes[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] == 2
+        assert finished.attributes[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] == 1
+        assert (
+            finished.attributes[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] == 1
+        )
+
+
+@pytest.mark.parametrize(
+    "terminal_path", ["abort", "error", "engine_failure", "shutdown"]
+)
+def test_request_span_cleanup(request_span_exporter, traced_request, terminal_path):
+    """Terminal paths close spans without exporting exception content."""
+    from vllm.tracing import StatusCode
+
+    processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, traced_request.request_id)
+    processor.add_request(traced_request, None, queue=queue)
+    if terminal_path == "abort":
+        processor.abort_requests([traced_request.external_req_id], internal=False)
+    elif terminal_path == "error":
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=traced_request.request_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.ERROR,
+                )
+            ],
+            time.monotonic(),
+            IterationStats(),
+        )
+    elif terminal_path == "engine_failure":
+        processor.propagate_error(RuntimeError("sensitive exception content"))
+        with pytest.raises(RuntimeError, match="sensitive exception content"):
+            queue.get_nowait()
+    else:
+        processor.shutdown()
+
+    processor.abort_requests([traced_request.request_id], internal=True)
+    processor.shutdown()
+    (span,) = request_span_exporter.get_finished_spans()
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description is None
+    assert not span.events
+
+
+def test_parallel_request_spans(request_span_exporter, traced_request):
+    """Parallel sampling retains one distinct span per admitted child."""
+    traced_request.sampling_params.n = 2
+    parent = ParentRequest(traced_request)
+    processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+    for index in range(2):
+        child = copy(traced_request)
+        child.request_id, child.sampling_params = parent.get_child_info(index)
+        processor.add_request(child, None, parent, index)
+        assert processor.request_states[child.request_id].trace_span.is_recording()
+    assert not request_span_exporter.get_finished_spans()
+
+    processor.abort_requests([parent.request_id], internal=True)
+    spans = request_span_exporter.get_finished_spans()
+    assert len(spans) == 2
+    assert len({span.context.span_id for span in spans}) == 2
+    assert len({span.context.trace_id for span in spans}) == 1
+    assert not processor.has_unfinished_requests()
+
+
+def test_streaming_input_span_survives_chunk_completion(
+    request_span_exporter, traced_request
+):
+    """Input chunks share a span until the final input closes the request."""
+    traced_request.resumable = True
+    processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+    processor.add_request(traced_request, None)
+    state = processor.request_states[traced_request.request_id]
+    span = state.trace_span
+    for _ in range(2):
+        processor.add_request(traced_request, None)
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=traced_request.request_id,
+                    new_token_ids=[4],
+                    finish_reason=FinishReason.STOP,
+                )
+            ],
+            time.monotonic(),
+            IterationStats(),
+        )
+        assert state.trace_span is span
+        assert not request_span_exporter.get_finished_spans()
+
+    # End an idle input stream after its last generation chunk has finished.
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=traced_request.request_id,
+                new_token_ids=[5],
+                finish_reason=FinishReason.STOP,
+            )
+        ],
+        time.monotonic(),
+        IterationStats(),
+    )
+    traced_request.resumable = False
+    processor.add_request(traced_request, None)
+    assert not processor.has_unfinished_requests()
+    assert len(request_span_exporter.get_finished_spans()) == 1
+
+
+def test_disabled_tracing_does_not_create_request_spans(
+    request_span_exporter, traced_request
+):
+    processor = OutputProcessor(None, log_stats=False)
+    processor.add_request(traced_request, None)
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=traced_request.request_id,
+                new_token_ids=[4],
+                finish_reason=FinishReason.STOP,
+            )
+        ]
+    )
+    assert not processor.has_unfinished_requests()
+    assert not request_span_exporter.get_finished_spans()

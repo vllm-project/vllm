@@ -5,6 +5,74 @@ import pytest
 
 
 @pytest.fixture
+def inference_spans(monkeypatch):
+    sdk = pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from vllm.sampling_params import SamplingParams
+    from vllm.tracing import otel
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+    from vllm.v1.engine.output_processor import OutputProcessor
+    from vllm.v1.metrics.stats import IterationStats
+
+    if not otel.is_otel_available():
+        pytest.skip("OTel required")
+    provider = sdk.TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel.trace, "get_tracer", provider.get_tracer)
+    processor = OutputProcessor(None, log_stats=False, tracing_enabled=True)
+
+    def finish_engine(request_id="request", trace_headers=None):
+        request = EngineCoreRequest(
+            request_id=request_id,
+            external_req_id=request_id,
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=SamplingParams(detokenize=False),
+            pooling_params=None,
+            arrival_time=1,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            trace_headers=trace_headers,
+        )
+        processor.add_request(request, None)
+        span = processor.request_states[request_id].trace_span
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=request_id,
+                    new_token_ids=[2],
+                    finish_reason=FinishReason.STOP,
+                )
+            ],
+            1,
+            IterationStats(),
+        )
+        return span
+
+    yield exporter, finish_engine
+    processor.shutdown()
+    provider.shutdown()
+
+
+@pytest.fixture
+def tool_trace(inference_spans):
+    from vllm.tracing import RequestTrace, use_request_trace
+
+    exporter, finish_engine = inference_spans
+    trace = RequestTrace()
+    with use_request_trace(trace):
+        finish_engine()
+        yield trace, exporter
+    trace.end()
+
+
+@pytest.fixture
 def sample_prompts():
     return [
         "Hello, my name is",

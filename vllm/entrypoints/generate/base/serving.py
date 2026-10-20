@@ -32,6 +32,7 @@ from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tracing import get_request_trace
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -187,6 +188,8 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> str:
+        if owner := get_request_trace():
+            owner.failed = True
         json_str = json.dumps(
             self.create_error_response(
                 message=message,

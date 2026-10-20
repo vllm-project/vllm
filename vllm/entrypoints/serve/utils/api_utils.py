@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+from collections.abc import Awaitable
 from http import HTTPStatus
 from typing import Any
 
@@ -16,6 +17,7 @@ from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tracing import RequestTrace, use_request_trace
 
 logger = init_logger(__name__)
 
@@ -33,6 +35,68 @@ async def listen_for_disconnect(request: Request) -> None:
             ) and hasattr(request.app.state, "server_load_metrics"):
                 request.app.state.server_load_metrics -= 1
             break
+
+
+class _TracedStreamingResponse(StreamingResponse):
+    def __init__(self, response: StreamingResponse, owner: RequestTrace):
+        self.owner = owner
+        self.response = response
+        super().__init__(
+            response.body_iterator,
+            status_code=response.status_code,
+            media_type=response.media_type,
+            background=response.background,
+        )
+        self.raw_headers = response.raw_headers
+
+    async def __call__(self, scope, receive, send):
+        self.response.status_code = self.status_code
+        self.response.raw_headers = self.raw_headers
+        self.response.background = self.background
+        self.response.body_iterator = self.body_iterator
+        completed = False
+
+        async def traced_send(message):
+            nonlocal completed
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                completed = True
+
+        with use_request_trace(self.owner):
+            try:
+                await self.response(scope, receive, traced_send)
+            except BaseException:
+                self.owner.failed = True
+                raise
+            finally:
+                try:
+                    if close := getattr(self.body_iterator, "aclose", None):
+                        await close()
+                except BaseException:
+                    # Cleanup must not replace the original response error.
+                    self.owner.failed = True
+                self.owner.end(error=not completed)
+
+    def __del__(self):
+        self.owner.end(error=True)
+
+
+async def run_with_inference_trace(operation: Awaitable, *, enabled: bool):
+    """Keep admitted engine spans open through response conversion and streaming."""
+    if not enabled:
+        return await operation
+    owner = RequestTrace()
+    try:
+        with use_request_trace(owner):
+            result = await operation
+    except BaseException:
+        owner.end(error=True)
+        raise
+    if isinstance(result, StreamingResponse):
+        result = _TracedStreamingResponse(result, owner)
+    else:
+        owner.end(error=isinstance(result, Response) and result.status_code >= 400)
+    return result
 
 
 def with_cancellation(handler_func):
@@ -64,7 +128,14 @@ def with_cancellation(handler_func):
         # The request is either the second positional arg or `raw_request`
         request = args[1] if len(args) > 1 else kwargs["raw_request"]
 
-        handler_task = asyncio.create_task(handler_func(*args, **kwargs))
+        operation = handler_func(*args, **kwargs)
+        config = getattr(request.app.state, "vllm_config", None)
+        if (
+            config is not None
+            and config.observability_config.otlp_traces_endpoint is not None
+        ):
+            operation = run_with_inference_trace(operation, enabled=True)
+        handler_task = asyncio.create_task(operation)
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
 
         done, pending = await asyncio.wait(

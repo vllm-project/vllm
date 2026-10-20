@@ -3,11 +3,20 @@
 
 import functools
 from collections.abc import Callable
-from typing import Any, TypeAlias
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
+
+    from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 # Import the implementation details
 from .otel import (
     SpanKind,
+    StatusCode,
     extract_trace_context,
     init_otel_tracer,
     init_otel_worker_tracer,
@@ -16,6 +25,7 @@ from .otel import (
     manual_instrument_otel,
     otel_import_error_traceback,
 )
+from .otel import start_span_otel as start_span
 from .utils import (
     SpanAttributes,
     contains_trace_headers,
@@ -31,6 +41,11 @@ __all__ = [
     "is_tracing_available",
     "SpanAttributes",
     "SpanKind",
+    "StatusCode",
+    "start_span",
+    "RequestTrace",
+    "get_request_trace",
+    "use_request_trace",
     "extract_trace_context",
     "extract_trace_headers",
     "log_tracing_disabled_warning",
@@ -61,6 +76,118 @@ _REGISTERED_TRACING_BACKENDS: dict[
         manual_instrument_otel,
     ),
 }
+
+
+class RequestTrace:
+    """Frontend ownership of engine spans until final response processing."""
+
+    def __init__(self):
+        self.spans: list[Span] = []
+        self.closed = False
+        self.failed = False
+        self.tool_attributes: dict[str, str | int | bool] | None = None
+
+    def capture_tool_request(
+        self,
+        request: "ChatCompletionRequest | AnthropicMessagesRequest",
+        api_surface: Literal["chat_completions", "messages"],
+    ) -> None:
+        """Keep only bounded native request metadata, before parser mutation."""
+        if not any(
+            field in request.model_fields_set
+            and getattr(request, field, None) is not None
+            for field in ("tools", "tool_choice", "parallel_tool_calls")
+        ):
+            return
+        choice = request.tool_choice
+        choice_type = (
+            choice if isinstance(choice, str) else getattr(choice, "type", "unset")
+        )
+        choice_label = {"any": "required", "tool": "named", "function": "named"}.get(
+            choice_type, choice_type
+        )
+        if choice_label not in ("unset", "auto", "none", "required", "named"):
+            choice_label = "other"
+        self.tool_attributes = {
+            SpanAttributes.TOOL_CALLING_PRESENT: True,
+            SpanAttributes.TOOL_CALLING_TOOL_COUNT: len(request.tools or ()),
+            SpanAttributes.TOOL_CALLING_TOOL_CHOICE: choice_label,
+            SpanAttributes.TOOL_CALLING_API_SURFACE: api_surface,
+            SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: False,
+            SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: 0,
+            SpanAttributes.TOOL_CALLING_PARSER_STATUS: "interrupted",
+        }
+
+    def record_tool_response(
+        self,
+        *,
+        tool_calls_count: int = 0,
+        parse_failed: bool = False,
+        completed: bool = True,
+    ) -> None:
+        if self.tool_attributes is None:
+            return
+        self.failed |= parse_failed
+        # Messages finalization must not hide a failure surfaced by Chat parsing.
+        if (
+            parse_failed
+            or self.tool_attributes[SpanAttributes.TOOL_CALLING_PARSER_STATUS]
+            == "parse_failure"
+        ):
+            status = "parse_failure"
+        elif not completed:
+            status = "interrupted"
+        else:
+            status = "success" if tool_calls_count else "no_tool_calls"
+        self.tool_attributes.update(
+            {
+                SpanAttributes.TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS: tool_calls_count
+                > 0,
+                SpanAttributes.TOOL_CALLING_TOOL_CALLS_COUNT: tool_calls_count,
+                SpanAttributes.TOOL_CALLING_PARSER_STATUS: status,
+            }
+        )
+
+    def end(self, *, error: bool = False) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if (
+            self.tool_attributes is not None
+            and (error or self.failed)
+            and self.tool_attributes[SpanAttributes.TOOL_CALLING_PARSER_STATUS]
+            != "parse_failure"
+        ):
+            self.tool_attributes[SpanAttributes.TOOL_CALLING_PARSER_STATUS] = (
+                "interrupted"
+            )
+        for span in self.spans:
+            if span.is_recording():
+                if self.tool_attributes is not None:
+                    span.set_attributes(self.tool_attributes)
+                if error or self.failed:
+                    span.set_status(StatusCode.ERROR)
+            span.end()
+        self.spans.clear()
+
+
+_REQUEST_TRACE: ContextVar[RequestTrace | None] = ContextVar(
+    "vllm_request_trace", default=None
+)
+
+
+def get_request_trace() -> RequestTrace | None:
+    owner = _REQUEST_TRACE.get()
+    return owner if owner is not None and not owner.closed else None
+
+
+@contextmanager
+def use_request_trace(owner: RequestTrace):
+    token = _REQUEST_TRACE.set(owner)
+    try:
+        yield
+    finally:
+        _REQUEST_TRACE.reset(token)
 
 
 def init_tracer(

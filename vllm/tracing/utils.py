@@ -27,6 +27,14 @@ class SpanAttributes:
     GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 
+    TOOL_CALLING_PRESENT = "vllm.tool_calling.present"
+    TOOL_CALLING_TOOL_COUNT = "vllm.tool_calling.tool_count"
+    TOOL_CALLING_TOOL_CHOICE = "vllm.tool_calling.tool_choice"
+    TOOL_CALLING_API_SURFACE = "vllm.tool_calling.api_surface"
+    TOOL_CALLING_RESPONSE_HAS_TOOL_CALLS = "vllm.tool_calling.response_has_tool_calls"
+    TOOL_CALLING_TOOL_CALLS_COUNT = "vllm.tool_calling.tool_calls_count"
+    TOOL_CALLING_PARSER_STATUS = "vllm.tool_calling.parser_status"
+
     # Custom attributes added until they are standardized
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
     GEN_AI_REQUEST_N = "gen_ai.request.n"
