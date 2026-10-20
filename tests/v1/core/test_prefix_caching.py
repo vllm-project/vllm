@@ -7164,16 +7164,12 @@ def test_short_pause_offloads_only_with_current_pressure_and_sustained_wait(
     assert manager.get_computed_blocks(request)[1] == (0 if offload else 4)
 
 
-@pytest.mark.parametrize("preserve_source", [False, True])
-def test_tool_pause_must_amortize_observed_store_time(preserve_source):
-    from vllm.v1.kv_hints.policy import ToolWaitPolicy
-
+def test_tool_pause_must_amortize_observed_store_time():
     manager, request, controller, adapter, target = make_movement_controller()
     assert manager.allocate_slots(request, 4) is not None
     manager.cache_blocks(request, 4)
     manager.free(request)
     runtime, now = install_movement_policies(manager, controller, "movement")
-    runtime.policies["movement"] = ToolWaitPolicy(preserve_source=preserve_source)
     submit_movement(
         controller,
         "store",
@@ -7193,67 +7189,6 @@ def test_tool_pause_must_amortize_observed_store_time(preserve_source):
     )
     assert result.status == OperationStatus.COMPLETED
     assert not result.derived_operations and not adapter.jobs
-
-
-@pytest.mark.parametrize("preserve_source", [False, True])
-def test_policy_backup_can_reuse_reclaim_and_reload_its_successful_scope(
-    preserve_source,
-):
-    from vllm.v1.kv_hints.policy import ToolWaitPolicy
-
-    manager, request, controller, adapter, first = make_movement_controller()
-    assert manager.allocate_slots(request, 4) is not None
-    manager.cache_blocks(request, 4)
-    manager.free(request)
-    target = {"kind": "session", "session_id": "s", "continuation_id": "c"}
-    submit_movement(
-        controller,
-        "associate-backup",
-        "associate",
-        {
-            "session_id": "s",
-            "continuation_id": "c",
-            "expected_revision": 0,
-            "target": {
-                **first,
-                "blocks": [
-                    *first["blocks"],
-                    {
-                        "group_id": 0,
-                        "block_hash": request.block_hashes[1].hex(),
-                        "start_token": 4,
-                        "end_token": 8,
-                    },
-                ],
-            },
-        },
-    )
-    runtime, _ = install_movement_policies(manager, controller, "movement")
-    runtime.policies["movement"] = ToolWaitPolicy(preserve_source=preserve_source)
-    submit_movement(
-        controller,
-        "backup",
-        "signal",
-        {"target": target, "signal": "tool_wait", "resume_after_seconds": 10},
-    )
-    adapter.finish(bytes_transferred=16)
-    controller.executor.progress()
-    runtime.before_acknowledge()
-    assert manager.block_pool.get_num_free_blocks() == 3
-    assert manager.get_computed_blocks(request)[1] == (4 if preserve_source else 0)
-    competitor = make_request("pressure", list(range(20, 33)), 4, sha256)
-    assert manager.allocate_slots(competitor, 12) is not None
-    assert manager.get_computed_blocks(request)[1] == 0
-    manager.free(competitor)
-    submit_movement(
-        controller, "restore-backup", "signal", {"target": target, "signal": "resume"}
-    )
-    assert len(adapter.jobs) == 1
-    assert adapter.jobs[0].direction == "load" and adapter.jobs[0].num_tokens == 4
-    adapter.finish()
-    controller.executor.progress()
-    assert manager.get_computed_blocks(request)[1] == 4
-    assert manager.block_pool.get_num_free_blocks() == 3
 
 
 def test_queued_admission_preparation_releases_scope_when_session_finishes():

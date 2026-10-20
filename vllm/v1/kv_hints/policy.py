@@ -205,7 +205,6 @@ class ToolWaitPolicy(KVPolicy):
         min_pause_seconds: float = 0.5,
         prefetch_on_admission: bool = False,
         consider_pause_duration: bool = True,
-        preserve_source: bool = False,
     ):
         if tier not in ("cpu", "mooncake"):
             raise ValueError("Movement policy requires CPU or Mooncake")
@@ -222,7 +221,6 @@ class ToolWaitPolicy(KVPolicy):
         self.prefetch_on_admission = prefetch_on_admission
         self.uses_scheduler_guidance = prefetch_on_admission
         self.consider_pause_duration = consider_pause_duration
-        self.preserve_source = preserve_source
         if type(max_stored_blocks) is not int or max_stored_blocks < 1:
             raise ValueError("max_stored_blocks must be positive")
         self.max_stored_blocks = max_stored_blocks
@@ -299,11 +297,7 @@ class ToolWaitPolicy(KVPolicy):
             self._load_seconds = max(
                 elapsed_seconds, 0.75 * self._load_seconds + 0.25 * elapsed_seconds
             )
-        if (
-            not isinstance(action, (MoveTo, CopyTo))
-            or action.src.tier != "gpu"
-            or result.namespace is None
-        ):
+        if not isinstance(action, MoveTo) or result.namespace is None:
             return
         if result.transferred_bytes and "cold_copy_stored" in result.completed_steps:
             self._store_seconds = max(
@@ -378,11 +372,10 @@ class ToolWaitPolicy(KVPolicy):
                     self._kept.popitem(last=False)
                 return PolicyDecision()
             self._kept.pop(signal.owner_id, None)
-            store_action = CopyTo if self.preserve_source else MoveTo
             return PolicyDecision(
                 (
                     PolicyProposal(
-                        store_action(
+                        MoveTo(
                             signal.target,
                             CacheLocation("gpu"),
                             CacheLocation(self.tier),

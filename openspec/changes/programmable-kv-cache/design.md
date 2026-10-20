@@ -412,14 +412,15 @@ the counters-only path and cached scheduler age history. Unknown subclasses keep
 the existing full-observation default.
 
 An unreferenced cached G1 block is already in the allocator's free queue.
-Removing its hash through MOVE does not add an allocatable block. Evaluate an
-opt-in `preserve_source` tool policy using the existing GPU-source COPY primitive
-for backup; the normal allocator may still reclaim that cached copy on demand.
-Legacy policy and explicit MOVE retain their behavior. Successful GPU-source
-COPY results update the same bounded cold catalog and measured store cost as
-MOVE, while cold-source COPY remains a load result. Behavioral checks must prove
-equal free capacity, preserved immediate reuse, normal allocation-driven eviction,
-and restoration of only the successfully stored subset before full-work timing.
+Removing its hash through MOVE does not add an allocatable block. The opt-in
+GPU-source COPY backup experiment preserved immediate reuse and remained
+reclaimable under allocation pressure, with verified cold-subset/cost tracking.
+Its full pressure run took 1232.76 s versus the two validated MOVE runs at
+1188.53/1182.21 s and reported fewer cached tokens. Equal free capacity alone
+does not establish better cache victim selection. Retain the MOVE policy and
+remove the unsuccessful optional backup configuration; the existing public
+COPY primitive remains available. Preserve the experiment and source revision
+as evidence rather than adding an unused production option.
 
 `integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.

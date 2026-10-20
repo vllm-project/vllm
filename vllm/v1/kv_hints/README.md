@@ -201,11 +201,6 @@ not exceed `min_pause_seconds` (default 0.5) or its observed store-plus-load tim
 estimates keep pressure-based demotion. Skipped movement history is bounded and
 cleaned with its logical owners; explicit movement commands are unaffected.
 This heuristic does not estimate GPU recomputation cost or guarantee residency.
-`preserve_source=true` uses GPU-source COPY for backup instead of MOVE.
-After storage completes the cached G1 copy remains reclaimable by ordinary
-allocation, with the same free-block count as after MOVE. The default remains
-MOVE. Successful COPY backups update the same cold-content history and measured
-store cost, allowing later restoration after allocator eviction.
 In admission-coupled mode a short tool can also use a sustained GPU backlog:
 current referenced occupancy must reach `min_pressure`, and an observed waiting
 request must have waited longer than the minimum window or measured store/load

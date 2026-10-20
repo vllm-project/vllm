@@ -244,7 +244,6 @@ def main():
     parser.add_argument("--movement-min-pressure", type=float, default=0.8)
     parser.add_argument("--prefetch-on-admission", action="store_true")
     parser.add_argument("--movement-pressure-only", action="store_true")
-    parser.add_argument("--movement-preserve-source", action="store_true")
     parser.add_argument("--oracle", action="store_true")
     parser.add_argument("--policy-components", default="retention,movement,quota")
     parser.add_argument("--policy-max-wait-seconds", type=float, default=30)
@@ -504,7 +503,6 @@ def main():
                                 "consider_pause_duration": (
                                     not args.movement_pressure_only
                                 ),
-                                "preserve_source": args.movement_preserve_source,
                             },
                         },
                         {
