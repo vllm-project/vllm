@@ -109,20 +109,6 @@ def _run_rust_frontend(
     # code.
     engine_stack.close()
 
-    def _coord_shutdown(coordinator: DPCoordinator):
-        coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
-
-    def _engine_shutdown(
-        local_engine_manager: CoreEngineProcManager | CoreEngineActorManager,
-    ):
-        local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
-
-    def _api_shutdown():
-        timeout = (
-            vllm_config.shutdown_timeout if signal_utils.shutdown_requested else None
-        )
-        api_server_manager.shutdown(timeout=timeout)
-
     # Register callbacks in reverse of the desired LIFO execution order:
     #   set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
     #   -> grpc_sock cleanup -> sock cleanup
@@ -130,13 +116,30 @@ def _run_rust_frontend(
         exit_stack.callback(_coord_shutdown, coordinator)
     if local_engine_manager is not None:
         exit_stack.callback(_engine_shutdown, local_engine_manager)
-    exit_stack.callback(_api_shutdown)
+    exit_stack.callback(_api_shutdown, api_server_manager, vllm_config)
 
     wait_for_completion_or_failure(
         api_server_manager=api_server_manager,
         engine_manager=local_engine_manager,
         coordinator=coordinator,
     )
+
+
+def _coord_shutdown(coordinator: DPCoordinator):
+    coordinator.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+
+
+def _engine_shutdown(
+    local_engine_manager: CoreEngineProcManager | CoreEngineActorManager,
+):
+    local_engine_manager.shutdown(timeout=to_timeout(signal_utils.shutdown_by))
+
+
+def _api_shutdown(
+    api_server_manager: RustFrontendProcessManager, vllm_config: VllmConfig
+):
+    timeout = vllm_config.shutdown_timeout if signal_utils.shutdown_requested else None
+    api_server_manager.shutdown(timeout=timeout)
 
 
 def run_rust_frontend(args: argparse.Namespace) -> None:

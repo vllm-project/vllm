@@ -5,11 +5,31 @@ import errno
 import os
 import socket
 
-from vllm.entrypoints.launchers.launcher import (
-    create_server_socket,
-    create_server_unix_socket,
-)
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
+
+
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
+    family = socket.AF_INET
+    if is_valid_ipv6_address(addr[0]):
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(addr)
+
+    return sock
+
+
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
+    return sock
 
 
 def setup_listen_address(
@@ -42,6 +62,9 @@ def setup_listen_address(
                 ) from e
             raise
         return f"unix:{uds}", sock
+
+    if port is None:
+        raise ValueError("port is required when uds is not provided")
 
     host = host or ""
 
@@ -93,25 +116,8 @@ def setup_listen_address(
     return listen_address, sock
 
 
-def setup_listen_address_from_args(args, *, reuse_port):
-    return setup_listen_address(
-        host=args.host,
-        port=args.port,
-        uds=args.uds,
-        reuse_port=reuse_port,
-        ssl_keyfile=getattr(args, "ssl_keyfile", None),
-        ssl_certfile=getattr(args, "ssl_certfile", None),
-    )
-
-
 def cleanup_listen_socket(sock: socket.socket, uds_path: str | None = None) -> None:
-    """Release the serve listen socket bound by ``setup_listen_address``.
-
-    For AF_UNIX sockets the path is inferred from the socket itself when
-    ``uds_path`` is not provided, so callers don't have to remember to pass
-    ``args.uds``. Idempotent: safe to call multiple times (e.g. the shutdown
-    path may already have closed the socket).
-    """
+    """Release the serve listen socket bound by ``setup_listen_address``."""
     if uds_path is None and sock.family == socket.AF_UNIX:
         try:
             name = sock.getsockname()
@@ -143,3 +149,16 @@ def _describe_port_holder(port: int) -> str:
         name = cmdline = "<unavailable>"
 
     return f"pid={process.pid} name={name!r} cmd={cmdline!r}"
+
+
+def setup_listen_address_from_args(
+    args, *, reuse_port: bool
+) -> tuple[str, socket.socket]:
+    return setup_listen_address(
+        host=getattr(args, "host", None),
+        port=getattr(args, "port", None),
+        uds=getattr(args, "uds", None),
+        reuse_port=reuse_port,
+        ssl_keyfile=getattr(args, "ssl_keyfile", None),
+        ssl_certfile=getattr(args, "ssl_certfile", None),
+    )
