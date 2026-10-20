@@ -29,7 +29,7 @@ use vllm_engine_core_client::protocol::output::StopReason;
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
@@ -820,9 +820,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
         FinishReason::Repetition(_) => Ok("repetition"),
-        FinishReason::Error => {
-            bail_server_error!("Internal server error");
-        }
+        FinishReason::Error(error) => Err(engine_error(error.as_deref())),
     }
 }
 
@@ -932,7 +930,7 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error, false).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), false).is_err());
     }
 
     #[test]
