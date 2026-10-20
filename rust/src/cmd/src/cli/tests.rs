@@ -185,7 +185,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -199,6 +199,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -971,6 +972,40 @@ fn serve_args_reject_unsupported_flag_arg() {
 }
 
 #[test]
+fn serve_args_enable_per_request_metrics_requires_engine_stats() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+    ])
+    .expect("per-request metrics flag is supported");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:0".into());
+    assert!(config.api_server_options.enable_per_request_metrics);
+    assert!(config.validate().is_ok());
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-per-request-metrics",
+        "--disable-log-stats",
+    ])
+    .expect("flags parse independently");
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args.to_frontend_config("tcp://127.0.0.1:0".into()).validate().unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("--enable-per-request-metrics requires engine statistics logging")
+    );
+}
+
+#[test]
 fn serve_args_reject_custom_generation_config_source() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -1053,7 +1088,7 @@ fn frontend_args_accept_json() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1067,6 +1102,7 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -1724,7 +1760,7 @@ fn serve_args_accept_handshake_aliases() {
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
-                        tool_strict_level: Auto,
+                        tool_strict_level: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1738,6 +1774,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_per_request_metrics: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -1882,7 +1919,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1895,6 +1932,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
@@ -1976,7 +2014,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1989,6 +2027,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
@@ -2114,7 +2153,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             grpc_listener_mode: None,
             tool_call_parser: None,
             reasoning_parser: None,
-            tool_strict_level: Auto,
+            tool_strict_level: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2127,6 +2166,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
