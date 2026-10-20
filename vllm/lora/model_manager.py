@@ -684,9 +684,7 @@ class LoRAModelManager:
                     )
                     model.loras[module_name] = lora
                 elif module.__class__.__name__ == "FusedMoE3DWithLoRA":
-                    # Case for 3D moe model. Size by global experts because
-                    # _stack_moe_lora_weights reshapes by global_num_experts
-                    # and then slices this EP rank's experts.
+                    # Case for 3D moe model, sized by global experts for EP
                     # w2
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
@@ -916,7 +914,6 @@ class LoRAModelManager:
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
-            # Packed entries may hold None for sub-modules without a LoRA.
             lora_device = next(t for t in first_lora.lora_a if t is not None).device
         else:
             lora_device = first_lora.lora_a.device
@@ -1007,8 +1004,7 @@ class LoRAModelManager:
                     gate_up_proj_lora.lora_b,
                     down_proj_lora.lora_b,
                 ]
-                # module_lora now owns the gate_up tensors, so drop the
-                # base_layer entry to avoid pinning them twice.
+                # Avoid pinning the gate_up tensors twice
                 lora_model.loras.pop(module_name + ".base_layer", None)
             else:
                 # Some 3D MoE models haven't added the `is_3d_moe_weight`

@@ -442,7 +442,6 @@ def _bare_manager(modules=None, packed_modules=None):
 
 @pytest.fixture
 def count_pins(monkeypatch):
-    """Enable pinning on CPU-only hosts and count pin_memory calls."""
     pinned = []
 
     def fake_pin(self):
@@ -456,9 +455,6 @@ def count_pins(monkeypatch):
 
 @pytest.mark.parametrize("v_only", [False, True])
 def test_pin_memory_for_packed_lora(count_pins, v_only):
-    """The device of a packed LoRA is read from a tensor, not the tensor.
-    The first sub-LoRA can also be None (e.g. a v-only adapter)."""
-
     def make(name):
         return LoRALayerWeights(name, 4, 4, torch.zeros(4, 8), torch.zeros(8, 4))
 
@@ -471,8 +467,6 @@ def test_pin_memory_for_packed_lora(count_pins, v_only):
 
 
 def test_3d_moe_lora_pinned_once(count_pins):
-    """gate_up tensors are shared by the base_layer entry and the experts
-    entry. Only the experts entry may survive, or they get pinned twice."""
     num_experts, rank = 2, 4
     module = MagicMock(spec=FusedMoE3DWithLoRA)
     module.w13_lora_a_stacked = (torch.zeros(1, num_experts, rank, 8),)
@@ -503,9 +497,6 @@ def test_3d_moe_lora_pinned_once(count_pins):
 
 @pytest.mark.parametrize("ep_size", [1, 2, 3])
 def test_dummy_3d_moe_lora_is_sized_by_global_experts(ep_size):
-    """With EP the stacked buffers hold local experts, but the 3D stacking
-    reshapes by global experts, so a rank not divisible by ep_size used to
-    fail at warmup."""
     global_experts, rank = 6, 4
     local = global_experts // ep_size
 
