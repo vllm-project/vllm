@@ -131,7 +131,8 @@ mod tests {
                 "max_tokens": 7,
                 "logprobs": 2,
                 "prompt_logprobs": 1,
-                "ignore_eos": true
+                "ignore_eos": true,
+                "routed_experts_prompt_start": 2
             },
             "kv_transfer_params": {
                 "connector": "x"
@@ -158,6 +159,10 @@ mod tests {
             Some(1)
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
+        assert_eq!(
+            prepared.text_request.sampling_params.routed_experts_prompt_start,
+            Some(2)
+        );
         assert_eq!(prepared.text_request.priority, -3);
         assert_eq!(prepared.text_request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(
