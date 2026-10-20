@@ -885,10 +885,9 @@ class AsyncLLM(EngineClient):
                                 for eco in outputs_slice
                                 for mm_hash in eco.mm_cache_miss_hashes or ()
                             ]
-                            if missing_hashes:
-                                # Mark before publishing errors so even queued
-                                # renders invalidate before their next cache lookup.
-                                renderer.queue_mm_cache_invalidations(missing_hashes)
+                            # Mark before publishing errors so even queued
+                            # renders invalidate before their next cache lookup.
+                            renderer.queue_mm_cache_invalidations(missing_hashes)
 
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(

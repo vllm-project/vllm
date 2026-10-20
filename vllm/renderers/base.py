@@ -397,9 +397,11 @@ class BaseRenderer(ABC, Generic[_T]):
     def queue_mm_cache_invalidations(self, mm_hashes: Sequence[str]) -> None:
         """Coalesce stale sender entries without interrupting processing."""
         cache = self.mm_processor_cache
-        if cache is None:
+        if cache is None or not mm_hashes:
             return
         pending = {h for h in mm_hashes if cache.is_cached_item(h)}
+        if not pending:
+            return
         with self._mm_cache_invalidation_lock:
             self._pending_mm_cache_invalidations.update(pending)
 
