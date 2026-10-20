@@ -97,10 +97,27 @@ class ObservabilityConfig:
     argument."""
 
     enable_logging_iteration_details: bool = False
-    """Enable detailed logging of iteration details.
-    If set, vllm EngineCore will log iteration details
-    This includes number of context/generation requests and tokens
-    and the elapsed cpu time for the iteration."""
+    """Log iteration request/token counts and automatically collect GPU timing
+    where supported. Unsupported configurations log counts without durations.
+    Requires log statistics to be enabled."""
+
+    iteration_timing_enabled: bool = Field(default=False, init=False, repr=False)
+    """Internal state resolved at EngineCore startup; not a user option."""
+
+    enable_iteration_workload_metrics: bool = False
+    """Add scheduled context-length and queued-work statistics to complete
+    iteration records. Automatically enables GPU timing, not console logging.
+    Disabled by default.
+    Queue snapshots scan waiting requests after each completed iteration."""
+
+    forward_pass_metrics_port: int = Field(default=0, ge=0, le=65535)
+    """Base TCP port for native forward-pass metrics. Zero disables publishing.
+    Each EngineCore publishes its data-parallel rank N on PORT + N. Enabling this
+    also enables iteration GPU timing and workload metrics, not console logs."""
+
+    forward_pass_metrics_worker_id: str = ""
+    """Worker identifier in forward-pass metrics. Defaults to the generated
+    vLLM instance ID when unset."""
 
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
@@ -212,6 +229,14 @@ class ObservabilityConfig:
                     "must be strictly increasing"
                 )
         return value
+
+    @model_validator(mode="after")
+    def _enable_iteration_metrics_collection(self):
+        if self.forward_pass_metrics_port:
+            self.enable_iteration_workload_metrics = True
+        if self.enable_iteration_workload_metrics:
+            self.iteration_timing_enabled = True
+        return self
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):

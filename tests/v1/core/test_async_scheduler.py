@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.metrics.iteration import IterationMetricsCollector
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -30,6 +31,45 @@ def _make_model_runner_output(
         prompt_logprobs_dict={},
         pooler_output=[],
     )
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_iteration_workload_matches_async_speculative_execution_context(
+    use_v2_model_runner,
+):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu",
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    scheduler.observability_config.iteration_timing_enabled = True
+    scheduler.observability_config.enable_iteration_workload_metrics = True
+    collector = IterationMetricsCollector(scheduler, correct_async_spec_lengths=True)
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(request)
+
+    def schedule():
+        output = scheduler.schedule()
+        collector.begin_iteration(output)
+        return output
+
+    def complete(output, tokens):
+        result = _make_model_runner_output(output)
+        result.sampled_token_ids = [tokens]
+        result.iteration_timing_samples = ((output.iteration_metrics_id, 10.0),)
+        collector.before_update(output, result)
+        scheduler.update_from_output(output, result)
+        collector.complete_iteration(output, result)
+        return collector.take_ready()[0]
+
+    complete(schedule(), [1])
+    first, second = schedule(), schedule()
+    assert first.scheduled_workload.sum_decode_kv_tokens == 8
+    assert second.scheduled_workload.sum_decode_kv_tokens == 12
+    assert complete(first, [2]).scheduled_workload.sum_decode_kv_tokens == 8
+    # Three rejected drafts in the first execution shrink the second's context.
+    assert complete(second, [3, 4]).scheduled_workload.sum_decode_kv_tokens == 9
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])

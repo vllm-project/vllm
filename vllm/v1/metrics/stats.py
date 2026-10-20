@@ -10,6 +10,10 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import (
+    QueuedIterationWorkload,
+    ScheduledIterationWorkload,
+)
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -203,10 +207,15 @@ class SchedulerIterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
-    elapsed_ms: float
+    elapsed_ms: float | None
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
+    is_idle: bool = False
+    # None when GPU timing is disabled; CPU result-wait time is not a substitute.
+    timing_scope: str | None = None
+    scheduled_workload: ScheduledIterationWorkload | None = None
+    queued_workload: QueuedIterationWorkload | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"
@@ -237,6 +246,8 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
+    # Completed GPU timings can lag request output delivery by multiple steps.
+    iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

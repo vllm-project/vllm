@@ -97,6 +97,13 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsExporter
+from vllm.v1.metrics.iteration import (
+    ITERATION_IDLE_RECORD_INTERVAL,
+    ITERATION_TIMING_POLL_INTERVAL,
+    ITERATION_TIMING_SHUTDOWN_TIMEOUT,
+    IterationMetricsCollector,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -130,6 +137,9 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        vllm_config.resolve_iteration_timing(
+            log_stats, multiprocess_mode=isinstance(self, EngineCoreProc)
+        )
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
@@ -182,6 +192,24 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self._initialize_effective_attention_block_size()
+        self.iteration_metrics = (
+            IterationMetricsCollector(
+                scheduler=(
+                    self.scheduler
+                    if (
+                        vllm_config.observability_config.enable_iteration_workload_metrics
+                    )
+                    else None
+                ),
+                correct_async_spec_lengths=bool(
+                    vllm_config.scheduler_config.async_scheduling
+                    and vllm_config.speculative_config is not None
+                    and not vllm_config.model_config.is_diffusion
+                ),
+            )
+            if vllm_config.observability_config.iteration_timing_enabled
+            else None
+        )
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
@@ -230,6 +258,10 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        self.forward_pass_metrics_exporter = (
+            ForwardPassMetricsExporter.from_vllm_config(vllm_config)
+        )
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -564,7 +596,11 @@ class EngineCore:
         enable_details = (
             self.vllm_config.observability_config.enable_logging_iteration_details
         )
-        if not self.log_stats or not enable_details:
+        if (
+            self.vllm_config.observability_config.iteration_timing_enabled
+            or not self.log_stats
+            or not enable_details
+        ):
             yield None
             return
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
@@ -584,7 +620,7 @@ class EngineCore:
                 num_ctx_tokens=0,
                 num_generation_requests=0,
                 num_generation_tokens=0,
-                elapsed_ms=0.0,
+                elapsed_ms=None,
                 is_dummy=True,
             )
         else:
@@ -595,14 +631,12 @@ class EngineCore:
                 num_ctx_tokens=details.num_ctx_tokens,
                 num_generation_requests=details.num_generation_requests,
                 num_generation_tokens=details.num_generation_tokens,
-                elapsed_ms=0.0,
+                elapsed_ms=None,
                 num_encoder_inputs=details.num_encoder_inputs,
                 num_encoder_output_tokens=details.num_encoder_output_tokens,
             )
 
-        start_time = time.monotonic()
         yield iteration_details
-        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
         self._iteration_index = iteration_index + 1
 
     def _make_iteration_details_stats(
@@ -632,6 +666,30 @@ class EngineCore:
         for eco in outputs.values():
             eco.weight_version = self._weight_version
 
+    def _attach_iteration_records(self, outputs: dict[int, EngineCoreOutputs]) -> None:
+        collector = self.iteration_metrics
+        if collector is None or not (records := collector.take_ready()):
+            return
+        if self.forward_pass_metrics_exporter is not None:
+            self.forward_pass_metrics_exporter.record(records)
+        # Keep stats with their frontend for request-local enrichment (e.g. LoRA).
+        for output in outputs.values():
+            if output.scheduler_stats is not None:
+                output.scheduler_stats.iteration_records.extend(records)
+                return
+        owner = outputs.get(0)
+        if owner is None:
+            outputs[0] = owner = EngineCoreOutputs()
+        owner.scheduler_stats = self.scheduler.make_stats() or SchedulerStats()
+        owner.scheduler_stats.iteration_records.extend(records)
+
+    def _poll_iteration_metrics(self) -> dict[int, EngineCoreOutputs]:
+        outputs: dict[int, EngineCoreOutputs] = {}
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.poll_timing(self.model_executor)
+            self._attach_iteration_records(outputs)
+        return outputs
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
         Overridden by the DP engine core; never throttles otherwise."""
@@ -648,6 +706,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.begin_iteration(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -661,9 +721,14 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.before_update(scheduler_output, model_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.complete_iteration(scheduler_output, model_output)
+            self._attach_iteration_records(engine_core_outputs)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -706,6 +771,8 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            if self.iteration_metrics is not None:
+                self.iteration_metrics.begin_iteration(scheduler_output)
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -763,9 +830,14 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.before_update(scheduler_output, model_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if self.iteration_metrics is not None:
+            self.iteration_metrics.complete_iteration(scheduler_output, model_output)
+            self._attach_iteration_records(engine_core_outputs)
         self._attach_iteration_details(engine_core_outputs, iteration_details)
         self._attach_weight_version(engine_core_outputs)
 
@@ -807,6 +879,28 @@ class EngineCore:
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
+        collector = self.iteration_metrics
+        if collector is not None:
+            deadline = time.monotonic() + ITERATION_TIMING_SHUTDOWN_TIMEOUT
+            while collector.has_pending_timing():
+                try:
+                    outputs = self._poll_iteration_metrics()
+                except Exception:
+                    logger.warning(
+                        "Could not collect final iteration timings", exc_info=True
+                    )
+                    break
+                if outputs and isinstance(self, EngineCoreProc):
+                    for client_index, output in outputs.items():
+                        self.output_queue.put_nowait((client_index, output))
+                if not collector.has_pending_timing():
+                    break
+                if time.monotonic() >= deadline:
+                    logger.warning("Dropping unfinished iteration timings at shutdown")
+                    break
+                time.sleep(ITERATION_TIMING_POLL_INTERVAL)
+        if self.forward_pass_metrics_exporter is not None:
+            self.forward_pass_metrics_exporter.shutdown()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -1051,7 +1145,14 @@ class EngineCore:
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.execute_dummy_batch()
+        collector = self.iteration_metrics
+        if collector is None:
+            self.model_executor.execute_dummy_batch()
+            return
+        iteration_id = collector.begin_dummy_iteration()
+        samples = self.model_executor.execute_dummy_batch(iteration_id)
+        assert samples is not None
+        collector.complete_timing_samples(samples)
 
     def compute_weight_checksums(self) -> list[dict[str, str]]:
         return self.collective_rpc("compute_weight_checksums")
@@ -1616,6 +1717,33 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
         waited = False
         while not self.has_work() and self.is_running():
+            collector = self.iteration_metrics
+            observability = self.vllm_config.observability_config
+            heartbeat = (
+                collector is not None
+                and observability.enable_iteration_workload_metrics
+            )
+            if collector is not None and self.input_queue.empty():
+                for client_index, output in self._poll_iteration_metrics().items():
+                    self.output_queue.put_nowait((client_index, output))
+                if (
+                    heartbeat
+                    and self.input_queue.empty()
+                    and not collector.has_pending_timing()
+                    and time.monotonic() >= getattr(self, "_next_idle_record", 0.0)
+                ):
+                    idle = collector.make_idle_record()
+                    assert idle is not None
+                    if self.forward_pass_metrics_exporter is not None:
+                        self.forward_pass_metrics_exporter.record((idle,))
+                    stats = self.scheduler.make_stats() or SchedulerStats()
+                    stats.iteration_records.append(idle)
+                    self.output_queue.put_nowait(
+                        (0, EngineCoreOutputs(scheduler_stats=stats))
+                    )
+                    self._next_idle_record = (
+                        time.monotonic() + ITERATION_IDLE_RECORD_INTERVAL
+                    )
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1626,10 +1754,21 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            pending_timing = collector is not None and collector.has_pending_timing()
             try:
-                req = self.input_queue.get(block=block)
+                if block and (pending_timing or heartbeat):
+                    timeout = (
+                        ITERATION_TIMING_POLL_INTERVAL
+                        if pending_timing
+                        else ITERATION_IDLE_RECORD_INTERVAL
+                    )
+                    req = self.input_queue.get(timeout=timeout)
+                else:
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if block and (pending_timing or heartbeat):
+                    continue
                 break
             if not block:
                 break
@@ -2452,6 +2591,11 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
+                    if self.iteration_metrics is not None:
+                        outputs: dict[int, EngineCoreOutputs] = {}
+                        self._attach_iteration_records(outputs)
+                        for client_index, output in outputs.items():
+                            self.output_queue.put_nowait((client_index, output))
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(

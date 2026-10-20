@@ -2,10 +2,41 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for ObservabilityConfig validation."""
 
-import pytest
-from pydantic import ValidationError
+from types import SimpleNamespace
 
+import pytest
+from pydantic import TypeAdapter, ValidationError
+
+from vllm.config import DeviceConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
+
+
+def test_iteration_timing_is_not_a_constructor_option():
+    with pytest.raises(ValidationError, match="iteration_timing_enabled"):
+        TypeAdapter(ObservabilityConfig).validate_python(
+            {"iteration_timing_enabled": True}
+        )
+
+
+def test_iteration_workload_enables_gpu_timing_without_logging():
+    assert not ObservabilityConfig().enable_iteration_workload_metrics
+    config = ObservabilityConfig(enable_iteration_workload_metrics=True)
+    assert config.iteration_timing_enabled
+    assert not config.enable_logging_iteration_details
+    with pytest.raises(ValidationError, match="Iteration GPU timing requires a CUDA"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"), observability_config=config
+        )
+
+    runtime_config = VllmConfig()
+    runtime_config.model_config = SimpleNamespace(runner_type="generate")
+    runtime_config.device_config.device_type = "cuda"
+    runtime_config.observability_config = config
+    runtime_config.resolve_iteration_timing(log_stats=False, multiprocess_mode=True)
+    assert config.iteration_timing_enabled
+    config.enable_iteration_workload_metrics = False
+    runtime_config.resolve_iteration_timing(log_stats=False, multiprocess_mode=True)
+    assert not config.iteration_timing_enabled
 
 
 def test_custom_histogram_buckets_default_none():
