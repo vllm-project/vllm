@@ -12,12 +12,7 @@ from __future__ import annotations
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.mxfp4_mla import (
-    E8M0_BIAS,
-    GROUP_SIZE,
-    row_bytes,
-    scale_region_offset,
-)
+from vllm.v1.attention.ops.mxfp4_mla import E8M0_BIAS, GROUP_SIZE, row_bytes
 
 # E2M1 magnitudes by code index 0..7. Code is ``sign << 3 | index``.
 _E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -199,6 +194,6 @@ def store_mxfp4_mla(
         NUM_GROUPS=latent // group,
         HALF_GROUP=group // 2,
         ROW_BYTES=pitch,
-        SCALE_OFFSET=scale_region_offset(latent),
+        SCALE_OFFSET=latent // 2,
         num_warps=4,
     )

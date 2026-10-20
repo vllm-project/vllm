@@ -22,8 +22,3 @@ def row_bytes(latent_dim: int, group: int = GROUP_SIZE) -> int:
     if latent_dim % group:
         raise ValueError(f"latent dim {latent_dim} not divisible by group {group}")
     return latent_dim // 2 + latent_dim // group
-
-
-def scale_region_offset(latent_dim: int) -> int:
-    """Byte offset of the scale region within a row. 256 for a 512-wide latent."""
-    return latent_dim // 2

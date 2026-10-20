@@ -12,15 +12,15 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.mxfp4_mla_read import _load_mxfp4_rows
 
-_ON_ROCM_GPU = current_platform.is_rocm() and torch.cuda.is_available()
-pytestmark = pytest.mark.skipif(not _ON_ROCM_GPU, reason="mxfp4_mla is ROCm-only")
+if current_platform.is_rocm() and torch.cuda.is_available():
+    from vllm.platforms.rocm import on_gfx950, on_mi3xx
 
-if _ON_ROCM_GPU:
-    from vllm.platforms.rocm import on_gfx950
-
-    _ON_GFX950 = on_gfx950()
+    _ON_MI3XX, _ON_GFX950 = on_mi3xx(), on_gfx950()
 else:
-    _ON_GFX950 = False
+    _ON_MI3XX = _ON_GFX950 = False
+pytestmark = pytest.mark.skipif(
+    not _ON_MI3XX, reason="mxfp4_mla needs CDNA 3 or 4 (gfx942 or gfx950)"
+)
 
 LATENT, ROW, GROUP, BLOCK_K = 512, 272, 32, 16
 _E2M1_VALUES = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
