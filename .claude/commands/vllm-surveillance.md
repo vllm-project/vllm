@@ -32,6 +32,8 @@ docker inspect myia_vllm-medium-swift15-27b --format 'RC={{.RestartCount}} statu
 docker logs --tail 20000 myia_vllm-medium-swift15-27b 2>&1 | grep -ac 'out of memory'
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
 docker ps --filter name=myia_vllm --format '{{.Names}}\t{{.Status}}'
+# /dev/shm hôte (ipc:host — NOUS seuls l'utilisons) : fuite à chaque boot, cf. encadré ci-dessous
+docker exec myia_vllm-medium-swift15-27b df -h /dev/shm | tail -1
 # wedge : le signal faisant autorité = la sonde décodage du watchdog (pas la télémétrie seule)
 docker logs --tail 4000 myia_vllm-watchdog-swift15-27b 2>&1 | grep -E "WEDGE health|CRASH-LOOP|RESTARTING|BOOT-STALL" | grep -vE '^\s'
 docker logs --tail 4000 myia_vllm-watchdog-swift15-27b 2>&1 | grep -c 'OK health=200 decode=200'
@@ -42,6 +44,22 @@ Attendu : health 200 (<10 ms), RC stable, OOM 0, 3 conteneurs Up, sondes OK. **V
 **Dérive VRAM — mesurée puis INFIRMÉE comme tendance (09/10)** : 21 408 (08/10 22:5xZ) → **21 594** (09/10 04:47Z, +186) → **21 435** (09/10 10:47Z, **−159**). Le cycle de 04:47Z avait lu une pente de +30 MiB/h et annoncé une alerte ; **la pente n'a pas tenu** — c'est un **high-water d'allocateur** (charge soutenue qui garde les graphs à leur forme max), **pas une fuite**. Leçon : **deux points ne font pas une pente** ; ne pas annoncer une extrapolation (« J+2 ») sur 6 h de données. La charge qui produit ce high-water est mesurée en §5ter. `StartedAt` stable vs cycle précédent ; un déplacement avec RC=0 = restart externe → identifier la cause (penser à `autoheal` : `docker ps | grep -i heal`, redémarreur concurrent INVISIBLE, RestartCount flat).
 
 Comportement documenté, PAS une panne : toute requête ≥ ~100K tokens **affame les nouvelles arrivées** (dense 27B) — le watchdog tolère 90 s. Depuis le batch 8192 la fenêtre recule (prefill +21 %), mais un WEDGE `fail 1/2` (jamais 2/2) pendant une sonde prefill ou un gros prompt est le comportement attendu, **y compris déclenché par nos propres sondes de banc** (vécu 08/10 21:38 et 21:46, deux `fail 1/2` pendant les sondes 157K, zéro restart). Un WEDGE pendant un gros prefill = attendre le post-mortem avant d'agir ; le moteur est sain.
+
+### ⚠ `/dev/shm` hôte — fuite à chaque boot (mesurée 20/10)
+
+Le moteur est le **seul conteneur `ipc=host`** de la machine (51 conteneurs inspectés le 20/10) : **tout ce qui vit dans ce shm est à nous**. Plancher légitime = **le tier lui-même** (32 GiB en nvfp4) + les blocs `psm_*` transitoires de la génération courante (~0,5-1 GiB). **Tout le reste est orphelin** : chaque génération morte laisse ses `psm_*` (25/161/241 MB) et ses `sem.mp-*`, et **la fenêtre d'éval fs du 20/10 a laissé 2 × 8 GiB de `vllm_offload_*.mmap`** (les tiers du profil d'éval, mtime antérieurs au boot prod). État mesuré avant nettoyage : **49G/63G = 77 %**, dont **21,8 GiB d'orphelins sur 58 fichiers** ; après : **32G = 51 %, 31G libres**, moteur health 200 en 5,9 ms.
+
+Un `/dev/shm` plein = ENOSPC pour les blocs suivants → **crash moteur** ; sous charge (fenêtre Minimax) la marge est le facteur limitant. **Seuil d'alerte : > 45G utilisés (≈ 72 %).**
+
+**Recette** — ne supprime que les fichiers **antérieurs au démarrage du conteneur** (donc jamais un fichier mappé ni la génération vivante) :
+
+```bash
+docker inspect myia_vllm-medium-swift15-27b --format '{{.State.StartedAt}}'   # borne (UTC)
+MSYS_NO_PATHCONV=1 docker exec myia_vllm-medium-swift15-27b sh -c \
+  'find /dev/shm -maxdepth 1 -type f ! -newermt "2026-10-20 10:25:05" -print -delete'
+```
+
+Effet de bord mesuré : les pages tmpfs comptant dans le commit hôte, les 17 GiB rendus ont fait passer la marge commit de **86,4 % → 83,4 %** (sous le seuil §3). **Nettoyer après toute fenêtre d'éval et après tout `down/up`** — c'est là que la fuite se matérialise.
 
 ## (2) Condensation (logs roosync)
 
