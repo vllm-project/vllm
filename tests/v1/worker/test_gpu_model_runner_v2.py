@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CacheConfig, ParallelConfig
+from vllm.config import CacheConfig, LoadConfig, ParallelConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -393,6 +393,10 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
+    monkeypatch.setattr(
+        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
+    )
 
     speculator.load_draft_model(object(), set())
 
