@@ -21,6 +21,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 
 
 def _build_serving_render() -> ServingRender:
@@ -911,3 +912,28 @@ async def test_messages_render_error_invalid_model(client):
     assert response.status_code == 404
     data = response.json()
     assert "error" in data
+
+
+@pytest.fixture(scope="module")
+def gpt_oss_server():
+    with RemoteLaunchRenderServer(GPT_OSS_MODEL_NAME, []) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
+    """GPT-OSS chats are rendered with Harmony in /tokenize, as on the chat route."""
+    messages = [
+        {"role": "system", "content": "Answer in one word."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+    async with httpx.AsyncClient(
+        base_url=gpt_oss_server.url_for(""), timeout=30.0
+    ) as client:
+        render = await client.post(
+            "/v1/chat/completions/render", json={"messages": messages}
+        )
+        tokenize = await client.post("/tokenize", json={"messages": messages})
+
+    assert render.status_code == tokenize.status_code == 200
+    assert tokenize.json()["tokens"] == render.json()["token_ids"]
