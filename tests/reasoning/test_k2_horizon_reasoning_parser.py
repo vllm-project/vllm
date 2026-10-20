@@ -21,6 +21,10 @@ EFFORT_TOKENS = {
     "low": ("<ifm|think_faster>", "</ifm|think_faster>"),
 }
 TOOL_CALLS_START = "<ifm|tool_calls>"
+TOOL_CALL_WITH_END_TAG = (
+    '<ifm|tool_calls><ifm|tool_call>ping{"text":"</ifm|think>"}'
+    "</ifm|tool_call></ifm|tool_calls>"
+)
 
 
 class K2Tokenizer:
@@ -70,6 +74,24 @@ def _request(**kwargs) -> ChatCompletionRequest:
         model="k2-horizon",
         messages=[{"role": "user", "content": "test"}],
         **kwargs,
+    )
+
+
+def _stream(parser: K2HorizonReasoningParser, chunks: list[str]) -> tuple[str, str]:
+    deltas = [
+        parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+        )
+        for chunk in chunks
+    ]
+    return (
+        "".join(d.reasoning or "" for d in deltas if d),
+        "".join(d.content or "" for d in deltas if d),
     )
 
 
@@ -172,25 +194,39 @@ def test_any_effort_end_token_closes_reasoning(effort: str, end_token: str):
     parser = K2HorizonReasoningParser(tokenizer, **kwargs)
     streaming_parser = K2HorizonReasoningParser(tokenizer, **kwargs)
     output = f"plan{end_token}answer"
-    deltas = [
-        streaming_parser.extract_reasoning_streaming(
-            previous_text="",
-            current_text="",
-            delta_text=char,
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
-        )
-        for char in output
-    ]
     output_ids = [*tokenizer.encode("plan"), end_token_id, *tokenizer.encode("answer")]
 
     assert parser.extract_reasoning(output, _request()) == ("plan", "answer")
-    assert "".join(d.reasoning or "" for d in deltas if d) == "plan"
-    assert "".join(d.content or "" for d in deltas if d) == "answer"
+    assert _stream(streaming_parser, list(output)) == ("plan", "answer")
     assert parser.is_reasoning_end(output_ids)
     assert parser.is_reasoning_end_streaming(output_ids, [end_token_id])
     assert parser.extract_content_ids(output_ids) == tokenizer.encode("answer")
+
+
+@pytest.mark.parametrize("effort", ["high", "medium", "low"])
+@pytest.mark.parametrize(
+    "end_token", ["", "</ifm|think>"], ids=["tool-call-first", "end-token-first"]
+)
+def test_earliest_boundary_ends_reasoning(effort: str, end_token: str):
+    """An end token inside tool-call text must not move the boundary."""
+    tokenizer = _k2_tokenizer()
+    kwargs = {"chat_template_kwargs": {"reasoning_effort": effort}}
+    parser = K2HorizonReasoningParser(tokenizer, **kwargs)
+    output = f"plan{end_token}{TOOL_CALL_WITH_END_TAG}"
+    inside_tool_tag = output.index(TOOL_CALLS_START) + 3
+    expected = ("plan", TOOL_CALL_WITH_END_TAG)
+
+    assert parser.extract_reasoning(output, _request()) == expected
+    for chunks in (
+        [output],
+        list(output),
+        [output[:inside_tool_tag], output[inside_tool_tag:]],
+    ):
+        streaming_parser = K2HorizonReasoningParser(tokenizer, **kwargs)
+        assert _stream(streaming_parser, chunks) == expected
+    assert parser.extract_content_ids(tokenizer.encode(output)) == tokenizer.encode(
+        TOOL_CALL_WITH_END_TAG
+    )
 
 
 def test_latest_boundary_controls_reasoning_state():
