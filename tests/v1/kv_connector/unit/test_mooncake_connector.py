@@ -1657,7 +1657,7 @@ async def test_peer_failure_only_settles_its_pending_requests(terminal):
         await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
         assert [meta.pull_tasks_count for meta in requests] == [1, 1, 1]
         assert [meta.failed for meta in requests] == [False, True, True]
-        assert worker.finished_recving_reqs == set()
+        assert worker.get_finished()[1] is None
         assert worker.get_block_ids_with_load_errors() == {2, 3}
         worker.process_pulling_result(
             MooncakeXferResponse(
@@ -1665,7 +1665,7 @@ async def test_peer_failure_only_settles_its_pending_requests(terminal):
             ),
             metas,
         )
-        assert worker.finished_recving_reqs == {meta.d_req_id for meta in requests}
+        assert worker.get_finished()[1] == {meta.d_req_id for meta in requests}
         assert all(meta.pull_tasks_count == 0 for meta in requests)
         worker.shutdown()
 
@@ -1693,7 +1693,8 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             producer.reqs_need_send[send_meta.transfer_id] = send_meta
 
             async def expire_before_send():
-                assert await producer.fetch_finished_sending_reqs() == {"p-req-1"}
+                producer._sweep_expired_sends()
+                assert producer.get_finished()[0] == {"p-req-1"}
 
             metadata = _xfer_meta(
                 [
@@ -1742,7 +1743,7 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
                 {meta.d_req_id: meta},
             )
             assert meta.pull_tasks_count == 1
-            assert worker.finished_recving_reqs == set()
+            assert worker.get_finished()[1] is None
             sock = (
                 mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
             )
@@ -1752,7 +1753,7 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             )
             assert meta.pull_tasks_count == 0
             assert meta.failed
-            assert worker.finished_recving_reqs == {meta.d_req_id}
+            assert worker.get_finished()[1] == {meta.d_req_id}
             assert worker.get_block_ids_with_load_errors() == {100}
             stats = worker.get_kv_connector_stats()
             assert stats is not None

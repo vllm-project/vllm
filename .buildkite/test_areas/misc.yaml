@@ -153,7 +153,8 @@ steps:
   commands:
     - INSTALL_MOONCAKE_COMPRESSION=1 bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - VLLM_TEST_REQUIRE_MOONCAKE_COMPRESSION=$$(python -c "import torch; print(int(torch.version.cuda is not None))") pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - export VLLM_TEST_REQUIRE_MOONCAKE_COMPRESSION=$$(python -c "import torch; print(int(torch.version.cuda is not None))")
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
   mirror:
     amd:
