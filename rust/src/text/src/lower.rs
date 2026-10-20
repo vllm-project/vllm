@@ -221,7 +221,14 @@ pub fn lower_sampling_params(
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
-        logit_bias,
+        // Like Python's `SamplingParams.from_optional`, clamp biases to
+        // [-100, 100] instead of passing extreme values to the sampler.
+        logit_bias: logit_bias.map(|logit_bias| {
+            logit_bias
+                .into_iter()
+                .map(|(token_id, bias)| (token_id, bias.clamp(-100.0, 100.0)))
+                .collect()
+        }),
         allowed_token_ids,
         bad_words_token_ids: (!bad_words_token_ids.is_empty()).then_some(bad_words_token_ids),
         // TODO: Validate structured-output schemas and regexes before submitting requests to engine-core.
@@ -482,6 +489,23 @@ mod tests {
             lower(Some(-2)),
             Err(Error::InvalidThinkingTokenBudget)
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_clamps_logit_bias() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                logit_bias: Some(HashMap::from([(5, 250.0), (6, -300.0), (7, 1.5)])),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect("lower logit_bias");
+
+        assert_eq!(
+            params.logit_bias,
+            Some(HashMap::from([(5, 100.0), (6, -100.0), (7, 1.5)]))
+        );
     }
 
     #[test]
