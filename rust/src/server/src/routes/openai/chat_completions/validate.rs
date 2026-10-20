@@ -81,8 +81,9 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
+    // Python's default is 1.0, which SDKs may send explicitly.
     reject_non_default(
-        request.length_penalty.as_ref(),
+        request.length_penalty.filter(|penalty| *penalty != 1.0).as_ref(),
         "length_penalty",
         "length_penalty is not supported.",
     )?;
@@ -90,6 +91,20 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(
             param = "spaces_between_special_tokens",
             "spaces_between_special_tokens is not supported."
+        );
+    }
+    // TODO: return the chat-templated prompt as `prompt_text`.
+    if request.return_prompt_text == Some(true) {
+        bail_invalid_request!(
+            param = "return_prompt_text",
+            "return_prompt_text is not supported."
+        );
+    }
+    // TODO: return the per-choice `weight_versions` spans.
+    if request.return_weight_versions == Some(true) {
+        bail_invalid_request!(
+            param = "return_weight_versions",
+            "return_weight_versions is not supported."
         );
     }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
@@ -254,6 +269,58 @@ mod tests {
             ..base_request()
         };
 
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+        let request = ChatCompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("the default length_penalty should be accepted");
+
+        let request = ChatCompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_return_prompt_text() {
+        for return_prompt_text in [None, Some(false)] {
+            let request = ChatCompletionRequest {
+                return_prompt_text,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+                .expect("an unset or false return_prompt_text should be accepted");
+        }
+
+        let request = ChatCompletionRequest {
+            return_prompt_text: Some(true),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_return_weight_versions() {
+        for return_weight_versions in [None, Some(false)] {
+            let request = ChatCompletionRequest {
+                return_weight_versions,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+                .expect("an unset or false return_weight_versions should be accepted");
+        }
+
+        let request = ChatCompletionRequest {
+            return_weight_versions: Some(true),
+            ..base_request()
+        };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
