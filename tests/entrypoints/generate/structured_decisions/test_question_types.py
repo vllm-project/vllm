@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -62,10 +63,24 @@ def test_choice_prompt():
 def test_prompt_keeps_instructions_as_given():
     q = noul(instructions="Reply within the hour?\n\n")
     assert q.type.prompt(q).startswith("Question: Reply within the hour?\n\n\nyes\n")
-    assert q.type.prompt(q, 2).startswith("Question 2: Reply within the hour?\n\n\n")
     empty = noul(instructions="")
     assert empty.type.prompt(empty) == "yes\nno\nAnswer with yes or no only."
-    assert empty.type.prompt(empty, 1).startswith("Question 1:\nyes\n")
+
+
+@pytest.mark.parametrize(
+    "q,body",
+    [
+        (choice(), "A: billing - money\nB: outage\nC: other\n"),
+        (noul(criteria={"true": "t", "false": "f"}), "yes: t\nno: f\n"),
+        (score(), "0: calm\n1: annoyed\n2: furious\n"),
+    ],
+)
+def test_prompt_is_the_heading_then_the_body(q, body):
+    body += q.type.reply_instruction
+    assert q.type.body(q) == body
+    assert q.type.prompt(q) == f"Question: {q.instructions}\n{body}"
+    bare = replace(q, instructions="")
+    assert bare.type.prompt(bare) == body
 
 
 def test_choice_answer_shape():

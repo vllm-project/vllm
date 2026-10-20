@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import string
+from io import BytesIO
 from typing import Any
 
+import pybase64 as base64
 import pytest
 import requests
+from PIL import Image, ImageDraw
 
 from tests.utils import RemoteOpenAIServer, large_gpu_mark
 
@@ -23,8 +26,6 @@ def server():
         "0.85",
         "--diffusion-config",
         f'{{"canvas_length": {CANVAS}}}',
-        "--max-logprobs",
-        "32",
         "--enable-prefix-caching",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args, max_wait_seconds=900) as remote_server:
@@ -143,3 +144,75 @@ def test_joint_answers_do_not_follow_line_numbers(server):
     assert len(response["joint"]["canvases"]) > 1
     answers = response["answers"]
     assert sum(answers[f"q{i}"]["choice"] == letters[i % 26] for i in range(64)) >= 60
+
+
+def picture(shape: str, colour: str) -> str:
+    """A 256x256 data URL: one filled shape on white."""
+    image = Image.new("RGB", (256, 256), "white")
+    draw = ImageDraw.Draw(image)
+    box = (48, 48, 208, 208)
+    (draw.rectangle if shape == "square" else draw.ellipse)(box, fill=colour)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+PICTURES = {"red square": ("square", "red"), "blue circle": ("circle", "blue")}
+
+PICTURE_QUESTIONS: dict[str, Any] = {
+    "colour": {
+        "type": "choice",
+        "instructions": "What colour is the shape in the image?",
+        "criteria": dict.fromkeys(["red", "green", "blue"]),
+    },
+    "shape": {
+        "type": "choice",
+        "instructions": "Which shape is in the image?",
+        "criteria": dict.fromkeys(["square", "circle", "triangle"]),
+    },
+    "round": {"type": "noul", "instructions": "Is the shape in the image round?"},
+}
+
+
+@pytest.mark.parametrize("joint", [False, True])
+def test_images_follow_the_picture(server, joint):
+    def read(images):
+        body = {
+            "state": "Look at the image.",
+            "questions": PICTURE_QUESTIONS,
+            "joint": joint,
+            "images": images,
+        }
+        response = post(server, body)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def per_read_tokens(body):
+        reads = len(body["joint"]["canvases"]) if joint else len(PICTURE_QUESTIONS)
+        return body["usage"]["input_tokens"] / reads
+
+    text = per_read_tokens(read([]))
+    for name, (shape, colour) in PICTURES.items():
+        body = read([picture(shape, colour)])
+        # A Gemma 4 image takes up to 280 soft tokens and its delimiters.
+        assert 200 < per_read_tokens(body) - text <= 300, name
+        answers = body["answers"]
+        assert answers["colour"]["choice"] == colour, name
+        assert answers["shape"]["choice"] == shape, name
+        assert (answers["round"]["noul"] > 0.5) == (shape == "circle"), name
+    both = read([picture(*p) for p in PICTURES.values()])
+    assert 400 < per_read_tokens(both) - text <= 600
+
+
+def test_images_joint_matches_per_question(server):
+    for shape, colour in PICTURES.values():
+        body = {
+            "state": "Look at the image.",
+            "questions": PICTURE_QUESTIONS,
+            "images": [picture(shape, colour)],
+        }
+        alone = post(server, body).json()["answers"]
+        joint = post(server, {**body, "joint": True}).json()["answers"]
+        for qid in ("colour", "shape"):
+            assert joint[qid]["choice"] == alone[qid]["choice"]
+        assert (joint["round"]["noul"] > 0.5) == (alone["round"]["noul"] > 0.5)

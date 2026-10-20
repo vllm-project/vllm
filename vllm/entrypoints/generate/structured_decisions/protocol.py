@@ -40,7 +40,8 @@ class StructuredDecisionRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: dict[str, Any] | None = None
     joint: StrictBool = Field(
-        default=False, description="Answer the questions jointly; DiffusionGemma only."
+        default=False,
+        description="Answer the questions jointly; diffusion models only.",
     )
     cache_salt: str | None = Field(
         default=None,

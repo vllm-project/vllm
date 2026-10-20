@@ -41,7 +41,7 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
@@ -511,6 +511,8 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
     """DiffusionGemma. Each read is one read-only request with one denoising step:
     one question, or with read_joint one canvas of questions."""
 
+    modalities = frozenset({"image"})
+
     THOUGHT = "<|channel>thought\n<channel|>"
     END_OF_TURN = "<turn|>"
     CANVAS_STEP = 16
@@ -581,6 +583,21 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
                         )
                         return False
                 self.line_prefix[(k, label_set)] = prefix
+        # A canvas asks for the ids of every label on it, however many
+        # questions it holds, so the union of all labels' ids bounds a request.
+        ids = {
+            i
+            for x, slot_id in self.slot_label_ids.items()
+            for i in (slot_id, self.label_ids[x])
+        }
+        if len(ids) > MAX_LOGPROB_TOKEN_IDS:
+            logger.warning(
+                "Joint decision reads are off: the labels have %d token ids, "
+                "more than the %d logprob_token_ids a request can ask for",
+                len(ids),
+                MAX_LOGPROB_TOKEN_IDS,
+            )
+            return False
         return True
 
     def _joint_chunks(
@@ -605,8 +622,19 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
 
     def _joint_content(self, state: str, questions: list[Question], start: int) -> str:
         """The user turn of a joint read: the state, then the numbered questions."""
-        asks = "\n\n".join(q.type.prompt(q, k) for k, q in enumerate(questions, start))
+        asks = "\n\n".join(
+            self._joint_question(k, q) for k, q in enumerate(questions, start)
+        )
         return f"{state}\n\n{asks}\n\n{self.JOINT_REPLY}"
+
+    @staticmethod
+    def _joint_question(number: int, question: Question) -> str:
+        """A numbered question. The heading shows even without instructions, so
+        each answer line's number matches a question."""
+        head = f"Question {number}:"
+        if question.instructions:
+            head = f"{head} {question.instructions}"
+        return f"{head}\n{question.type.body(question)}"
 
     def _joint_canvas(
         self, questions: list[Question], prompt_ids: list[int], start: int
@@ -643,9 +671,12 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
         media: Mapping[str, Sequence[str]] | None = None,
     ) -> list[QuestionRead]:
         read_request = self._read_request(chat_template_kwargs, cache_salt)
+        image_parts = await self._image_parts((media or {}).get("image", ()))
         chunks = self._joint_chunks(questions)
         contents = [self._joint_content(state, chunk, k) for k, chunk in chunks]
-        rendered = await self._prompts(read_request, contents, instructions, [])
+        rendered = await self._prompts(
+            read_request, contents, instructions, image_parts
+        )
 
         inputs, params, layouts, slots, widths = [], [], [], [], []
         for (start, chunk), (engine_input, prompt_ids) in zip(chunks, rendered):
@@ -716,12 +747,18 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
                 f"{extra}, more than max_model_len={self.max_model_len}"
             )
         salt = engine_input.get("cache_salt")
+        salt = salt if isinstance(salt, str) else None
         # The thought block _must_ appear outside of the canvas (far worse results
         # otherwise)
-        return tokens_input(
-            prompt_ids + self.thought,
-            cache_salt=salt if isinstance(salt, str) else None,
-        )
+        ids = prompt_ids + self.thought
+        if engine_input["type"] != "multimodal":
+            return tokens_input(ids, cache_salt=salt)
+        # The images' placeholders come before the thought, so their ranges hold.
+        read_input: MultiModalInput = {**engine_input, "prompt_token_ids": ids}
+        read_input.pop("prompt", None)
+        if salt is None:
+            read_input.pop("cache_salt", None)
+        return read_input
 
 
 class LiquidStrategy(NextTokenStrategy):

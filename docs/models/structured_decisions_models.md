@@ -166,7 +166,7 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 
 #### Joint reads
 
-With `"joint": true`, DiffusionGemma reads several questions from one canvas in
+With `"joint": true`, a diffusion model reads several questions from one canvas in
 one denoising step: the prompt numbers the questions, and each answer is read at
 its slot in a `number: answer` line. A one-question request is read per
 question, as without `joint`.
@@ -198,7 +198,7 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; [Liquid d1](#liquid-d1), images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only) |
 
 Unknown top-level fields, and question fields other than `type`,
 `instructions` and `criteria`, are rejected with a 400.

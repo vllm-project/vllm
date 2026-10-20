@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.decisions.api_router import register_decisions_api_
 from vllm.entrypoints.openai.decisions.protocol import DecisionRequest
 from vllm.entrypoints.openai.decisions.question_types import (
     LABELS,
+    QUESTION_TYPES,
     StructuredDecisionError,
     build_question,
     label_softmax,
@@ -65,6 +66,7 @@ from vllm.entrypoints.serve.exception_handling.register import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import mm_input, tokens_input
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
     CompletionOutput,
@@ -74,6 +76,7 @@ from vllm.outputs import (
 )
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
 
 TRACE_HEADERS = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
@@ -462,6 +465,39 @@ def test_canvas_read():
         strategy._read_input(
             {"type": "token", "prompt_token_ids": [1, 2, 3, 4]}, [1, 2, 3, 4]
         )
+
+
+def test_canvas_read_keeps_the_images():
+    strategy = DiffusionGemmaCanvasStrategy.__new__(DiffusionGemmaCanvasStrategy)
+    strategy.thought, strategy.width, strategy.max_model_len = [10, 11], 16, 64
+    assert DiffusionGemmaCanvasStrategy.modalities == {"image"}
+    mm_kwargs: Any = object()
+    hashes = {"image": ["h0", "h1"]}
+    placeholders = {
+        "image": [
+            PlaceholderRange(offset=1, length=2),
+            PlaceholderRange(offset=4, length=2),
+        ]
+    }
+    ids = [1, 7, 7, 2, 7, 7, 3]
+    engine_input = mm_input(
+        ids, mm_kwargs, hashes, placeholders, prompt="text", cache_salt="tenant"
+    )
+    read_input = strategy._read_input(engine_input, ids)
+    # The thought follows the prompt, so the images' ranges still hold.
+    assert read_input == {
+        "type": "multimodal",
+        "prompt_token_ids": [*ids, 10, 11],
+        "mm_kwargs": mm_kwargs,
+        "mm_hashes": hashes,
+        "mm_placeholders": placeholders,
+        "cache_salt": "tenant",
+    }
+    assert read_input["type"] == "multimodal"
+    assert read_input["mm_kwargs"] is mm_kwargs
+    assert engine_input["prompt_token_ids"] == ids
+    unsalted = strategy._read_input(mm_input(ids, mm_kwargs, hashes, placeholders), ids)
+    assert "cache_salt" not in unsalted
 
 
 JOINT_SCHEMA_PROMPT = """<|im_start|>system
@@ -1323,6 +1359,54 @@ def test_joint_lines_put_each_label_in_one_slot(dgemma):
     assert len(set(strategy.slot_label_ids.values())) == len(strategy.slot_label_ids)
 
 
+def test_joint_labels_fit_the_logprob_token_ids(dgemma, monkeypatch):
+    _, _, strategy = dgemma
+    labels = strategy.slot_label_ids
+    ids = set(labels.values()) | {strategy.label_ids[x] for x in labels}
+    # Every label of every question type, with and without its leading space.
+    assert labels.keys() == {x for t in QUESTION_TYPES.values() for x in t.label_set}
+    assert len(ids) <= MAX_LOGPROB_TOKEN_IDS
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.decisions.strategies.MAX_LOGPROB_TOKEN_IDS",
+        len(ids) - 1,
+    )
+    assert not strategy._init_joint_lines(strategy._tokenizer())
+
+
+def test_joint_prompt_numbers_each_question():
+    def ask(qid, type_name, instructions, criteria):
+        return build_question(qid, type_name, instructions, criteria, 128)
+
+    questions = [
+        ask("team", "choice", "Which team?", {"billing": "pay", "ship": None}),
+        ask("other", "choice", "", {"billing": "pay", "ship": None}),
+        ask("urgent", "noul", "Reply within the hour?\n\n", {"true": "a refund"}),
+        ask("tone", "score", None, ["low", "high"]),
+    ]
+    # The joint prompt needs no tokenizer, so skip __init__.
+    strategy = object.__new__(DiffusionGemmaCanvasStrategy)
+    assert strategy._joint_content("S", questions, 3) == (
+        "S\n\n"
+        "Question 3: Which team?\n"
+        "A: billing - pay\n"
+        "B: ship\n"
+        "Answer with the letter of one option only.\n\n"
+        "Question 4:\n"
+        "A: billing - pay\n"
+        "B: ship\n"
+        "Answer with the letter of one option only.\n\n"
+        "Question 5: Reply within the hour?\n\n\n"
+        "yes: a refund\n"
+        "no\n"
+        "Answer with yes or no only.\n\n"
+        "Question 6:\n"
+        "0: low\n"
+        "1: high\n"
+        "Answer with the number of one level only.\n\n"
+        'Reply with one line per question, in order, formatted as "number: answer".'
+    )
+
+
 @pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
 @pytest.mark.parametrize(
     "field,value,error",
@@ -1335,6 +1419,35 @@ def test_bad_top_level_fields_are_a_400(decision_server, endpoint, field, value,
     assert response.status_code == 400, response.text
     assert error in response.json()["error"]["message"]
     assert not server.engine.admitted and not server.engine.generated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("joint", [False, True])
+async def test_dgemma_reads_images(dgemma, monkeypatch, joint):
+    serving, engine, strategy = dgemma
+    strategy.__dict__["_connector"] = MediaConnector()
+    prompts = strategy._prompts
+    seen: list[list[dict[str, Any]]] = []
+
+    async def record(read_request, contents, instructions, image_parts):
+        seen.append(image_parts)
+        # The renderer has no image processor here, so render the text only.
+        return await prompts(read_request, contents, instructions, [])
+
+    monkeypatch.setattr(strategy, "_prompts", record)
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
+    image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    response = await serving.create_decision(joint_request(joint=joint, images=[image]))
+    assert isinstance(response, StructuredDecisionResponse)
+    (parts,) = seen
+    assert [p["type"] for p in parts] == ["image_pil"]
+    assert parts[0]["image_pil"].size == (8, 8)
+    assert (response.joint is not None) == joint
+
+    response = await serving.create_decision(joint_request(joint=joint, videos=[image]))
+    assert isinstance(response, ErrorResponse) and response.error.code == 400
+    assert "does not take video inputs" in response.error.message
 
 
 @pytest.mark.asyncio
