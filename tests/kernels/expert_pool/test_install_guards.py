@@ -100,7 +100,6 @@ def test_layer_guard_accepts_the_supported_geometry():
         (_routed(dp_size=2), "data parallelism"),
         (_routed(sp=True), "sequence parallelism"),
         (_routed(method=_method(NvFp4MoeBackend.VLLM_CUTLASS)), "Marlin"),
-        (_routed(method=SimpleNamespace(nvfp4_backend=None)), "Marlin"),
     ],
 )
 def test_layer_guard_rejects_before_any_weight_is_allocated(bad, match):
@@ -108,3 +107,15 @@ def test_layer_guard_rejects_before_any_weight_is_allocated(bad, match):
 
     with pytest.raises(ValueError, match=match):
         RoutedExperts._validate_expert_pool_supported(bad)
+
+
+def test_layer_guard_keeps_unquantized_layers_on_the_gpu():
+    # e.g. the BF16 MTP head of an NVFP4 checkpoint: served outside the pool.
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    layer = _routed(method=UnquantizedFusedMoEMethod.__new__(UnquantizedFusedMoEMethod))
+    RoutedExperts._validate_expert_pool_supported(layer)
+    assert layer._moe_expert_pool_rows == 0

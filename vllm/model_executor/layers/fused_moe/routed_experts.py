@@ -215,13 +215,19 @@ class RoutedExperts(PluggableLayer):
             ModelOptNvFp4FusedMoE,
         )
 
-        if (
-            not isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
-            or self.quant_method.nvfp4_backend != NvFp4MoeBackend.MARLIN
-        ):
+        if not isinstance(self.quant_method, ModelOptNvFp4FusedMoE):
+            # e.g. a BF16 MTP head that the checkpoint leaves unquantized.
+            logger.warning_once(
+                "MoE layers using %s are not served by the expert pool; their "
+                "experts stay on the GPU.",
+                type(self.quant_method).__name__,
+            )
+            self._moe_expert_pool_rows = 0
+            return
+        if self.quant_method.nvfp4_backend != NvFp4MoeBackend.MARLIN:
             raise ValueError(
                 "moe_expert_pool_rows supports the ModelOpt NVFP4 Marlin MoE "
-                f"backend only, got {type(self.quant_method).__name__}"
+                f"backend only, got {self.quant_method.nvfp4_backend.value}"
             )
 
     # TODO(bnell): Temporary hack. Get rid of this.

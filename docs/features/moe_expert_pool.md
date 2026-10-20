@@ -42,8 +42,14 @@ allocations. Rows can move between layers at run time.
 ## Requirements and limits
 
 - ModelOpt NVFP4 checkpoints with the Marlin MoE backend
-  (`--moe-backend marlin`). Other quantization methods or NVFP4 backends
-  are rejected when the layer is built.
+  (`--moe-backend marlin`). NVFP4 layers on other backends are rejected
+  when the layer is built; MoE layers with another quantization method
+  (e.g. an MTP head the checkpoint leaves in BF16) are not pooled and keep
+  their experts on the GPU.
+- Speculative decoding: the decode lanes are sized for
+  `1 + num_speculative_tokens` tokens per request. A BF16 draft MoE needs
+  its own backend, e.g. `--speculative-config '{"method": "mtp",
+  "num_speculative_tokens": 3, "moe_backend": "triton"}'`.
 - No expert, data or sequence parallelism.
 - `N` must be at least `top_k` and every MoE layer must have the same expert
   count and top-k.

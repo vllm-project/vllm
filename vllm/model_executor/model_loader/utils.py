@@ -164,12 +164,16 @@ def process_weights_after_loading(
         install_expert_pool,
     )
 
-    scheduler_config = get_current_vllm_config().scheduler_config
+    vllm_config = get_current_vllm_config()
+    scheduler_config = vllm_config.scheduler_config
+    # A decode step verifies 1 + num_speculative_tokens tokens per request.
     install_expert_pool(
         model,
         target_device,
         max_decode_tokens=(
-            scheduler_config.max_num_seqs if scheduler_config is not None else 1
+            scheduler_config.max_num_seqs * (1 + vllm_config.num_speculative_tokens)
+            if scheduler_config is not None
+            else 1
         ),
     )
 
