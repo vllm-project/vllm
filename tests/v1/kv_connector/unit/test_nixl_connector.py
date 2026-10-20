@@ -1472,7 +1472,9 @@ class TestNixlHandshake:
             ),
         ):
             worker = FakeNixlConnectorWorker(
-                create_vllm_config(), "engine", hand_shake_latency=0
+                create_vllm_config(block_size=maybe_update_block_size(16)),
+                "engine",
+                hand_shake_latency=0,
             )
         worker.use_mla = True
         worker._head_sharded_draft_kv_heads = 8
