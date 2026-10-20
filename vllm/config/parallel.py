@@ -225,11 +225,14 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
-    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node (kept for
+      compatibility; prefer "mori")
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node (kept for
+      compatibility; prefer "mori")
     - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "mori": MoRI EP; uses EPv2 where supported (see `VLLM_MORI_EP_V2`) and
       EPv1 otherwise, picking the EPv1 inter-node kernel from the token budget
+      (see `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
