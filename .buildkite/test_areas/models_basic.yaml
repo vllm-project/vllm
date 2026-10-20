@@ -114,9 +114,9 @@ steps:
   - image-build-amd
   source_file_dependencies:
   - vllm/models/minimax_m3/amd/
-  - tests/models/minimax_m3/amd_mono/
+  - tests/models/minimax_m3/amd_specialized_decode/
   commands:
-  - pytest -v -s models/minimax_m3/amd_mono
+  - pytest -v -s models/minimax_m3/amd_specialized_decode
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200

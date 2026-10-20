@@ -21,6 +21,8 @@ from .routing import decide_step
 from .spec import DecodeConfig
 from .weights import MonoLayerWeights
 
+FAULT_MESSAGE = "MiniMax-M3 FFN launch error word set; the step is discarded"
+
 LayerKernel = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor | None],
     tuple[torch.Tensor, torch.Tensor],
@@ -191,13 +193,19 @@ class SpecializedDecode:
         return self.executor.health()
 
     def after_step(self, step: Step | None, failure: Exception | None = None) -> None:
-        """A rank-local exception in the layer loop marks every rank's error
-        word (their pending waits end; every rank's next output raises), then
-        propagates here."""
+        """After every forward's layer loop (mono or stock, eager or captured
+        into a FULL graph), before its logits and sampling: a device-side
+        assert that the sticky error word is clear. A set word traps the GPU
+        queue, so no later work of the step (sampling, the output copy) runs
+        and the worker process aborts. A rank-local exception in the layer
+        loop marks every rank's error word (their pending waits end and their
+        asserts fire), then propagates here."""
         if failure is not None:
             if step is not None and step.launched:
                 self.executor.abort()
             raise failure
+        if not self._closed:
+            torch._assert_async(self.executor.fault_word[0] == 0, FAULT_MESSAGE)
         if step is not None and step.launched:
             self.executor.after_step()
 

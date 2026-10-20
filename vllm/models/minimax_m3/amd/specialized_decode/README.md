@@ -18,6 +18,24 @@ Milestone one is deliberately narrow:
 
 `runtime/` owns refusals, planning, health and shutdown; `mono/` owns the
 kernel and its host launcher. Unsupported static deployments are refused with
-all known reasons. In-kernel waits are bounded and set a sticky error word on
-every rank. The word is copied with each step's sampled tokens, and the model
-runner raises instead of returning a step's tokens once it is set.
+all known reasons.
+
+## Fail-stop
+
+In-kernel waits are bounded (10 s) and a timeout, a host abort or a failed
+epoch reset sets a sticky error word on every rank. The step's last launch
+does not finish on any rank until every rank has published its own failure
+flag (or the bound expired). After the layer loop of every forward (mono or
+stock, eager or replayed from a FULL graph), before logits and sampling, a
+device-side assert (`torch._assert_async`) checks that the word is clear. If
+it is set, the GPU queue traps: none of the step's later work runs (sampling,
+the output copy), the worker's wait for the step's output fails with
+`hipErrorLaunchFailure`, the HSA runtime aborts the worker processes and the
+engine stops.
+
+Guarantee: no token is returned from a step any of whose launches failed on
+any rank, nor from any later step. There is no host synchronization per step;
+the check is two small kernels a forward (inside the FULL graph when one is
+replayed). The cause (rank, epoch, site) stays in the device word: the worker
+reports only the GPU queue exception. `test_failstop.py` checks that the
+assert traps on the installed torch build.
