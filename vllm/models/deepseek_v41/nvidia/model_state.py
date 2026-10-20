@@ -389,6 +389,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 attn_groups,
                 kv_cache_config,
                 replay_start,
+                for_capture=for_capture,
             )
         return attn_metadata
 
@@ -447,6 +448,7 @@ class DeepseekV41ModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         replay_start: torch.Tensor,
         capture_desc: BatchExecutionDescriptor | None = None,
+        for_capture: bool = False,
     ) -> None:
         """Set the replay layers' batch for this forward, or none. Eager steps trim;
         captures and PIECEWISE graphs at the trim threshold or above break out to a
@@ -464,14 +466,25 @@ class DeepseekV41ModelState(DefaultModelState):
 
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        row_limit = layers.window
-        if current_platform.is_rocm():
-            # is_prefilling stays true on the chunk that finishes the prompt.
-            unfinished = input_batch.is_prefilling_np[:num_reqs] & (
-                input_batch.num_computed_prefill_tokens_np[:num_reqs] + query_lens
-                < input_batch.prefill_len_np[:num_reqs]
+        # On ROCm an unfinished prefill keeps 1 replay row. The chunk that
+        # finishes the prompt, decode, and prompt-logprobs keep the window.
+        # Capture stays on the full window: a captured graph must match the
+        # batch it will replay, and the 1-row path is a runtime eager trim.
+        row_limit: int | np.ndarray = layers.window
+        if (
+            current_platform.is_rocm()
+            and capture_desc is None
+            and not for_capture
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
+            prefill_len = input_batch.prefill_len_np[:num_reqs]
+            unfinished = (
+                input_batch.is_prefilling_np[:num_reqs]
+                & (computed + query_lens < prefill_len)
+                & (query_lens > 1)
             )
-            row_limit = np.where(unfinished, 1, layers.window)
+            row_limit = np.where(unfinished, 1, int(layers.window))
         kept_lens = np.where(
             self._keeps_rows_np[input_batch.idx_mapping_np[:num_reqs]],
             query_lens,

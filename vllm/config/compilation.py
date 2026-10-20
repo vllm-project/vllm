@@ -566,7 +566,9 @@ class CompilationConfig:
     """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
     most max_num_batched_tokens. If empty: multiples of sliding_window up to
     min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
-    16 * sliding_window. Larger replay batches run eagerly."""
+    16 * sliding_window. On ROCm the empty list also includes 1, 2, 4, 6, 8,
+    12, 16, 24, 32, 48, 64, and 96 below the window, and an explicit list must
+    include 1. Larger replay batches run eagerly."""
 
     decoder_replay_trim_threshold: int = Field(default=768, ge=0)
     """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this
