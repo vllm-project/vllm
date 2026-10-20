@@ -40,7 +40,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import JobResult, LookupProbe, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
@@ -436,6 +436,18 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
 
         def lookup(self, key, req_context):
             return LookupResult.HIT if key in hit_keys else LookupResult.MISS
+
+        def probe_batch(self, requested_keys, req_context):
+            return [
+                LookupProbe(
+                    key,
+                    LookupResult.HIT if key in hit_keys else LookupResult.MISS,
+                )
+                for key in requested_keys
+            ]
+
+        def promote_batch(self, probes, req_context):
+            return {}
 
         def create_store_job(self, requested_keys, req_context):
             return TransferJob(

@@ -52,6 +52,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
     JobId,
     JobResult,
+    LookupProbe,
     ParentManager,
     SecondaryTierManager,
     TransferJob,
@@ -190,6 +191,16 @@ class _SecondaryTierFacingParent(ParentManager):
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         return self._m.lookup(key, req_context, exclude_tier_idx=self._origin_idx)
+
+    def probe_batch(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> list[LookupProbe]:
+        return self._m.probe_batch(keys, req_context, exclude_tier_idx=self._origin_idx)
+
+    def promote_batch(
+        self, probes: Collection[LookupProbe], req_context: ReqContext
+    ) -> dict[OffloadKey, LookupResult]:
+        return self._m.promote_batch(probes, req_context)
 
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -616,6 +627,27 @@ class TieringOffloadingManager(OffloadingManager):
         # in time for a promotion this lookup may initiate.
         self._maybe_process_finished_jobs()
 
+        probe = self._probe(key, req_context, exclude_tier_idx=exclude_tier_idx)
+        if probe.promotion_tier is None:
+            assert probe.result is not None
+            return probe.result
+
+        promoted = self._initiate_promotion(probe.promotion_tier, key, req_context)
+        return LookupResult.HIT_PENDING if promoted else LookupResult.MISS
+
+    def _probe(
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        *,
+        exclude_tier_idx: int | None = None,
+    ) -> LookupProbe:
+        """Query every tier for one key without pinning or promoting.
+
+        A secondary-tier HIT is reported as ``result=None`` plus the tier
+        index so the caller can pin the batch's primary HITs before starting
+        any promotion.
+        """
         start_time = time.monotonic()
         primary_hit = self.primary_tier.lookup(key, req_context)
         lookup_duration = time.monotonic() - start_time
@@ -627,9 +659,9 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
-            return LookupResult.HIT
+            return LookupProbe(key, LookupResult.HIT)
         if primary_hit is LookupResult.HIT_PENDING:
-            return LookupResult.HIT_PENDING
+            return LookupProbe(key, LookupResult.HIT_PENDING)
 
         any_retry = False
         for i, tier in enumerate(self.secondary_tiers):
@@ -649,8 +681,7 @@ class TieringOffloadingManager(OffloadingManager):
                     result,
                     lookup_duration,
                 )
-                promoted = self._initiate_promotion(i, key, req_context)
-                return LookupResult.MISS if not promoted else LookupResult.HIT_PENDING
+                return LookupProbe(key, None, i)
             if result is LookupResult.RETRY:
                 any_retry = True
             self._metrics.on_lookup(
@@ -661,9 +692,50 @@ class TieringOffloadingManager(OffloadingManager):
                 lookup_duration,
             )
 
-        if any_retry:
-            return LookupResult.RETRY
-        return LookupResult.MISS
+        return LookupProbe(key, LookupResult.RETRY if any_retry else LookupResult.MISS)
+
+    def probe_batch(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        exclude_tier_idx: int | None = None,
+    ) -> list[LookupProbe]:
+        """Probe ``keys`` without pinning anything or starting promotions.
+
+        Batch callers must pin every primary HIT with create_store_job()
+        before calling promote_batch(): a promotion allocates primary-tier
+        space and may evict an unpinned HIT from this same batch.
+        """
+        if not keys:
+            return []
+        self._maybe_process_finished_jobs()
+        return [
+            self._probe(key, req_context, exclude_tier_idx=exclude_tier_idx)
+            for key in keys
+        ]
+
+    def promote_batch(
+        self,
+        probes: Collection[LookupProbe],
+        req_context: ReqContext,
+    ) -> dict[OffloadKey, LookupResult]:
+        """Promote every probed secondary-tier HIT.
+
+        Must run after the caller pinned all primary HITs of the same probe
+        batch. Returns one terminal result per promoted key.
+        """
+        results: dict[OffloadKey, LookupResult] = {}
+        for probe in probes:
+            if probe.promotion_tier is None:
+                continue
+            promoted = self._initiate_promotion(
+                probe.promotion_tier, probe.key, req_context
+            )
+            results[probe.key] = (
+                LookupResult.HIT_PENDING if promoted else LookupResult.MISS
+            )
+        return results
 
     @override
     def get_load_source(

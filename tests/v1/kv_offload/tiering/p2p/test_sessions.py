@@ -27,7 +27,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import LookupProbe, TransferJob
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -268,8 +268,11 @@ class FakeParent:
     ``pending`` and ``retry`` script the first lookup() result for those
     keys; subsequent lookups behave normally (a key that promised
     HIT_PENDING / RETRY can later be promoted to HIT by adding it to
-    ``stored`` and removing it from ``pending``/``retry``). ``calls``
-    captures every parent invocation in order for assertions.
+    ``stored`` and removing it from ``pending``/``retry``). ``secondary``
+    holds keys that only a secondary tier has, so probing reports them as
+    awaiting promotion; ``promote_full`` makes that promotion fail for
+    lack of primary capacity. ``calls`` captures every parent invocation
+    in order for assertions.
 
     Injected per-step via ``session.serve_external_requests(parent)`` —
     not held by the session, matching how ``TieringOffloadingManager``
@@ -281,10 +284,14 @@ class FakeParent:
         stored: dict[OffloadKey, int] | None = None,
         pending: set[OffloadKey] | None = None,
         retry: set[OffloadKey] | None = None,
+        secondary: set[OffloadKey] | None = None,
+        promote_full: bool = False,
     ) -> None:
         self.stored: dict[OffloadKey, int] = dict(stored or {})
         self.pending: set[OffloadKey] = set(pending or ())
         self.retry: set[OffloadKey] = set(retry or ())
+        self.secondary: set[OffloadKey] = set(secondary or ())
+        self.promote_full = promote_full
         self._next_job_id: int = 1000
         self.calls: list[tuple] = []
 
@@ -301,6 +308,49 @@ class FakeParent:
         if key in self.stored:
             return LookupResult.HIT
         return LookupResult.MISS
+
+    def probe_batch(
+        self,
+        keys: Sequence[OffloadKey],
+        ctx: ReqContext,
+    ) -> list[LookupProbe]:
+        keys_list = list(keys)
+        self.calls.append(("probe_batch", tuple(keys_list), ctx.req_id))
+        probes: list[LookupProbe] = []
+        for key in keys_list:
+            if key in self.pending:
+                probes.append(LookupProbe(key, LookupResult.HIT_PENDING))
+            elif key in self.retry:
+                probes.append(LookupProbe(key, LookupResult.RETRY))
+            elif key in self.stored:
+                probes.append(LookupProbe(key, LookupResult.HIT))
+            elif key in self.secondary:
+                probes.append(LookupProbe(key, None, 0))
+            else:
+                probes.append(LookupProbe(key, LookupResult.MISS))
+        return probes
+
+    def promote_batch(
+        self,
+        probes: Sequence[LookupProbe],
+        ctx: ReqContext,
+    ) -> dict[OffloadKey, LookupResult]:
+        pending = list(probes)
+        self.calls.append(("promote_batch", tuple(p.key for p in pending), ctx.req_id))
+        results: dict[OffloadKey, LookupResult] = {}
+        for probe in pending:
+            if probe.promotion_tier is None:
+                continue
+            if self.promote_full:
+                results[probe.key] = LookupResult.MISS
+                continue
+            # Mirror the real manager: the promotion reserves the primary
+            # slot, so later probes of this key report HIT_PENDING instead of
+            # starting a second promotion.
+            self.secondary.discard(probe.key)
+            self.pending.add(probe.key)
+            results[probe.key] = LookupResult.HIT_PENDING
+        return results
 
     def create_store_job(
         self,
@@ -1415,6 +1465,7 @@ class TestServerLookupHandling:
         assert resps[0][LookupRespMsg.HITS] == [True, True, True]
 
         kinds = [c[0] for c in cb.calls]
+        assert kinds.count("probe_batch") == 1
         assert kinds.count("create_store_job") == 1
         cs = next(c for c in cb.calls if c[0] == "create_store_job")
         assert cs[1] == (b"hA", b"hB", b"hC")
@@ -1426,6 +1477,60 @@ class TestServerLookupHandling:
             b"hB",
             b"hC",
         }
+
+    def test_primary_hits_pinned_before_secondary_promotion(self):
+        """A secondary-tier HIT must not start its promotion until every
+        primary HIT of the same LookupMsg has been pinned. Promoting first
+        can evict an unpinned HIT, and the later create_store_job would then
+        fail on a key the lookup had just reported as HIT."""
+        cb = FakeParent(stored={b"hA": 1}, secondary={b"hB"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        ordered = [
+            c[0]
+            for c in cb.calls
+            if c[0] in {"probe_batch", "create_store_job", "promote_batch"}
+        ]
+        probe_idx = ordered.index("probe_batch")
+        store_idx = ordered.index("create_store_job")
+        promote_idx = ordered.index("promote_batch")
+        assert probe_idx < store_idx < promote_idx
+
+        first_probe = next(c for c in cb.calls if c[0] == "probe_batch")
+        assert first_probe[1] == (b"hA", b"hB")
+        cs = next(c for c in cb.calls if c[0] == "create_store_job")
+        assert cs[1] == (b"hA",)
+        pb = next(c for c in cb.calls if c[0] == "promote_batch")
+        assert pb[1] == (b"hB",)
+
+        # The promotion is in flight, so the response waits for it.
+        assert _lookup_resps(conn, sent_before) == []
+        [lookup] = _srv_lookups(session)
+        assert lookup.resolved == {b"hA": True}
+        assert lookup.pending == {b"hB"}
+
+    def test_secondary_hit_is_a_miss_when_primary_cannot_make_room(self):
+        """A secondary HIT whose promotion is rejected is reported as MISS,
+        while the primary HIT of the same batch stays pinned and HIT."""
+        cb = FakeParent(stored={b"hA": 1}, secondary={b"hB"}, promote_full=True)
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [True, False]
+        assert set(_srv_outbound(session, "req-1").available) == {b"hA"}
 
     def test_all_misses_no_store_job_finish_fires(self):
         """All-MISS batch: no create_store_job call; one LookupRespMsg

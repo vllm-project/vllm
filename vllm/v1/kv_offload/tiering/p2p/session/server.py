@@ -506,35 +506,51 @@ class ServerRole:
         keys: Iterable[OffloadKey],
         parent: ParentManager,
     ) -> list[OffloadKey]:
-        """Poll ``keys`` against the tiering manager and pin any HITs.
+        """Probe ``keys`` as one batch, pin the primary HITs, then promote.
 
-        For each key not already definitively resolved, query
-        ``parent.lookup`` and record the outcome on ``lookup``: HIT / MISS
-        land in ``resolved`` and clear ``pending``; HIT_PENDING / RETRY park
-        in ``pending`` for a later serve. Newly-HIT keys are pinned in one
-        batch via :meth:`_pin_and_register_hits` and also returned (for
-        caller logging).
+        The whole batch is probed before anything is pinned: a secondary-tier
+        HIT starts a promotion, and that promotion may evict an earlier
+        primary HIT of the same batch while it is still unpinned. Pinning the
+        primary HITs in a single ``create_store_job`` call before
+        ``promote_batch`` fixes that ordering and keeps one LookupMsg down to
+        one batched transfer.
+
+        For each key not already definitively resolved, the probe outcome is
+        recorded on ``lookup``: HIT / MISS land in ``resolved`` and clear
+        ``pending``; HIT_PENDING / RETRY park in ``pending`` for a later
+        serve. Newly-pinned keys are also returned (for caller logging).
 
         Shared by the first-sighting pass (:meth:`_process_inbound_lookup`)
         and the re-poll pass (:meth:`_resolve_pending_lookups`); callers pass
         a de-duplicated ``keys`` collection.
         """
-        new_hits: list[OffloadKey] = []
-        for h in keys:
-            if h in lookup.resolved:
-                continue
-            result = parent.lookup(h, lookup.ctx)
-            if result is LookupResult.HIT:
-                new_hits.append(h)
-                lookup.resolved[h] = True
-                lookup.pending.discard(h)
-            elif result is LookupResult.MISS:
-                lookup.resolved[h] = False
-                lookup.pending.discard(h)
-            else:
-                lookup.pending.add(h)
+        unresolved = [h for h in keys if h not in lookup.resolved]
+        if not unresolved:
+            return []
+
+        probes = parent.probe_batch(unresolved, lookup.ctx)
+        new_hits = [probe.key for probe in probes if probe.result is LookupResult.HIT]
         if new_hits:
             self._pin_and_register_hits(lookup, new_hits, parent)
+
+        promoted = parent.promote_batch(
+            [probe for probe in probes if probe.promotion_tier is not None],
+            lookup.ctx,
+        )
+
+        for probe in probes:
+            key = probe.key
+            result = probe.result
+            if result is None:
+                result = promoted.get(key, LookupResult.MISS)
+            if result is LookupResult.HIT:
+                lookup.resolved[key] = True
+                lookup.pending.discard(key)
+            elif result is LookupResult.MISS:
+                lookup.resolved[key] = False
+                lookup.pending.discard(key)
+            else:
+                lookup.pending.add(key)
         return new_hits
 
     def _process_inbound_lookup(
