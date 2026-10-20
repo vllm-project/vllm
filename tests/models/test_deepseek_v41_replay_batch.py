@@ -135,7 +135,7 @@ def _slot_mappings(num_tokens: int) -> torch.Tensor:
     )
 
 
-def _prepare(state, batch, cg_mode, for_capture: bool = False):
+def _prepare(state, batch, cg_mode):
     """Runs prepare_attn; returns the replay batch and the replay build's inputs.
     The first replay layer's sliding-window build follows the replay build."""
     state.prepare_attn(
@@ -145,7 +145,6 @@ def _prepare(state, batch, cg_mode, for_capture: bool = False):
         _slot_mappings(batch.num_tokens_after_padding),
         [],
         GROUPS,
-        for_capture=for_capture,
     )
     replay = state.decoder_replay_layers.replay_batch
     return (None, None) if replay is None else (replay, state.builds[-2])
@@ -196,8 +195,8 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
 
 
 def test_rocm_unfinished_prefill_keeps_one_row(state, monkeypatch):
-    """Unfinished ROCm prefills keep one row. Capture, CUDA, and prompt
-    logprobs keep the window."""
+    """Unfinished ROCm prefills keep one row. CUDA and prompt logprobs keep
+    the window."""
     import vllm.models.deepseek_v41.nvidia.model_state as model_state
 
     # 200 left, 50 left, the 50-token finish, one decode.
@@ -218,10 +217,6 @@ def test_rocm_unfinished_prefill_keeps_one_row(state, monkeypatch):
     monkeypatch.setattr(model_state.current_platform, "is_rocm", lambda: True)
     replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
     assert replay is not None and replay.rows.tolist() == one_row
-
-    state.builds.clear()
-    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE, for_capture=True)
-    assert replay is not None and replay.rows.tolist() == full_window
 
     state._keeps_rows_np[0] = True
     replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)

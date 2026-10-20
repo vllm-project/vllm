@@ -389,7 +389,6 @@ class DeepseekV41ModelState(DefaultModelState):
                 attn_groups,
                 kv_cache_config,
                 replay_start,
-                for_capture=for_capture,
             )
         return attn_metadata
 
@@ -448,7 +447,6 @@ class DeepseekV41ModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         replay_start: torch.Tensor,
         capture_desc: BatchExecutionDescriptor | None = None,
-        for_capture: bool = False,
     ) -> None:
         """Set the replay layers' batch for this forward, or none. Eager steps trim;
         captures and PIECEWISE graphs at the trim threshold or above break out to a
@@ -466,20 +464,14 @@ class DeepseekV41ModelState(DefaultModelState):
 
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        # is_prefilling stays true on the finishing chunk. Capture keeps the window.
+        # is_prefilling stays true on the finishing chunk.
         row_limit: int | np.ndarray = layers.window
-        if (
-            current_platform.is_rocm()
-            and capture_desc is None
-            and not for_capture
-            and not torch.cuda.is_current_stream_capturing()
-        ):
+        if current_platform.is_rocm():
             computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
             prefill_len = input_batch.prefill_len_np[:num_reqs]
             unfinished = (
                 input_batch.is_prefilling_np[:num_reqs]
                 & (computed + query_lens < prefill_len)
-                & (query_lens > 1)
             )
             row_limit = np.where(unfinished, 1, int(layers.window))
         kept_lens = np.where(
