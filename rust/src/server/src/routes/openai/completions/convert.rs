@@ -196,12 +196,12 @@ fn completion_echo_text(
     if !request.echo {
         return Ok(None);
     }
+    if request.return_token_ids.unwrap_or(false) {
+        return Ok(Some(String::new()));
+    }
 
     match &request.prompt {
         Prompt::Text(prompt) => Ok(Some(prompt.clone())),
-        Prompt::TokenIds(token_ids) if request.return_token_ids.unwrap_or(false) => {
-            Ok(Some(String::new()))
-        }
         Prompt::TokenIds(token_ids) => {
             tokenizer.decode(token_ids, false).map(Some).map_err(|error| {
                 ApiError::invalid_request(
