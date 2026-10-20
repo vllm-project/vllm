@@ -233,3 +233,117 @@ class TestGlobalMetadataStateAllocation:
         free_after_release = state.rank_metadata[0].get_free_page_count()
 
         assert free_after_release == free_after_alloc + 1
+
+
+# ===========================================================================
+# TestGlobalMetadataStateEviction
+# ===========================================================================
+
+
+def _fill(state, keys, pages):
+    """Write `keys` into pre-selected pages so the free pool is empty."""
+    state.rank_metadata[0].free_pages = [
+        p for p in state.rank_metadata[0].free_pages if p not in pages
+    ]
+    for key, page in zip(keys, pages):
+        state.confirm_write_for_keys(0, [(key, page)])
+
+
+class TestGlobalMetadataStateEviction:
+    """Tests for LRU eviction, reader leases, and the unchanged all-or-nothing."""
+
+    def test_eviction_frees_page_for_new_key(self):
+        """A full pool with an unleased complete key makes room for a new key."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        _fill(state, ["K1", "K2"], [0, 1])
+        assert state.rank_metadata[0].get_free_page_count() == 0
+
+        results = state.allocate_pages_for_keys(0, [("K3", "")])
+
+        assert results["K3"] == 0, results  # oldest key's page was reclaimed
+        assert state.batch_key_exists(["K1"]) == [False]
+        assert state.get_key_locations(0, ["K1"]) == [None]
+        assert state.evicted_keys == 1
+
+    def test_leased_key_is_not_evicted(self):
+        """A key held by a reader survives eviction; allocation fails instead."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 1)
+        _fill(state, ["K1"], [0])
+
+        assert state.acquire_keys(0, ["K1"]) == {"K1": 0}
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": -1}
+        assert state.batch_key_exists(["K1"]) == [True]
+
+        state.release_keys(0, ["K1"])
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": 0}
+
+    def test_expired_lease_is_reclaimed(self):
+        """A lease from a crashed reader expires instead of pinning pages."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 1)
+        _fill(state, ["K1"], [0])
+
+        state.acquire_keys(0, ["K1"], ttl_s=-1.0)  # already expired
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": 0}
+        assert state.batch_key_exists(["K1"]) == [False]
+
+    def test_eviction_skips_partial_keys(self):
+        """A key without a confirmed write is never reclaimed by eviction."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        partial_page = state.allocate_pages_for_keys(0, [("partial", "")])["partial"]
+        _fill(state, ["done"], [1])
+
+        results = state.allocate_pages_for_keys(0, [("new", "")])
+
+        assert results["new"] == 1
+        # The partial key still owns its page: only the complete key was evicted.
+        assert state.rank_metadata[0].get_free_page_count() == 0
+        assert state.batch_key_exists(["partial"]) == [False]
+        assert state.get_key_locations(0, ["partial"]) == [None]
+        assert partial_page == 0
+
+    def test_hits_of_the_allocating_request_are_not_evicted(self):
+        """Pages a request is about to read from cache must not be recycled."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        _fill(state, ["K1", "K2"], [0, 1])
+
+        results = state.allocate_pages_for_keys(0, [("K1", ""), ("K3", "")])
+
+        assert results["K1"] == 0
+        assert results["K3"] == 1
+        assert state.batch_key_exists(["K1"]) == [True]
+        assert state.batch_key_exists(["K2"]) == [False]
+
+    def test_eviction_prefers_least_recently_used(self):
+        """Acquiring a key refreshes its LRU position."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 2)
+        _fill(state, ["K1", "K2"], [0, 1])
+
+        state.acquire_keys(0, ["K1"])
+        state.release_keys(0, ["K1"])
+
+        results = state.allocate_pages_for_keys(0, [("K3", "")])
+
+        assert results["K3"] == 1
+        assert state.batch_key_exists(["K1"]) == [True]
+        assert state.batch_key_exists(["K2"]) == [False]
+
+    def test_eviction_across_ranks_releases_every_page(self):
+        """Evicting a key returns one page per rank, keeping the pools disjoint."""
+        state = GlobalMetadataState()
+        state.initialize_rank(0, 1)
+        state.initialize_rank(1, 1)
+        state.confirm_write_for_keys(0, [("K", 0)])
+        state.confirm_write_for_keys(1, [("K", 0)])
+        assert state.batch_key_exists(["K"]) == [True]
+
+        assert state.allocate_pages_for_keys(0, [("K2", "")]) == {"K2": 0}
+
+        assert state.rank_metadata[0].get_free_page_count() == 0
+        assert state.rank_metadata[1].get_free_page_count() == 1
+        assert state.rank_metadata[1].free_pages == [0]

@@ -5,7 +5,9 @@
 import argparse
 import logging
 import threading
+import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import orjson
@@ -56,6 +58,11 @@ class KeyMetadata:
     key: str
     rank_to_page: dict[int, int]  # rank -> allocated page index
     tp_world_size: int
+    # Number of readers currently holding this key (a lease). A key is only
+    # evictable while `lease_count == 0`; `lease_expiry` is the monotonic
+    # deadline after which the leases are considered abandoned (client crash).
+    lease_count: int = 0
+    lease_expiry: float = 0.0
 
     def add_rank_page(self, rank: int, page_index: int) -> None:
         """Add page allocation for a specific rank."""
@@ -77,16 +84,23 @@ class KeyMetadata:
 class GlobalMetadataState:
     """Manages global metadata state across all ranks and keys."""
 
-    def __init__(self):
+    def __init__(self, lease_ttl_s: float = 120.0):
         self.global_lock = threading.RLock()
         self.rank_metadata: dict[int, RankFileMetadata] = {}
         self.key_metadata: dict[str, KeyMetadata] = {}
+        # Completion order for eviction: oldest (least recently used) first.
+        # Only complete keys are tracked; a partial key cannot be evicted.
+        self._lru: OrderedDict[str, None] = OrderedDict()
+        self.lease_ttl_s = lease_ttl_s
+        self.evicted_keys = 0
 
     def clear(self) -> None:
         """Clear all metadata state."""
         with self.global_lock:
             self.rank_metadata.clear()
             self.key_metadata.clear()
+            self._lru.clear()
+            self.evicted_keys = 0
             logger.info("Cleared all metadata state")
 
     def initialize_rank(self, rank: int, num_pages: int) -> None:
@@ -126,6 +140,12 @@ class GlobalMetadataState:
                 dict.fromkeys(key for key, _ in keys if key not in cached_pages)
             )
             num_pages_needed = len(new_keys)
+            free_pages = self.rank_metadata[rank].get_free_page_count()
+            if num_pages_needed > free_pages:
+                # Reclaim least-recently-used keys, but never the keys this
+                # same request is serving from cache (they are about to be
+                # read by the caller).
+                self.evict_lru(num_pages_needed - free_pages, exclude=cached_pages)
             allocated_pages = self.rank_metadata[rank].allocate_pages(num_pages_needed)
 
             if len(allocated_pages) < num_pages_needed:
@@ -166,6 +186,10 @@ class GlobalMetadataState:
                 # Add confirmed page to key metadata
                 self.key_metadata[key].add_rank_page(rank, page_index)
 
+                # Only a complete key can be evicted; track it for LRU order.
+                if self.key_metadata[key].is_complete():
+                    self._touch(key)
+
             # Release specified pages back to free pool
             if pages_to_release:
                 self.rank_metadata[rank].release_pages(pages_to_release)
@@ -175,6 +199,99 @@ class GlobalMetadataState:
                     rank,
                     pages_to_release,
                 )
+
+    def _touch(self, key: str) -> None:
+        """Move a complete key to the most-recently-used end of the LRU."""
+        meta = self.key_metadata.get(key)
+        if meta is None or not meta.is_complete():
+            return
+        self._lru[key] = None
+        self._lru.move_to_end(key)
+
+    def acquire_keys(
+        self, rank: int, keys: list[str], ttl_s: float | None = None
+    ) -> dict[str, int | None]:
+        """Return page locations for keys and lease them against eviction.
+
+        The caller must call :meth:`release_keys` once the pages have been
+        read. Leases expire after ``ttl_s`` so a crashed reader cannot pin
+        pages forever.
+        """
+        with self.global_lock:
+            if rank not in self.rank_metadata:
+                raise ValueError(f"Rank {rank} not initialized")
+
+            ttl = self.lease_ttl_s if ttl_s is None else ttl_s
+            deadline = time.monotonic() + ttl
+            results: dict[str, int | None] = {}
+            for key in dict.fromkeys(keys):
+                meta = self.key_metadata.get(key)
+                if (
+                    meta is None
+                    or not meta.is_complete()
+                    or rank not in meta.rank_to_page
+                ):
+                    results[key] = None
+                    continue
+                meta.lease_count += 1
+                meta.lease_expiry = max(meta.lease_expiry, deadline)
+                self._touch(key)
+                results[key] = meta.rank_to_page[rank]
+            return results
+
+    def release_keys(self, rank: int, keys: list[str]) -> None:
+        """Drop one lease per key taken by :meth:`acquire_keys`."""
+        with self.global_lock:
+            for key in dict.fromkeys(keys):
+                meta = self.key_metadata.get(key)
+                if meta is None:
+                    continue
+                meta.lease_count = max(0, meta.lease_count - 1)
+                if meta.lease_count == 0:
+                    meta.lease_expiry = 0.0
+
+    def evict_lru(self, num_pages: int, exclude: dict[str, int] | None = None) -> int:
+        """Evict least-recently-used complete, unleased keys.
+
+        Args:
+            num_pages: Stop once this many keys have been evicted.
+            exclude: Keys that must not be evicted (e.g. the hits of the
+                allocation call that triggered the eviction).
+
+        Returns:
+            Number of keys evicted.
+
+        """
+        with self.global_lock:
+            now = time.monotonic()
+            excluded = set(exclude or ())
+            evicted = 0
+            for key in list(self._lru.keys()):
+                if evicted >= num_pages:
+                    break
+                meta = self.key_metadata.get(key)
+                if meta is None:
+                    self._lru.pop(key, None)
+                    continue
+                if meta.lease_count:
+                    if meta.lease_expiry > now:
+                        # A live reader may still touch these pages.
+                        continue
+                    # The reader is gone; reclaim the abandoned lease.
+                    meta.lease_count = 0
+                    meta.lease_expiry = 0.0
+                if key in excluded or not meta.is_complete():
+                    continue
+                for key_rank, page in meta.get_all_pages():
+                    self.rank_metadata[key_rank].release_pages([page])
+                del self.key_metadata[key]
+                self._lru.pop(key, None)
+                self.evicted_keys += 1
+                evicted += 1
+                logger.info(
+                    "Evicted key %s, returned %s pages", key, meta.tp_world_size
+                )
+            return evicted
 
     def batch_key_exists(self, keys: list[str]) -> list[bool]:
         """Check if keys exist in metadata and all ranks have confirmed writes.
@@ -231,8 +348,13 @@ class GlobalMetadataState:
 class Hf3fsMetadataServer:
     """HF3FS Metadata Server with improved key-based organization."""
 
-    def __init__(self, persistence_path: str | None = None, save_interval: int = 60):
-        self.state = GlobalMetadataState()
+    def __init__(
+        self,
+        persistence_path: str | None = None,
+        save_interval: int = 60,
+        lease_ttl_s: float = 120.0,
+    ):
+        self.state = GlobalMetadataState(lease_ttl_s=lease_ttl_s)
         self.app = FastAPI(default_response_class=ORJSONResponse)
         self._setup_routes()
 
@@ -248,6 +370,8 @@ class Hf3fsMetadataServer:
         self.app.post("/keys/confirm_write")(self.confirm_write_for_keys)
         self.app.post("/keys/batch_exists")(self.batch_key_exists)
         self.app.post("/keys/get_locations")(self.get_key_locations)
+        self.app.post("/keys/acquire")(self.acquire_keys)
+        self.app.post("/keys/release")(self.release_keys)
         self.app.post("/clear")(self.clear)
 
     async def initialize_rank(self, rank: int, request: Request):
@@ -357,6 +481,45 @@ class Hf3fsMetadataServer:
                 status_code=500, detail=f"Failed to get key locations: {str(e)}"
             ) from e
 
+    async def acquire_keys(self, request: Request):
+        """Return locations and lease the keys against eviction."""
+        data = await self._read_json(request)
+        rank = data.get("rank")
+        keys = data.get("keys", [])
+        ttl_s = data.get("ttl")
+
+        if rank is None or not isinstance(keys, list):
+            raise HTTPException(
+                status_code=400, detail="Invalid request format: need 'rank' and 'keys'"
+            )
+
+        try:
+            locations = self.state.acquire_keys(rank, keys, ttl_s)
+            return ORJSONResponse({"locations": locations})
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to acquire keys: {str(e)}"
+            ) from e
+
+    async def release_keys(self, request: Request):
+        """Drop leases taken by /keys/acquire."""
+        data = await self._read_json(request)
+        rank = data.get("rank")
+        keys = data.get("keys", [])
+
+        if rank is None or not isinstance(keys, list):
+            raise HTTPException(
+                status_code=400, detail="Invalid request format: need 'rank' and 'keys'"
+            )
+
+        try:
+            self.state.release_keys(rank, keys)
+            return Response(status_code=204)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to release keys: {str(e)}"
+            ) from e
+
     async def clear(self, request: Request):
         """Clear the metadata server."""
         self.state.clear()
@@ -405,6 +568,21 @@ class Hf3fsMetadataInterface(ABC):
     def get_key_locations(self, rank: int, keys: list[str]) -> list[int]:
         """Get page indices for keys on a specific rank."""
         pass
+
+    def acquire_keys(
+        self, rank: int, keys: list[str], ttl_s: float | None = None
+    ) -> dict[str, int | None]:
+        """Return page locations for keys and protect them from eviction.
+
+        Backends without eviction may simply return the locations, which is
+        the default here; a backend that evicts must pin the keys until
+        :meth:`release_keys` is called.
+        """
+        return dict(zip(keys, self.get_key_locations(rank, keys)))
+
+    def release_keys(self, rank: int, keys: list[str]) -> None:
+        """Drop leases taken by :meth:`acquire_keys` (no-op by default)."""
+        return None
 
 
 class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
@@ -477,13 +655,40 @@ class Hf3fsGlobalMetadataClient(Hf3fsMetadataInterface):
         response = self._post("keys/get_locations", {"rank": rank, "keys": keys})
         return response.get("locations", [])
 
+    def acquire_keys(
+        self, rank: int, keys: list[str], ttl_s: float | None = None
+    ) -> dict[str, int | None]:
+        """Return page locations for keys and lease them against eviction."""
+        try:
+            response = self._post(
+                "keys/acquire", {"rank": rank, "keys": list(keys), "ttl": ttl_s}
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (404, 405):
+                # An older metadata server has no leases, but it never evicts
+                # either, so a plain lookup is still safe against this client.
+                locations = self.get_key_locations(rank, list(keys))
+                return dict(zip(list(keys), locations))
+            raise
+        return dict(response.get("locations", {}))
+
+    def release_keys(self, rank: int, keys: list[str]) -> None:
+        """Drop leases taken by :meth:`acquire_keys`."""
+        try:
+            self._post("keys/release", {"rank": rank, "keys": list(keys)})
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (404, 405):
+                return
+            raise
+
 
 def run_metadata_server(
     host: str = "0.0.0.0",
     port: int = 18000,
+    lease_ttl_s: float = 120.0,
 ):
     """Run the improved HF3FS metadata server."""
-    server = Hf3fsMetadataServer()
+    server = Hf3fsMetadataServer(lease_ttl_s=lease_ttl_s)
     server.run(host=host, port=port)
 
 
@@ -496,6 +701,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--port", type=int, default=18000, help="Port to run the server on."
     )
+    parser.add_argument(
+        "--lease-ttl-s",
+        type=float,
+        default=120.0,
+        help=(
+            "Seconds before a reader lease counts as abandoned. Must exceed the "
+            "slowest block load, or a crashed reader would pin pages forever."
+        ),
+    )
     args = parser.parse_args()
 
-    run_metadata_server(args.host, args.port)
+    run_metadata_server(args.host, args.port, args.lease_ttl_s)
