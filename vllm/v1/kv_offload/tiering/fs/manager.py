@@ -14,7 +14,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -164,6 +163,8 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+        # Per store job: blocks written (already published blocks are skipped).
+        self._store_progress: dict[JobId, int] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -221,19 +222,24 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = keys
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
-            self._use_o_direct,
-        )
-        self._job_block_counts[job_metadata.job_id] = len(keys)
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+            self._store_job_keys[job_id] = keys
+        self._job_block_counts[job_id] = len(keys)
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+
+        def store_task() -> None:
+            self._store_progress[job_id] = batch_store_block(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(job_id, 1, [store_task])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -282,7 +288,8 @@ class FileSystemTierManager(SecondaryTierManager):
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, 0)
-            transfer_bytes = block_count * self._block_size if block_count else None
+            num_written = self._store_progress.pop(job_id, block_count)
+            transfer_bytes = num_written * self._block_size if block_count else None
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:

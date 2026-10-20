@@ -245,6 +245,13 @@ class TestIdleDecay:
         bp.reset()
         assert bp._last_update == 0.0
 
+    def test_update_ignores_jobs_that_wrote_nothing(self):
+        """A store that wrote nothing is not a latency sample."""
+        bp = self._make_detector()
+        bp.update(time.monotonic() - 1.0, 0)
+        assert bp._completions == 0
+        assert bp.store_latency_ema == 0.0
+
 
 class TestBackpressure:
     @pytest.fixture

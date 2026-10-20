@@ -177,22 +177,30 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
+) -> int:
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    to paths[i] via a temp-file rename. Blocks whose file already exists are
+    skipped. Raises on first error.
+
+    Returns:
+        The number of blocks written.
+
     """
     _validate_offsets(view, offsets, block_size)
 
+    to_write = [(p, o) for p, o in zip(paths, offsets) if not os.path.exists(p)]
     if _HAS_FSIO_C:
         view_B = view.cast("B")
-        view_slices = [view_B[x : x + block_size] for x in offsets]
-        tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
+        view_slices = [view_B[o : o + block_size] for _, o in to_write]
+        dest_paths = [p for p, _ in to_write]
+        tmp_paths = [p + _get_tmp_suffix() for p in dest_paths]
+        batch_store_block_C(tmp_paths, dest_paths, view_slices, use_o_direct)
     else:
-        for path, offset in zip(paths, offsets):
+        for path, offset in to_write:
             _store_block(path, view, offset, block_size, use_o_direct)
+    return len(to_write)
 
 
 def batch_load_block(
