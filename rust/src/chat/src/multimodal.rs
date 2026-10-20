@@ -14,15 +14,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use itertools::{Either, izip};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
-    ModelProcessorSpec, ModelRegistry, PreProcessorConfig, PreprocessedEncoderInputs,
-    PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
+    ModelProcessorSpec, PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement,
+    Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
     VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,7 @@ mod expand;
 mod image;
 mod input;
 mod item;
+mod models;
 mod preprocessed;
 mod tensor;
 mod timing;
@@ -131,9 +132,11 @@ impl MultimodalModelContext {
     }
 
     /// Resolve a static model processor spec for one loaded model.
+    ///
+    /// Local model support ([`models`]) is consulted before the
+    /// `llm-multimodal` registry.
     fn resolve_model_spec(&self) -> Option<&'static dyn ModelProcessorSpec> {
-        static REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
-        REGISTRY.lookup(&self.metadata())
+        models::lookup_spec(&self.metadata())
     }
 
     /// Build a vision preprocessor for one loaded model and modality.
@@ -1344,23 +1347,22 @@ mod tests {
                 })
                 .collect(),
         );
-        let clip = Arc::new(
-            VideoClip::new_rgb_with_sample_fps(
-                video,
-                bytes::Bytes::new(),
-                VideoSource::InlineBytes,
-                "video".to_owned(),
-                2.0,
-            )
-            .with_frame_timestamps(Some(vec![2.5, 3.0])),
-        );
+        let clip = Arc::new(VideoClip::new_rgb_with_sample_fps(
+            video,
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "video".to_owned(),
+            2.0,
+        ));
         let prepared =
             info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
         let token_ids =
             prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
+        // Two frames uniformly sampled at 2 fps with temporal_patch_size=2
+        // form one clip whose first frame is stamped at 0/2.0 = 0.00s.
         assert_eq!(
             info.context.tokenizer().decode(&token_ids, false).unwrap(),
-            "<|vid_start|>Time: 2.50s<|video|><|vid_end|>"
+            "<|vid_start|>Time: 0.00s<|video|><|vid_end|>"
         );
     }
 
