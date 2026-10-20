@@ -265,10 +265,9 @@ def test_structural_tag_allows_exactly_the_prompt_tools(tool_choice: str):
             ],
         }
     )
-    prompt_names = [
-        tool["function"]["name"]
-        for tool in construct_tool_dicts(request.tools, tool_choice)
-    ]
+    tool_dicts = construct_tool_dicts(request.tools, tool_choice)
+    assert tool_dicts is not None
+    prompt_names = [tool["function"]["name"] for tool in tool_dicts]
 
     tag = get_model_structural_tag(
         model="hermes",
@@ -846,6 +845,7 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     parser = StepParser(MagicMock(), tools=sample_tools)
     request = parser.adjust_request(request)
 
+    assert request.structured_outputs is not None
     assert request.structured_outputs.json is None
     grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
     # Rendered exactly as the Step-3.5/3.7 chat templates render tool calls.
@@ -860,6 +860,7 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
 
     assert not content
+    assert tool_calls is not None
     assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
         ("get_weather", {"city": "Dallas"})
     ]
@@ -931,6 +932,7 @@ def test_longcat_forced_tool_choice_round_trips_native_tags(
     parser = LongcatParser(MagicMock(), tools=sample_tools)
     request = parser.adjust_request(request)
 
+    assert request.structured_outputs is not None
     grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
     # Rendered exactly as the LongCat-Flash chat template renders tool calls.
     output = (
@@ -943,6 +945,7 @@ def test_longcat_forced_tool_choice_round_trips_native_tags(
     _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
 
     assert not content
+    assert tool_calls is not None
     assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
         ("get_weather", {"city": "Dallas"})
     ]
@@ -1035,6 +1038,7 @@ def test_native_format_parser_skips_json_schema_constraint_responses(
 
     out = parser.adjust_request(request)
 
+    assert isinstance(out, ResponsesRequest)
     assert out.structured_outputs is None
     assert out.text is None
 
@@ -1998,6 +2002,7 @@ def test_glm47_responses_request_attaches_shallow_tag(
 
     out = parser.adjust_request(request)
 
+    assert isinstance(out, ResponsesRequest)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
     assert out.text is None
@@ -2205,6 +2210,7 @@ def _tool_calling_grammar(
     parser_cls = ParserManager.get_parser(
         tool_parser_name=tool_parser, enable_auto_tools=True
     )
+    assert parser_cls is not None
     adjusted = parser_cls(MagicMock(), tools=tools).adjust_request(request)
     structured_outputs = adjusted.structured_outputs
     if structured_outputs is None or structured_outputs.structural_tag is None:
