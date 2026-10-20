@@ -294,7 +294,9 @@ fn try_convert_value(param_type: &JsonParamType<'_>, input: &ParamInput) -> Opti
 fn try_convert_text_value(param_type: &JsonParamType<'_>, value: &str) -> Option<Value> {
     match param_type {
         JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => convert_integer_text(value),
+        JsonParamType::Integer => {
+            convert_integer_text(value).or_else(|| convert_whole_number_text(value))
+        }
         JsonParamType::Number => convert_number_text(value),
         JsonParamType::Boolean => try_convert_boolean(value),
         JsonParamType::Object(_) if value.trim().is_empty() => Some(Value::Object(Map::new())),
@@ -399,6 +401,14 @@ pub(crate) fn convert_integer_text(value: &str) -> Option<Value> {
         .ok()
         .map(Number::from)
         .map(Value::Number)
+}
+
+/// Convert a whole number written as a float (`3.0`) to a JSON integer, since JSON Schema
+/// counts any number with a zero fractional part as an `integer`.
+fn convert_whole_number_text(value: &str) -> Option<Value> {
+    let number = without_digit_separators(value.trim())?.parse::<f64>().ok()?;
+    let in_range = number >= i64::MIN as f64 && number < i64::MAX as f64;
+    (number.fract() == 0.0 && in_range).then(|| Value::Number(Number::from(number as i64)))
 }
 
 /// Convert raw text to a JSON number, as for a `number` parameter.
@@ -588,6 +598,25 @@ mod tests {
         assert_eq!(params.convert("size", text("1_000.5")), json!(1000.5));
         for invalid in ["_1", "1_", "1__0", "1_.5"] {
             assert_eq!(params.convert("size", text(invalid)), json!(invalid));
+        }
+    }
+
+    #[test]
+    fn integers_accept_whole_number_floats() {
+        let params = ToolSchema::from_schema(json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "either": { "type": ["integer", "number"] }
+            }
+        }));
+
+        assert_eq!(params.convert("count", text("3.0")), json!(3));
+        assert_eq!(params.convert("count", text(" -2.0 ")), json!(-2));
+        assert_eq!(params.convert("count", text("1_000.0")), json!(1000));
+        assert_eq!(params.convert("either", text("3.5")), json!(3.5));
+        for invalid in ["3.5", "inf", "NaN", "1e300"] {
+            assert_eq!(params.convert("count", text(invalid)), json!(invalid));
         }
     }
 

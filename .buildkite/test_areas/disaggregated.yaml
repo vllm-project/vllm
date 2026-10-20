@@ -14,6 +14,7 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
   mirror:
     amd:
       label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
@@ -426,7 +427,7 @@ steps:
     # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
     PREFILL_BLOCK_SIZE: "2048"
     DECODE_BLOCK_SIZE: "2048"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align,--max-model-len 32768"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh

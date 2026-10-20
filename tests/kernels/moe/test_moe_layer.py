@@ -127,6 +127,14 @@ if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
 
 DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
+
+# These tests run on one node, where NVSHMEM reaches peers over NVLink, so
+# keep it off the NICs to avoid depending on IB setup on shared CI hosts.
+DEEPEP_SINGLE_NODE_NVSHMEM_ENV = {
+    "NVSHMEM_REMOTE_TRANSPORT": "none",
+    # DeepEP forces IBGDA on, so also hide the NICs from it.
+    "NVSHMEM_HCA_LIST": "none",
+}
 MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
 
 QUANT_METHODS = [
@@ -2187,6 +2195,8 @@ def test_moe_layer(
 
     rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
     parallel_worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker
+    cuda_deepep = current_platform.is_cuda() and backend in DEEPEP_BACKENDS
+    env_dict = DEEPEP_SINGLE_NODE_NVSHMEM_ENV if cuda_deepep else None
     launch_failures: list[str] = []
 
     try:
@@ -2197,7 +2207,7 @@ def test_moe_layer(
                     world_size,
                     parallel_worker,
                     vllm_config,
-                    None,
+                    env_dict,
                     test_config_batch,
                     verbosity,
                     failure_report_path=failure_report_path,

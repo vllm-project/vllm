@@ -156,7 +156,6 @@ _MSGSPEC_FLOATS_MATCH_REPR = _msgspec_floats_match_repr()
 def render_tokens_logprobs(
     sampled_token_ids: Sequence[int],
     container: FlatLogprobs,
-    num_output_top_logprobs: int,
 ) -> list[bytes] | None:
     """Render the ``GenerateLogProbs`` JSON of one choice, as parts whose
     concatenation is the JSON.
@@ -164,13 +163,13 @@ def render_tokens_logprobs(
     Per position, the per-entry path builds a dict from the row (keys keep
     their first occurrence's order, values come from the last occurrence;
     slot 0 has the engine rank, slot ``j`` rank ``j``), looks the sampled
-    entry up by the sampled id, and lists the first ``max(k, 1)`` dict items
-    as ``top_logprobs``; logprobs are clamped (NaN and values below -9999 are
-    -9999.0) and a rank of 0 is null.
+    entry up by the sampled id, and lists every dict item as ``top_logprobs``
+    (one fewer when the sampled id repeats in the top-k); logprobs are clamped
+    (NaN and values below -9999 are -9999.0) and a rank of 0 is null.
 
     Returns None when the rows do not map to that shape directly (sampled id
-    not in slot 0, repeated top-k ids, fewer entries than requested, a value
-    JSON cannot represent): the caller then uses the per-entry path.
+    not in slot 0, repeated top-k ids, a value JSON cannot represent): the
+    caller then uses the per-entry path.
     """
     engine_rows = container.rows()
     if engine_rows is None:
@@ -185,8 +184,7 @@ def render_tokens_logprobs(
         return None
 
     num_slots = token_ids.shape[1]
-    limit = max(num_output_top_logprobs, 1)
-    cols = np.arange(limit)
+    cols = np.arange(num_slots)
     rank_pieces = np.array(_rank_pieces(list(range(num_slots + 1))), dtype=object)
     parts: list[bytes] = [b'{"content":[']
     for start in range(0, n, _RENDER_BLOCK_ROWS):
@@ -206,10 +204,11 @@ def render_tokens_logprobs(
         else:
             has_dup = np.zeros(rows, dtype=bool)
             dup_col = np.full(rows, num_slots)
-        if num_slots - int(has_dup.any()) < limit:
-            return None
-        # Slots of the top-k entries: the duplicate's slot is skipped.
+        # Slots of the top-k entries: the duplicate's slot is skipped, so a
+        # row with a duplicate has no last entry.
         src = cols[None, :] + (cols[None, :] >= dup_col[:, None])
+        missing = src == num_slots
+        src = np.minimum(src, num_slots - 1)
         # The sampled entry's value and rank come from the duplicate's slot.
         sampled_src = np.where(has_dup, dup_col, 0)
         value_src = np.where(src == 0, sampled_src[:, None], src)
@@ -224,25 +223,27 @@ def render_tokens_logprobs(
         # Per row: content lead, value, rank; first top lead, value, rank;
         # lead, value, rank per further top entry; the row end. Built as one
         # object array: per-row lists would be GC-tracked objects.
-        floats = np.empty(rows * limit, dtype=object)
+        floats = np.empty(rows * num_slots, dtype=object)
         floats[:] = format_float_reprs(values.ravel())
-        floats = floats.reshape(rows, limit)
+        floats = floats.reshape(rows, num_slots)
         sampled_rank_pieces = np.empty(rows, dtype=object)
         sampled_rank_pieces[:] = _rank_pieces(sampled_ranks.tolist())
-        out = np.empty((rows, 3 * (limit + 1) + 1), dtype=object)
+        out = np.empty((rows, 3 * (num_slots + 1) + 1), dtype=object)
         out[:, 0] = _CONTENT_LEADS.lookup(ids[:, 0])
         out[:, 1] = floats[:, 0]
         out[:, 2] = sampled_rank_pieces
         out[:, 3] = _FIRST_TOP_LEADS.lookup(ids[:, 0])
         out[:, 4] = floats[:, 0]
         out[:, 5] = sampled_rank_pieces
-        if limit > 1:
+        if num_slots > 1:
             top_src = src[:, 1:]
             out[:, 6:-1:3] = _NEXT_TOP_LEADS.lookup(
                 np.take_along_axis(ids, top_src, axis=1)
             )
             out[:, 7:-1:3] = floats[:, 1:]
             out[:, 8:-1:3] = rank_pieces[top_src]
+            for start_col in (6, 7, 8):
+                out[:, start_col:-1:3][missing[:, 1:]] = b""
         out[:, -1] = b"}]},"
         parts.append(b"".join(out.ravel().tolist()))
     parts[-1] = parts[-1][:-1]  # the last row has no separator

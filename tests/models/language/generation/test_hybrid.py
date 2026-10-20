@@ -342,10 +342,13 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave headroom for the HF model that ran earlier in this process on a
+    # 32.5 GiB MIG.
     with vllm_runner(
         model,
         max_num_seqs=MAX_NUM_SEQS,
         attention_backend=ATTN_BACKEND,
+        gpu_memory_utilization=0.9,
         enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
