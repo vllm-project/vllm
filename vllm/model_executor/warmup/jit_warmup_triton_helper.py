@@ -168,6 +168,18 @@ def triton_scalar_specialization_rep(value: int) -> int:
     return divisible_rep if value % 16 == 0 else generic_rep
 
 
+def triton_ptr_range(tensor: Any) -> int:
+    """Pointer range Triton's ROCm backend would read off ``tensor``.
+
+    Mirrors ``HIPBackend.is_within_2gb``: an explicit ``ptr_range`` wins over
+    the storage size, so a view that narrows its own range stays narrow here.
+    """
+    ptr_range = getattr(tensor, "ptr_range", None)
+    if ptr_range is not None:
+        return ptr_range()
+    return tensor.untyped_storage().size()
+
+
 @dataclass(frozen=True)
 class TritonWarmupTensor:
     """Compile-only tensor metadata used by Triton warmup.
@@ -175,10 +187,10 @@ class TritonWarmupTensor:
     ``strides=None`` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
 
-    ``storage_bytes`` must be set from ``untyped_storage().size()`` of the
-    runtime tensor whenever that storage can exceed 2 GiB. The ROCm backend
-    specializes pointers on it (``tt.pointer_range``), so a KV-cache view left
-    at the 0 default value warms a variant the live launch never uses.
+    ``storage_bytes`` must be set via ``triton_ptr_range`` whenever the runtime
+    tensor's storage can exceed 2 GiB. The ROCm backend specializes pointers on
+    it (``tt.pointer_range``), so a KV-cache view left at the 0 default value
+    warms a variant the live launch never uses.
     """
 
     dtype: Any

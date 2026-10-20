@@ -21,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
     triton_kernel_dispatcher_with_warmup,
+    triton_ptr_range,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -205,7 +206,7 @@ def _kpool_compress_warmup_inputs(
     kv_cache = k_cache.kv_cache
     page_size = kv_cache.shape[1]
     buf_numel_per_page = kv_cache.stride(0)
-    buf_storage_bytes = kv_cache.untyped_storage().size()
+    buf_storage_bytes = triton_ptr_range(kv_cache)
     loc_aligned: Any = WarmupChoices(True, False)
     return dict(
         buf_fp8_ptr=TritonWarmupTensor(FP8_DTYPE, storage_bytes=buf_storage_bytes),
@@ -439,7 +440,7 @@ def _kpool_tail_seed_warmup_inputs(
     tail_block_elems = tail_kv_cache.stride(0)
     kpool_head = tail_kv_cache.stride(1)
     ring = tail_kv_cache.shape[2]
-    tail_storage_bytes = tail_kv_cache.untyped_storage().size()
+    tail_storage_bytes = triton_ptr_range(tail_kv_cache)
     tslot_aligned: Any = WarmupChoices(True, False)
     return dict(
         key_ptr=TritonWarmupTensor(torch.bfloat16),
