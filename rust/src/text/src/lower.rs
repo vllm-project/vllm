@@ -146,6 +146,11 @@ pub fn lower_sampling_params(
         }
         .into());
     }
+    // Validate the final constraint: chat may have replaced the user's
+    // constraint with a parser-built output grammar.
+    if let Some(structured_outputs) = &structured_outputs {
+        structured_outputs.validate()?;
+    }
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -356,9 +361,13 @@ mod tests {
     use std::num::NonZeroU32;
 
     use serial_test::file_serial;
+    use thiserror_ext::AsReport as _;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::multimodal::{
         MmFeatureSpec, MmModality, PlaceholderRange,
+    };
+    use vllm_engine_core_client::protocol::structured_outputs::{
+        StructuredOutputBackend, StructuredOutputsParams,
     };
     use vllm_engine_core_client::protocol::tensor::WireNdArray;
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -508,6 +517,28 @@ mod tests {
         .expect("lower zero min_tokens");
 
         assert_eq!(params.min_tokens, 0);
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_schema_xgrammar_cannot_enforce() {
+        let structured_outputs = StructuredOutputsParams {
+            backend: StructuredOutputBackend::Xgrammar,
+            ..StructuredOutputsParams::json(serde_json::json!({
+                "type": "integer",
+                "multipleOf": 2,
+            }))
+        };
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                structured_outputs: Some(structured_outputs),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(error.is_request_validation_error());
+        assert!(error.to_report_string().contains("not supported by xgrammar"));
     }
 
     #[test]
@@ -1366,6 +1397,47 @@ mod tests {
             error,
             Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_enforces_bad_words_limits() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("blocked", 300)
+            .with_regular_token(" blocked", 301);
+        let lower = |bad_words: Option<Vec<String>>, bad_words_token_ids: Vec<Vec<u32>>| {
+            lower_sampling_params(
+                SamplingParams {
+                    bad_words,
+                    bad_words_token_ids: Some(bad_words_token_ids),
+                    ..Default::default()
+                },
+                SamplingHints::default(),
+                sample_sampling_limits(),
+                3,
+                &tokenizer,
+            )
+        };
+
+        lower(None, vec![vec![7; 8]; 128]).unwrap();
+        for (bad_words, raw, expected) in [
+            (
+                None,
+                vec![vec![7]; 129],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                Some(vec!["blocked".to_string()]),
+                vec![vec![7]; 127],
+                "Too many bad words: 129. The max number is 128.",
+            ),
+            (
+                None,
+                vec![vec![7; 1025]],
+                "Too many total bad word tokens: 1025. The max is 1024.",
+            ),
+        ] {
+            assert_eq!(lower(bad_words, raw).unwrap_err().to_string(), expected);
+        }
     }
 
     #[test]

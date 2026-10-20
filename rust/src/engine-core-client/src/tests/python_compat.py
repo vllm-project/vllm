@@ -94,6 +94,13 @@ class EngineCoreRequest(
     kv_hints: KvHintsEnvelope | None = None
 
 
+@dataclass(frozen=True)
+class RequestError:
+    code: str
+    message: str
+    retryable: bool = False
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,
@@ -117,6 +124,7 @@ class EngineCoreOutput(
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
+    error: RequestError | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -237,7 +245,8 @@ outputs = EngineCoreOutputs(
         EngineCoreOutput(
             request_id="req-1",
             new_token_ids=[7, 8],
-            finish_reason=FinishReason.LENGTH,
+            finish_reason=FinishReason.ERROR,
+            error=RequestError("engine_paused", "Generation is paused.", True),
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],

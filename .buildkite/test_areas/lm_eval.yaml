@@ -12,7 +12,7 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.yaml
   mirror:
     amd:
       label: ":amd: (MI300) LM Eval Small Models"
@@ -173,7 +173,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-small.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.yaml
 
 - label: ":nvidia: (B200) LM Eval Small Models Distributed"
   key: lm-eval-small-models-distributed-2xb200
@@ -186,7 +186,7 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.yaml
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
@@ -214,9 +214,7 @@ steps:
       - vllm/v1/attention/ops/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
-      # Dense MLA PCP-only accuracy; DP1/DCP1.
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp-mi355.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.yaml
 
 - label: ":nvidia: (B200) LM Eval HiSparse Nightly"
   key: lm-eval-hisparse-nightly-4xb200
@@ -707,18 +705,17 @@ steps:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355-nemotron-3-super.txt
 
-- label: ":amd: (MI300) LM Eval Large Models"
+- label: ":amd: (MI355) LM Eval Large Models"
   key: amd-lm-eval-large-models
   dind: false
-  device: mi300_8
+  device: mi355_8
   optional: true
   timeout_in_minutes: 65
   depends_on:
   - image-build-amd
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-large.txt
   source_file_dependencies:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
@@ -792,6 +789,7 @@ steps:
 
 - label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY"
   key: moe-refactor-integration-test-b200-dp-temporary
+  automatic_shard: true
   device: b200-k8s
   optional: true
   num_devices: 2
@@ -1298,9 +1296,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload"
+      label: ":amd: (MI355 DPX) LM Eval KV-Offload"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -1360,9 +1358,9 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
   mirror:
     amd:
-      label: ":amd: (MI300) LM Eval KV-Offload Large"
+      label: ":amd: (MI355) LM Eval KV-Offload Large"
       dind: false
-      device: mi300_4
+      device: mi355_4
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -1427,10 +1425,10 @@ steps:
   # Qwen2-57B has 28 attention heads and cannot run at TP8.
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: ":amd: (MI300) LM Eval Large Models ROCm Harness"
+- label: ":amd: (MI355) LM Eval Large Models ROCm Harness"
   key: amd-lm-eval-large-models-rocm-harness
   dind: false
-  device: mi300_8
+  device: mi355_8
   optional: true
   timeout_in_minutes: 40
   depends_on:

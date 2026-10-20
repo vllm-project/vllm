@@ -12,7 +12,7 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{
-    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+    EngineCoreFinishReason, RequestError, RequestSpecDecodeMetrics, StopReason,
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
@@ -97,8 +97,9 @@ pub enum FinishReason {
     Length,
     /// The request was aborted by the client.
     Abort,
-    /// A retryable request-level internal error occurred.
-    Error,
+    /// A request-level internal error occurred, with the engine's details
+    /// when it sent any (e.g. a retryable rejection by a paused engine).
+    Error(Option<Box<RequestError>>),
     /// A repetitive token pattern was detected.
     Repetition(Option<StopReason>),
 }
@@ -117,7 +118,7 @@ impl FinishReason {
             Self::Stop(_) => "stop",
             Self::Length => "length",
             Self::Abort => "abort",
-            Self::Error => "error",
+            Self::Error(_) => "error",
             Self::Repetition(_) => "repetition",
         }
     }
@@ -146,12 +147,13 @@ impl FinishReason {
 fn finish_reason_from_engine(
     finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
+    error: Option<Box<RequestError>>,
 ) -> Option<FinishReason> {
     finish_reason.map(|reason| match reason {
         EngineCoreFinishReason::Stop => FinishReason::Stop(stop_reason),
         EngineCoreFinishReason::Length => FinishReason::Length,
         EngineCoreFinishReason::Abort => FinishReason::Abort,
-        EngineCoreFinishReason::Error => FinishReason::Error,
+        EngineCoreFinishReason::Error => FinishReason::Error(error),
         EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
     })
 }
@@ -401,8 +403,13 @@ impl GenerateOutputStream {
             .map(|stats| stats.num_cached_tokens as usize)
             .unwrap_or(0);
 
-        let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
-        if let Some(finish_reason) = finish_reason.as_ref() {
+        // An engine error means the request was rejected before it ran.
+        let rejected = raw.error.is_some();
+        let finish_reason =
+            finish_reason_from_engine(raw.finish_reason, raw.stop_reason, raw.error);
+        if let Some(finish_reason) = finish_reason.as_ref()
+            && !rejected
+        {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
         let weight_versions = if finish_reason.is_some() {
@@ -575,7 +582,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
-                        finish_reason: FinishReason::Error,
+                        finish_reason: FinishReason::Error(None),
                         usage: TokenUsage {
                             prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
                             output_token_count: 0,

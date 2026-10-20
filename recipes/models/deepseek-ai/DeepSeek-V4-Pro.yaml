@@ -1,0 +1,972 @@
+meta:
+  title: "DeepSeek-V4-Pro"
+  slug: "deepseek-v4-pro"
+  provider: "DeepSeek"
+  description: "DeepSeek V4 flagship MoE (1.6T total / 49B active) with hybrid CSA+HCA attention, manifold-constrained hyper-connections, Muon-trained on 32T+ tokens, and three-tier reasoning."
+  date_added: 2026-04-24
+  date_updated: 2026-10-13
+  tasks:
+    - text
+  performance_headline: "Frontier 1.6T/49B reasoning MoE with native FP4+FP8 weights, MTP and DSpark speculative decoding, and 1M-token context"
+  related_recipes: []
+  hardware:
+    h200: verified
+    b200: verified
+    gb200: verified
+    b300: verified
+    gb300: verified
+    mi300x: unsupported
+    mi325x: unsupported
+    mi355x: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V4-Pro"
+  min_vllm_version: "0.20.0"
+  default_frontend: rust
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "1600B"
+  active_parameters: "49B"
+  context_length: 1048576
+  flashinfer_autotune: true
+  base_args:
+    - "--trust-remote-code"
+    - "--kv-cache-dtype"
+    - "fp8"
+    - "--block-size"
+    - "256"
+
+features:
+  tool_calling:
+    description: "Enable tool calling with DeepSeek V4 chat template support."
+    args:
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Enable reasoning/thinking mode with the DeepSeek V4 reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v4"
+  spec_decoding:
+    description: "Speculative decoding — pick a drafting method."
+    # Mode = the --speculative-config method only (args); the served checkpoint
+    # is owned by the Variant row. Default is MTP; the 0813 (default) and DSpark
+    # checkpoints flip this to dspark via their `default_modes`.
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in Multi-Token Prediction, 2 draft tokens."
+        # The preview FP4+FP8 and NVFP4 checkpoints ship an MTP head only — their
+        # config.json carries no dspark_* block, so dspark can't be drafted there.
+        variants:
+          - fp8
+          - nvfp4
+          - redhat_nvfp4
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":2}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark drafting, 7 draft tokens, probabilistic. Requires the 0813 or DSpark checkpoint (Variant row)."
+        # Only the fused checkpoints carry the DSpark draft — the 0813 release
+        # (default) and the DSpark re-pack of the preview weights.
+        variants:
+          - default
+          - dspark
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    # Official 0813 release: supersedes the preview, same architecture with the
+    # fused DSpark draft module attached (config.json gains the dspark_* block —
+    # byte-identical to the DSpark re-pack below).
+    model_id: "deepseek-ai/DeepSeek-V4-Pro-0813"
+    label: "FP8 (0813)"
+    precision: fp8
+    vram_minimum_gb: 960
+    description: "Official DeepSeek-V4-Pro release (2026-08-13) superseding the preview — substantially stronger agentic performance, with the DSpark draft module attached."
+    # DSpark drafting landed in 0.25.0, above this recipe's 0.20.0 baseline.
+    min_vllm_version: "0.25.0"
+    default_modes:
+      spec_decoding: dspark
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+  fp8:
+    # Marked "(Preview)" rather than left bare: with the 0813 release on the same
+    # row, an unqualified FP8 pill reads as "the plain one" instead of "the
+    # superseded one". Matches DeepSeek's own naming — their benchmark tables
+    # say `DeepSeek-V4-Pro-0813` vs `DeepSeek-V4-Pro (Preview)`.
+    label: "FP8 (Preview)"
+    precision: fp8
+    vram_minimum_gb: 960
+    description: "Native FP4+FP8 mixed checkpoint (MoE experts FP4, remaining params FP8)"
+    # deep_gemm_mega_moe is FP8-only; NVFP4 selects its backend separately.
+    # Layered on the recipe-level Blackwell FP4 indexer cache.
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+  nvfp4:
+    model_id: "nvidia/DeepSeek-V4-Pro-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 960
+    description: "NVIDIA modelopt NVFP4 checkpoint (MoE experts NVFP4; attention, shared experts, router head, and MTP stay FP8) for Blackwell GPUs."
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "flashinfer_cutedsl"
+  dspark:
+    # Fused DSpark checkpoint — the preview weights with the DSpark draft module
+    # attached. A distinct served repo, so it lives on the Variant axis;
+    # selecting it defaults the spec-decoding method to dspark (below).
+    model_id: "deepseek-ai/DeepSeek-V4-Pro-DSpark"
+    label: "DSpark"
+    precision: fp8
+    vram_minimum_gb: 960
+    description: "Preview FP4+FP8 weights with the DSpark draft module baked in — same base checkpoint as the fp8 variant plus a fused speculative decoder."
+    # DSpark support landed after the recipe baseline (0.20.0), in vLLM 0.25.0.
+    min_vllm_version: "0.25.0"
+    default_modes:
+      spec_decoding: dspark
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/DeepSeek-V4-Pro-NVFP4-FP8"
+    precision: nvfp4
+    label: "NVFP4+FP8 (RedHat)"
+    vram_minimum_gb: 1000
+    description: "RedHatAI NVFP4+FP8 mixed-precision checkpoint"
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+# TP+EP is the default deployment; single_node_tp is offered only as a
+# latency-oriented alternative.
+default_strategy: single_node_tep
+
+hardware_overrides:
+  hopper:
+    # H200 (141 GB × 8 = 1128 GB) leaves KV cache tight at 1M context with
+    # ~960 GB mixed-precision weights replicated across DP ranks — cap to 800K.
+    # H20 (no profile here) needs `--max-model-len 200000 --max-num-seqs 16` (#617).
+    extra_args:
+      - "--max-model-len"
+      - "800000"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--max-num-seqs"
+      - "512"
+      - "--no-enable-flashinfer-autotune"
+      - "--compilation-config"
+      - '{"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+  blackwell:
+    # Common to every variant on Blackwell. The FP8-only deep_gemm_mega_moe MoE
+    # kernel is added per-variant (FP8 checkpoints), not here.
+    extra_args:
+      - "--attention_config.indexer_kv_dtype=mxfp4"
+  amd:
+    extra_args:
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-seqs"
+      - "512"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--compilation-config"
+      - '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+
+strategy_overrides:
+  single_node_tp:
+    # Latency-oriented TP-only deployment: no expert parallelism (single_node_tp
+    # strategy doesn't add --enable-expert-parallel) and no MoE mega-kernel
+    # backend on Blackwell. Autotune is disabled to minimize startup time.
+    hardware_overrides:
+      hopper:
+        extra_args:
+          - "--no-enable-flashinfer-autotune"
+      blackwell:
+        # Replaces recipe-level blackwell override: keeps the FP4 indexer cache
+        # but drops any variant-level --moe-backend selection (TP-only uses
+        # the default MoE backend).
+        extra_args:
+          - "--attention_config.indexer_kv_dtype=mxfp4"
+          - "--no-enable-flashinfer-autotune"
+  single_node_tep:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+  multi_node_tep:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+  single_node_dep:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+  multi_node_dep:
+    extra_args:
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE", "custom_ops":["all"]}'
+  pd_cluster:
+    env:
+      VLLM_USE_NCCL_SYMM_MEM: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+    prefill:
+      nodes:
+        default: 2           # 2 GB200 NVL4 trays = 8 GPUs (~960 GB weights don't fit on 1 tray)
+        gb300: 1             # 1 GB300 NVL4 tray = 4 GPUs (1072 GB/tray fits weights)
+      parallelism: dep       # DP + expert-parallel pool
+      vllm_args:
+        - "--max-num-seqs"
+        - "16"
+        - "--max-num-batched-tokens"
+        - "16384"
+        - "--no-disable-hybrid-kv-cache-manager"
+        - "--enable-sleep-mode"
+      env: {}
+    decode:
+      nodes:
+        default: 2           # 2 GB200 NVL4 trays = 8 GPUs
+        gb300: 1             # 1 GB300 NVL4 tray = 4 GPUs
+      parallelism: dep
+      vllm_args:
+        - "--max-num-seqs"
+        - "1024"
+        - "--max-num-batched-tokens"
+        - "1024"
+        - "--max-cudagraph-capture-size"
+        - "1024"
+        - "--compilation-config"
+        - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+        - "--no-disable-hybrid-kv-cache-manager"
+        - "--enable-sleep-mode"
+      env: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-V4-Pro is the flagship of the V4 preview family: a 1.6T-total / 49B-active
+  Mixture-of-Experts model. It pairs a **hybrid attention stack** — Compressed Sparse
+  Attention (CSA) + Heavily Compressed Attention (HCA) — with **Manifold-Constrained
+  Hyper-Connections (mHC)** to reach 27% of V3.2's per-token inference FLOPs and 10% of
+  V3.2's KV cache at 1M context. Pre-trained on 32T+ tokens with the **Muon optimizer**
+  for faster convergence; post-training is a two-stage pipeline (domain-specific expert
+  cultivation + unified consolidation via on-policy distillation).
+
+  Checkpoint is **FP4+FP8 mixed**: MoE expert weights are stored in FP4 while the
+  remaining (attention / norm / router) params stay in FP8.
+
+  An **NVFP4 variant** (`nvidia/DeepSeek-V4-Pro-NVFP4`) is also available — NVIDIA
+  modelopt re-quantizes the MoE experts to standard NVFP4 while attention, shared
+  experts, router head, and MTP stay FP8. Pick it from the **Variant** row; it runs on
+  Blackwell GPUs with the FP4 indexer cache.
+
+  ## Checkpoints
+
+  Four checkpoints are on the **Variant** row. They differ in *which weights you serve*
+  and *which draft module ships with them* — the speculative method itself is picked on
+  the **Spec Decoding** row.
+
+  | Variant | Repo | Draft | Notes |
+  | :-- | :-- | :-- | :-- |
+  | **FP8 (0813)** (default) | `deepseek-ai/DeepSeek-V4-Pro-0813` | DSpark | Official release, preview structure + DSpark |
+  | **FP8 (Preview)** | `deepseek-ai/DeepSeek-V4-Pro` | MTP | Preview FP4+FP8 mixed weights |
+  | **NVFP4** | `nvidia/DeepSeek-V4-Pro-NVFP4` | MTP | modelopt re-quant, Blackwell |
+  | **DSpark** | `deepseek-ai/DeepSeek-V4-Pro-DSpark` | DSpark | Preview weights + fused DSpark module |
+
+  **0813 is the official DeepSeek-V4-Pro release** and the default here, superseding
+  the preview with substantially stronger agentic capability — 87.9 on Terminal Bench
+  2.1, 62.7 on DeepSWE and 42.7 on HLE (60.0 with tools), versus 72.1, 12.8 and 37.7
+  for the preview. It is built on the preview model structure with a DSpark speculative
+  decoding module attached. The preview weights remain available as the
+  **FP8 (Preview)** variant for reproducing earlier results.
+
+  **DSpark** is *not* new weights — it is the preview checkpoint with a speculative
+  decoding module attached (see [DeepSpec](https://github.com/deepseek-ai/DeepSpec)).
+  Both fused checkpoints add a `dspark_*` block to `config.json`; the preview and NVFP4
+  checkpoints have no such block, which is why the DSpark method is offered only on the
+  two variants that carry the draft. Selecting either one auto-enables **Spec Decoding**
+  with `method: dspark`, emitting:
+
+  ```
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+  ```
+
+  The fused checkpoints are ~893 GB on disk versus ~865 GB for the preview — the draft
+  module is the difference. Both require **vLLM 0.25.0**, above this recipe's 0.20.0
+  baseline; the Install block bumps automatically when either is selected.
+
+  ## Reasoning modes
+
+  The chat template exposes three reasoning-effort modes:
+
+  - **Non-think** — fast, intuitive responses.
+  - **Think High** — explicit chain-of-thought for complex problem-solving and planning.
+  - **Think Max** — maximum reasoning effort; requires `--max-model-len >= 393216`
+    (384K tokens) to avoid truncation.
+
+  Recommended sampling: `temperature = 1.0`, `top_p = 1.0`.
+
+  On the **0813** variant the effort levels are named `low` / `high` / `max`, and
+  DeepSeek recommends `top_p = 0.95` for agentic scenarios (`1.0` otherwise) with
+  `temperature = 1.0`. Allow up to **384K output tokens** at the `high` and `max`
+  levels.
+
+  Note that the 0813 release ships no Jinja chat template — the repo provides an
+  `encoding/` folder with `encode_messages` / `parse_message_from_completion_text`
+  helpers instead. Serving through vLLM with `--tokenizer-mode deepseek_v4` (the
+  **Tool Calling** pill) applies the built-in DeepSeek-V4 encoding, so the OpenAI-
+  compatible endpoint works without the helper scripts.
+
+  ### OpenAI Client Example
+
+  For DeepSeek-V4, keep reasoning controls in `chat_template_kwargs`, as it exposes a
+  custom **Think Max** mode via `"reasoning_effort": "max"`.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  model = "deepseek-ai/DeepSeek-V4-Pro-0813"
+  messages = [{"role": "user", "content": "What is 17*19? Return only the final integer."}]
+
+  # Non-think
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+  )
+
+  # Think High
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+      extra_body={
+          "chat_template_kwargs": {
+              "thinking": True,
+              "reasoning_effort": "high",
+          },
+      },
+  )
+
+  # Think Max
+  resp = client.chat.completions.create(
+      model=model,
+      messages=messages,
+      extra_body={
+          "chat_template_kwargs": {
+              "thinking": True,
+              "reasoning_effort": "max",
+          },
+      },
+  )
+  ```
+
+  ## Recommended deployments
+
+  - **B300 (8× GPU)**: single-node DP + EP with `--data-parallel-size 8`.
+  - **H200 (8× GPU)**: DP + EP with `--data-parallel-size 8`. Context is capped at
+    800K tokens (`--max-model-len 800000`) to leave KV headroom with dense params
+    replicated across ranks — applies to both single-node and multi-node H200.
+  - **MI355X (8× GPU)**: validated with ROCm + AITER (`VLLM_ROCM_USE_AITER=1`),
+    `--gpu-memory-utilization 0.9`, `--max-num-seqs 128`,
+    `--max-num-batched-tokens 8192`, and `--distributed-executor-backend mp`.
+  - **GB200 NVL4 (4× GPU per tray)**: the ~960 GB mixed-precision checkpoint does not
+    fit on one tray; run multi-node DP + EP across **2 trays** (8 GPUs total) with
+    `--data-parallel-size 8`. Pick the "Multi-Node" tab and set nodes to 2.
+
+  ### MI355X (8×288GB)
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --host localhost \
+    --port 8001 \
+    --dtype auto \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 8 \
+    --max-num-seqs 512 \
+    --max-num-batched-tokens 8192 \
+    --distributed-executor-backend mp \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
+  ```
+
+  #### MI355X is validated on GSM8K dataset:
+
+  ##### Launch command
+
+  ```bash
+  MODEL=deepseek-ai/DeepSeek-V4-Pro
+  lm_eval --model local-completions \
+    --model_args model=$MODEL,base_url=http://0.0.0.0:8001/v1/completions,num_concurrent=128,max_retries=10,max_gen_toks=2048,timeout=60000 \
+    --batch_size auto \
+    --tasks gsm8k \
+    --num_fewshot 8 \
+    --output_path . 2>&1 | tee -a eval.log
+  ```
+
+  ##### Reported result
+
+  ```text
+  local-completions ({'model': 'deepseek-ai/DeepSeek-V4-Pro', 'base_url': 'http://0.0.0.0:8001/v1/completions', 'num_concurrent': 128, 'max_retries': 10, 'max_gen_toks': 2048, 'timeout': 60000}), gen_kwargs: ({}), limit: None, num_fewshot: 8, batch_size: auto
+  |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+  |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+  |gsm8k|      3|flexible-extract|     8|exact_match|↑  |0.9538|±  |0.0058|
+  |     |       |strict-match    |     8|exact_match|↑  |0.9545|±  |0.0057|
+  ```
+
+  ## KV Cache Offloading
+
+  Agentic and multi-turn workloads reuse long prefixes whose KV state can exceed on-GPU
+  capacity. The **KV Offload** row attaches a host-DRAM KV tier to any serving strategy —
+  pick one of three connectors:
+
+  - **Simple** — `SimpleCPUOffloadConnector`: spills KV blocks to a per-rank region of CPU
+    DRAM on each node. The simplest way to extend effective KV capacity for a single instance.
+  - **Mooncake** — `MooncakeStoreConnector`: pools CPU DRAM into a distributed shared KV
+    store — either embedded (each rank's vLLM worker runs a Mooncake client that donates a DRAM segment)
+    or standalone (a per-node `mooncake_store_service` owns the node's DRAM and contributes
+    it to the pool, decoupling cache lifetime from the engine). A cluster-wide
+    `mooncake_master` coordinates the pool; across 2+ instances, GPU workers share it for
+    cross-instance prefix reuse. Install from the extra-install block above; see the [Mooncake docs](https://kvcache-ai.github.io/Mooncake/).
+  - **LMCache** — `LMCacheMPConnector`: a node-local KV pool served by a
+    companion `lmcache server` process, launched before `vllm serve`.
+    Single-node strategies only. Install from the extra-install block above; see the [LMCache docs](https://docs.lmcache.ai/).
+
+  ## Agentic serving on GB200/GB300 (DSpark)
+
+  For agentic serving, use the following common settings with
+  [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/tree/72e1d3230f6c080a530b0a1d46f8eb4602340597)
+  and its native DSpark draft. These are separate from the command-builder defaults.
+
+  ### Common settings
+
+  Set `VLLM_USE_V2_MODEL_RUNNER=1` and use these engine arguments:
+
+  ```text
+  --tokenizer-mode deepseek_v4 --trust-remote-code
+  --kv-cache-dtype fp8 --block-size 256
+  --no-disable-hybrid-kv-cache-manager --no-enable-flashinfer-autotune
+  --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
+  --speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+  ```
+
+  The example uses `K=6`, where `K` is `num_speculative_tokens`. Tune K and the
+  prefill/decode (PD) ratio for each target concurrency to balance throughput,
+  per-user latency and time to first token. Use the same K on both PD roles.
+
+  For aggregate TP serving, use
+  `--disable-custom-all-reduce`, `VLLM_ALLREDUCE_USE_FLASHINFER=1`,
+  `VLLM_FLASHINFER_ALLREDUCE_BACKEND=auto`; do not select an EP MoE backend.
+  For DEP (TP1 with data and expert parallelism), both pools instead use
+  `--enable-expert-parallel --enable-ep-weight-filter --enable-cumem-allocator`,
+  `--moe-backend deep_gemm_amxf4_mega_moe` and `VLLM_DSV4_MEGA_FP8_COMBINE=1`.
+  This MoE configuration supports the native mixed FP4/FP8 checkpoint, unlike
+  the FP8-only `deep_gemm_mega_moe` setting above.
+
+  For aggregate and decode, set `cudagraph_mode=FULL_DECODE_ONLY` and `mode=0`
+  in `--compilation-config`, with explicit capture sizes `n*(K+1)` for `n=1..S`.
+  `S` is `max-num-seqs` per DP rank, or per engine for pure TP. Set the maximum
+  capture size to `S*(K+1)`; aggregate serving can also include `n*K` sizes.
+  Recompute the capture sizes when K or S changes. Size `max-num-batched-tokens`
+  to cover verification tokens plus any prefill work scheduled on that engine.
+
+  ### Scheduling, NUMA binding, and streaming
+
+  **DEP decode scheduling:** the decode example below uses:
+
+  ```text
+  --prefill-schedule-interval 16 --long-prefill-token-threshold 512
+  ```
+
+  The interval controls how often DP ranks admit new prefill requests. Increasing
+  it can balance work across ranks but delays admission. The threshold limits
+  long-prefill chunk size when requests share the token budget.
+  Compare these overrides with leaving both flags unset, measuring throughput,
+  time to first token, and inter-token latency at your target load. Retune when
+  changing the workload, pool sizes, hardware, or engine version.
+
+  The prefill example uses `--long-prefill-token-threshold 1024` and leaves
+  `--prefill-schedule-interval` unset.
+
+  **DEP NUMA binding:** on every prefill and decode node, enable binding and
+  provide one NUMA node ID per visible GPU. For the four-GPU layout where GPUs
+  0/1 are local to NUMA node 0 and GPUs 2/3 to NUMA node 1, use:
+
+  ```text
+  --numa-bind --numa-bind-nodes 0 0 1 1
+  ```
+
+  Match the list to the local GPU order and topology on each node, including
+  GB300 deployments. See the [vLLM NUMA binding guide](https://docs.vllm.ai/en/latest/configuration/optimization/#numa-binding-for-multi-socket-gpu-nodes)
+  for automatic detection and explicit mappings.
+
+  **Aggregate streaming:** add `--stream-interval 10` to the aggregate TP8
+  worker at concurrency 1, 4, or 8. This batches streamed output into larger
+  updates to reduce host overhead; use a smaller interval when smoother token
+  delivery matters more. The DEP configurations leave this override unset.
+
+  ### Running with Dynamo
+
+  The example below runs a DEP8 prefill pool and a DEP8 decode pool, each across
+  two four-GPU GB200 nodes, plus a host for shared services and the frontend.
+  Run the Python commands in `vllm/vllm-openai:nightly-dev-arm64-cu13.0.1-20ebb28`
+  with the model, recipe files, GPUs, and RDMA devices accessible;
+  use host networking so the advertised addresses are reachable across nodes.
+  Install the matching Dynamo packages in each frontend/worker container:
+
+  ```bash
+  python3 -m pip install --extra-index-url https://pypi.nvidia.com \
+    ai-dynamo==1.3.0.dev20260720 ai-dynamo-runtime==1.3.0.dev20260720
+  ```
+
+  Save the following as `dynamo-env.sh` and source it in each shell. Replace the
+  example addresses with routable addresses on your cluster. `MODEL_PATH` must
+  contain the pinned 0813 checkpoint on every worker.
+
+  ```bash
+  export INFRA_IP=10.0.0.10
+  export ETCD_ENDPOINTS="http://${INFRA_IP}:2379"
+  export NATS_SERVER="nats://${INFRA_IP}:4222"
+  export DYN_NAMESPACE=dspark
+  export MODEL_PATH=/models/DeepSeek-V4-Pro-0813
+  export SERVED_MODEL=deepseek-ai/DeepSeek-V4-Pro-0813
+  export PREFILL_HEAD_IP=10.0.0.11
+  export DECODE_HEAD_IP=10.0.0.21
+  ```
+
+  **Shared services.** Provide `etcd`, `nats-server`, and `mooncake_master` on the
+  service host's `PATH`. See the official [Dynamo service setup](https://github.com/ai-dynamo/dynamo/blob/59dd504105db498b11e5715854a2512d57b7a1e0/dev/docker-compose.yml)
+  and [Mooncake installation](https://kvcache-ai.github.io/Mooncake/) for installation
+  options. Start these services once on the private cluster network, before workers:
+
+  ```bash
+  source ./dynamo-env.sh
+  etcd --data-dir ./etcd-data --listen-client-urls http://0.0.0.0:2379 \
+    --advertise-client-urls "$ETCD_ENDPOINTS" >etcd.log 2>&1 &
+  cat >nats.conf <<'EOF'
+  port: 4222
+  max_payload: 33554432
+  jetstream { store_dir: "./nats-data" }
+  EOF
+  nats-server -c ./nats.conf >nats.log 2>&1 &
+  mooncake_master --port=8700 --enable_http_metadata_server=true \
+    --http_metadata_server_port=8701 --eviction_high_watermark_ratio=0.9 \
+    --default_kv_lease_ttl=10000 --rpc_thread_num=16 \
+    --enable_metric_reporting=true --metrics_port=8702 >mooncake.log 2>&1 &
+  ```
+
+  Wait for the services to listen before continuing. All hosts must reach the
+  shared endpoints; workers must also reach each other's DP rendezvous and NIXL
+  addresses. Existing managed services can supply the same endpoints.
+
+  **Frontend.** In a separate shell, start the HTTP endpoint for the disaggregated
+  deployment:
+
+  ```bash
+  source ./dynamo-env.sh
+  export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600
+  export DYN_TCP_CHANNEL_BUFFER=128
+  export DYN_TCP_REQUEST_TIMEOUT=60
+  python3 -m dynamo.frontend --http-port 8000 --router-mode random \
+    --router-session-affinity-ttl-secs 900
+  ```
+
+  - Aggregate: `--router-mode kv`, `DYN_ROUTER_TEMPERATURE=0` and
+    `DYN_TOKENIZER=fastokens`.
+  - Disaggregated: `--router-mode random` with session affinity, or `kv` with
+    the same tokenizer settings. Send a stable conversation
+    ID as `x-dynamo-session-id` and set `--router-session-affinity-ttl-secs` to
+    cover the conversation lifetime.
+  - Both DEP roles use `MultiConnector` with `NixlConnector` for PD transfer and
+    `MooncakeStoreConnector` for shared prefix storage. Enable store lookup only
+    on prefill, and set `VLLM_CONNECTOR_PREFETCH_DEPTH=0` there. Role-specific
+    `--kv-transfer-config` values:
+
+  Prefill — save as `prefill-kv.json` in the worker's working directory:
+
+  ```json
+  {"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}
+  ```
+
+  Decode — save as `decode-kv.json` in the worker's working directory:
+
+  ```json
+  {"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"enable_cross_layers_blocks":false}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"load_async":true,"lookup_async":false,"enable_lookup":false,"enable_cross_layers_blocks":false,"enable_offload":false}}]}}
+  ```
+
+  **Worker environment.** Run the following in Bash on each worker node. Set
+  `NODE_IP` to that node's routable address and `NODE_RANK` to 0 or 1 within its
+  own pool. For example, prefill nodes `10.0.0.11` / `10.0.0.12` use ranks 0 / 1;
+  decode nodes `10.0.0.21` / `10.0.0.22` also use ranks 0 / 1. All four GPUs are
+  visible to one launch process per node. Adjust the NUMA and NIC mappings to
+  match the hardware. The embedded Mooncake store uses 140 GB per local rank
+  in this example; ensure enough host memory or resize it for your deployment.
+
+  ```bash
+  source ./dynamo-env.sh
+  export NODE_IP=10.0.0.11  # Change on each worker node.
+  NODE_RANK=0              # Use 1 on the second node of either pool.
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  export VLLM_HOST_IP="$NODE_IP"
+  export VLLM_NIXL_SIDE_CHANNEL_HOST="$NODE_IP"
+  export VLLM_NIXL_SIDE_CHANNEL_PORT=20096
+  export DYN_SYSTEM_PORT=8081
+  export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_DSV4_MEGA_FP8_COMBINE=1
+  export PYTHONHASHSEED=0
+  export MOONCAKE_MASTER="${INFRA_IP}:8700"
+  export MOONCAKE_TE_META_DATA_SERVER="http://${INFRA_IP}:8701/metadata"
+  export MOONCAKE_LOCAL_HOSTNAME="$NODE_IP"
+  export MOONCAKE_CONFIG_PATH="$PWD/mooncake.json"
+  cat >"$MOONCAKE_CONFIG_PATH" <<EOF
+  {"metadata_server":"P2PHANDSHAKE",
+   "master_server_address":"${MOONCAKE_MASTER}","global_segment_size":"140GB",
+   "local_buffer_size":"4GB","protocol":"rdma",
+   "device_name":"mlx5_0,mlx5_1,mlx5_2,mlx5_3","mode":"embedded","enable_offload":false}
+  EOF
+
+  COMMON_ARGS=(
+    --model "$MODEL_PATH" --served-model-name "$SERVED_MODEL"
+    --tensor-parallel-size 1 --pipeline-parallel-size 1
+    --data-parallel-size 8 --data-parallel-size-local 4
+    --data-parallel-start-rank "$((4 * NODE_RANK))"
+    --data-parallel-rpc-port 13345 --data-parallel-hybrid-lb
+    --enable-expert-parallel --enable-ep-weight-filter --enable-cumem-allocator
+    --moe-backend deep_gemm_amxf4_mega_moe
+    --numa-bind --numa-bind-nodes 0 0 1 1
+    --tokenizer-mode deepseek_v4 --trust-remote-code
+    --max-model-len 1048576 --kv-cache-dtype fp8 --block-size 256
+    --no-disable-hybrid-kv-cache-manager --no-enable-flashinfer-autotune
+    --attention-config '{"backend":"FLASHINFER_MLA_SPARSE_DSV4","use_prefill_query_quantization":true,"indexer_kv_dtype":"mxfp4"}'
+    --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+  )
+  ```
+
+  **Prefill workers.** Run once on each prefill node after the worker environment
+  block, keeping `PREFILL_HEAD_IP` identical across the pool:
+
+  ```bash
+  export VLLM_CONNECTOR_PREFETCH_DEPTH=0
+  python3 -m dynamo.vllm "${COMMON_ARGS[@]}" --disaggregation-mode prefill \
+    --data-parallel-address "$PREFILL_HEAD_IP" \
+    --kv-transfer-config "$(cat prefill-kv.json)" \
+    --max-num-seqs 64 --max-num-batched-tokens 8192 \
+    --long-prefill-token-threshold 1024 --gpu-memory-utilization 0.85 \
+    --max-cudagraph-capture-size 384
+  ```
+
+  **Decode workers.** Run once on each decode node after the worker environment
+  block. This example uses K=5 and S=8, so graph capture sizes are 6 through 48:
+
+  ```bash
+  python3 -m dynamo.vllm "${COMMON_ARGS[@]}" --disaggregation-mode decode \
+    --data-parallel-address "$DECODE_HEAD_IP" \
+    --kv-transfer-config "$(cat decode-kv.json)" \
+    --max-num-seqs 8 --max-num-batched-tokens 8240 \
+    --prefill-schedule-interval 16 --long-prefill-token-threshold 512 \
+    --gpu-memory-utilization 0.9 --kv-cache-memory-bytes 37580963840 \
+    --max-cudagraph-capture-size 48 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","mode":0,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48]}'
+  ```
+
+  For DEP12/DEP16, set `--data-parallel-size` to 12/16 in the corresponding
+  pool and run on three/four four-GPU nodes. Each pool keeps its own head address;
+  start ranks are `4 * NODE_RANK` (0, 4, 8, 12). Tune scheduling for the target
+  workload and recompute graph sizes when changing K or S. The same port numbers can be
+  reused on separate hosts; co-located workers need distinct port allocations.
+  The [official Dynamo vLLM examples](https://github.com/ai-dynamo/dynamo/tree/59dd504105db498b11e5715854a2512d57b7a1e0/examples/backends/vllm/launch)
+  provide the aggregate and KV-routing launch patterns; apply this section's
+  model and aggregate settings when using those patterns.
+
+  Once all workers register, send requests to the frontend, retaining the same
+  session ID for turns in one conversation:
+
+  ```bash
+  curl "http://${INFRA_IP}:8000/v1/chat/completions" \
+    -H 'Content-Type: application/json' -H 'x-dynamo-session-id: example-session' \
+    -d '{"model":"deepseek-ai/DeepSeek-V4-Pro-0813","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+  ```
+
+  ## Agentic benchmark reproduction (InferenceX MI355X sweep)
+
+  The command above is the default serving configuration. The SemiAnalysis InferenceX
+  MI355X benchmark lane for this checkpoint is a separate high-concurrency benchmark
+  configuration — not the recipe default. To reproduce that sweep, start from the
+  default command above and apply these deltas:
+
+  **Source configuration:**
+
+  ```yaml
+  image: vllm/vllm-openai-rocm:nightly-eed1f3d0c6043bd494424a22443ee198dd56f657
+  ```
+
+  **Applied to both arms:**
+
+  - Enable `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4` (previously commented out).
+  - Disable `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0` for this nightly.
+    DSv4-Pro is a mixed checkpoint (MXFP4 routed experts, FP8 shared expert), and
+    this image fails while loading incompatible scales and shapes when the fused
+    shared-expert path is enabled.
+  - Raise `--gpu-memory-utilization` from `0.8` to `0.86`.
+  - Pin `--max-num-batched-tokens 8192` instead of the nightly default of `16384`.
+    On the TP8 initialization check this raised GPU KV-cache capacity from `4,730,981`
+    to `8,524,228` tokens and reduced peak activation memory from `11.44 GiB` to
+    `8.9 GiB`.
+
+  **Applied to the DP-attention arm only:**
+
+  - Cap `--max-num-seqs` at `CONC` rather than `2*CONC`. The limit is per scheduler
+    and DP-attention runs one scheduler per rank. The pure TP8 arm keeps the existing
+    `2*CONC` headroom for AgentX subagent fan-out.
+  - Add `--prefill-schedule-interval 8` and `--long-prefill-token-threshold 16384`.
+
+  With `--max-num-batched-tokens 8192` now pinned for both arms,
+  `--long-prefill-token-threshold 16384` sits above the token budget and therefore
+  never binds. It is inert rather than harmful, and the DP-attention point was
+  measured with it present.
+
+  `--compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}'` is
+  unchanged; it was already in the checked-in recipe.
+
+  Export the AITER and INT4 quantized all-reduce environment variables before launch:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export VLLM_ROCM_USE_AITER_MOE=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0
+  export VLLM_ENGINE_READY_TIMEOUT_S=10800
+
+  vllm serve "$MODEL_PATH" --served-model-name "$MODEL" \
+    --host 0.0.0.0 \
+    --port "$VLLM_BACKEND_PORT" \
+    --trust-remote-code \
+    --async-scheduling \
+    --distributed-executor-backend mp \
+    --kv-cache-dtype fp8 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.86 \
+    --moe-backend aiter \
+    --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2.49}' \
+    --tokenizer-mode deepseek_v4 \
+    --tool-call-parser deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --enable-auto-tool-choice \
+    --enable-prefix-caching \
+    --prefix-cache-retention-interval 32768 \
+    --no-disable-hybrid-kv-cache-manager \
+    --max-num-seqs "8"
+  ```
+
+  `--prefix-cache-retention-interval` replaces the `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`
+  env var, removed in vLLM 0.30.0
+  ([vllm-project/vllm#55353](https://github.com/vllm-project/vllm/pull/55353)).
+
+  ## Fixed-sequence benchmark reproduction (InferenceX MI355X 8K/1K)
+
+  This is a **second, separate InferenceX lane** — not a variation of the Agentic
+  sweep above. It is a fixed-sequence measurement at input length 8192 and output
+  length 1024 on one 8× MI355X node, run as two arms: **STP** (no speculative
+  decoding) and **real MTP with two draft tokens**. Neither arm is the general
+  recipe default, and neither is a recommendation for other AMD workloads.
+
+  The checkpoint is `deepseek-ai/DeepSeek-V4-Pro` — the **FP8 (Preview)** pill in
+  the Variant row, whose mixed FP4+FP8 weights InferenceX labels `fp4`. It is not
+  the `0813` default variant and not the DSpark checkpoint.
+
+  ### Source configuration
+
+  | Item | Value |
+  |---|---|
+  | InferenceX PR | [#2792](https://github.com/SemiAnalysisAI/InferenceX/pull/2792) |
+  | Config keys | `dsv4-fp4-mi355x-vllm` (STP), `dsv4-fp4-mi355x-vllm-mtp` (MTP) |
+  | Hardware | one node, 8× MI355X |
+  | Image | `vllm/vllm-openai-rocm:nightly-7c5dc571cbd1064ecc8a9b1045637ff647aa22cb` |
+  | Image digest | `sha256:f0bdaf5217a09949842b45c1ea1f12260d3205ec81f143b320dfc2eb3ec95e55` |
+  | Parallelism | TP 8, DP 1, EP 1 — no `--enable-expert-parallel` |
+  | Workload | ISL 8192, OSL 1024; concurrency 4, 8, 16, 32, 64, 128, 256, 512 |
+  | Requests per point | 10 × concurrency |
+
+  The image is pinned to an immutable nightly tag rather than a floating
+  `:nightly`, because the measurements depend on the ROCm DeepSeek-V4 kernel state
+  in that specific build. The Install block's AMD default stays on `:nightly`
+  deliberately — pin the tag above only when reproducing these numbers.
+
+  ### STP launch (no speculative decoding)
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_MOE=1
+  # Fuses the FP8 shared expert into the MXFP4 routed-expert AITER kernel.
+  # See the shared-expert note below for the build and eligibility requirements.
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --port "${PORT:-8000}" \
+    --tensor-parallel-size 8 \
+    --data-parallel-size 1 \
+    --async-scheduling \
+    --no-enable-prefix-caching \
+    --distributed-executor-backend mp \
+    --gpu-memory-utilization 0.8 \
+    --kv-cache-dtype fp8 \
+    --trust-remote-code \
+    --moe-backend aiter \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+  ```
+
+  ### MTP arm (real speculation, 2 draft tokens)
+
+  The MTP arm is the same launch plus one flag. Everything else — environment,
+  parallelism, memory, cache, executor, MoE backend, parsers, compilation — is
+  identical:
+
+  ```bash
+    --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+  ```
+
+  This is **real** MTP: draft tokens are verified against the target model. ROCm
+  support for the DeepSeek-V4 MTP head landed in
+  [vllm-project/vllm#43385](https://github.com/vllm-project/vllm/pull/43385). The
+  same two-token config is available from the command builder — enable *Spec
+  decoding* and pick the **MTP** mode with the FP8 (Preview) variant selected.
+
+  ### Left at engine defaults
+
+  This lane deliberately passes no `--max-model-len`, `--max-num-seqs`,
+  `--max-num-batched-tokens`, or `--block-size`, and no tool-calling flags. That
+  differs from this recipe's general AMD configuration, which does set several of
+  them — one reason this reproduction is documented separately rather than folded
+  into the default command.
+
+  ### Benchmarking the MTP arm needs chat formatting
+
+  MTP-style speculation is trained against chat-formatted input. Benchmarking it
+  with raw completion prompts silently depresses the acceptance rate, so measure
+  it against the chat endpoint, which applies the DeepSeek-V4 chat template that
+  `--tokenizer-mode deepseek_v4` installs:
+
+  ```bash
+  CONC=32
+
+  vllm bench serve \
+    --model deepseek-ai/DeepSeek-V4-Pro \
+    --host localhost \
+    --port "${PORT:-8000}" \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --dataset-name random \
+    --random-input-len 8192 \
+    --random-output-len 1024 \
+    --num-prompts "$((CONC * 10))" \
+    --max-concurrency "$CONC" \
+    --ignore-eos \
+    --trust-remote-code
+  ```
+
+  InferenceX drives its own benchmark client with a private DeepSeek-V4 encoder
+  rather than the tokenizer's built-in template, so the numbers on its dashboard
+  are not byte-identical to what the command above produces. Use the chat endpoint
+  for any MTP acceptance measurement regardless.
+
+  ### Shared-expert fusion requires a recent build
+
+  `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1` is a request, not a guarantee:
+  vLLM gates the fused shared-expert path on its own eligibility check.
+  [vllm-project/vllm#53161](https://github.com/vllm-project/vllm/pull/53161),
+  merged as `de69e821`, added the heterogeneous path that fuses the native-FP8
+  shared expert into the MXFP4 routed-expert kernel. Current `:nightly` images
+  include it, so the flag takes effect. On any build older than `de69e821` the
+  check rejects this mixed FP4+FP8 checkpoint outright and the fusion
+  self-disables at startup — including the immutable tag pinned in the
+  reproduction table above, which predates the fix.
+
+  On a build that includes it, the fusion additionally requires gfx950 (MI355X),
+  tensor parallelism 8, data parallelism 1, no expert parallelism and no EPLB,
+  `--moe-backend aiter`, BF16 model dtype, and the DeepSeek-V4 block-128 FP8
+  shared-expert quantization config. Both arms here satisfy this. Data-parallel
+  attention does not, and keeps the unfused path.
+
+  Eligibility is also re-checked per invocation against AITER's tuned-config
+  coverage for the number of MoE input rows. Decode-sized batches are covered and
+  take the fused kernel; large prefill chunks fall back to the unfused path, so an
+  8K-input workload runs fused during decode and unfused during prefill.
+
+  Failures are silent and logged at debug level, so check the server log before
+  assuming the fused path executed rather than inferring it from the flag. The
+  line to look for is `Using AITER DeepSeek V4 heterogeneous MoE for CSV-covered
+  MoE input rows`.
+
+  ### How this differs from the Agentic sweep above
+
+  | Setting | Fixed-sequence 8K/1K | Agentic sweep |
+  |---|---|---|
+  | Workload | ISL 8192 / OSL 1024, conc 4–512 | agentic-coding traces |
+  | `--gpu-memory-utilization` | `0.8` | `0.86` |
+  | Prefix caching | `--no-enable-prefix-caching` | `--enable-prefix-caching` |
+  | Speculation | none (STP) or real MTP, 2 tokens | synthetic MTP, 3 tokens |
+  | `--max-num-seqs` | not passed | `8` |
+  | `--max-num-batched-tokens` | not passed | `8192` |
+
+  The Agentic lane's synthetic acceptance length is a benchmark-comparability
+  device. This lane never uses it: the STP arm has no draft at all, and the MTP
+  arm verifies against the real target.
+
+  ### Provenance
+
+  Validation for this configuration comes from InferenceX, not from this
+  repository — no MI355X benchmark was rerun here.
+
+  - InferenceX PR: [#2792](https://github.com/SemiAnalysisAI/InferenceX/pull/2792)
+  - STP script: [`dsv4_fp4_mi355x_vllm.sh`](https://github.com/SemiAnalysisAI/InferenceX/blob/7393456f925f4962fc9bb6438567e73f7ca12bf8/benchmarks/single_node/fixed_seq_len/dsv4_fp4_mi355x_vllm.sh)
+  - MTP script: [`dsv4_fp4_mi355x_vllm_mtp.sh`](https://github.com/SemiAnalysisAI/InferenceX/blob/7393456f925f4962fc9bb6438567e73f7ca12bf8/benchmarks/single_node/fixed_seq_len/dsv4_fp4_mi355x_vllm_mtp.sh)
+  - Config matrix: [`configs/amd-master.yaml`](https://github.com/SemiAnalysisAI/InferenceX/blob/7393456f925f4962fc9bb6438567e73f7ca12bf8/configs/amd-master.yaml)
+  - Successful sweep: [run 33538769698](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/33538769698),
+    which ran at commit `7a209b121932696b7efd437ac50d19c53efc7a94`. All eight
+    concurrency points passed on both arms, plus `lm-eval` GSM8K eval-only jobs at
+    concurrency 128 and 512. Commits after that point on the PR branch do not touch
+    either fixed-sequence script or these two config entries.
+  - ROCm DeepSeek-V4 MTP support: [vllm-project/vllm#43385](https://github.com/vllm-project/vllm/pull/43385)
