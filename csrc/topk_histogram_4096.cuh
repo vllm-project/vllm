@@ -327,6 +327,8 @@ struct Histogram4096Smem {
   };
 };
 
+// Defined in topk_histogram_4096_overflow.cuh. Only kFp32Rescan instantiations
+// call it, and their callers include that header.
 template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
 __device__ __noinline__ void exact_topk_rescan_cold(
     const float* __restrict__ scores, int32_t* __restrict__ output,

@@ -1631,7 +1631,8 @@ def _negative_halfway_threshold() -> tuple[float, torch.Tensor]:
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize(
-    "num_rows,seq_len", [(1, 262144), (6, 131072), (16, 65536), (64, 65536)]
+    "num_rows,seq_len",
+    [(1, 262144), (6, 131072), (16, 65536), (34, 131072), (64, 65536)],
 )
 @torch.inference_mode()
 def test_cooperative_topk_overflow_negative_halfway(
@@ -1679,6 +1680,132 @@ def test_cooperative_topk_negative_inf_ties(
     _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
     torch.accelerator.synchronize()
     _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("num_rows,seq_len", [(9, 262144), (34, 131072), (64, 262144)])
+@torch.inference_mode()
+def test_cooperative_topk_streaming_overflow(
+    num_rows: int, seq_len: int, top_k: int
+) -> None:
+    # Per-CTA partitions exceed the resident stages, so recovery rescans
+    # global memory (kFused=false).
+    generator = torch.Generator().manual_seed(seq_len + top_k)
+    logits = (1.0 + torch.rand((num_rows, seq_len), generator=generator) * 0.01).cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("num_rows", [1, 16, 64])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_staging_fallback(num_rows: int, top_k: int) -> None:
+    # The final radix window holds more candidates per CTA than the staging
+    # buffer, so recovery falls back to a full candidate rescan.
+    seq_len = 262144
+    num_needed, num_window = 10, 100000
+    generator = torch.Generator().manual_seed(num_rows + top_k)
+    window = 1.0 + torch.randint(0, 8, (num_window,), generator=generator) * 2.0**-23
+    rows = []
+    for _ in range(num_rows):
+        row = torch.full((seq_len,), -100.0)
+        row[: top_k - num_needed] = 5.0 + torch.rand(
+            top_k - num_needed, generator=generator
+        )
+        row[top_k - num_needed : top_k - num_needed + num_window] = window
+        rows.append(row[torch.randperm(seq_len, generator=generator)])
+    logits = torch.stack(rows).cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("num_rows", [1, 64])
+@pytest.mark.parametrize(
+    "kind", ["zero_subnormal", "zero", "neg_zero", "neg_inf", "pos_inf"]
+)
+@torch.inference_mode()
+def test_cooperative_topk_overflow_special_bins(
+    kind: str, num_rows: int, top_k: int
+) -> None:
+    # Zero/subnormal and infinite coarse bins take the full FP32 radix rescan;
+    # single-key bins (all 0.0, -0.0 or +-inf) skip its refinement rounds.
+    seq_len = 131072
+    num_needed = 10
+    generator = torch.Generator().manual_seed(num_rows + top_k)
+    rows = []
+    for _ in range(num_rows):
+        if kind == "zero_subnormal":
+            row = torch.full((seq_len,), -100.0)
+            row[: top_k - num_needed] = 5.0 + torch.rand(
+                top_k - num_needed, generator=generator
+            )
+            tiny = torch.arange(1, 1501, dtype=torch.float32) * 1e-42
+            special = torch.cat(
+                [torch.zeros(1500), torch.full((1000,), -0.0), tiny, -tiny]
+            )
+            row[top_k - num_needed : top_k - num_needed + special.numel()] = special
+        elif kind in ("zero", "neg_zero"):
+            row = torch.full((seq_len,), 0.0 if kind == "zero" else -0.0)
+            row[: top_k - num_needed] = 5.0 + torch.rand(
+                top_k - num_needed, generator=generator
+            )
+        elif kind == "neg_inf":
+            row = torch.full((seq_len,), float("-inf"))
+            row[: top_k - num_needed] = torch.randn(
+                top_k - num_needed, generator=generator
+            )
+        else:
+            row = torch.randn(seq_len, generator=generator)
+            row[:3000] = float("inf")
+        rows.append(row[torch.randperm(seq_len, generator=generator)])
+    logits = torch.stack(rows).cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("num_rows", [9, 64])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_mixed_lengths(num_rows: int, top_k: int) -> None:
+    # One launch mixes short, cluster, overflowing and non-overflowing rows;
+    # scores past each row's length must never be selected.
+    width = 262144
+    choices = [top_k + 100, 16384, 16385, 65536, 200000, width]
+    generator = torch.Generator().manual_seed(num_rows + top_k)
+    row_lengths = [choices[i % len(choices)] for i in range(num_rows)]
+    logits = torch.full((num_rows, width), float("inf"))
+    for row, length in enumerate(row_lengths):
+        if row % 2:
+            logits[row, :length] = 1.0 + torch.rand(length, generator=generator) * 0.01
+        else:
+            logits[row, :length] = torch.randn(length, generator=generator)
+    logits = logits.cuda()
+    lengths = torch.tensor(row_lengths, dtype=torch.int32, device="cuda")
+    indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, width)
+    torch.accelerator.synchronize()
+    for row, length in enumerate(row_lengths):
+        _assert_cooperative_topk_exact(
+            logits[row : row + 1], indices[row : row + 1], length, top_k
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
