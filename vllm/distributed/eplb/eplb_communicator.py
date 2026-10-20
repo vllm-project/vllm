@@ -1028,7 +1028,33 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._expert_to_src_row = None
             self._layer_idx = None
 
+    def _report_teardown(self) -> None:
+        """Say when this communicator is collected, and what it deregisters.
+
+        A reconfiguration builds the new communicator before the switch and
+        registers the same expert weight tensors the old one still has
+        registered, so two NIXL registrations cover the same memory until the
+        old object is collected. `__del__` then deregisters that memory, and
+        nothing decides when: a stray reference delays it, which can put the
+        deregistration inside the window where peers are reading. Timestamps
+        are the only way to tell whether that is what happens, since the fault
+        and the teardown are in different processes.
+
+        Diagnostic only.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_COMM_TEARDOWN") != "1":
+            return
+        with contextlib.suppress(Exception):
+            logger.warning(
+                "[EEP-DEBUG] eplb communicator teardown: %d registration(s), "
+                "%d remote agent(s), %d transfer handle(s)",
+                len(self._registered_descs),
+                len(self._remote_agents),
+                len(self._xfer_entries),
+            )
+
     def __del__(self) -> None:
+        self._report_teardown()
         with contextlib.suppress(Exception):
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):

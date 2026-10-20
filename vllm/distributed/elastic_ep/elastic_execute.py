@@ -160,6 +160,11 @@ class ElasticEPScalingExecutor:
         self.reconfig_request = None
         self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
         self._prepared_eplb_communicator: EplbCommunicator | None = None
+        # Groups held back because a shrunk communicator still runs on them.
+        self._deferred_parent_groups: list[GroupCoordinator] = []
+        # The communicator the previous configuration used, kept alive on
+        # purpose while the new one transfers, see `_hold_previous_communicator`.
+        self._previous_eplb_communicator: EplbCommunicator | None = None
         self._async_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
@@ -250,9 +255,64 @@ class ElasticEPScalingExecutor:
         from vllm.platforms import current_platform
 
         current_platform.set_device(self.worker.device)
+        self._destroy_released_parent_groups()
         for group in groups:
-            if group is not None:
-                group.destroy()
+            if group is None:
+                continue
+            if self._defer_for_shrink_child(group):
+                continue
+            group.destroy()
+
+    def _destroy_released_parent_groups(self) -> None:
+        """Retire deferred groups once their last child has gone.
+
+        A deferred group is one retirement behind, which is the earliest point
+        at which its child can already be dead, and leaving it to a later one
+        would hold the buffers for the rest of the process.
+        """
+        if not self._deferred_parent_groups:
+            return
+        still_held = []
+        for group in self._deferred_parent_groups:
+            communicator = getattr(group, "device_communicator", None)
+            pynccl_comm = getattr(communicator, "pynccl_comm", None)
+            if pynccl_comm is not None and pynccl_comm.has_live_shrink_children:
+                still_held.append(group)
+                continue
+            group.destroy()
+        logger.warning(
+            "[EEP-DEBUG] retired %d deferred parent group(s), %d still held",
+            len(self._deferred_parent_groups) - len(still_held),
+            len(still_held),
+        )
+        self._deferred_parent_groups = still_held
+
+    def _defer_for_shrink_child(self, group: GroupCoordinator) -> bool:
+        """Hold back a group whose communicator a shrunk child is running on.
+
+        `ncclCommShrink` with NCCL_COMM_SHRINK_SHARE_RESOURCES=1 gives the child
+        the parent's buffers rather than its own, so retiring the parent here
+        frees memory a live communicator is still using. Both surviving ranks
+        faulted five seconds after a scale down that did exactly that.
+
+        Retiring early is the fix for the IPC refusal on the first collective,
+        so this cannot simply be dropped: deferring a group is only right for a
+        group that has a child, and the whole point is to find out whether the
+        refusal comes back when one group outlives the switch.
+        """
+        if os.getenv("VLLM_EEP_SHRINK_KEEP_PARENT") != "1":
+            return False
+        communicator = getattr(group, "device_communicator", None)
+        pynccl_comm = getattr(communicator, "pynccl_comm", None)
+        if pynccl_comm is None or not pynccl_comm.has_live_shrink_children:
+            return False
+        self._deferred_parent_groups.append(group)
+        logger.warning(
+            "[EEP-DEBUG] keeping a retired group alive because a shrunk "
+            "communicator still runs on its resources, %d deferred so far",
+            len(self._deferred_parent_groups),
+        )
+        return True
 
     @contextmanager
     def _watchdog(self, label: str) -> Iterator[None]:
@@ -811,10 +871,46 @@ class ElasticEPScalingExecutor:
                     module._replace_quant_method(module._quant_method.old_quant_method)
 
         assert self._prepared_eplb_communicator is not None
+        self._hold_previous_communicator(eplb_model_state.communicator)
         eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
         self._prepared_eplb_communicator = None
 
         return retired_groups
+
+    def _hold_previous_communicator(self, communicator) -> None:
+        """Keep the replaced EPLB communicator alive until the reshuffle is done.
+
+        The new communicator is built in `prepare_reconfiguration` and registers
+        the same expert weight tensors the old one already registered, so for a
+        while two NIXL registrations cover the same memory. The assignment below
+        drops the only reference to the old one, and its `__del__` deregisters
+        that memory. Nothing says when that runs: a reference the async worker
+        captured can delay it, which would put the deregistration inside the
+        window where peers are reading, and that is where the memory faults
+        land. It would also explain why only the ranks that were already there
+        fault, since only they have an old communicator to collect.
+
+        Holding a reference across the reshuffle makes the teardown happen at a
+        time this code chooses instead of a time the garbage collector chooses.
+        Diagnostic for now, because the mechanism is not proven.
+        """
+        if os.getenv("VLLM_EEP_HOLD_OLD_EPLB_COMM") != "1":
+            return
+        self._previous_eplb_communicator = communicator
+        logger.warning(
+            "[EEP-DEBUG] holding the previous eplb communicator %s across the "
+            "reshuffle instead of letting the collector decide",
+            type(communicator).__name__ if communicator is not None else None,
+        )
+
+    def _release_previous_communicator(self) -> None:
+        """Drop the held communicator once no peer is reading any more."""
+        if self._previous_eplb_communicator is None:
+            return
+        self._previous_eplb_communicator = None
+        logger.warning(
+            "[EEP-DEBUG] released the previous eplb communicator after the reshuffle"
+        )
 
     def _perform_eplb_reshuffle(
         self,
@@ -845,6 +941,7 @@ class ElasticEPScalingExecutor:
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
         eplb_state.is_async = is_async_enabled
+        self._release_previous_communicator()
         # Start the async worker thread if it doesn't exist yet (idempotent).
         # This is needed for new workers after scale-up: they create EplbState
         # in setup_eplb_from_mapping() but don't start the thread there because

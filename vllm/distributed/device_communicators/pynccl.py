@@ -103,6 +103,12 @@ class PyNcclCommunicator:
     # None for communicators built via `from_unique_id_bytes` (no process group).
     group: ProcessGroup | StatelessProcessGroup | None
 
+    # Set on both ends by `from_parent_shrink`. Class level so that every
+    # instance has them, including the ones built through `__new__` and the
+    # paths that return early before any instance attribute is assigned.
+    _shrink_parent: "PyNcclCommunicator | None" = None
+    _shrink_children: int = 0
+
     def __init__(
         self,
         group: ProcessGroup | StatelessProcessGroup,
@@ -327,6 +333,14 @@ class PyNcclCommunicator:
         assert isinstance(device, torch.device)
         self.device = device
 
+        # With NCCL_COMM_SHRINK_SHARE_RESOURCES=1 the child runs on buffers the
+        # parent owns, so destroying the parent first pulls them out from under
+        # a live user. Record the link in both directions so a teardown can see
+        # it: the count tells a holder of the parent that it is not free to go,
+        # and the reference keeps the parent from being collected meanwhile.
+        self._shrink_parent: PyNcclCommunicator | None = parent
+        parent._shrink_children += 1
+
         with torch.accelerator.device_index(device.index):
             self.comm = self.nccl.ncclCommShrink(parent.comm, exclude_ranks, flags)
 
@@ -371,6 +385,15 @@ class PyNcclCommunicator:
                 )
             self.available = False
             self.disabled = True
+        parent = self._shrink_parent
+        if parent is not None:
+            parent._shrink_children = max(0, parent._shrink_children - 1)
+            self._shrink_parent = None
+
+    @property
+    def has_live_shrink_children(self) -> bool:
+        """Whether a communicator derived from this one is still running on it."""
+        return self._shrink_children > 0
 
     def all_reduce(
         self,
