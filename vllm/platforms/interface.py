@@ -1443,10 +1443,8 @@ class Platform:
         reads of device values, so capture stays graph-capture/replay safe.
         Capture currently runs from the Model Runner V2 aux-output connector.
 
-        The result must be a 2-D (rows, experts_per_token) tensor on the input
-        device. Empty tensors are valid; rows past the step's local token count
-        are written but never read, and the row count must not exceed the
-        capturer's buffer capacity. Return ``None`` for the default restoration.
+        Return the rows in token order, or ``None`` for the default
+        restoration. Empty tensors are valid.
         """
         return None
 

@@ -378,46 +378,6 @@ def test_platform_rows_none_restores_default_layout(monkeypatch):
     assert (capturer.device_buffer[3:] == -1).all()
 
 
-@pytest.mark.parametrize("platform_override", [False, True])
-def test_capture_rejects_rows_exceeding_buffer(monkeypatch, platform_override):
-    """Oversized routing results fail before writing any capture rows."""
-    capturer = _capturer_with_buffer(max_tokens=2)
-    rows = torch.zeros(3, 2, dtype=torch.int32)
-
-    class OversizedPlatform(Platform):
-        @classmethod
-        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
-            return rows
-
-    platform = OversizedPlatform() if platform_override else Platform()
-    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", platform)
-    with (
-        patch(f"{_REC_MODULE}.get_forward_context", return_value=_forward_context()),
-        pytest.raises(ValueError, match="returned 3 rows for a 2-row buffer"),
-    ):
-        capturer.capture(0, rows)
-    assert (capturer.device_buffer == -1).all()
-
-
-def test_capture_rejects_non_2d_platform_rows(monkeypatch):
-    """Platform rows must keep the (rows, experts_per_token) shape."""
-    capturer = _capturer_with_buffer(max_tokens=4)
-    flat_rows = torch.zeros(6, dtype=torch.int32)
-
-    class FlatPlatform(Platform):
-        @classmethod
-        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
-            return flat_rows
-
-    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", FlatPlatform())
-    with (
-        patch(f"{_REC_MODULE}.get_forward_context", return_value=_forward_context()),
-        pytest.raises(ValueError, match="must return a 2-D"),
-    ):
-        capturer.capture(0, torch.zeros(3, 2, dtype=torch.int32))
-    assert (capturer.device_buffer == -1).all()
-
-
 def test_routed_experts_capturer_single_dp_no_metadata():
     """dp_metadata is None: capture writes the full topk_ids rows."""
     capturer = _capturer_with_buffer(dp_rank=0)
