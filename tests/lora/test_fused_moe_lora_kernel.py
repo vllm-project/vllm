@@ -9,6 +9,7 @@ import torch
 from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm import _custom_ops as ops
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
     tensor_model_parallel_all_gather,
@@ -30,6 +31,13 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cleanup_after_module():
+    """Release this module's cached GPU memory before later engine tests."""
+    yield
+    cleanup_dist_env_and_memory()
 
 
 def round_up(x, base):
