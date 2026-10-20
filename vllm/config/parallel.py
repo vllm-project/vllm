@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
+DataParallelLBPolicy = Literal["requests", "tokens", "dualpath"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
@@ -180,6 +181,20 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    data_parallel_lb_policy: DataParallelLBPolicy = "requests"
+    """How the internal DP load balancer picks an engine for a new request.
+
+    - "requests": the fewest waiting + running requests (default).
+    - "tokens": the fewest tokens held by waiting + running requests, with
+      the request count as the tie-breaker.
+    - "dualpath": balance tokens and requests together, following the
+      decode-engine scheduler of DualPath (arXiv:2602.21548). A request goes to
+      the engine with the fewest requests among those that stay within 5% of
+      the mean token load after taking it; if none do, to the engine with the
+      fewest tokens.
+
+    Applies only when vLLM load-balances between data parallel ranks
+    (internal and hybrid LB modes)."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
@@ -923,6 +938,7 @@ class ParallelConfig:
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
+            "data_parallel_lb_policy",
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",

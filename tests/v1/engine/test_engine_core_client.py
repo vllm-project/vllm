@@ -209,12 +209,17 @@ def _make_pooling_request(
     )
 
 
-def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncMPClient:
+def _make_dplb_client(
+    num_engines: int = 3, client_count: int = 1, lb_policy: str = "requests"
+) -> DPLBAsyncMPClient:
     client = object.__new__(DPLBAsyncMPClient)
     client.client_count = client_count
+    client.lb_policy = lb_policy
     client.reqs_in_flight = {}
     client.streaming_reqs = set()
     client.engine_inflight = Counter()
+    client.engine_inflight_tokens = Counter()
+    client.reqs_num_tokens = {}
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
@@ -300,6 +305,55 @@ def test_dplb_burst_round_robins_despite_snapshot_rebinds():
         client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
 
     assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
+
+
+def test_dplb_tokens_policy_picks_fewest_tokens():
+    client = _make_dplb_client(lb_policy="tokens")
+    client.lb_engines = [[0, 1, 0.1, 900], [0, 9, 0.1, 100], [0, 2, 0.1, 100]]
+
+    request = make_request(SamplingParams(max_tokens=1))
+    assert client.get_core_engine_for_request(request) == client.core_engines[2]
+
+
+@pytest.mark.parametrize(
+    "num_tokens, expected_engine",
+    [
+        # Engine 0 stays under 1.05 * mean tokens, so the fewest requests win.
+        (10, 0),
+        # Every engine would exceed the threshold, so the fewest tokens win.
+        (1000, 1),
+    ],
+)
+def test_dplb_dualpath_balances_tokens_and_requests(num_tokens, expected_engine):
+    client = _make_dplb_client(num_engines=4, lb_policy="dualpath")
+    client.lb_engines = [[0, 2, 0.3, 630]] + [[0, 8, 0.3, 600] for _ in range(3)]
+
+    request = make_request(SamplingParams(max_tokens=1), [1] * num_tokens)
+    engine = client.get_core_engine_for_request(request)
+
+    assert engine == client.core_engines[expected_engine]
+    assert client.engine_inflight_tokens[engine] == num_tokens
+
+
+def test_dplb_dualpath_avoids_kv_bound_queues():
+    client = _make_dplb_client(num_engines=2, lb_policy="dualpath")
+    client.lb_engines = [[3, 1, 0.95, 0], [0, 6, 0.4, 800]]
+
+    request = make_request(SamplingParams(max_tokens=1))
+    assert client.get_core_engine_for_request(request) == client.core_engines[1]
+
+
+def test_dplb_finished_request_releases_tokens():
+    client = _make_dplb_client(lb_policy="dualpath")
+    request = make_request(SamplingParams(max_tokens=1), [1] * 7)
+    engine = client.get_core_engine_for_request(request)
+    assert client.engine_inflight_tokens[engine] == 7
+
+    outputs = EngineCoreOutputs(finished_requests={request.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+
+    assert client.engine_inflight_tokens[engine] == 0
+    assert request.request_id not in client.reqs_num_tokens
 
 
 @pytest.mark.asyncio

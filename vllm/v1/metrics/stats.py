@@ -236,6 +236,9 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    # Tokens held by waiting and running requests, for internal DP
+    # load-balancing.
+    num_kv_tokens: int = 0
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

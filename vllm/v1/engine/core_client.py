@@ -79,6 +79,51 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
 
+# DualPath admits an engine for a request only if the engine's tokens stay
+# within this factor of the mean token load after taking the request.
+_DUALPATH_TOKEN_SLACK = 1.05
+# A waiting queue on an engine above this KV cache usage means the engine is
+# out of KV capacity rather than mid-burst.
+_KV_BOUND_USAGE = 0.5
+
+
+def select_engine_by_tokens(
+    policy: str,
+    loads: Sequence[tuple[float, float, float, float]],
+    num_tokens: int,
+) -> int:
+    """Pick an engine for a request under a token-aware DP LB policy.
+
+    Args:
+        policy: "tokens" or "dualpath".
+        loads: one (request_load, token_load, num_waiting, kv_cache_usage)
+            tuple per engine, in scan order; ties go to the earliest entry.
+        num_tokens: tokens the new request brings.
+
+    Returns:
+        The index into `loads` of the chosen engine.
+
+    """
+    indices = range(len(loads))
+    if policy == "tokens":
+        return min(indices, key=lambda i: (loads[i][1], loads[i][0]))
+    assert policy == "dualpath", policy
+    # Engines with a KV-bound waiting queue cannot take the request now.
+    feasible = [
+        i for i in indices if not (loads[i][2] and loads[i][3] >= _KV_BOUND_USAGE)
+    ] or list(indices)
+    threshold = (
+        _DUALPATH_TOKEN_SLACK
+        * (sum(load[1] for load in loads) + num_tokens)
+        / len(loads)
+    )
+    # Among the engines that stay within the token threshold, take the one
+    # with the fewest requests; otherwise the one with the fewest tokens.
+    within = [i for i in feasible if loads[i][1] + num_tokens <= threshold]
+    if within:
+        return min(within, key=lambda i: (loads[i][0], loads[i][1]))
+    return min(feasible, key=lambda i: (loads[i][1], loads[i][0]))
+
 
 class EngineCoreClient(ABC):
     """EngineCoreClient: subclasses handle different methods for pushing
@@ -1490,10 +1535,10 @@ class DPAsyncMPClient(AsyncMPClient):
             renderer,
         )
 
-        # List of [waiting, running, kv_cache_usage] per engine.
+        # List of [waiting, running, kv_cache_usage, num_kv_tokens] per engine.
         # Used only by DPLBAsyncMPClient subclass.
         self.lb_engines: list[list[int | float]] = [
-            [0, 0, 0.0] for _ in self.core_engines
+            [0, 0, 0.0, 0] for _ in self.core_engines
         ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
@@ -1555,7 +1600,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             self.engine_ranks_managed = list(range(dp_size))
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines += [
-                                    [0, 0, 0.0]
+                                    [0, 0, 0.0, 0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1714,6 +1759,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         renderer: BaseRenderer | None = None,
     ):
         self.client_count = client_count
+        self.lb_policy = vllm_config.parallel_config.data_parallel_lb_policy
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
@@ -1722,6 +1768,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
+        # Exact per-engine prompt tokens of this client's unfinished requests,
+        # used by the token-aware policies.
+        self.engine_inflight_tokens: Counter[EngineIdentity] = Counter()
+        self.reqs_num_tokens: dict[str, int] = {}
 
         super().__init__(
             vllm_config,
@@ -1751,12 +1801,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # This is for streaming-input session affinity.
             return engine
 
+        num_tokens = 0
+        if self.lb_policy != "requests":
+            if request.prompt_token_ids is not None:
+                num_tokens = len(request.prompt_token_ids)
+            elif request.prompt_embeds is not None:
+                num_tokens = len(request.prompt_embeds)
+
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None and (
-            eng_index := get_late_interaction_engine_index(
-                request.pooling_params, len(self.core_engines)
+        if (
+            (eng_index := request.data_parallel_rank) is None
+            and (
+                eng_index := get_late_interaction_engine_index(
+                    request.pooling_params, len(self.core_engines)
+                )
             )
-        ) is None:
+            is None
+            and self.lb_policy != "requests"
+        ):
+            eng_index = self._get_engine_index_by_tokens(num_tokens)
+        elif eng_index is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
@@ -1766,7 +1830,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running, kv_cache_usage = current_counts[idx]
+                waiting, running, kv_cache_usage = current_counts[idx][:3]
                 # Estimate engine load as the greater of the coordinator's
                 # latest (waiting + running) snapshot and this client's own
                 # in-flight count (scaled by the number of clients). The
@@ -1801,7 +1865,46 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         self.engine_inflight[chosen_engine] += 1
+        if num_tokens:
+            self.reqs_num_tokens[request.request_id] = num_tokens
+            self.engine_inflight_tokens[chosen_engine] += num_tokens
         return chosen_engine
+
+    def _get_engine_index_by_tokens(self, num_tokens: int) -> int:
+        """Pick an engine under a token-aware policy.
+
+        As with the request counts, each engine's load is the greater of the
+        coordinator's latest snapshot and this client's own in-flight load
+        scaled by the number of clients.
+        """
+        current_counts = self.lb_engines
+        num_engines = len(current_counts)
+        order = [(self.eng_start_index + i) % num_engines for i in range(num_engines)]
+        loads = []
+        for idx in order:
+            waiting, running, kv_cache_usage, kv_tokens = current_counts[idx]
+            engine = self.core_engines[idx]
+            loads.append(
+                (
+                    max(
+                        self.client_count * self.engine_inflight[engine],
+                        waiting + running,
+                    ),
+                    max(
+                        self.client_count * self.engine_inflight_tokens[engine],
+                        kv_tokens,
+                    ),
+                    waiting,
+                    kv_cache_usage,
+                )
+            )
+        eng_index = order[select_engine_by_tokens(self.lb_policy, loads, num_tokens)]
+        # Account for the request locally until the next coordinator update,
+        # as the request-count policy does.
+        current_counts[eng_index][0] += self.client_count
+        current_counts[eng_index][3] += self.client_count * num_tokens
+        self.eng_start_index = (self.eng_start_index + 1) % num_engines
+        return eng_index
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
@@ -1815,6 +1918,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
                     self.engine_inflight[engine] -= 1
+                    if num_tokens := self.reqs_num_tokens.pop(req_id, 0):
+                        self.engine_inflight_tokens[engine] -= num_tokens
 
     @staticmethod
     async def eep_process_engine_core_notification(

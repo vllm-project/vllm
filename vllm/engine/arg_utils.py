@@ -109,6 +109,7 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DataParallelLBPolicy,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
@@ -554,6 +555,9 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
+    data_parallel_lb_policy: DataParallelLBPolicy = (
+        ParallelConfig.data_parallel_lb_policy
+    )
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_hc_sp: bool = ParallelConfig.enable_hc_sp
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
@@ -1269,6 +1273,10 @@ class EngineArgs:
             "--data-parallel-hybrid-lb",
             "-dph",
             **parallel_kwargs["data_parallel_hybrid_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-lb-policy",
+            **parallel_kwargs["data_parallel_lb_policy"],
         )
         parallel_group.add_argument(
             "--data-parallel-external-lb",
@@ -2566,6 +2574,7 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            data_parallel_lb_policy=self.data_parallel_lb_policy,
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
             enable_expert_parallel=self.enable_expert_parallel,

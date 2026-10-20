@@ -1194,6 +1194,9 @@ class EngineCoreProc(EngineCore):
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
+            self.publish_dp_lb_tokens = (
+                vllm_config.parallel_config.data_parallel_lb_policy != "requests"
+            )
             self.last_counts = (0, 0)
 
             self.addresses = addresses
@@ -1608,7 +1611,13 @@ class EngineCoreProc(EngineCore):
         if counts != self.last_counts:
             self.last_counts = counts
             stats = SchedulerStats(
-                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                num_kv_tokens=(
+                    self.scheduler.get_num_kv_tokens()
+                    if self.publish_dp_lb_tokens
+                    else 0
+                ),
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -2394,6 +2403,11 @@ class DPEngineCoreProc(EngineCoreProc):
             stats = SchedulerStats(
                 *counts,
                 kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                num_kv_tokens=(
+                    self.scheduler.get_num_kv_tokens()
+                    if self.publish_dp_lb_tokens
+                    else 0
+                ),
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
             )
