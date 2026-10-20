@@ -7,11 +7,13 @@
 这是独立副本，原实验目录后续产生的新结果不会自动更新本目录。
 
 - [对外技术报告 HTML](technical-report.html)：图表和样式已内嵌，可单独发送；[Markdown 版本](technical-report.md)用于编辑。
+- [英文技术报告 HTML](technical-report-en.html)：英文正文与图表，可单独发送；[英文 Markdown 版本](technical-report-en.md)用于编辑。
 - [实验索引](experiment-index.md)：35 个矩阵的重复计划、已有轮数、失败和采用范围。
 - [机器可读汇总](summary.json)：逐轮耗时、指标、预测实验、验收状态及未采用结果。
 - [证据清单](evidence-manifest.json)：每个归档文件的原路径、保存位置、长度和 SHA256。
 - [补充证据清单](updates/2026-10-20-013805/evidence-manifest.json)及[补充状态](updates/2026-10-20-013805/status.json)：队列恢复、采样修正、77/82 任务状态和新增分析。
 - [性能图 SVG](performance.svg) / [PNG](performance.png)：主对照、预测敏感性与容量退化结果。
+- [英文性能图 SVG](performance-en.svg) / [PNG](performance-en.png)：对应英文报告，数据与中文版相同。
 - [归档脚本](capture_snapshot.py)和[汇总脚本](summarize_snapshot.py)：记录采集与计算方法。
 - [增量采集脚本](capture_update.py)：另建时间目录保存变化文件，复用未变化证据；[最新增量入口](latest-update.json)记录路径。
 - [校验结果](verification.json)及[校验脚本](verify_snapshot.py)：逐文件重算 SHA256、检查本报告链接并复算吞吐比例。
