@@ -6,13 +6,11 @@ import math
 
 import torch
 
-from vllm.utils.torch_utils import async_tensor_h2d
-
 from .flashinfer_sparse import Step5FlashInferSparse
 from .ops.attention_gate import headwise_sigmoid_gate
-from .ops.sparse_indexer import PrimsTSSelectionOutput, select_regions
 
 MIN_DECODE_BATCH_SIZE = 32
+_SPARSE_BLOCK_SIZE = 8
 
 
 def uses_prims_ts_attention(metadata, num_speculative_tokens, kv_cache_dtype):
@@ -57,21 +55,14 @@ def get_kv_cache_and_scales(query, cache, layer):
 
 
 def _require_qkv(query, cache):
+    """Check Step5's shared K/V channels; FlashInfer receives zero-copy slices."""
     if query.dtype != cache.dtype or query.dtype not in (
         torch.bfloat16,
         torch.float8_e4m3fn,
     ):
         raise NotImplementedError("Step5 PrimTS requires homogeneous BF16 or E4M3 QKV")
-    if query.shape[-1] != 192 or cache.shape[-1] != 384:
-        raise ValueError("Step5 PrimTS requires D192 and packed K/V content")
-
-
-def _routes(lengths, group_size, device):
-    offsets = [0]
-    for length in lengths:
-        for start in range(0, length, group_size):
-            offsets.append(offsets[-1] + min(group_size, length - start))
-    return async_tensor_h2d(offsets, dtype=torch.int32, device=device)
+    if cache.shape[-1] != 2 * query.shape[-1]:
+        raise ValueError("Step5 cache must concatenate K/V with 2 * head_dim channels")
 
 
 def _sparse_wrapper(query, cache, table, offsets, group, topk, model_len, split_kv):
@@ -81,16 +72,17 @@ def _sparse_wrapper(query, cache, table, offsets, group, topk, model_len, split_
     )
 
     _require_qkv(query, cache)
+    head_dim = query.shape[-1]
     model_len = min(model_len, table.shape[1] * cache.shape[2])
     size = get_q_token_kv_block_sparse_workspace_size(
         query,
-        cache[..., :192],
+        cache[..., :head_dim],
         table,
         block_topk=topk,
         max_seq_len_kv=model_len,
         qo_indptr=offsets,
         group_size=group,
-        kv_block_size=8,
+        kv_block_size=_SPARSE_BLOCK_SIZE,
         split_kv=split_kv,
         share_pattern_across_kv_heads=False,
         count_current_block_in_topk=False,
@@ -102,8 +94,8 @@ def _sparse_wrapper(query, cache, table, offsets, group, topk, model_len, split_
         offsets.numel() - 1 if offsets is not None else query.shape[0] * query.shape[1],
         query.shape[-2],
         cache.shape[1],
-        192,
-        8,
+        head_dim,
+        _SPARSE_BLOCK_SIZE,
         cache.shape[2],
         topk,
         model_len,
@@ -140,6 +132,7 @@ class Step5PrimsTSDecode:
 
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("Warm Step5 PrimTS decode before graph capture")
+        self.head_dim = query.shape[-1]
         self.groups = cache.shape[1]
         tokens = query.shape[0] // self.groups
         self.tokens = tokens
@@ -148,17 +141,19 @@ class Step5PrimsTSDecode:
         self.heads = query.shape[1] * self.groups
         self.query_len = query_len
         self.topk = topk
+        # Current contributes up to one full block outside the history budget.
+        max_selected_kv_tokens = (topk + 1) * _SPARSE_BLOCK_SIZE
         self.group = suggest_q_token_kv_block_sparse_group_size(
             batch_size=self.tokens // query_len,
             seq_len_q=query_len,
-            selected_seq_len_kv=topk * 8 + 8,
+            selected_seq_len_kv=max_selected_kv_tokens,
             num_qo_heads=self.heads,
             num_kv_heads=self.groups,
             multi_processor_count=num_sms,
-            head_dim=192,
+            head_dim=self.head_dim,
             q_data_type=query.dtype,
             split_kv=True,
-            kv_block_size=8,
+            kv_block_size=_SPARSE_BLOCK_SIZE,
         )
         self.group = math.gcd(self.group, query_len)
         self.shape = (
@@ -166,15 +161,11 @@ class Step5PrimsTSDecode:
             query_len // self.group,
             self.group,
             self.heads,
-            192,
+            self.head_dim,
         )
         self.ids = torch.empty(
             (self.tokens, self.groups, topk), dtype=torch.int32, device=query.device
         )
-        self.positions = torch.empty(
-            self.tokens, dtype=torch.int64, device=query.device
-        )
-        self.owners = torch.empty(self.tokens, dtype=torch.int32, device=query.device)
         self.wrapper = _sparse_wrapper(
             query.view(self.shape),
             cache,
@@ -191,6 +182,7 @@ class Step5PrimsTSDecode:
         query,
         cache,
         table,
+        seq_lens,
         active,
         out,
         scale,
@@ -202,16 +194,15 @@ class Step5PrimsTSDecode:
             raise ValueError("Decode shape must match its vLLM request capacity")
         self.wrapper.run(
             query.view(self.shape),
-            (cache[..., :192], cache[..., 192:]),
+            (cache[..., : self.head_dim], cache[..., self.head_dim :]),
             table,
             self.ids,
-            self.owners,
-            self.positions,
+            seq_lens=seq_lens,
             sm_scale=scale,
             v_scale=v_scale,
             out=out.view(self.shape),
         )
-        output = out.view(tokens, self.heads, 192)
+        output = out.view(tokens, self.heads, self.head_dim)
         if gate is not None:
             # TODO: fuse the gate into the final epilogue, preserving BF16 rounding.
             headwise_sigmoid_gate(
@@ -241,41 +232,46 @@ class Step5PrimsTSPrefill:
         max_topk=None,
     ):
         from flashinfer.attention.prims_ts import (
+            make_q_token_kv_block_sparse_qo_indptr,
             suggest_q_token_kv_block_sparse_group_size,
         )
 
         tokens, heads, dim = shape
-        if dtype not in (torch.bfloat16, torch.float8_e4m3fn) or dim != 192:
-            raise NotImplementedError("Step5 PrimTS prefill requires BF16/E4M3 D192")
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise NotImplementedError("Step5 PrimTS prefill requires BF16/E4M3 queries")
+        self.head_dim = dim
         lengths = [
             int(b - a) for a, b in zip(request_offsets[:-1], request_offsets[1:])
         ]
         self.groups, self.tokens = groups, tokens
         self.topk = region_count - 1 if max_topk is None else max_topk
         self.scale, self.model_len = scale, model_len
+        # This is a per-query capacity, not the original context length.
+        max_selected_kv_tokens = (self.topk + 1) * _SPARSE_BLOCK_SIZE
         self.group = suggest_q_token_kv_block_sparse_group_size(
             batch_size=len(lengths),
             seq_len_q=max(lengths),
-            selected_seq_len_kv=self.topk * 8 + 8,
+            selected_seq_len_kv=max_selected_kv_tokens,
             num_qo_heads=heads * groups,
             num_kv_heads=groups,
             multi_processor_count=num_sms,
-            head_dim=192,
+            head_dim=dim,
             q_data_type=dtype,
             split_kv=False,
-            kv_block_size=8,
+            kv_block_size=_SPARSE_BLOCK_SIZE,
         )
-        self.offsets = _routes(lengths, self.group, device)
-        self.positions = torch.empty(tokens, dtype=torch.int64, device=device)
+        cpu_offsets = make_q_token_kv_block_sparse_qo_indptr(
+            torch.as_tensor(request_offsets, dtype=torch.int32, device="cpu"),
+            tokens,
+            group_size=self.group,
+            device="cpu",
+        )
+        self.offsets = cpu_offsets.pin_memory().to(device, non_blocking=True)
         self.ids = torch.empty(
             tokens, groups, self.topk, dtype=torch.int32, device=device
         )
-        self.owners = torch.empty(tokens, dtype=torch.int32, device=device)
         self.query_buffer = None
         self.wrapper = None
-
-    def metadata_output(self):
-        return PrimsTSSelectionOutput(self.ids, self.owners, self.positions)
 
     def page_metadata(self, table, owners, page_stride=1, start=0, end=None):
         # PrimTS builds its own union; leave the selector's ordinary IDs intact.
@@ -284,8 +280,20 @@ class Step5PrimsTSPrefill:
     def fixup_positions(self, positions):
         self.positions = positions
 
-    def bind(self, query, cache, table, output, qk_scale=1.0, v_scale=1.0):
+    def bind(
+        self,
+        query,
+        cache,
+        table,
+        output,
+        *,
+        owners,
+        positions,
+        qk_scale=1.0,
+        v_scale=1.0,
+    ):
         _require_qkv(query, cache)
+        self.owners, self.positions = owners, positions
         self.qk_scale, self.v_scale = qk_scale, v_scale
         self.query_buffer = query
         self.cache, self.table, self.output = cache, table, output
@@ -303,7 +311,7 @@ class Step5PrimsTSPrefill:
             )
 
     def selection_output(self, start, end):
-        return PrimsTSSelectionOutput(self.ids[start:end, self.current_group])
+        return self.ids[start:end, self.current_group]
 
     def finish(self, query, cache, out):
         if self.wrapper is None:
@@ -312,7 +320,7 @@ class Step5PrimsTSPrefill:
         if self.current_group == self.groups:
             self.wrapper.run(
                 self.query_buffer,
-                (self.cache[..., :192], self.cache[..., 192:]),
+                (self.cache[..., : self.head_dim], self.cache[..., self.head_dim :]),
                 self.table,
                 self.ids,
                 self.owners,
@@ -338,6 +346,7 @@ class Step5PrimsTSSWA:
         )
 
         _require_qkv(query, cache)
+        head_dim = query.shape[-1]
         n = metadata.num_actual_tokens
         output[n:].zero_()
         if not n:
@@ -356,6 +365,7 @@ class Step5PrimsTSSWA:
             cache.stride(),
             table.shape[1],
             decode,
+            query.shape[1:],
             query.dtype,
             scale,
             v_scale,
@@ -371,7 +381,7 @@ class Step5PrimsTSSWA:
                     batch_size=request_capacity,
                     num_qo_heads=query.shape[1],
                     num_kv_heads=cache.shape[1],
-                    head_dim=192,
+                    head_dim=head_dim,
                     page_size=cache.shape[2],
                     max_kv_len=model_len,
                     max_seq_len_q=qlen,
@@ -391,7 +401,7 @@ class Step5PrimsTSSWA:
                     max_kv_len=model_len,
                     num_qo_heads=query.shape[1],
                     num_kv_heads=cache.shape[1],
-                    head_dim=192,
+                    head_dim=head_dim,
                     q_dtype=query.dtype,
                     k_dtype=cache.dtype,
                     out_dtype=torch.bfloat16,
@@ -407,15 +417,15 @@ class Step5PrimsTSSWA:
         wrapper = state
         if decode:
             actual_shape = (
-                (requests, qlen, query.shape[1], 192)
+                (requests, qlen, query.shape[1], head_dim)
                 if qlen > 1
-                else (requests, query.shape[1], 192)
+                else (requests, query.shape[1], head_dim)
             )
             fixed_query = query[:n].view(actual_shape)
             fixed_output = output[:n].view(actual_shape)
             wrapper.run(
                 fixed_query,
-                (cache[..., :192], cache[..., 192:]),
+                (cache[..., :head_dim], cache[..., head_dim:]),
                 lengths,
                 table,
                 out=fixed_output,
@@ -426,8 +436,8 @@ class Step5PrimsTSSWA:
         else:
             wrapper.run(
                 query[:n],
-                cache[..., :192],
-                cache[..., 192:],
+                cache[..., :head_dim],
+                cache[..., head_dim:],
                 metadata.query_start_loc[: requests + 1],
                 table,
                 lengths,
@@ -447,7 +457,7 @@ class Step5PrimsTSSWA:
 class Step5PrimsTSSparse(Step5FlashInferSparse):
     """Keep the selector and summaries while replacing main attention with PrimTS."""
 
-    supports_grouped_prefill = True
+    native_decode_attention = Step5FlashInferSparse.select_and_run_decode_attention
 
     def __init__(self, device, max_model_len, topk):
         super().__init__(device)
@@ -488,43 +498,6 @@ class Step5PrimsTSSparse(Step5FlashInferSparse):
             max_topk=plan_topk,
         )
 
-    def prefill_metadata(
-        self, owners, positions, regions, topk, *, paged_prefill=None, prims_output=None
-    ):
-        from .ops.prefill_indexer_metadata import prepare_prefill_indexer
-
-        return prepare_prefill_indexer(
-            owners,
-            positions,
-            regions,
-            topk,
-            self._num_sms,
-            paged_prefill=paged_prefill,
-            prims_output=prims_output,
-        )
-
-    def select_regions(
-        self,
-        scores,
-        current,
-        topk,
-        *,
-        topk_lengths=None,
-        paged_prefill=None,
-        sort=True,
-        prims_output=None,
-    ):
-        return select_regions(
-            scores,
-            current,
-            topk,
-            self._topk_backend,
-            topk_lengths=topk_lengths,
-            paged_prefill=paged_prefill,
-            sort=sort,
-            prims_output=prims_output,
-        )
-
     def select_and_run_decode_attention(
         self,
         query,
@@ -538,38 +511,22 @@ class Step5PrimsTSSparse(Step5FlashInferSparse):
         out,
         scale,
         *,
+        seq_lens=None,
         topk_lengths=None,
         clear_inactive=True,
         k_scale=None,
         v_scale=None,
         query_len=1,
         gate=None,
-        use_prims_ts=True,
     ):
-        if not use_prims_ts:
-            return super().select_and_run_decode_attention(
-                query,
-                kv_cache,
-                scores,
-                current,
-                topk,
-                block_table,
-                positions,
-                active,
-                out,
-                scale,
-                topk_lengths=topk_lengths,
-                clear_inactive=clear_inactive,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                query_len=query_len,
-                gate=gate,
-            )
+        if seq_lens is None:
+            raise ValueError("PrimTS decode requires per-request KV lengths")
         tokens = query.shape[0] // kv_cache.shape[1]
         key = (
             tokens,
             query.shape[1:],
             query.stride(),
+            query.dtype,
             kv_cache.data_ptr(),
             kv_cache.shape,
             kv_cache.stride(),
@@ -589,27 +546,20 @@ class Step5PrimsTSSparse(Step5FlashInferSparse):
                 num_sms=self._num_sms,
             )
             self._decode_plans[key] = plan
-        select_regions(
+        self.select_regions(
             scores,
             current,
             topk,
-            self._topk_backend,
             topk_lengths=topk_lengths,
             sort=False,
-            prims_output=PrimsTSSelectionOutput(
-                plan.ids.view(-1, topk),
-                plan.owners,
-                plan.positions,
-                positions,
-                active,
-                plan.groups,
-                query_len,
-            ),
+            out=plan.ids.view(-1, topk),
+            history_only=True,
         )
         plan.run(
             query,
             kv_cache,
             block_table,
+            seq_lens,
             active,
             out,
             scale * (1.0 if k_scale is None else k_scale),

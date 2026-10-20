@@ -226,11 +226,11 @@ def test_fp8_query_store_preserves_model_dtype_kv_and_cache():
             dim,
             128,
             1e-5,
+            q_dtype=torch.float8_e4m3fn if fp8_query else None,
             kv_cache_dtype="fp8",
+            q_scale=1 / 256,
             k_scale=scales[0],
             v_scale=scales[1],
-            fp8_query=fp8_query,
-            q_scale=1 / 256,
         )
 
     native = run(False)

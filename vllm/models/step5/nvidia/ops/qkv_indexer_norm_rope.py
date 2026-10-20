@@ -288,7 +288,7 @@ def qkv_indexer_norm_rope(
     decode_ring=None,
     decode_z: torch.Tensor | None = None,
     decode_slots: torch.Tensor | None = None,
-    fp8_query: bool = False,
+    q_dtype: torch.dtype | None = None,
     q_scale: float = 1.0,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
@@ -310,6 +310,9 @@ def qkv_indexer_norm_rope(
         main_k_scale,
         main_v_scale,
     ) = main_inputs
+    if q_dtype not in (None, main_qkv.dtype, torch.float8_e4m3fn):
+        raise ValueError("Q must use the input dtype or float8_e4m3fn")
+    fp8_query = q_dtype == torch.float8_e4m3fn
     fp8_cache = main_kc.dtype in (torch.uint8, torch.float8_e4m3fn)
     if fp8_cache:
         main_kc = main_kc.view(torch.float8_e4m3fn)
@@ -318,7 +321,7 @@ def qkv_indexer_norm_rope(
     main_q = torch.empty(
         (tokens, main_qh * 192),
         device=main_qkv.device,
-        dtype=torch.float8_e4m3fn if fp8_query else main_qkv.dtype,
+        dtype=main_qkv.dtype if q_dtype is None else q_dtype,
     )
     main_k = main_qkv.new_empty((tokens, main_kh * 192))
     main_v = torch.empty_like(main_k)
