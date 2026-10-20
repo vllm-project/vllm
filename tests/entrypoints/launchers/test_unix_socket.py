@@ -5,7 +5,9 @@ restart, a path a live server still listens on must not be taken over, and the
 file is removed again on shutdown."""
 
 import errno
+import os
 import socket
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ import pytest
 from vllm.entrypoints.launchers.launcher import (
     create_server_unix_socket,
     remove_unix_socket_file,
+    unix_socket_file_identity,
 )
 
 
@@ -68,13 +71,59 @@ def test_regular_file_at_path_is_left_alone(sock_path: str):
 
 def test_remove_unix_socket_file(sock_path: str):
     _leave_stale_socket_file(sock_path)
-    remove_unix_socket_file(sock_path)
+    identity = unix_socket_file_identity(sock_path)
+    assert identity is not None
+    remove_unix_socket_file(sock_path, identity)
     assert not Path(sock_path).exists()
 
     # Missing file: nothing to do, no error.
-    remove_unix_socket_file(sock_path)
+    remove_unix_socket_file(sock_path, identity)
 
     # A regular file at the path is not ours to delete.
     Path(sock_path).write_text("not a socket")
-    remove_unix_socket_file(sock_path)
+    assert unix_socket_file_identity(sock_path) is None
+    remove_unix_socket_file(sock_path, identity)
     assert Path(sock_path).exists()
+
+
+def test_cleanup_keeps_a_replacement_socket(sock_path: str):
+    # Server A binds the path; the file is removed from under it and server B
+    # binds the same path. A's shutdown must not delete B's file.
+    old = create_server_unix_socket(sock_path)
+    identity = unix_socket_file_identity(sock_path)
+    Path(sock_path).unlink()
+    replacement = create_server_unix_socket(sock_path)
+    try:
+        replacement.listen(1)
+        old.close()
+        remove_unix_socket_file(sock_path, identity)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(sock_path)
+        client.close()
+    finally:
+        replacement.close()
+
+
+def test_cleanup_keeps_a_symlink(sock_path: str):
+    owner = create_server_unix_socket(sock_path)
+    identity = unix_socket_file_identity(sock_path)
+    target = sock_path + ".target"
+    try:
+        Path(sock_path).rename(target)
+        Path(sock_path).symlink_to(target)
+        remove_unix_socket_file(sock_path, identity)
+        assert Path(sock_path).is_symlink()
+        assert Path(target).exists()
+    finally:
+        owner.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="abstract namespace is Linux-only")
+def test_abstract_namespace_socket_has_no_file():
+    path = f"\0vllm-uds-test-{os.getpid()}"
+    sock = create_server_unix_socket(path)
+    try:
+        assert unix_socket_file_identity(path) is None
+        remove_unix_socket_file(path, None)
+    finally:
+        sock.close()

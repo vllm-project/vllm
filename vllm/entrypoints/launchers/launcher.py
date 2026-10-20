@@ -372,6 +372,8 @@ def _remove_stale_unix_socket(path: str) -> None:
     that nothing accepts connections on is removed; a path that a live server
     still listens on is left alone, and ``bind`` then fails as before.
     """
+    if path.startswith("\0"):
+        return  # abstract namespace: no file
     try:
         if not stat.S_ISSOCK(os.stat(path).st_mode):
             return
@@ -390,11 +392,26 @@ def _remove_stale_unix_socket(path: str) -> None:
         probe.close()
 
 
-def remove_unix_socket_file(path: str) -> None:
-    """Remove the socket file created by ``create_server_unix_socket``."""
+def unix_socket_file_identity(path: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the socket file at ``path``, captured right after
+    binding so that shutdown removes only this server's file. ``None`` when there
+    is no such file (abstract namespace, missing, or not a socket)."""
+    if path.startswith("\0"):
+        return None
     try:
-        if stat.S_ISSOCK(os.stat(path).st_mode):
-            os.unlink(path)
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISSOCK(info.st_mode) else None
+
+
+def remove_unix_socket_file(path: str, identity: tuple[int, int] | None) -> None:
+    """Remove the socket file at ``path`` if it is still the one captured in
+    ``identity``; a replacement bound by another server since then is kept."""
+    if identity is None or unix_socket_file_identity(path) != identity:
+        return
+    try:
+        os.unlink(path)
     except FileNotFoundError:
         pass
     except OSError as e:

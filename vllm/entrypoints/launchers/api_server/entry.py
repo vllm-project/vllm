@@ -21,7 +21,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
 from ..app import build_app
-from ..launcher import remove_unix_socket_file, serve_http, setup_server
+from ..launcher import (
+    remove_unix_socket_file,
+    serve_http,
+    setup_server,
+    unix_socket_file_identity,
+)
 from ..utils.server_utils import get_uvicorn_log_config
 from .app_state import init_app_state
 
@@ -173,11 +178,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     signal.signal(signal.SIGTERM, _interrupt_init)
 
     listen_address, sock = setup_server(args, reuse_port=False)
+    uds_identity = unix_socket_file_identity(args.uds) if args.uds else None
     try:
         await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
     finally:
         if args.uds:
-            remove_unix_socket_file(args.uds)
+            remove_unix_socket_file(args.uds, uds_identity)
 
 
 async def run_server_worker(
