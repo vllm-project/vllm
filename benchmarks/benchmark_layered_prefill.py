@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import csv
 import hashlib
+import io
 import json
 import os
 import random
@@ -32,7 +33,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "benchmarks/configs/layered_prefill/pr.json"
-SHAREGPT_LENGTHS = DEFAULT_CONFIG.with_name("sharegpt_lengths.csv")
+# Reference ShareGPT length trace (Llama 2 tokenizer).
+SHAREGPT_LENGTHS_URL = (
+    "https://raw.githubusercontent.com/scale-snu/layered-prefill/"
+    "f563fa04380350005b8cb449bb3994d6289199f5/benchmarks/preprocessed_traces/"
+    "sharegpt_8k_filtered_stats_llama2_tokenizer.csv"
+)
+SHAREGPT_LENGTHS_SHA256 = (
+    "6d6c296302a853e2669a674a96f269283e60c57e60363bd450588a1066919f9f"
+)
 CLI = [sys.executable, "-m", "vllm.entrypoints.cli.main"]
 ENV = {
     "VLLM_USE_V2_MODEL_RUNNER": "1",
@@ -356,11 +365,14 @@ def sharegpt_requests(tokenizer, seed: int):
         for entry in data
         if "conversations" in entry and len(entry["conversations"]) >= 2
     ]
-    with SHAREGPT_LENGTHS.open() as file:
-        lengths = [
-            (int(row["num_prefill_tokens"]), int(row["num_decode_tokens"]))
-            for row in csv.DictReader(file)
-        ]
+    with urllib.request.urlopen(SHAREGPT_LENGTHS_URL, timeout=60) as response:
+        trace = response.read()
+    if hashlib.sha256(trace).hexdigest() != SHAREGPT_LENGTHS_SHA256:
+        raise RuntimeError(f"Unexpected ShareGPT length trace: {SHAREGPT_LENGTHS_URL}")
+    lengths = [
+        (int(row["num_prefill_tokens"]), int(row["num_decode_tokens"]))
+        for row in csv.DictReader(io.StringIO(trace.decode()))
+    ]
     lengths = [(i, o) for i, o in lengths if i > 0 and o > 0]
     random.seed(seed)
     random.shuffle(conversations)
@@ -814,9 +826,8 @@ def main(argv: list[str] | None = None) -> None:
         "relax_seconds": args.relax_seconds,
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "implementation": implementation_version(),
-        "sharegpt_lengths_sha256": hashlib.sha256(
-            SHAREGPT_LENGTHS.read_bytes()
-        ).hexdigest(),
+        "sharegpt_lengths_url": SHAREGPT_LENGTHS_URL,
+        "sharegpt_lengths_sha256": SHAREGPT_LENGTHS_SHA256,
     }
     path = args.output_dir / "manifest.json"
     if path.exists():
