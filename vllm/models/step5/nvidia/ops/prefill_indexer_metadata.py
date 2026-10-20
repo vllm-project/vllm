@@ -164,17 +164,8 @@ def prepare_prefill_indexer(
     rows = positions.numel()
     chunk_size = prefill_indexer_chunk_size(regions)
     need_scores = regions > topk
-    if out is not None and (
-        out.ndim not in (2, 3)
-        or out.shape[0] != rows
-        or out.shape[-1] < min(regions, topk) + int(not history_only)
-        or out.stride(-1) != 1
-        or out.dtype not in (torch.int32, torch.int64)
-        or out.device != positions.device
-    ):
-        raise ValueError(
-            "prefill selection output must match rows, capacity and device"
-        )
+    if out is not None and out.shape[0] != rows:
+        raise ValueError("prefill selection output must match the number of rows")
     paged_kwargs = {}
     if paged_prefill is not None:
         if need_scores or paged_prefill.block_size not in (16, 32, 64, 128):
