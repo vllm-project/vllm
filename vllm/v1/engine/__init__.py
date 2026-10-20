@@ -246,6 +246,10 @@ class EngineCoreOutput(
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
 
+    # entry -> [num_new_tokens, width]: the token outputs of the new tokens
+    # (vllm/v1/token_outputs.py); appended last for array_like compatibility.
+    new_token_outputs: dict[str, torch.Tensor] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

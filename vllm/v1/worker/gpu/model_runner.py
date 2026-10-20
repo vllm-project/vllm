@@ -81,6 +81,8 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.token_outputs import TokenOutputs
+from vllm.v1.token_outputs import allowed as allowed_token_outputs
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
@@ -343,6 +345,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
+        # The requests that asked for token outputs (vllm/v1/token_outputs.py);
+        # None when the engine allows none, so the default path does no work.
+        token_output_names = allowed_token_outputs(self.model_config)
+        self.token_outputs: TokenOutputs | None = (
+            TokenOutputs(token_output_names) if token_output_names else None
+        )
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
@@ -1167,6 +1175,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
+        if self.token_outputs is not None:
+            self.token_outputs.remove_request(req_id)
         self.lora_state.remove_request(req_id)
         return True
 
@@ -1247,6 +1257,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
+                if self.token_outputs is not None:
+                    self.token_outputs.add_request(req_id, new_req_data.sampling_params)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -2202,6 +2214,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
+        if self.token_outputs is not None:
+            model_runner_output.token_outputs = self.token_outputs.gather(
+                hidden_states, input_batch
+            )
         pending_aux_output = None
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
