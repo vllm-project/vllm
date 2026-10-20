@@ -41,6 +41,7 @@ from vllm.v1.worker.utils import AttentionGroup
 if TYPE_CHECKING:
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
     from vllm.v1.worker.gpu.sample.sampler import Sampler
     from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 
@@ -123,6 +124,56 @@ class BaseSpeculator(ABC):
         non-chain drafts can do that here.
         """
         return None
+
+    def prepare_verify_inputs(  # noqa: B027
+        self,
+        input_batch: InputBatch,
+        model_inputs: dict[str, Any],
+        *,
+        dummy_run: bool = False,
+    ) -> None:
+        """Adjust the target forward's inputs just before it runs.
+
+        Called once per target forward (also for capture and profiling dummy
+        runs, with ``dummy_run=True``), after ``positions`` and the slot
+        mappings were computed from the chain layout (``positions[i] =
+        num_computed + i``, one KV slot per query token) and after the attention
+        metadata was built. The default does nothing.
+
+        A speculator that verifies a tree can rewrite the positions in place
+        here (siblings share a position; the KV slots stay chain slots because
+        they were already computed): ``input_batch.positions`` and
+        ``model_inputs["positions"]``, which is another tensor for models with
+        multi-dimensional RoPE. It can also stage the inputs its attention backend
+        reads, such as which earlier rows each row attends to. Writes must go to
+        the existing buffers so CUDA graph replays see them.
+        """
+
+    def post_accept(  # noqa: B027
+        self,
+        input_batch: InputBatch,
+        sampler_output: "SamplerOutput",
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        """Called after verification and before the step's state is committed.
+
+        Runs on the model runner's stream after ``num_sampled`` /
+        ``num_rejected`` are known and before ``num_computed_tokens`` advance
+        and ``propose`` runs. The default does nothing. A tree verifier uses it
+        to move the KV entries of the accepted path (which are not contiguous
+        in the chain slots) to the slots the next step expects, and to remember
+        which tree node was accepted.
+        """
+
+    def overridden_hooks(self) -> frozenset[str]:
+        """The optional per-step hooks this speculator overrides. The model
+        runner reads them once and skips the no-op defaults on every step."""
+        return frozenset(
+            name
+            for name in ("prepare_verify_inputs", "post_accept")
+            if getattr(type(self), name) is not getattr(BaseSpeculator, name)
+        )
 
 
 class DraftModelSpeculator(BaseSpeculator):

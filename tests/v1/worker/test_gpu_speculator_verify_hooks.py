@@ -12,6 +12,10 @@ import pytest
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    BaseSpeculator,
+)
 
 # --- make_rejection_sampler -------------------------------------------------
 
@@ -62,3 +66,36 @@ def test_speculator_supplied_rejection_sampler_replaces_the_default(monkeypatch)
     runner = _runner(Supplies(), monkeypatch)
     assert GPUModelRunner._build_rejection_sampler(runner) is custom
     assert seen == [runner.sampler]
+
+
+# --- prepare_verify_inputs / post_accept ------------------------------------
+
+
+class _MinimalSpeculator(BaseSpeculator):
+    def init_cudagraph_manager(self, cudagraph_mode):
+        pass
+
+    def capture(self):
+        pass
+
+    def propose(self, *args, **kwargs):  # pragma: no cover - not called
+        raise NotImplementedError
+
+
+class _VerifySpeculator(_MinimalSpeculator):
+    def prepare_verify_inputs(self, input_batch, model_inputs, *, dummy_run=False):
+        pass
+
+    def post_accept(self, input_batch, sampler_output, num_sampled, num_rejected):
+        pass
+
+
+def test_only_overridden_hooks_are_called():
+    assert _MinimalSpeculator.__new__(_MinimalSpeculator).overridden_hooks() == set()
+    assert NgramGPUSpeculator.__new__(NgramGPUSpeculator).overridden_hooks() == set()
+    assert _VerifySpeculator.__new__(_VerifySpeculator).overridden_hooks() == {
+        "prepare_verify_inputs",
+        "post_accept",
+    }
+    # A runner built without a speculator calls none.
+    assert GPUModelRunner.__new__(GPUModelRunner).speculator_hooks == set()

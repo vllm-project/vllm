@@ -197,6 +197,10 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    # The optional per-step hooks the speculator overrides (see
+    # BaseSpeculator.overridden_hooks); none without a speculator.
+    speculator_hooks: frozenset[str] = frozenset()
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -302,6 +306,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(
                     self.vllm_config, self.device, self.req_states
                 )
+                self.speculator_hooks = self.speculator.overridden_hooks()
 
             self.use_aux_hidden_state_outputs = requires_aux_hidden_states(
                 self.speculative_config
@@ -1920,6 +1925,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata = None
         slot_mappings_by_layer = None
+        verify_inputs = False
         ubatch_state: UBatchState | None = None
         if batch_desc.num_ubatches > 1:
             assert self.ubatch_runner is not None
@@ -1937,6 +1943,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
+            verify_inputs = "prepare_verify_inputs" in self.speculator_hooks
             attn_groups = self.attn_groups
             if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
@@ -2000,6 +2007,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if verify_inputs:
+            # Positions (as the model takes them) and slot mappings exist;
+            # the forward has not run.
+            assert self.speculator is not None
+            self.speculator.prepare_verify_inputs(
+                input_batch, model_inputs, dummy_run=dummy_run
+            )
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             if not requires_raw_input_tokens(self.model):
@@ -2173,6 +2187,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if "post_accept" in self.speculator_hooks:
+            assert self.speculator is not None
+            self.speculator.post_accept(
+                input_batch, sampler_output, num_sampled, num_rejected
+            )
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
