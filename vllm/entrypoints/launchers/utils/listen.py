@@ -63,61 +63,63 @@ def setup_listen_address(
                     f"path."
                 ) from e
             raise
-        return f"unix:{uds}", sock
+        listen_address = f"unix:{uds}"
+    else:
+        if port is None:
+            raise ValueError("port is required when uds is not provided")
 
-    if port is None:
-        raise ValueError("port is required when uds is not provided")
+        host = host or ""
 
-    host = host or ""
+        try:
+            sock = create_server_socket((host, port), reuse_port=reuse_port)
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                holder = _describe_port_holder(port)
+                if reuse_port:
+                    hint = (
+                        "The holder does not share the port via SO_REUSEPORT "
+                        "(possibly a non-vLLM process or a different user). "
+                        "Free the port or pass a different --port."
+                    )
+                else:
+                    hint = (
+                        "Free the port, pass a different --port, or share it "
+                        "via SO_REUSEPORT by running multiple API servers "
+                        "(--api-server-count > 1)."
+                    )
+                raise OSError(
+                    f"Port {port} is already in use (holder: {holder}). {hint}"
+                ) from e
+            if e.errno == errno.EACCES:
+                raise OSError(
+                    f"Permission denied binding to "
+                    f"{host or '0.0.0.0'}:{port}. "
+                    f"Ports below 1024 typically require elevated privileges."
+                ) from e
+            if e.errno == errno.ENOPROTOOPT and reuse_port:
+                raise OSError(
+                    "SO_REUSEPORT is not supported on this platform. "
+                    "Cannot use --api-server-count > 1 here; use a single "
+                    "API server."
+                ) from e
+            raise
 
-    try:
-        sock = create_server_socket((host, port), reuse_port=reuse_port)
-    except OSError as e:
-        if e.errno == errno.EADDRINUSE:
-            holder = _describe_port_holder(port)
-            if reuse_port:
-                hint = (
-                    "The holder does not share the port via SO_REUSEPORT "
-                    "(possibly a non-vLLM process or a different user). "
-                    "Free the port or pass a different --port."
-                )
-            else:
-                hint = (
-                    "Free the port, pass a different --port, or share it "
-                    "via SO_REUSEPORT by running multiple API servers "
-                    "(--api-server-count > 1)."
-                )
-            raise OSError(
-                f"Port {port} is already in use (holder: {holder}). {hint}"
-            ) from e
-        if e.errno == errno.EACCES:
-            raise OSError(
-                f"Permission denied binding to "
-                f"{host or '0.0.0.0'}:{port}. "
-                f"Ports below 1024 typically require elevated privileges."
-            ) from e
-        if e.errno == errno.ENOPROTOOPT and reuse_port:
-            raise OSError(
-                "SO_REUSEPORT is not supported on this platform. "
-                "Cannot use --api-server-count > 1 here; use a single "
-                "API server."
-            ) from e
-        raise
+        # Only the port needs to come from the kernel (so ``--port 0`` reports
+        # the real port). Keep the user-supplied host in the address so
+        # ``--host localhost`` still prints ``localhost`` instead of
+        # ``127.0.0.1``.
+        bound_addr, bound_port = sock.getsockname()[:2]
+        display_addr = host or bound_addr or "0.0.0.0"
+        is_ssl = bool(ssl_keyfile and ssl_certfile)
+        host_part = (
+            f"[{display_addr}]" if is_valid_ipv6_address(display_addr) else display_addr
+        )
+        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{bound_port}"
 
     # workaround to avoid footguns where uvicorn drops requests with too
-    # many concurrent requests active
+    # many concurrent requests active. This must run on every successful bind
+    # (TCP *and* UDS):
     set_ulimit()
-
-    # Only the port needs to come from the kernel (so ``--port 0`` reports the
-    # real port). Keep the user-supplied host in the address so ``--host
-    # localhost`` still prints ``localhost`` instead of ``127.0.0.1``.
-    bound_addr, bound_port = sock.getsockname()[:2]
-    display_addr = host or bound_addr or "0.0.0.0"
-    is_ssl = bool(ssl_keyfile and ssl_certfile)
-    host_part = (
-        f"[{display_addr}]" if is_valid_ipv6_address(display_addr) else display_addr
-    )
-    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{bound_port}"
 
     return listen_address, sock
 
