@@ -58,6 +58,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig, DotsVisionConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
@@ -542,18 +543,25 @@ class DotsVisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
-    def forward(
-        self, hidden_states: torch.Tensor, grid_thw: list[list[int]]
-    ) -> torch.Tensor:
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_frames_per_batch: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute the grid_thw-dependent metadata outside of forward(),
+        so that it is not baked into the encoder CUDA graph."""
+        if device is None:
+            device = self.device
+
+        # Position embeddings.
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        # Convert grid_thw to tensor (always expecting list format now)
-        grid_thw_tensor = torch.tensor(
-            grid_thw, device=hidden_states.device, dtype=torch.long
-        )
-        hidden_states = hidden_states.to(self.dtype)
-        hidden_states = self.patch_embed(hidden_states, grid_thw_tensor)
-
+        # Compute cu_seqlens on CPU so that max_seqlen derived from it also
+        # stays on CPU; cu_seqlens is copied to the device at the end.
+        grid_thw_tensor = torch.tensor(grid_thw, dtype=torch.long)
         cu_seqlens = torch.repeat_interleave(
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
         ).cumsum(
@@ -562,7 +570,61 @@ class DotsVisionTransformer(nn.Module):
         )
         cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        # Keep cu_seqlens shape stable across capture/replay.
+        # Pad with the last offset so that padded sequences are empty and the
+        # offsets stay valid.
+        pad_to = (
+            max_frames_per_batch if max_frames_per_batch is not None else max_batch_size
+        )
+        if pad_to is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < pad_to:
+                cu_seqlens = torch.cat(
+                    (
+                        cu_seqlens,
+                        torch.full(
+                            (pad_to - num_seqs,),
+                            cu_seqlens[-1],
+                            dtype=cu_seqlens.dtype,
+                            device=cu_seqlens.device,
+                        ),
+                    )
+                )
+
+        # Keep max_seqlen on CPU: on GPU, the extra D2H copy would be captured
+        # into the CUDA graph. For capture, the override is the max number of
+        # patches of the token budget.
+        if max_seqlen_override is None:
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        else:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+
+        return {
+            "rotary_pos_emb": rotary_pos_emb,
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
+            "max_seqlen": max_seqlen,
+        }
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]] | None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        if encoder_metadata is None:
+            assert grid_thw is not None
+            grid_thw_list = (
+                grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
+            )
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
+
+        rotary_pos_emb = encoder_metadata["rotary_pos_emb"]
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        max_seqlen = encoder_metadata["max_seqlen"]
+        hidden_states = hidden_states.to(self.dtype)
+        hidden_states = self.patch_embed(hidden_states)
+
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
