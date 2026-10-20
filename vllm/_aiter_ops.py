@@ -2657,7 +2657,9 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fused_gdn_decode_enabled(cls) -> bool:
         """Fused conv1d + delta-rule + gated-RMSNorm GDN decode kernel available."""
-        if not cls._AITER_ENABLED:
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls._AITER_ENABLED and on_gfx950()):
             return False
         try:
             from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
