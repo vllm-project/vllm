@@ -21,9 +21,12 @@ from ..spec import (
     RECORD,
     SWA_WIDTH,
     TOPK,
+    UG_GROUPS,
     draft_routing,
     draft_swa_width,
+    on_gfx942,
 )
+from .weights942 import scale_bytes as _scale_bytes
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -36,10 +39,6 @@ def _record_view(kv: torch.Tensor, block: int) -> torch.Tensor:
     data rows, then its scale words: the kernels index both from it)."""
     kv = kv if kv.dtype == torch.uint8 else kv.view(torch.uint8)
     return torch.as_strided(kv, (kv.shape[0], block, RECORD), (kv.stride(0), RECORD, 1))
-
-
-def _scale_bytes(scale: torch.Tensor) -> torch.Tensor:
-    return scale if scale.dtype == torch.uint8 else scale.view(torch.uint8)
 
 
 def _select(
@@ -160,7 +159,7 @@ class LayerLaunches:
     def _plan_layer(self, layer, tp_size: int, first: bool) -> LayerPlan | None:
         """Info needed to run the specialized decode kernel for this layer."""
         attn = layer.attn
-        why = _skip_layer(layer, self.experts, self.topk)
+        why = _skip_layer(layer, self.experts, self.topk, tp_size)
         if why is not None:
             logger.info_once(
                 "DSv4.1 specialized decode: layer %d on vLLM's path (%s)",
@@ -168,6 +167,19 @@ class LayerLaunches:
                 why,
             )
             return None
+        if self.draft and on_gfx942():
+            # On gfx942 the draft layers take the FFN launch after vLLM's
+            # attention. vLLM's draft MoE multiplies bf16 activations with the
+            # FP4 experts, and the FFN launch quantizes them to MXFP8 as it does
+            # for the target. That changes only how many drafts the target
+            # accepts, not the target's output.
+            logger.info_once(
+                "DSv4.1 specialized decode: the FFN launch for the draft layers "
+                "(%d / %d routing)",
+                self.experts,
+                self.topk,
+            )
+            return self._ffn_plan(layer, tp_size)
         why = _ffn_only(layer)
         if why is None and self.draft and (attn.compress_ratio or attn.indexer):
             why = "compressed keys"
@@ -177,15 +189,16 @@ class LayerLaunches:
                 "DSv4.1 specialized decode: the draft layers on vLLM's path (%s)", why
             )
             return None
-        weights = _weights(layer, why is not None, tp_size, self.experts)
         if why is not None:
             logger.info_once(
                 "DSv4.1 specialized decode: the FFN launch for layers with %s", why
             )
-            # A decode step hands wo_b's TP partial to the FFN launch; the layer
-            # reduces it on the steps that keep vLLM's path.
-            attn.wo_b.reduce_results = False
-            return LayerPlan(layer, weights, ffn_only=True)
+            return self._ffn_plan(layer, tp_size)
+        weights = _weights(layer, False, tp_size, self.experts)
+        # gfx942: the entry seam of a whole first layer projects the expanded
+        # residual with the unfolded hc_attn_fn, as K1 does, and not the
+        # embedding with the folded copy, which has no AITER kernel there.
+        layer.unfolded_entry = on_gfx942()
         comp_key = attn.compressed_cache_prefix if attn.compress_ratio else None
         # K1's seam folds the owed post into the residual, except where the
         # residual arrives settled: the embedding, or after the Engram write.
@@ -201,6 +214,14 @@ class LayerLaunches:
             folds=(True, False) if settled else (True,),
         )
 
+    def _ffn_plan(self, layer, tp_size: int) -> LayerPlan:
+        # A decode step hands wo_b's TP partial to the FFN launch; the layer
+        # reduces it on the steps that keep vLLM's path.
+        layer.attn.wo_b.reduce_results = False
+        return LayerPlan(
+            layer, _weights(layer, True, tp_size, self.experts), ffn_only=True
+        )
+
     def bind_caches(self, caches: Mapping[str, Any]) -> None:
         """Nothing to take: a launch reads the cache off its attention layer."""
 
@@ -209,7 +230,7 @@ class LayerLaunches:
         for plan in self.plans.values():
             for width in self.widths:
                 if plan.ffn_only:
-                    keys[width, "ffn"] = None
+                    keys[width, "ffn", self.experts, self.topk] = None
                 else:
                     for fold in plan.folds:
                         keys[width, plan.ratio, fold, plan.index] = None
@@ -218,7 +239,7 @@ class LayerLaunches:
     def compile(self, key: Any) -> None:
         self.runner.scratch(key[0])
         if key[1] == "ffn":
-            self.runner.ffn_kernel(key[0])
+            self.runner.ffn_kernel(key[0], key[2], key[3])
         else:
             width, ratio, fold, index = key
             self.runner.kernels(width, ratio, fold=fold, index=index)
@@ -305,7 +326,7 @@ class LayerLaunches:
         tensors = (part, residual, post_mix, res_mix, pre_mix)
         if not all(t.is_contiguous() for t in tensors):
             return None
-        return self.runner.ffn(plan.weights, *tensors)
+        return self.runner.ffn(plan.weights, *tensors, topk=self.topk)
 
 
 class DSV41Kernel(LayerLaunches):
@@ -318,7 +339,7 @@ class DSV41Kernel(LayerLaunches):
             widths,
             experts=EXPERTS,
             topk=TOPK,
-            ug_groups=2,
+            ug_groups=UG_GROUPS,
             swa_width=SWA_WIDTH,
         )
 
@@ -416,7 +437,9 @@ class DSV41DraftKernel(LayerLaunches):
             widths,
             experts=experts,
             topk=topk,
-            ug_groups=DRAFT_UG_GROUPS,
+            # the draft's unions are small on gfx950, where it runs whole; on
+            # gfx942 it takes the FFN launch, validated at the target's groups
+            ug_groups=UG_GROUPS if on_gfx942() else DRAFT_UG_GROUPS,
             swa_width=draft_swa_width(vllm_config),
         )
 
@@ -429,14 +452,25 @@ class DSV41DraftKernel(LayerLaunches):
         for idx in range(self.embed_layer, self.layer_end):
             layer = model.layers[idx]
             plan = self.plans.get(layer.attn.layer_id)
-            out = None
-            if plan is not None:
+            ffn = out = None
+            if plan is None:
+                pass
+            elif plan.ffn_only:
+                ffn = partial(self.launch_ffn, plan)
+            else:
                 out = self.launch_whole(
                     plan, hidden, positions, residual, post_mix, res_mix, pre_mix
                 )
             if out is None:
                 out = layer(
-                    hidden, positions, input_ids, pre_mix, post_mix, res_mix, residual
+                    hidden,
+                    positions,
+                    input_ids,
+                    pre_mix,
+                    post_mix,
+                    res_mix,
+                    residual,
+                    decode_ffn=ffn,
                 )
             hidden, residual, post_mix, res_mix, pre_mix = out
         return model.epilogue(
@@ -444,17 +478,52 @@ class DSV41DraftKernel(LayerLaunches):
         )
 
 
+def prepare_weights(vllm_config, model, draft: bool = False) -> None:
+    """Make ready, at model creation, whatever the launches need from the
+    weights before vLLM loads them: the flag the gfx942 decode helpers read, the
+    top-k hooks they call, and the gfx942 kernels' own copies of the weights,
+    which vLLM then makes as it processes each layer's at load.
+
+    Args:
+        vllm_config: the config of the model being created.
+        model: the backbone, or the DSpark draft head's.
+        draft: whether ``model`` is the draft head's backbone.
+
+    """
+    from vllm.models.deepseek_v41.amd import ops
+
+    # The gfx942 decode helpers run in forward passes, where vLLM's current
+    # config is not set, so they read the flag recorded here.
+    ops.record_specialized_decode(vllm_config)
+    if not vllm_config.kernel_config.specialized_decode or not on_gfx942():
+        return
+    from vllm.models.deepseek_v41.amd.ops import topk as topk_ops
+
+    from .weights942 import copy_at_load
+
+    # A failed build shows at startup, and the hooks then leave the top-k to
+    # vLLM from the first step on.
+    topk_ops.build()
+    experts, topk = draft_routing(vllm_config) if draft else (EXPERTS, TOPK)
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    for layer in model.layers:
+        if _skip_layer(layer, experts, topk, tp_size) is None:
+            copy_at_load(layer, ffn_only=draft or _ffn_only(layer) is not None)
+
+
 def _ffn_only(layer) -> str | None:
     """Why this layer's attention seam and attention stay on vLLM's path, which
     leaves it the FFN launch, or None when it runs whole."""
     from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
+    from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
 
+    # The MXFP4 indexer cache needs CDNA4, so gfx942 drives vLLM's FP8 indexer,
+    # whose wq_b also reads K1's bf16 qr.
+    indexer_cls = DeepseekV4Indexer if on_gfx942() else DeepseekV41RocmMxfp4Indexer
     attn = layer.attn
     if attn.compressor is not None and attn.indexer is None:
         return "a compressor without an indexer"
-    if attn.indexer is not None and not isinstance(
-        attn.indexer, DeepseekV41RocmMxfp4Indexer
-    ):
+    if attn.indexer is not None and not isinstance(attn.indexer, indexer_cls):
         return f"a {type(attn.indexer).__name__}"
     if attn.compress_ratio not in (0, 1, 2):
         return f"compress ratio {attn.compress_ratio}"
@@ -463,14 +532,20 @@ def _ffn_only(layer) -> str | None:
     return None
 
 
-def _skip_layer(layer, experts: int, topk: int) -> str | None:
+def _skip_layer(layer, experts: int, topk: int, tp_size: int) -> str | None:
     """Why this layer keeps vLLM's path for every step, or None when it takes a
     launch (whole or FFN only: ``_plan_layer`` picks which)."""
     ffn = layer.ffn
+    gfx942 = on_gfx942()
     if layer.use_sequence_parallel:
         return "sequence-parallel layer"
-    if not layer.fuse_seam_norm:
+    if not layer.fuse_seam_norm and not gfx942:
+        # gfx942 has no fused seam kernel. vLLM rounds the collapsed stream to
+        # bf16 before its RMSNorm there, which the kernels' fused seam does not,
+        # so the two paths differ by that rounding.
         return "needs aiter's fused mHC seam"
+    if gfx942 and tp_size != 4:
+        return "gfx942 builds for tensor parallel size 4 only"
     if (
         ffn.shared_experts is None
         or ffn.gate.tid2eid is not None
@@ -492,6 +567,10 @@ def _weights(layer, ffn_only: bool, world: int, experts: int):
         MonoLayerWeights,
     )
 
+    if on_gfx942():
+        from .weights942 import layer_weights
+
+        return layer_weights(layer, ffn_only, world)
     a, f = layer.attn, layer.ffn
     e, sh = f.experts.routed_experts, f.shared_experts
     weights = MonoLayerWeights(

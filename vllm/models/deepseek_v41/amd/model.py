@@ -236,6 +236,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             requires_grad=False,
         )
         self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        # set by the specialized decode when this layer runs whole on gfx942
+        self.unfolded_entry = False
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -310,9 +312,19 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                # When layer 0 is a whole mono layer (gfx942), the
+                # entry seam projects the expanded residual with the
+                # unfolded hc_attn_fn, as K1 does, instead of the embedding
+                # with the folded copy. The hc copies are equal, so the
+                # products are the same and only their order of addition
+                # changes, and pre_mix None still selects copy 0 as the
+                # layer input. The AITER op mhc_pre_delayed_aiter takes this
+                # form. The folded form has no AITER kernel on gfx942 and runs
+                # the eager reference instead, about 120 small kernels a step.
+                unfolded = self.unfolded_entry
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
-                    self.hc_attn_fn_broadcast,
+                    self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
                     self.hc_attn_base,
                     self.rms_norm_eps,
@@ -320,7 +332,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_eps,
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
-                    x=x,
+                    x=None if unfolded else x,
                 )
             else:
                 residual = x
@@ -1408,6 +1420,11 @@ class DeepseekV41LLMForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
+            prepare_weights,
+        )
+
+        prepare_weights(vllm_config, self.model)
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

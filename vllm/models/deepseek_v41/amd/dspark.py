@@ -52,6 +52,10 @@ from .model import (
     _linear_scale_param_name,
     _use_sequence_parallel,
 )
+from .ops import draft_lm_head
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
@@ -368,6 +372,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.model = DSparkDeepseekV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        from vllm.models.deepseek_v41.amd.specialized_decode.runtime.decode import (
+            prepare_weights,
+        )
+
+        prepare_weights(vllm_config, self.model, draft=True)
         # Shared with the target (aliased by the speculator's load utility).
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
@@ -414,7 +423,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
-        return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+        # On gfx942 with --specialized-decode, the 5 rows of one request take the
+        # torch GEMM instead of wvSplitK (ops/draft_lm_head.py).
+        return draft_lm_head.compute_logits(
+            self.logits_processor, self.lm_head, self.model.norm(hidden_states)
+        )
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.
@@ -435,6 +448,21 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         """Per-position acceptance probability for each drafted token."""
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+
+    def sample_sequential(
+        self,
+        speculator: "DSparkSpeculator",
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> bool:
+        """DSparkSpeculator._sample_sequential asks this first. With
+        --specialized-decode on gfx942 each Markov step is one launch
+        (ops/fused_markov.py), and this returns True. For a step that the
+        fused launches do not take, it returns False, having done nothing,
+        and the speculator runs its own loop."""
+        from .ops import fused_markov
+
+        return fused_markov.sample_sequential(speculator, num_reqs, head_hidden)
 
     # --- Weight loading ----------------------------------------------------
 

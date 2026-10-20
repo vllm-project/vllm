@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1 mono decode against vLLM's path, through the real model."""
+"""DeepSeek-V4.1 specialized decode against vLLM's path, through the real
+model: at TP2 and TP4 on CDNA4, and at TP4 on gfx942, where the indexer is
+vLLM's FP8 one (the MXFP4 indexer cache needs CDNA4) and the kernels read the
+copies of the weights that the model makes when it loads them."""
 
 import zlib
 
@@ -32,12 +35,22 @@ WHOLE, FFN = (0, 1, 2, 3, 4), ()
 STEPS = 5  # decode steps after the prefill's token
 
 
-def _on_cdna4() -> bool:
+def _arch() -> str:
+    """The GPU kind that the mono kernels build for, "cdna4" or "gfx942", or
+    an empty string on any other GPU."""
     if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import get_cdna_version
+        return ""
+    from vllm.platforms.rocm import get_cdna_version, on_gfx942
 
-    return get_cdna_version() == 4
+    if get_cdna_version() == 4:
+        return "cdna4"
+    return "gfx942" if on_gfx942() else ""
+
+
+# The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
+# build for TP4 only. 8 rows are two GEMV passes of 6 rows there, the second
+# one padded, and 42 rows are the most that they take.
+CASES = {"cdna4": [(2, 8), (4, 8)], "gfx942": [(4, 8), (4, 42)]}
 
 
 @torch.no_grad()
@@ -211,12 +224,34 @@ class MonoProbe:
         torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
 
     def mono_layers(self) -> dict:
+        from vllm.models.deepseek_v41.amd.specialized_decode.runtime.weights942 import (
+            ATTN_LINEARS,
+        )
+
         model = self.model_runner.model  # type: ignore[attr-defined]
         decode = getattr(model, "specialized_decode", None)
         plans = {} if decode is None else decode.kernel.plans
+
+        def copies(plan) -> bool:
+            """Whether the layer holds the gfx942 copies of its weights, which
+            the model makes when it loads them (``mono942``)."""
+            ffn = plan.layer.ffn
+            held = [
+                ffn.experts.routed_experts,
+                ffn.shared_experts.gate_up_proj,
+                ffn.shared_experts.down_proj,
+            ]
+            if not plan.ffn_only:
+                held += [getattr(plan.layer.attn, n) for n in ATTN_LINEARS]
+            return all(hasattr(t, "mono942") for t in held)
+
         layers = {
             i: (
-                ["ffn" if plans[i].ffn_only else "whole", plans[i].weights is not None]
+                [
+                    "ffn" if plans[i].ffn_only else "whole",
+                    plans[i].weights is not None,
+                    copies(plans[i]),
+                ]
                 if i in plans
                 else None
             )
@@ -229,7 +264,9 @@ class MonoProbe:
         }
 
 
-def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
+def _decode(
+    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+):
     """Greedy decode of ``prompts`` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
@@ -239,6 +276,17 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    # CDNA4 has the MXFP4 indexer cache with 128-token blocks. gfx942 keeps
+    # vLLM's FP8 indexer, which needs 64-token blocks.
+    indexer: dict = dict(block_size=64)
+    if arch == "cdna4":
+        indexer = dict(
+            attention_config={
+                "indexer_kv_dtype": "mxfp4",
+                "indexer_sparse_logits": True,
+            },
+            block_size=128,
+        )
     with vllm_runner(
         MODEL,
         tensor_parallel_size=tp,
@@ -249,13 +297,13 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         specialized_decode=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
-        attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},
-        block_size=128,
+        **indexer,
         enforce_eager=True,
         max_model_len=4096,
         max_num_seqs=len(prompts),
-        # a prompt prefills in one step, so its decode tokens never share one
-        max_num_batched_tokens=16384,
+        # All prompts prefill in one step, so that no decode token shares a
+        # step with a prefill and every decode step has all the rows.
+        max_num_batched_tokens=max(16384, sum(len(p) for p in prompts)),
         enable_prefix_caching=False,
         gpu_memory_utilization=0.5,
     ) as runner:
@@ -273,29 +321,44 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
-@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-@pytest.mark.parametrize("tp", [2, 4])
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
+@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42)])
+def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+    arch = _arch()
+    if not arch:
+        pytest.skip("the mono kernels target CDNA4 and gfx942")
+    if (tp, rows) not in CASES[arch]:
+        pytest.skip(f"not a case of {arch}")
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     g = torch.Generator().manual_seed(0)
-    # contexts past both ratios' 512 compressed entries, so top-k selects
-    lens = torch.randperm(1700, generator=g)[:8].add(300).tolist()  # distinct
+    # Contexts past both ratios' 512 compressed entries, so top-k selects.
+    # The captures key a decode token by (prompt length, position), so the
+    # lengths are more than STEPS apart: a request whose positions reached a
+    # longer prompt's length would share that prompt's keys. Skipping the
+    # lengths that are too close keeps the 8-row cases' lengths as they were.
+    lens: list[int] = []
+    for n in torch.randperm(1700, generator=g).add(300).tolist():
+        if all(abs(n - m) > STEPS for m in lens):
+            lens.append(n)
+        if len(lens) == rows:
+            break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
     on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on"
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
     )
     off, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off"
+        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
     )
 
-    # both layer kinds took the mono path on every rank, at every decode step
+    # both layer kinds took the mono path on every rank, at every decode step,
+    # and on gfx942 from the weight copies made at load
     launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
+    copies = arch == "gfx942"
     for rank in probe_on:
         assert rank["layers"] == {
-            i: ["whole" if i in WHOLE else "ffn", True] for i in WHOLE + FFN
+            i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
         assert rank["epoch"] >= launches * STEPS, rank
         assert rank["epoch"] % launches == 0, rank
@@ -321,6 +384,19 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
     # Once it has, its residual stream differs and the later layers are exempt
     # for it. The residual stream: 3% (0.5% seen). A layer the kernels no
     # longer follow is off by far more, on every token.
+    # On gfx942 vLLM's path runs the MoE with bf16 activations, while the
+    # kernels quantize them to MXFP8 before both expert GEMMs, as on CDNA4.
+    # With these random weights that alone moves the FFN output by 4.65%
+    # (5.0% at most over 256 tokens), so layer 0 gets 6% there (5.3% seen).
+    # The later layers' 8% holds on gfx942 too (5.6% seen). The residual
+    # stream then differs by 1.0% after layer 1 and by up to 2.5% after layer
+    # 4, still under its 3%. That moves scores near 0.8 by up to about 2e-2,
+    # so past layer 0 a near-tie is a gap within 2e-2 there (1.1e-2 seen).
+    # And 22% of the tokens flip an expert at some layer, at 8 and at 42 rows
+    # alike, so up to a third may flip there instead of a quarter.
+    first_bound = 0.06 if arch == "gfx942" else 0.03
+    later_tie = 2e-2 if arch == "gfx942" else 1e-2
+    flip_divisor = 3 if arch == "gfx942" else 4
     for rank in range(tp):
         got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
         want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
@@ -336,10 +412,10 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
                 (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
                 err = _rel(res, res_ref)
                 assert err < 0.03, (rank, i, k, "residual", err)
-                bound = 0.03 if i == 0 else 0.08
+                bound = first_bound if i == 0 else 0.08
                 err = _rel(x, x_ref)
                 if err >= bound:
-                    tie = 5e-3 if i == 0 else 1e-2
+                    tie = 5e-3 if i == 0 else later_tie
                     assert gaps[(i, *k)] < tie, (rank, i, k, "x", err)
                     flipped.add(k)
-        assert len(flipped) <= len(keys) // 4, (rank, sorted(flipped))
+        assert len(flipped) <= len(keys) // flip_divisor, (rank, sorted(flipped))
