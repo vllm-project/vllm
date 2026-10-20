@@ -54,6 +54,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
     decode_attention_fwd_verify,
     select_verify_config,
     verify_num_kv_splits,
+    warmup_decode_attention_fwd_verify,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -804,6 +805,8 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     triton_verify_num_kv_splits: int = 0
     # Real KV lengths for varlen verify (``seq_lens`` holds padded ones).
     triton_verify_real_seq_lens: torch.Tensor | None = None
+    # Every verify length the Triton kernel can see; warmed up on first use.
+    triton_verify_qlens: tuple[int, ...] = ()
     # The FP8 asm kernel for this batch leaves V unscaled; scale by k_scale.
     fp8_v_scale_fix: bool = False
     # Whether persistent MLA metadata was computed
@@ -1299,7 +1302,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Split cap bound; must be static for full CUDA graphs.
         self._triton_verify_max_seq_len = vllm_config.model_config.max_model_len
         self._sm_count = current_platform.num_compute_units()
+        self._triton_verify_qlens: tuple[int, ...] = ()
         if self._use_triton_verify:
+            self._triton_verify_qlens = tuple(
+                range(
+                    AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN + 1,
+                    self._mtp_decode_qlen + 1,
+                )
+            )
             logger.info_once(
                 "ROCM_AITER_MLA: causal verify past %d tokens uses the Triton "
                 "verify kernel; the AITER asm decode has no correct kernel "
@@ -2056,6 +2066,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_decode=use_gluon_decode,
             use_gluon_verify=use_gluon_verify,
             triton_verify_num_kv_splits=triton_verify_num_kv_splits,
+            triton_verify_qlens=self._triton_verify_qlens,
             fp8_v_scale_fix=(
                 has_persistent_metadata
                 and self.dcp_world_size == 1
@@ -2505,6 +2516,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
         self._sm_count = current_platform.num_compute_units()
+        self._triton_verify_warmed_up = False
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -2994,6 +3006,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 logits_shape, dtype=torch.float32, device=q_mla.device
             )
         paged_kv = kv_c_and_k_pe_cache.unsqueeze(2)
+        if (
+            not self._triton_verify_warmed_up
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._triton_verify_warmed_up = True
+            warmup_decode_attention_fwd_verify(
+                q_mla,
+                paged_kv,
+                output,
+                lse,
+                decode.block_table,
+                decode.triton_verify_real_seq_lens is not None,
+                decode.triton_verify_qlens,
+                attn_logits,
+                self.scale,
+                paged_kv.size(1),
+                k_scale=layer._k_scale,
+            )
         decode_attention_fwd_verify(
             q_mla,
             paged_kv,

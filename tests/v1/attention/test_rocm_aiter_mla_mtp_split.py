@@ -129,6 +129,7 @@ def _builder(
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         _use_triton_dcp_verify=False,
         _use_triton_verify=False,
+        _triton_verify_qlens=(),
         _fp8_v_scale_fix_qlens=frozenset(),
         # Derived once in the real constructor, so derive it once here too.
         _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
@@ -943,6 +944,11 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
+    # The probe is cached per process; running it against the stub aiter
+    # would leave a wrong answer for later tests.
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_fp8_mla_decode_drops_v_scale", lambda *args: False
+    )
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(

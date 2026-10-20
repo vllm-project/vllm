@@ -29,6 +29,7 @@ It supports page size >= 1.
 """
 
 import logging
+import math
 from typing import Any
 
 import torch
@@ -902,7 +903,11 @@ def _verify_load_tile_qsplit(
     return k0, k1, v, kpe
 
 
-@triton.jit
+# Launch-varying ints are not specialized, so serving reuses the variants
+# compiled by warmup_decode_attention_fwd_verify.
+@triton.jit(
+    do_not_specialize=["stride_mid_ob", "stride_mid_oh", "BATCH", "NUM_KV_SPLITS"]
+)
 def _fwd_verify_kernel_stage1(
     Q,
     K_Buffer,
@@ -1164,7 +1169,7 @@ def _fwd_verify_kernel_stage1(
             )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["stride_mid_ob", "stride_mid_oh", "NUM_KV_SPLITS"])
 def _fwd_verify_kernel_stage2(
     Mid_O,
     o,
@@ -1442,6 +1447,9 @@ _VERIFY_LARGE_CONFIG: dict[str, Any] = dict(
 )
 
 
+_VERIFY_SMALL_MAX_ROWS = 640
+
+
 def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any]:
     """Launch config from MI300X (gfx942) sweeps, bf16, page 16.
 
@@ -1450,8 +1458,76 @@ def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any
     tile prefetched) halve the KV re-reads per request.
     """
     cfg = dict(VERIFY_DEFAULT_CONFIG)
-    if batch * qlen * num_heads <= 640:
+    if batch * qlen * num_heads <= _VERIFY_SMALL_MAX_ROWS:
         cfg.update(_VERIFY_SMALL_CONFIG)
     else:
         cfg.update(_VERIFY_LARGE_CONFIG)
     return cfg
+
+
+def _storage_view(t, shape):
+    """Contiguous ``shape`` over ``t``'s storage, or a new tensor if too small."""
+    if math.prod(shape) > t.untyped_storage().nbytes() // t.element_size():
+        return t.new_empty(shape)
+    strides = [1]
+    for size in reversed(shape[1:]):
+        strides.insert(0, strides[0] * size)
+    return torch.as_strided(t, shape, strides, 0)
+
+
+def warmup_decode_attention_fwd_verify(
+    q,
+    k_buffer,
+    o,
+    lse,
+    req_to_token,
+    has_real,
+    qlens,
+    attn_logits,
+    sm_scale,
+    page_size,
+    k_scale=None,
+):
+    """Compile every launch variant serving can reach for these tensors.
+
+    A launch specializes on qlen, the row-count config and a single split, but
+    graph capture and profiling only run the full verify length. Each variant
+    runs once on scratch tensors with the strides of the real ones; the split
+    scratch reuses attn_logits' storage, whose size the launch specializes on.
+    """
+    num_heads, Lv = q.shape[1], o.shape[-1]
+
+    def scratch(t, rows):
+        return torch.empty_strided(
+            (rows, *t.shape[1:]), t.stride(), dtype=t.dtype, device=t.device
+        )
+
+    for qlen in qlens:
+        for batch in {1, _VERIFY_SMALL_MAX_ROWS // (qlen * num_heads) + 1}:
+            rows = batch * qlen
+            seq_lens = torch.full((batch,), qlen, dtype=torch.int32, device=q.device)
+            block_table = torch.empty_strided(
+                (batch, req_to_token.shape[1]),
+                req_to_token.stride(),
+                dtype=req_to_token.dtype,
+                device=req_to_token.device,
+            ).zero_()
+            for num_kv_splits in (1, 2):
+                decode_attention_fwd_verify(
+                    scratch(q, rows).zero_(),
+                    k_buffer,
+                    k_buffer[..., :Lv],
+                    scratch(o, rows),
+                    scratch(lse, rows),
+                    block_table,
+                    seq_lens,
+                    seq_lens if has_real else None,
+                    qlen,
+                    _storage_view(
+                        attn_logits, (rows, num_heads, num_kv_splits, Lv + 1)
+                    ),
+                    num_kv_splits,
+                    sm_scale,
+                    page_size,
+                    k_scale=k_scale,
+                )
