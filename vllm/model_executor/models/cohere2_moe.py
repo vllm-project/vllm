@@ -382,24 +382,25 @@ class Cohere2Moe(nn.Module):
 
 def _make_dual_stream(vllm_config: VllmConfig) -> torch.cuda.Stream | None:
     """Side stream shared by all decoder layers, or None when the dual stream
-    is off or unsupported."""
-    if not envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM:
+    is disabled (token threshold 0) or unsupported."""
+    token_threshold = envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD
+    if token_threshold <= 0:
         return None
     if not current_platform.is_cuda():
-        logger.warning_once(
-            "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM is only supported on CUDA; ignoring it."
+        logger.info_once(
+            "Cohere2MoE attention/MoE dual stream is CUDA-only; running single-stream."
         )
         return None
     if vllm_config.parallel_config.use_ubatching:
         # Each layer holds a single fork/join state, so microbatches would race.
-        logger.warning_once(
-            "VLLM_COHERE2_ATTN_MOE_DUAL_STREAM is not supported with "
-            "microbatching (DBO); ignoring it."
+        logger.info_once(
+            "Cohere2MoE attention/MoE dual stream does not support "
+            "microbatching (DBO); running single-stream."
         )
         return None
     logger.info_once(
         "Cohere2MoE attention/MoE dual stream enabled (token threshold=%d).",
-        envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
+        token_threshold,
     )
     # Dedicated stream: the global aux_stream() is used by the shared-expert
     # and LoRA overlaps inside the MoE branch.
@@ -464,10 +465,9 @@ class Cohere2MoeDecoderLayer(nn.Module):
         self.uses_rms_norm = isinstance(self.input_layernorm, RMSNorm)
 
         if moe_stream is not None and not self._allows_dual_stream():
-            logger.warning_once(
-                "Cohere2MoE dual stream disabled for MoE layers that reduce "
-                "internally under TP (shared experts, EP all2all or sequence "
-                "parallel)."
+            logger.info_once(
+                "Cohere2MoE MoE layers that reduce internally under TP (shared "
+                "experts, EP all2all or sequence parallel) run single-stream."
             )
             moe_stream = None
         self.dual_stream = (
