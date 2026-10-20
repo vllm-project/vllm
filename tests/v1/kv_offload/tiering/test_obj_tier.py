@@ -465,6 +465,101 @@ class TestMockObjTierFailures:
         assert results[0].job_id == 3
         assert not results[0].success
 
+    def test_submit_store_raise_reported_in_get_finished(self):
+        # NIXL's bindings raise on an error status instead of returning a
+        # sentinel, so a failed registration must not escape submit_store.
+        tier, agent = _make_tier(num_blocks=4)
+        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished_jobs())
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert not results[0].success
+
+    def test_submit_load_raise_marks_verdict_negative(self):
+        # A promotion that fails at submission must mark the cached verdict as
+        # a miss, so the scheduler does not re-issue the same doomed promotion
+        # every step for the life of the request.
+        tier, agent = _make_tier(num_blocks=4)
+        ctx = ReqContext(req_id="obj-raise-load")
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(r.success for r in drain(tier))
+        # Cache a positive verdict: the object is present, so lookup is a HIT.
+        assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+        # The promotion the HIT triggered fails at submission.
+        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
+        tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1
+        assert results[0].job_id == 2
+        assert not results[0].success
+
+        # The same request must now resolve to MISS instead of serving the
+        # stale HIT, even though the object itself is still present.
+        assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
+
+    def test_raise_releases_the_handles_it_created(self, monkeypatch):
+        # make_prepped_xfer raises after the OBJ registration and the dlist
+        # handle exist: both must be released, or the registration leaks.
+        tier, agent = _make_tier(num_blocks=4)
+        deregister = MagicMock()
+        release_dlist = MagicMock()
+        monkeypatch.setattr(agent, "deregister_memory", deregister)
+        monkeypatch.setattr(agent, "release_dlist_handle", release_dlist)
+        agent.make_prepped_xfer = MagicMock(side_effect=RuntimeError("backend error"))
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        assert deregister.call_count == 1
+        assert release_dlist.call_count == 1
+        assert list(tier.get_finished_jobs())[0].success is False
+
+    def test_raise_does_not_leak_parent_job_or_primary_pin(self):
+        # The parent tiering manager only unwinds a job when the tier reports
+        # a JobResult for it. A raise from the tier would leave the job
+        # registered, the primary chunk pinned and the request unfinalized.
+        num_blocks = 4
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
+        mmap_region = MagicMock()
+        mmap_region.create_kv_memoryview.return_value = primary_kv_view
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_chunks=num_blocks, mmap_region=mmap_region
+        )
+        obj_tier, agent = _make_tier(
+            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+        )
+        agent.register_memory = MagicMock(side_effect=RuntimeError("backend error"))
+
+        ctx = ReqContext(req_id="obj-raise")
+        manager.on_new_request(ctx)
+        keys = [key(1)]
+        assert manager.prepare_store(keys, ctx) is not None
+        primary_tier.complete_store(keys, ctx, success=True)
+
+        # Must not raise: the tier reports the failure as a failed job.
+        manager.complete_store(keys, ctx, success=True)
+        manager.on_request_finished(ctx)
+
+        block = primary_tier._policy.get(keys[0])
+        assert block is not None
+        assert block.ref_cnt == 1  # pinned by the store job
+
+        schedule_context = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        # The job gate is reset at the end of a step, so the failed job is
+        # polled in the next one.
+        manager.on_schedule_end(schedule_context)
+        manager.on_schedule_end(schedule_context)
+
+        assert manager._transfer_jobs == {}
+        assert block.ref_cnt == 0
+        assert not manager.has_pending_work()
+        assert "obj-raise" not in manager._req_state
+
     def test_failure_and_success_both_returned_by_get_finished(self):
         # One job fails at submission, another succeeds in flight.
         tier, agent = _make_tier(num_blocks=4)

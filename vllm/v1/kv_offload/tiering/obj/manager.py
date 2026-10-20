@@ -5,7 +5,7 @@
 import ctypes
 import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import numpy as np
 
@@ -224,6 +224,53 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
         return results[0] is not None
 
+    def _release_submission_handles(
+        self,
+        job_id: int,
+        xfer_handle: object | None,
+        obj_handle: object | None,
+        files_desc: object | None,
+    ) -> None:
+        """Release the NIXL handles created for a failed submission.
+
+        Each release is independent: a failing release must not skip the
+        others, or the OBJ registration stays live.
+        """
+        if xfer_handle is not None:
+            try:
+                self._agent.release_xfer_handle(xfer_handle)
+            except Exception as exc:
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+        if obj_handle is not None:
+            try:
+                self._agent.release_dlist_handle(obj_handle)
+            except Exception as exc:
+                logger.warning(
+                    "release_dlist_handle failed for job %d: %s", job_id, exc
+                )
+        if files_desc is not None:
+            try:
+                self._agent.deregister_memory(files_desc)
+            except Exception as exc:
+                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
+
+    def _fail_submission(
+        self,
+        job_id: int,
+        xfer_handle: object | None = None,
+        obj_handle: object | None = None,
+        files_desc: object | None = None,
+    ) -> None:
+        """Release the handles of a failed submission and report the failure.
+
+        The tier never raises on a failed submission: the parent tiering
+        manager only unwinds a job when it sees a ``JobResult`` for it, so a
+        raise here would leave the job registered, the primary chunks pinned
+        and the request unfinalized.
+        """
+        self._release_submission_handles(job_id, xfer_handle, obj_handle, files_desc)
+        self._pending_results.append(JobResult(job_id=job_id, success=False))
+
     def _submit_transfer(
         self,
         job_id: int,
@@ -236,46 +283,62 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         assert block_ids.dtype == np.int32
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
-        nixl_files = [
-            (0, self._block_size_bytes, dev_id, key)
-            for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
-        ]
-        self._next_obj_dev_id += len(nixl_files)
+        files_desc: Any = None
+        obj_handle: Any = None
+        xfer_handle: Any = None
+        try:
+            nixl_files = [
+                (0, self._block_size_bytes, dev_id, key)
+                for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
+            ]
+            self._next_obj_dev_id += len(nixl_files)
 
-        files_desc = self._agent.register_memory(nixl_files, "OBJ")
-        if files_desc is None:
-            logger.warning("register_memory (OBJ) failed for job %d", job_id)
-            self._pending_results.append(JobResult(job_id=job_id, success=False))
-            return
+            files_desc = self._agent.register_memory(nixl_files, "OBJ")
+            if files_desc is None:
+                logger.warning("register_memory (OBJ) failed for job %d", job_id)
+                self._fail_submission(job_id)
+                return
 
-        obj_handle = self._agent.prep_xfer_dlist("ObjAgent", files_desc.trim())
-        if not obj_handle:
-            logger.warning("prep_xfer_dlist (OBJ) failed for job %d", job_id)
-            self._agent.deregister_memory(files_desc)
-            self._pending_results.append(JobResult(job_id=job_id, success=False))
-            return
+            obj_handle = self._agent.prep_xfer_dlist("ObjAgent", files_desc.trim())
+            if not obj_handle:
+                logger.warning("prep_xfer_dlist (OBJ) failed for job %d", job_id)
+                self._fail_submission(job_id, files_desc=files_desc)
+                return
 
-        xfer_handle = self._agent.make_prepped_xfer(
-            op,
-            self._dram_prepped_handle,
-            block_ids,
-            obj_handle,
-            np.arange(len(nixl_files), dtype=np.int32),
-        )
-        if not xfer_handle:
-            logger.warning("make_prepped_xfer failed for job %d", job_id)
-            self._agent.release_dlist_handle(obj_handle)
-            self._agent.deregister_memory(files_desc)
-            self._pending_results.append(JobResult(job_id=job_id, success=False))
-            return
+            xfer_handle = self._agent.make_prepped_xfer(
+                op,
+                self._dram_prepped_handle,
+                block_ids,
+                obj_handle,
+                np.arange(len(nixl_files), dtype=np.int32),
+            )
+            if not xfer_handle:
+                logger.warning("make_prepped_xfer failed for job %d", job_id)
+                self._fail_submission(
+                    job_id, obj_handle=obj_handle, files_desc=files_desc
+                )
+                return
 
-        state = self._agent.transfer(xfer_handle)
-        if state == "ERR":
-            logger.warning("agent.transfer failed for job %d", job_id)
-            self._agent.release_dlist_handle(obj_handle)
-            self._agent.deregister_memory(files_desc)
-            self._agent.release_xfer_handle(xfer_handle)
-            self._pending_results.append(JobResult(job_id=job_id, success=False))
+            state = self._agent.transfer(xfer_handle)
+            if state == "ERR":
+                logger.warning("agent.transfer failed for job %d", job_id)
+                self._fail_submission(
+                    job_id,
+                    xfer_handle=xfer_handle,
+                    obj_handle=obj_handle,
+                    files_desc=files_desc,
+                )
+                return
+        except Exception as exc:
+            # NIXL's Python bindings raise on every error status instead of
+            # returning a sentinel, so any of these calls can fail here.
+            logger.warning("OBJ transfer submission failed for job %d: %s", job_id, exc)
+            self._fail_submission(
+                job_id,
+                xfer_handle=xfer_handle,
+                obj_handle=obj_handle,
+                files_desc=files_desc,
+            )
             return
 
         self._transfers[job_id] = TransferEntry(
