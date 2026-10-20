@@ -8,7 +8,9 @@ AMM) and AMDGPUUsage "Execution Barriers":
 - A pair is one naturally aligned 64-bit atomic, (value | tag << 32),
   ``monotonic`` at its space's scope (``agent`` for this GPU's scratch, system
   for the peer heap). An atomic access is never split, so a load that sees a
-  pair's tag sees that store's value.
+  pair's tag sees that store's value. A triple pair (``put_triple``, the
+  attention seam) is the same atomic with three bf16 in bits 0 .. 47 under a
+  16-bit tag, unique between epoch resets (the kernel's EPOCH_LIMIT).
 - Data a pair announces is stored *store-available* and loaded *load-visible*
   at agent scope (AMM: agent atomics of 16 to 64 bits, ``llvm.amdgcn.av.load.
   b128``; ``store_dev`` / ``load_dev``).
@@ -229,8 +231,12 @@ def _fail_if(timed_out, fail, site):
 class Mailbox:
     """Tagged pairs of one launch (``tag``), every address an ``Addr``."""
 
-    def __init__(self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS):
+    def __init__(
+        self, tag, err_base, peer_bases, rank, epoch, ticks=WAIT_TICKS, tag16=None
+    ):
         self.tag = tag
+        # a triple pair's 16-bit tag (``put_triple``), if the launch has one
+        self.tag16 = tag16
         self.err_base = err_base
         self.peer_bases = peer_bases
         self.rank = rank
@@ -275,20 +281,29 @@ class Mailbox:
             store64(base, 1, hi, None)
             store64(base, 0, lo, None)
 
-    def poll(self, specs, batch=POLL_MAX, site=0):
+    def put_triple(self, a, i, bits48):
+        """Pair i of ``a`` := (48 value bits | tag16 << 48), monotonic."""
+        word = (bits48 & ((1 << 48) - 1)) | (fx.Int64(self.tag16) << 48)
+        store64(a.value, i, word, _SCOPE[a.space])
+
+    def poll(self, specs, batch=POLL_MAX, site=0, triples=False):
         """Pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})], all of one
         space, re-loaded together until every tag is this launch's. Returns the
-        value words."""
+        value words; ``triples``: of triple pairs (``put_triple``), both
+        words."""
         if const_expr(len(specs) == 0):
             return []
         if const_expr(len(specs) > batch):
-            return self.poll(specs[:batch], batch, site) + self.poll(
-                specs[batch:], batch, site
+            return self.poll(specs[:batch], batch, site, triples) + self.poll(
+                specs[batch:], batch, site, triples
             )
         spaces = {a.space for a, _, _ in specs}
         assert len(spaces) == 1, f"one poll batch spans {spaces}"
         scope = _SCOPE[spaces.pop()]
-        tag = self.tag
+        tag = self.tag16 if const_expr(triples) else self.tag
+
+        def high_tag(w):
+            return ((w >> 16) & 0xFFFF) if const_expr(triples) else w
 
         def load_all():
             words = []
@@ -301,15 +316,18 @@ class Mailbox:
         nw = sum(2 * n for _, _, n in specs)
 
         def pending(v):
-            bad = v[1] != tag
+            bad = high_tag(v[1]) != tag
             for e in range_constexpr(3, nw, 2):
-                bad = bad | (v[e] != tag)
+                bad = bad | (high_tag(v[e]) != tag)
             return bad
 
         v, timed_out = _spin(load_all, pending, self.err_base, self.ticks)
         _fail_if(timed_out, self.fail, site)
         outs, e = [], 0
         for _, _, n in specs:
-            outs.append([v[e + 2 * q] for q in range(n)])
+            if const_expr(triples):
+                outs.append([(v[e + 2 * q], v[e + 2 * q + 1]) for q in range(n)])
+            else:
+                outs.append([v[e + 2 * q] for q in range(n)])
             e += 2 * n
         return outs

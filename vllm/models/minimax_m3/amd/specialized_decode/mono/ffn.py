@@ -88,11 +88,16 @@ ALPHA, BETA, LIMIT = 1.702, 1.0, 7.0
 LOG2E = 1.4426950408889634
 MAX_TOKENS = 16
 
-COLS = 32  # columns of a push / reduce / final task
+COLS = 32  # columns of a final task
+FINAL_TASKS = HIDDEN // COLS  # 192
+# the attention seam's pairs carry three bf16 under a 16-bit tag
+TRIPLES = HIDDEN // 3  # 2048 a row
+TASK_TRIPLES = 16  # triples of a push / reduce task (CTAs 0 .. 127)
+SEAM_TASKS = TRIPLES // TASK_TRIPLES  # 128 (a token's SSQ parts)
 ROUTER_PARTS = 16
 ROUTER_K = HIDDEN // ROUTER_PARTS
 ROUTER_TASKS = EXPERTS // 16 * ROUTER_PARTS
-SEAM_TASKS = HIDDEN // COLS  # 192
+
 UP_TILES = INTER // 16  # 48 gate/up tile pairs an expert
 DOWN_TASKS = HIDDEN // 16  # 384
 K1_STEPS = HIDDEN // 128
@@ -101,7 +106,7 @@ UP_WAVE_STEPS = K1_STEPS // WAVES
 assert UP_WAVE_STEPS * WAVES == K1_STEPS and UP_WAVE_STEPS % 2 == 0
 
 # CTA bases of the stages placed by count
-NORM0 = SEAM_TASKS
+NORM0 = FINAL_TASKS
 ROUTER0 = NORM0 + MAX_TOKENS
 SHARED0 = (ROUTER0 + ROUTER_TASKS) % BLOCKS
 ROUTED0 = SHARED0 + UP_TILES
@@ -113,8 +118,9 @@ HANDSHAKE_BYTES = 64  # the step-end handshake's pairs in the error line, one a 
 SITE_REDUCE, SITE_NORM, SITE_ROUTER, SITE_ROUTE = 1, 2, 3, 4
 SITE_TABLE, SITE_UP, SITE_DOWN, SITE_FINAL, SITE_EPOCH = 5, 6, 7, 8, 9
 SITE_WRAP, SITE_HANDSHAKE, SITE_INJECT, SITE_PEER = 10, 11, 12, 13
-# launches before the 32-bit tag could repeat a stale pair: fail-stop instead
-EPOCH_LIMIT = (1 << 31) - (1 << 24)
+# launches before a triple pair's 16-bit tag (one a launch of its parity)
+# could repeat a stale pair: fail-stop instead
+EPOCH_LIMIT = (1 << 17) - (1 << 12)
 
 
 class Experts(Enum):
@@ -142,8 +148,9 @@ def slots(s: int) -> int:
 
 
 def peer_half_bytes(tp: int) -> int:
-    """One parity's peer regions: the attention partials, then the MoE's."""
-    return 2 * tp * MAX_TOKENS * (HIDDEN // 2) * 8
+    """One parity's peer regions: the attention partials (triple pairs), then
+    the MoE's (bf16-pair pairs)."""
+    return tp * MAX_TOKENS * (TRIPLES + HIDDEN // 2) * 8
 
 
 def peer_bytes(tp: int) -> int:
@@ -225,12 +232,35 @@ def flag_after_stores(c, addr, i, who):
         c["mb"].publish(addr, i, fx.Int32(1))
 
 
-def attn_pair(c, src, t, colpair):
-    return (src * MAX_TOKENS + t) * (HIDDEN // 2) + colpair
+def attn_pair(c, src, t, triple):
+    return (src * MAX_TOKENS + t) * TRIPLES + triple
 
 
 def ffn_pair(c, src, t, colpair):
-    return (c["tp"] + src) * MAX_TOKENS * (HIDDEN // 2) + attn_pair(c, 0, t, colpair)
+    attn = c["tp"] * MAX_TOKENS * TRIPLES
+    return attn + (src * MAX_TOKENS + t) * (HIDDEN // 2) + colpair
+
+
+def triple_bits(buf, t, triple):
+    """Row t's bf16 at columns 3 triple .. of a [*, HIDDEN] bf16 buffer: one
+    8-byte load from the dword holding the first, shifted to bits 0 .. 47."""
+    v = fx.Vector(
+        bo.buffer_load(
+            rsrc(buf),
+            t * (HIDDEN // 2) + (3 * triple) // 2,
+            vec_width=2,
+            dtype=T.i32,
+        )
+    )
+    w = (fx.Int64(fx.Uint32(fx.Int32(v[1]))) << 32) | fx.Int64(
+        fx.Uint32(fx.Int32(v[0]))
+    )
+    return w >> fx.Int64(16 * (triple & 1))
+
+
+def bf16_bits_f32(bits):
+    """A bf16's 16 bits (the low half of an int) as f32."""
+    return ((bits & 0xFFFF) << 16).bitcast(fx.Float32)
 
 
 @traced
@@ -251,60 +281,47 @@ def block_sum(c, v, slot):
 # ---------------------------------------------------------------- seam
 @traced
 def stage_push(c, task):
-    """Columns 32 task ..: this rank's partial pairs to every rank's ATTN."""
-    s, tid, a = c["S"], c["tid"], c["args"]
-    if tid < s * COLS // 2:
-        t = tid // (COLS // 2)
-        cp = task * (COLS // 2) + tid % (COLS // 2)
-        word = fx.Int32(
-            bo.buffer_load(
-                rsrc(a["part"]), t * (HIDDEN // 2) + cp, vec_width=1, dtype=T.i32
-            )
-        )
+    """Triples 16 task ..: this rank's partial as triple pairs to every rank's
+    ATTN."""
+    s, tid = c["S"], c["tid"]
+    if tid < s * TASK_TRIPLES:
+        t = tid // TASK_TRIPLES
+        tr = task * TASK_TRIPLES + tid % TASK_TRIPLES
+        bits = triple_bits(c["args"]["part"], t, tr)
         for p in range_constexpr(c["tp"]):
-            put_word(c, c["peer"][p], attn_pair(c, c["rank"], t, cp), word)
+            c["mb"].put_triple(c["peer"][p], attn_pair(c, c["rank"], t, tr), bits)
 
 
 @traced
 def stage_reduce(c, task):
-    """Columns 32 task ..: the ranks' pairs summed in rank order (the
+    """Triples 16 task ..: the ranks' values summed in rank order (the
     all-reduce's bf16), + residual in f32 -> residual out, the f32 sum (SRES)
     and the task's sum of squares (SSQ, a pair a token)."""
     s, tid, a = c["S"], c["tid"], c["args"]
     sq = fx.Float32(0.0)
-    if tid < s * COLS // 2:
-        t = tid // (COLS // 2)
-        cp = task * (COLS // 2) + tid % (COLS // 2)
+    if tid < s * TASK_TRIPLES:
+        t = tid // TASK_TRIPLES
+        tr = task * TASK_TRIPLES + tid % TASK_TRIPLES
         got = c["mb"].poll(
-            [(c["own"], attn_pair(c, src, t, cp), 1) for src in range(c["tp"])],
+            [(c["own"], attn_pair(c, src, t, tr), 1) for src in range(c["tp"])],
             site=SITE_REDUCE,
+            triples=True,
         )
-        lo, hi = bf2_f32(got[0][0])
-        for src in range_constexpr(1, c["tp"]):
-            l2, h2 = bf2_f32(got[src][0])
-            lo, hi = lo + l2, hi + h2
-        rw = fx.Int32(
-            bo.buffer_load(
-                rsrc(a["res_in"]), t * (HIDDEN // 2) + cp, vec_width=1, dtype=T.i32
-            )
-        )
-        rl, rh = bf2_f32(rw)
-        sl = bf16_round(lo) + rl
-        sh = bf16_round(hi) + rh
-        bo.buffer_store(
-            bf16_pair(sl, sh).bitcast(fx.Int32),
-            rsrc(a["res_out"]),
-            t * (HIDDEN // 2) + cp,
-        )
-        store_dev(
-            c["sres"].value,
-            t * HIDDEN + 2 * cp,
-            [sl.bitcast(fx.Int32), sh.bitcast(fx.Int32)],
-        )
-        sq = butterfly(sl * sl + sh * sh, (8, 4, 2, 1))
+        res = triple_bits(a["res_in"], t, tr)
+        col = t * HIDDEN + 3 * tr
+        for k in range_constexpr(3):
+            word = [got[src][0][k // 2] for src in range(c["tp"])]
+            acc = bf16_bits_f32(word[0] >> (16 * (k % 2)))
+            for src in range_constexpr(1, c["tp"]):
+                acc = acc + bf16_bits_f32(word[src] >> (16 * (k % 2)))
+            v = bf16_round(acc) + bf16_bits_f32(fx.Int32(res >> (16 * k)))
+            bo.buffer_store(v.to(fx.BFloat16), rsrc(a["res_out"]), col + k)
+            store_dev(c["sres"].value, col + k, [v.bitcast(fx.Int32)])
+            sq = sq + v * v
+        sq = butterfly(sq, (8, 4, 2, 1))
     cta_sync(drain=True)
-    if (tid < s * COLS // 2) & (tid % (COLS // 2) == 0):
-        t = tid // (COLS // 2)
+    if (tid < s * TASK_TRIPLES) & (tid % TASK_TRIPLES == 0):
+        t = tid // TASK_TRIPLES
         c["mb"].publish(c["ssq"], t * SEAM_TASKS + task, sq)
 
 
@@ -815,7 +832,7 @@ def run_ffn(c, bid):
     else:
         stage_down(c, [bid])
     stamp(c, 9)
-    for task in range(first_task(bid, 0), SEAM_TASKS, BLOCKS):
+    for task in range(first_task(bid, 0), FINAL_TASKS, BLOCKS):
         stage_final(c, task)
     stamp(c, 10)
 
@@ -878,7 +895,9 @@ def build_ffn(key: FfnBuild):
             tag = ep + 1
             raw = peer_bases(peers, tp)
             par = fx.Int64(ep & 1) * fx.Int64(half) + fx.Int64(ERROR_BYTES)
-            mb = Mailbox(tag, sym, raw, rank, ep, key.wait_ticks)
+            # a seam half's launches are those of one parity
+            tag16 = ((ep >> 1) + 1) & 0xFFFF
+            mb = Mailbox(tag, sym, raw, rank, ep, key.wait_ticks, tag16)
             c = {
                 "S": s,
                 "tp": tp,

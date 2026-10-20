@@ -20,10 +20,11 @@ from .weights import MonoLayerWeights
 logger = init_logger(__name__)
 
 COVERAGE_LOG_EVERY = 1024
-# a collective reset well before the kernels' 32-bit tag limit (EPOCH_LIMIT):
-# every 2^30 / 57 sparse layers ~ 18.8M sampled steps, counted per sampled step
-# (stock-routed ones too), so a reset comes early, never late
-RESET_LAUNCHES = 1 << 30
+# a collective reset well before the kernels' tag limit (EPOCH_LIMIT, the
+# attention seam's 16-bit tags): every (2^17 - 2^14) / 57 sparse layers ~ 2000
+# sampled steps, counted per sampled step (stock-routed ones too); launches no
+# step counts (startup's dummy runs) fit in the 2^14 - 2^12 to EPOCH_LIMIT
+RESET_LAUNCHES = (1 << 17) - (1 << 14)
 
 
 @dataclass(frozen=True)
