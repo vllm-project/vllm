@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -12,6 +13,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.step3p5 import (
@@ -29,7 +31,10 @@ from vllm.models.step5.common.csa_cache import (
     Step5CSASummaryCache,
 )
 from vllm.models.step5.common.ops.csa import indexer_norm
+from vllm.models.step5.nvidia.layernorm import get_step5_norm_dtype
+from vllm.models.step5.nvidia.model import _validate_step5_dsa_parallel_geometry
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx1250
 from vllm.transformers_utils.configs.step5 import Step5Config
 from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
@@ -90,14 +95,12 @@ class Step5SparseIndexer(nn.Module):
         self.sparse_indexer_q = group_linear("sparse_indexer_q", heads * self.proxy_dim)
         self.sparse_indexer_k = linear("sparse_indexer_k", self.proxy_dim)
         self.sparse_indexer_z = linear("sparse_indexer_z", self.proxy_dim)
-        self.sparse_indexer_w = group_linear("sparse_indexer_w", heads, torch.float32)
+        self.sparse_indexer_w = group_linear("sparse_indexer_w", heads)
         self.sparse_indexer_q_norm = nn.Module()
         self.sparse_indexer_q_norm.weight = nn.Parameter(
-            torch.zeros(self.proxy_dim, dtype=torch.float32), requires_grad=False
+            torch.zeros(self.proxy_dim), requires_grad=False
         )
-        self.sparse_indexer_k_norm = nn.LayerNorm(
-            self.proxy_dim, eps=self.eps, dtype=torch.float32
-        )
+        self.sparse_indexer_k_norm = nn.LayerNorm(self.proxy_dim, eps=self.eps)
 
         theta = config.rope_theta
         rope_parameters = dict(_rope_scaling(config, layer_idx) or {})
@@ -116,6 +119,7 @@ class Step5SparseIndexer(nn.Module):
         )
 
         vllm_config = get_current_vllm_config()
+        self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self.index_cache = Step5CSAIndexCache(
             proxy_dim=self.proxy_dim,
             cache_config=vllm_config.cache_config,
@@ -142,7 +146,7 @@ class Step5SparseIndexer(nn.Module):
         q, _ = self.sparse_indexer_q(hidden_states)
         k, _ = self.sparse_indexer_k(hidden_states)
         z, _ = self.sparse_indexer_z(hidden_states)
-        w, _ = self.sparse_indexer_w(hidden_states.float())
+        w, _ = self.sparse_indexer_w(hidden_states)
         q, k = indexer_norm(
             q.view(tokens, -1, self.proxy_dim),
             k.view(tokens, 1, self.proxy_dim),
@@ -157,7 +161,7 @@ class Step5SparseIndexer(nn.Module):
             q.view(tokens, self.num_local_groups, self.heads_per_group, self.proxy_dim),
             k.view(tokens, self.proxy_dim),
             z.view(tokens, self.proxy_dim),
-            weights * self.heads_per_group**-0.5,
+            weights.float() * self.heads_per_group**-0.5,
         )
 
 
@@ -201,6 +205,37 @@ class Step5Attention(Step3p5Attention):
             )
         if not self.use_rope:
             raise NotImplementedError("Step-5 sparse layers require RoPE")
+        if self.head_dim != 192:
+            raise ValueError(
+                f"Step-5 sparse attention requires head_dim 192, got {self.head_dim}"
+            )
+        if vllm_config.parallel_config.use_ubatching:
+            raise ValueError(
+                "Step-5 sparse attention does not support dual-batch overlap or "
+                "microbatching yet. Disable --enable-dbo and set --ubatch-size 1."
+            )
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise NotImplementedError(
+                "Step-5 sparse attention on ROCm cannot transfer its CSA caches "
+                "through a KV connector yet."
+            )
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and on_gfx1250():
+            raise NotImplementedError(
+                "Step-5 sparse attention reads the unshuffled KV cache layout."
+            )
+        sparse = get_step5_sparse_config(config)
+        assert sparse is not None
+        _validate_step5_dsa_parallel_geometry(
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            indexer_num_heads=sparse.sparse_indexer_num_heads,
+            index_tp_size=sparse.index_tp_size,
+            tp_size=get_tensor_model_parallel_world_size(),
+        )
         self.indexer = Step5SparseIndexer(
             config, self.layer_idx, prefix=kwargs["prefix"]
         )
@@ -232,34 +267,50 @@ class Step5Attention(Step3p5Attention):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         out = torch.empty_like(query)
+        gate = None
+        if self.use_head_wise_attn_gate:
+            gate, _ = self.g_proj(hidden_states)
         attn_name = _encode_layer_name(self.attn.layer_name)
         csa_name = _encode_layer_name(self.csa_layer_name)
         if current_platform.opaque_attention_op():
             kv_dep = torch.ops.vllm.unified_kv_cache_update(k, v, attn_name)
             torch.ops.vllm.step5_csa_attention(
-                hidden_states, positions, query, out, csa_name, kv_dep
+                hidden_states, positions, query, out, csa_name, gate, kv_dep
             )
         else:
             kv_dep = unified_kv_cache_update(k, v, attn_name)
-            step5_csa_attention(hidden_states, positions, query, out, csa_name, kv_dep)
-        if self.use_head_wise_attn_gate:
-            gate, _ = self.g_proj(hidden_states)
-            out = out * gate.unsqueeze(-1).sigmoid().to(out.dtype)
+            step5_csa_attention(
+                hidden_states, positions, query, out, csa_name, gate, kv_dep
+            )
         output, _ = self.o_proj(out.view(-1, self.q_size))
         return output
+
+
+def _use_fp32_norm_weights(module: nn.Module, config: Step5Config) -> None:
+    """The checkpoint keeps every RMSNorm weight in ``norm_dtype``."""
+    if getattr(config, "norm_dtype", None) is None:
+        return
+    if get_step5_norm_dtype(config) != torch.float32:
+        return
+    for norm in module.modules():
+        if isinstance(norm, GemmaRMSNorm):
+            norm.weight.data = norm.weight.data.float()
 
 
 class Step5DecoderLayer(Step3p5DecoderLayer):
     attention_cls = Step5Attention
 
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config, prefix=prefix)
+        self.act_dtype = vllm_config.model_config.dtype
+
     def forward(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        dtype = self.self_attn.o_proj.weight.dtype
         residual = hidden_states
-        hidden = self.input_layernorm(residual.to(dtype))
+        hidden = self.input_layernorm(residual).to(self.act_dtype)
         residual = residual + self.self_attn(positions, hidden).float()
-        hidden = self.post_attention_layernorm(residual.to(dtype))
+        hidden = self.post_attention_layernorm(residual).to(self.act_dtype)
         ffn = self.moe(hidden) if self.use_moe else self.mlp(hidden)
         return residual + ffn.float()
 
@@ -269,6 +320,8 @@ class Step5Model(Step3p5Model):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        _use_fp32_norm_weights(self, vllm_config.model_config.hf_text_config)
+        self.act_dtype = vllm_config.model_config.dtype
         make_empty = self.make_empty_intermediate_tensors
 
         def make_empty_fp32(batch_size, dtype, device):
@@ -292,7 +345,7 @@ class Step5Model(Step3p5Model):
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         if isinstance(hidden, torch.Tensor):
-            return hidden.to(self.norm.weight.dtype)
+            return hidden.to(self.act_dtype)
         return hidden
 
 
@@ -304,6 +357,7 @@ class Step5ForCausalLM(Step3p5ForCausalLM):
             ".self_attn.sparse_indexer_": ".self_attn.indexer.sparse_indexer_",
             ".self_attn.ssmax_s": None,
         },
+        orig_to_new_prefix={"vision_model.": None, "vit_large_projector.": None},
     )
 
 

@@ -37,6 +37,7 @@ class Step5CSAMetadata(AttentionMetadata):
     seq_lens: torch.Tensor
     num_actual_tokens: int
     num_reqs: int
+    max_query_len: int
     max_seq_len: int
     token_req: torch.Tensor | None = None
     positions: torch.Tensor | None = None
@@ -104,6 +105,7 @@ class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
             seq_lens=m.seq_lens,
             num_actual_tokens=m.num_actual_tokens,
             num_reqs=m.num_reqs,
+            max_query_len=m.max_query_len,
             max_seq_len=m.max_seq_len,
         )
         if not self.per_token:

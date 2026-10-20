@@ -61,8 +61,10 @@ def ref_compress(k: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
     regions = k.shape[0] // REGION
     k = k[: regions * REGION].float().view(regions, REGION, -1)
     z = z[: regions * REGION].float().view(regions, REGION, -1)
-    w = torch.exp(z - z.amax(dim=1, keepdim=True))
-    return _e4m3((w * k).sum(1) / w.sum(1))
+    # One max per region over rows and dims, like the reference kernel, so
+    # dims far below the region max underflow to zero.
+    w = torch.exp(z - z.amax(dim=(1, 2), keepdim=True))
+    return _e4m3((w * k).sum(1) / w.sum(1).clamp_min(1e-20))
 
 
 def ref_select(scores: torch.Tensor, positions: torch.Tensor, topk: int):

@@ -5,6 +5,7 @@
 import torch
 
 from vllm.models.step5.common.ops.csa import round_e4m3
+from vllm.models.step5.nvidia.ops.summary_update import _accumulate, _maximum
 from vllm.triton_utils import tl, triton
 
 
@@ -31,19 +32,25 @@ def _compress_paged_kernel(
     if req < 0:
         return
     region = tl.load(work_ptr + 2 * w + 1)
-    tokens = region * REGION_SIZE + tl.arange(0, REGION_SIZE)
-    page = tl.load(index_bt_ptr + req * stride_index_bt + tokens // INDEX_ROWS)
     dims = tl.arange(0, PROXY_DIM)
-    base = (
-        index_ptr
-        + page.to(tl.int64)[:, None] * stride_index_page
-        + (tokens % INDEX_ROWS)[:, None] * stride_index_row
-        + dims[None, :]
-    )
-    k = tl.load(base).to(tl.float32)
-    z = tl.load(base + PROXY_DIM).to(tl.float32)
-    weights = tl.exp(z - tl.max(z, axis=0)[None, :])
-    summary = tl.sum(weights * k, axis=0) / tl.sum(weights, axis=0)
+    numerator = tl.zeros((PROXY_DIM,), tl.float32)
+    denominator = tl.zeros((PROXY_DIM,), tl.float32)
+    maximum = tl.max(tl.full((PROXY_DIM,), -float("inf"), tl.float32), 0)
+    # Rows in position order with one running max, as the reference does.
+    for i in tl.static_range(REGION_SIZE):
+        token = region * REGION_SIZE + i
+        page = tl.load(index_bt_ptr + req * stride_index_bt + token // INDEX_ROWS)
+        row = (
+            index_ptr
+            + page.to(tl.int64) * stride_index_page
+            + (token % INDEX_ROWS) * stride_index_row
+        )
+        k = tl.load(row + dims).to(tl.float32)
+        z = tl.load(row + PROXY_DIM + dims).to(tl.float32)
+        numerator, denominator, maximum = _accumulate(
+            numerator, denominator, maximum, k, z
+        )
+    summary = tl.div_rn(numerator, _maximum(denominator, 1e-20))
     # Same rounding as ``round_e4m3``.
     summary = summary.to(tl.bfloat16).to(tl.float8e4nv).to(tl.bfloat16)
     out_page = tl.load(

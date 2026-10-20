@@ -9,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.models.step5.common.csa_cache import Step5CSAMetadata
 from vllm.models.step5.common.ops.csa_paged import (
@@ -44,12 +45,14 @@ def _rows_per_chunk(groups: int, max_regions: int) -> int:
     return max(1, budget // (_SCORE_BYTES * groups * max(max_regions, 1)))
 
 
+@eager_break_during_capture
 def step5_csa_attention(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     query: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    gate: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     del kv_cache_dummy_dep
@@ -136,11 +139,11 @@ def step5_csa_attention(
                 scores.flatten(0, 1),
                 own[start * groups : end * groups],
                 indexer.topk,
-                "per_row",
+                indexer.topk_backend,
             )
             del scores
-    if n == index_md.num_reqs:
-        # Pure decode: one query row per request, in request order.
+    if n == index_md.num_reqs * index_md.max_query_len:
+        # Decode or uniform MTP verify: requests own consecutive rows.
         sparse_decode_attention(
             query[:n].reshape(rows, -1, layer.head_dim),
             layer.attn.kv_cache,
@@ -150,7 +153,9 @@ def step5_csa_attention(
             torch.ones(rows, dtype=torch.bool, device=query.device),
             output[:n].view(rows, -1, layer.head_dim),
             scale=layer.scaling,
+            query_len=index_md.max_query_len,
             splits=sparse_decode_splits(rows),
+            gate=None if gate is None else gate[:n],
         )
         return
     regions = regions.view(n, groups, -1)
@@ -169,6 +174,8 @@ def step5_csa_attention(
         region_size=region_size,
         scale=layer.scaling,
     )
+    if gate is not None:
+        output[:n] *= gate[:n].unsqueeze(-1).sigmoid().to(output.dtype)
 
 
 def step5_csa_attention_fake(
@@ -177,6 +184,7 @@ def step5_csa_attention_fake(
     query: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    gate: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
