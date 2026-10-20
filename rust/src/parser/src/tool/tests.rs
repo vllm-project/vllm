@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
+
 use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserEvent, ToolParserOutput};
 use crate::tool::ToolParserTestExt as _;
 
@@ -14,7 +16,7 @@ impl ToolParser for DefaultParser {
         Ok(Box::new(Self))
     }
 
-    fn parse_into(&mut self, _chunk: &str, _output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, _chunk: DecodedText, _output: &mut ToolParserOutput) -> Result<()> {
         Ok(())
     }
 
@@ -106,7 +108,7 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
             Ok(Box::new(Self))
         }
 
-        fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        fn parse_into(&mut self, _chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
             output.push_text("prefix ");
             for call in [
                 ToolCallDelta {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, opt, preceded, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -156,13 +157,13 @@ impl DeepSeekDsmlToolParser {
         std::mem::take(&mut self.buffer)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         // Extract tool calls from streaming model output.
         //
         // Uses a buffer-until-complete-invoke strategy: text is buffered until
         // a complete invoke block is available, then parsed and emitted in one
         // shot.
-        self.buffer.push_str(chunk);
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_dsml_event(input, &mut self.mode, self.tokens)

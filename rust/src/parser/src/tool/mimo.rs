@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
+
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use super::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
@@ -30,7 +32,7 @@ impl ToolParser for MiMoToolParser {
         Some(xgrammar_structural_tag::Model::Mimo.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 

@@ -33,9 +33,9 @@ impl CombinedParser {
         }
     }
 
-    fn parse_tool(&mut self, content: &str, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn parse_tool(&mut self, content: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(tool) = self.tool.as_mut() else {
-            output.push_text(content);
+            output.push_text(content.text);
             return Ok(());
         };
 
@@ -129,19 +129,17 @@ impl UnifiedParser for CombinedParser {
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(reasoning) = self.reasoning.as_mut() else {
-            return self.parse_tool(&delta.text, output);
+            return self.parse_tool(delta, output);
         };
 
         let reasoning_delta = reasoning.push(delta)?;
         if let Some(reasoning) = reasoning_delta.reasoning {
             output.push_reasoning(reasoning);
         }
-        if let Some(content) = reasoning_delta.content {
-            // Content attributions stop at this boundary: the tool parser trait
-            // consumes plain text.
-            if !content.text.is_empty() {
-                self.parse_tool(&content.text, output)?;
-            }
+        if let Some(content) = reasoning_delta.content
+            && !content.text.is_empty()
+        {
+            self.parse_tool(content, output)?;
         }
         Ok(())
     }
@@ -156,7 +154,7 @@ impl UnifiedParser for CombinedParser {
             if let Some(content) = reasoning_delta.content
                 && !content.text.is_empty()
             {
-                self.parse_tool(&content.text, &mut output)?;
+                self.parse_tool(content, &mut output)?;
             }
         }
         output.append(self.flush_tool()?);
@@ -348,10 +346,10 @@ mod tests {
 
         fn parse_into(
             &mut self,
-            chunk: &str,
+            chunk: DecodedText,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.push_text(chunk);
+            output.push_text(chunk.text);
             Ok(())
         }
 
@@ -376,7 +374,7 @@ mod tests {
 
         fn parse_into(
             &mut self,
-            _chunk: &str,
+            _chunk: DecodedText,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
             output.push_text("committed");

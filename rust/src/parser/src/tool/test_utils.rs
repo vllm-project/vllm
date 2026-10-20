@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde_json::json;
+use vllm_tokenizer::DecodedText;
 
 use super::{ToolParser, ToolParserOutput};
 use crate::tool::Tool;
@@ -95,7 +96,7 @@ pub fn test_tools() -> Vec<Tool> {
 pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -> ToolParserOutput {
     let mut output = ToolParserOutput::default();
     for chunk in chunks {
-        parser.parse_into(chunk, &mut output).unwrap();
+        parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
     }
     output.append(parser.finish().unwrap());
     output.coalesce()

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
+
 use super::{GlmXmlToolParser, Separator};
 use crate::output_grammar::ToolStrictLevel;
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
@@ -35,7 +37,7 @@ impl ToolParser for Glm47MoeToolParser {
         Some(xgrammar_structural_tag::Model::Glm47.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
 

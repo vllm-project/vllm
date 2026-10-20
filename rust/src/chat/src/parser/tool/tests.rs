@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_parser::tool::{Result, ToolParserOutput};
+use vllm_tokenizer::DecodedText;
 
 use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
@@ -21,7 +22,7 @@ impl ToolParser for FakeToolParser {
         true
     }
 
-    fn parse_into(&mut self, _chunk: &str, _output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, _chunk: DecodedText, _output: &mut ToolParserOutput) -> Result<()> {
         Ok(())
     }
 
@@ -105,7 +106,7 @@ fn factory_parses_qwen2_5_coder_template_with_qwen3_json() {
 
     let mut parser = factory.create_for_model("Qwen/Qwen2.5-Coder-7B-Instruct", &[]).unwrap();
     let mut output = ToolParserOutput::default();
-    parser.parse_into(tool_call, &mut output).unwrap();
+    parser.parse_into(DecodedText::unattributed(tool_call), &mut output).unwrap();
     output.append(parser.finish().unwrap());
     let output = output.coalesce();
 
@@ -128,7 +129,7 @@ Tokyo
 
     let mut parser = factory.create(names::QWEN3_XML, &[]).unwrap();
     let mut output = ToolParserOutput::default();
-    parser.parse_into(tool_call, &mut output).unwrap();
+    parser.parse_into(DecodedText::unattributed(tool_call), &mut output).unwrap();
     output.append(parser.finish().unwrap());
     let output = output.coalesce();
 
@@ -271,7 +272,7 @@ fn factory_parses_mimo_parameter_tags() {
         assert_eq!(factory.resolve_name_for_model(model), Some(names::MIMO));
         let mut parser = factory.create_for_model(model, &[]).unwrap();
         let mut output = ToolParserOutput::default();
-        parser.parse_into("<tool_call>\n<function=lookup>\n<parameter=query>\n杭州\n</parameter>\n</function>\n</tool_call>", &mut output).unwrap();
+        parser.parse_into(DecodedText::unattributed("<tool_call>\n<function=lookup>\n<parameter=query>\n杭州\n</parameter>\n</function>\n</tool_call>"), &mut output).unwrap();
         output.append(parser.finish().unwrap());
         let output = output.coalesce();
         assert_eq!(output.calls().len(), 1);
