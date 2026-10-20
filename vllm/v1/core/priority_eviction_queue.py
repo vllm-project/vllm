@@ -431,6 +431,24 @@ class PriorityEvictionQueue:
         if meta.priority != old_priority and block.block_id in self._in_queue:
             self._push(block, meta)
 
+    def inherit_holds(self, source: KVCacheBlock, target: KVCacheBlock) -> None:
+        """Preserve live declarations when replacing an equivalent cache copy.
+
+        Existing target scopes win; the publishing request's directives run
+        afterward. Absolute expiry is preserved rather than renewed.
+        """
+        source_meta = self._meta.get(source.block_id)
+        if source_meta is None:
+            return
+        now = time.monotonic()
+        for scope, hold in source_meta.holds.items():
+            if hold.expiry is not None and hold.expiry <= now:
+                continue
+            target_meta = self._meta.get(target.block_id)
+            if target_meta is not None and scope in target_meta.holds:
+                continue
+            self._set_hold(target, scope, hold.priority, hold.expiry)
+
     def _drop_hold(self, block: KVCacheBlock, scope: str | None) -> bool:
         """Remove this scope's hold. Returns whether the block lost its last
         hold while queued (it then sits in neither free structure)."""

@@ -697,12 +697,9 @@ class BlockPool:
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
 
-        # A free block already holding this hash is a stale copy: the request
-        # recomputed the content because that copy was unreachable (its chain
-        # broke). It can never serve a hit again, so drop it now instead of
-        # letting it sit protected in the queue until eviction gets to it. The
-        # new copy is inserted first so the hash never goes empty here, which
-        # would otherwise reap its children as dead.
+        # Recomputed content can duplicate a free copy, including when replaying
+        # the last prompt block for logits. Insert the new copy before retiring
+        # the old one so the hash stays live and its descendants are not reaped.
         if retention is None:
             retention = self.priority_eviction_queue.active
         if retention:
@@ -722,12 +719,19 @@ class BlockPool:
         for old in olds:
             if old is new_block or old.is_null or old.ref_cnt != 0:
                 continue
-            if old in self.priority_eviction_queue:
+            queued = old in self.priority_eviction_queue
+            if (
+                not queued
+                and old.prev_free_block is None
+                and old.next_free_block is None
+            ):
+                continue
+            if self._chain_group(get_group_id(key)):
+                self.priority_eviction_queue.inherit_holds(old, new_block)
+            if queued:
                 self.priority_eviction_queue.unprotect(old.block_id)
-            elif old.prev_free_block is not None or old.next_free_block is not None:
-                self.free_block_queue.remove(old)
             else:
-                continue  # not in either free structure: leave it alone
+                self.free_block_queue.remove(old)
             self._maybe_evict_cached_block(old)
             self.free_block_queue.prepend_n([old])
 

@@ -1984,3 +1984,163 @@ class TestRetentionOnAdoptedCacheHits:
         meta = manager.block_pool.priority_eviction_queue._meta
         assert all(meta[b.block_id].holds["owner"].expiry == 70 for b in blocks)
         manager.free(request)
+
+
+class TestRetentionOnDuplicateReplacement:
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        import vllm.v1.core.priority_eviction_queue as eviction
+
+        clock = [0.0]
+        monkeypatch.setattr(
+            eviction, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        return clock
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "nohint",
+            "other_set",
+            "other_release",
+            "same_lower",
+            "same_release",
+            "same_short_ttl",
+            "expired",
+            "control65",
+        ],
+    )
+    def test_replacement_preserves_other_scopes_before_applying_current_intent(
+        self, clock, action
+    ):
+        manager = make_kv_cache_manager(
+            make_kv_cache_config(16, 32),
+            max_model_len=256,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        first = make_request("first", list(range(64)), 16, sha256, session_id="A")
+        first.kv_hints = make_retain_envelope(
+            [dict(start=0, end=None, priority=80, duration=100)]
+        )
+        assert manager.allocate_slots(first, 64) is not None
+        old = manager.get_blocks(first.request_id).blocks[0][3]
+        key = old.block_hash
+        manager.free(first)
+        clock[0] = 110 if action == "expired" else 10
+        length = 65 if action == "control65" else 64
+        same_scope = action.startswith("same_")
+        second = make_request(
+            "second",
+            list(range(length)),
+            16,
+            sha256,
+            session_id="A" if same_scope else "B",
+        )
+        if action in (
+            "other_set",
+            "other_release",
+            "same_lower",
+            "same_release",
+            "same_short_ttl",
+        ):
+            priority = (
+                0
+                if action.endswith("release")
+                else 80
+                if action == "same_short_ttl"
+                else 20
+            )
+            second.kv_hints = make_retain_envelope(
+                [dict(start=0, end=None, priority=priority, duration=30)]
+            )
+        computed, hit, _ = manager.get_computed_blocks(second)
+        assert hit == (64 if action == "control65" else 48)
+        assert (
+            manager.allocate_slots(
+                second,
+                length - hit,
+                num_new_computed_tokens=hit,
+                new_computed_blocks=computed,
+            )
+            is not None
+        )
+        replacement = manager.get_blocks(second.request_id).blocks[0][3]
+        assert replacement.block_hash == key
+        assert (replacement is old) == (action == "control65")
+        if replacement is not old:
+            assert old.block_hash is None
+            assert old.block_id not in manager.block_pool.priority_eviction_queue._meta
+        manager.free(second)
+        pool = manager.block_pool
+        queue = pool.priority_eviction_queue
+        meta = queue._meta.get(replacement.block_id)
+        holds = (
+            {}
+            if meta is None
+            else {
+                scope: (hold.priority, hold.expiry)
+                for scope, hold in meta.holds.items()
+            }
+        )
+        expected = {} if action in ("expired", "same_release") else {"A": (80, 100)}
+        if action == "other_set":
+            expected["B"] = (20, 40)
+        elif action == "same_lower":
+            expected = {"A": (20, 40)}
+        elif action == "same_short_ttl":
+            expected = {"A": (80, 40)}
+        assert holds == expected
+        probe = make_request("probe", list(range(65)), 16, sha256)
+        blocks, hit, _ = manager.get_computed_blocks(probe)
+        assert hit == 64 and blocks.blocks[0][3] is replacement
+        assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
+        lru = {b.block_id for b in pool.free_block_queue.get_all_free_blocks()}
+        assert not lru.intersection(queue._in_queue)
+        assert len(lru) + queue.num_blocks == pool.get_num_free_blocks()
+
+    def test_inheritance_keeps_target_scope_and_indexes_original_expiry(self, clock):
+        queue = PriorityEvictionQueue()
+        source, target = _make_block(1), _make_block(2)
+        for scope in ("A", "C"):
+            queue.apply_directives(
+                [source], [_d(start=0, end=16, priority=80, duration=100)], scope, 16
+            )
+        clock[0] = 10
+        queue.apply_directives(
+            [target], [_d(start=0, end=16, priority=20, duration=30)], "A", 16
+        )
+        queue.inherit_holds(source, target)
+        holds = queue._meta[target.block_id].holds
+        assert (holds["A"].priority, holds["A"].expiry) == (20, 40)
+        assert (holds["C"].priority, holds["C"].expiry) == (80, 100)
+        assert holds["C"] is not queue._meta[source.block_id].holds["C"]
+        assert queue.try_insert(target)
+        clock[0] = 40
+        assert queue.release_expired() == []
+        assert set(queue._meta[target.block_id].holds) == {"C"}
+        clock[0] = 100
+        assert queue.release_expired() == [target.block_id]
+
+    def test_inheritance_preserves_hold_limit_and_skips_expired_scopes(self, clock):
+        queue = PriorityEvictionQueue()
+        source, target = _make_block(1), _make_block(2)
+        queue.apply_directives(
+            [source], [_d(start=0, end=16, priority=90, duration=100)], "live", 16
+        )
+        queue.apply_directives(
+            [source], [_d(start=0, end=16, priority=100, duration=5)], "expired", 16
+        )
+        for index in range(queue._MAX_HOLDS_PER_BLOCK):
+            queue.apply_directives(
+                [target],
+                [_d(start=0, end=16, priority=10, duration=100)],
+                str(index),
+                16,
+            )
+        clock[0] = 10
+        queue.inherit_holds(source, target)
+        holds = queue._meta[target.block_id].holds
+        assert len(holds) == queue._MAX_HOLDS_PER_BLOCK
+        assert "live" in holds and "expired" not in holds
+        assert holds["live"].expiry == 100
