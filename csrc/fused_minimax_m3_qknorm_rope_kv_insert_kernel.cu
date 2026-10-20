@@ -1026,11 +1026,11 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
   int const kHeadDim = vllm::minimax_m3_fused_ops::kHeadDim;
   // fp8 outputs must use the e4m3 flavour this device converts natively.
 #ifdef USE_ROCM
-  auto const kFp8 = is_fp8_ocp()
-                        ? torch::headeronly::ScalarType::Float8_e4m3fn
-                        : torch::headeronly::ScalarType::Float8_e4m3fnuz;
+  static auto const kFp8 = is_fp8_ocp()
+                               ? torch::headeronly::ScalarType::Float8_e4m3fn
+                               : torch::headeronly::ScalarType::Float8_e4m3fnuz;
 #else
-  auto const kFp8 = torch::headeronly::ScalarType::Float8_e4m3fn;
+  static constexpr auto kFp8 = torch::headeronly::ScalarType::Float8_e4m3fn;
 #endif
   int const expected_row =
       (nq + 2 * nkv + (has_index ? niq + 1 : 0)) * kHeadDim;
