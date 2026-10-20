@@ -633,7 +633,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # bytes per block. Otherwise (page_size_padded is None) take the
             # primary block size when the backend can run it unsplit: if this
             # page does not divide the primary page, ``unify`` then pads it
-            # (padded pages cannot be split) instead of scaling a small block
+            # instead of scaling a small block
             # to a size coprime with the primary one, which inflates the
             # scheduler LCM (e.g. a 1024 B/token SWA draft next to a 1152
             # B/token MLA target: 1728 vs 1536 gives LCM 13824). Backends that

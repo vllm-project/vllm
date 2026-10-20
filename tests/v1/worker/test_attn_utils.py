@@ -521,6 +521,72 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC])
+@pytest.mark.parametrize("ratio", [1, 2, 4])
+def test_split_padded_pages_preserves_manager_block_boundaries(layout, ratio):
+    # TP8 hybrid attention: 512 tokens occupy 512 KiB in a 1280 KiB page.
+    spec = FullAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.bfloat16,
+        page_size_padded=1310720,
+    )
+    num_blocks, num_layers = 3, 2
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    caches = dense_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size=spec.block_size // ratio,
+    )
+    page_bytes = spec.page_size_bytes // ratio
+    content_bytes = spec.real_page_size_bytes // ratio
+    for layer, cache in enumerate(caches):
+        assert cache.shape == (num_blocks * ratio, 1, 512 // ratio, 512)
+        assert cache.stride(0) * cache.element_size() == page_bytes
+        for block in range(num_blocks * ratio):
+            cache[block].fill_(1 + layer * num_blocks * ratio + block)
+    pages = raw.view(-1, page_bytes)
+    assert torch.count_nonzero(pages[:, content_bytes:]) == 0
+    for layer, cache in enumerate(caches):
+        for block in range(num_blocks * ratio):
+            assert torch.all(cache[block] == 1 + layer * num_blocks * ratio + block)
+    expected = [cache[:ratio].clone() for cache in caches]
+    copy_kv_cache_blocks_inplace(
+        caches, num_blocks, [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
+    )
+    for cache, want in zip(caches, expected):
+        torch.testing.assert_close(cache[2 * ratio : 3 * ratio], want)
+
+
+def test_split_padded_pages_rejects_nonuniform_kernel_pages():
+    spec = FullAttentionSpec(
+        block_size=48,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1024,
+    )
+    with pytest.raises(AssertionError, match="equal kernel pages"):
+        compute_layout_strides(spec, 3, 1, KVCacheLayout.LBHNC, kernel_block_size=16)
+
+
+def test_split_padded_pages_rejects_interleaved_layers():
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=768,
+    )
+    raw = torch.zeros(3 * 2 * spec.page_size_bytes, dtype=torch.int8)
+    with pytest.raises(ValueError, match="contiguous pages"):
+        dense_kv_cache_views(raw, spec, 3, 2, KVCacheLayout.BLHNC, kernel_block_size=8)
+
+
 def test_reshape_padded_kv_cache_strides_by_padded_page():
     num_blocks = 3
     spec = FullAttentionSpec(
