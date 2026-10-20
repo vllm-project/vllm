@@ -82,6 +82,7 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-size")
             .arg(self.data_parallel_size.to_string())
             .args(&self.python_args);
+        command.envs(Self::rust_frontend_envs());
         command.envs(self.envs.iter().map(|(key, value)| (key, value)));
         command
     }
@@ -278,6 +279,12 @@ mod tests {
         expect![[r#"
             [
                 (
+                    "VLLM_USE_RUST_FRONTEND",
+                    Some(
+                        "1",
+                    ),
+                ),
+                (
                     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                     Some(
                         "vllm-mm-shm-test",
@@ -286,6 +293,19 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&envs);
+    }
+
+    #[test]
+    fn rust_frontend_envs_include_rust_frontend_flag() {
+        expect![[r#"
+            [
+                (
+                    "VLLM_USE_RUST_FRONTEND",
+                    "1",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&ManagedEngineConfig::rust_frontend_envs());
     }
 
     #[test]

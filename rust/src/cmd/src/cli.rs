@@ -139,9 +139,10 @@ pub struct RenderArgs {
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
     /// Server-side floor for structural-tag based tool calling: `auto`,
-    /// `function`, or `parameter`.
-    #[arg(long, default_value_t)]
-    tool_strict_level: ToolStrictLevel,
+    /// `function`, or `parameter`. When unset, the tool parser's default
+    /// level applies, else `auto`.
+    #[arg(long)]
+    tool_strict_level: Option<ToolStrictLevel>,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -151,6 +152,11 @@ pub struct RenderArgs {
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Whether to trust the chat template provided in the request. Only the HF
+    /// chat-template renderer honors request templates; native renderers ignore
+    /// them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    trust_request_chat_template: bool,
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
@@ -183,6 +189,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            trust_request_chat_template: self.trust_request_chat_template,
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
@@ -292,10 +299,11 @@ pub struct SharedRuntimeArgs {
     /// top of the per-tool `strict` field: `auto` follows the request's
     /// tool choice and per-tool strictness,
     /// `function` constrains the tool-call envelope for every request with
-    /// tools, `parameter` additionally pins argument schemas.
-    #[arg(long, default_value_t)]
+    /// tools, `parameter` additionally pins argument schemas. When unset, the
+    /// tool parser's default level applies, else `auto`.
+    #[arg(long)]
     #[serde(default)]
-    pub tool_strict_level: ToolStrictLevel,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -343,6 +351,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// Whether to trust the chat template provided in the request. If False,
+    /// the server will always use the chat template specified by
+    /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
+    /// renderer honors request templates; native renderers ignore them.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub trust_request_chat_template: bool,
 
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
@@ -432,6 +448,19 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_scale_out: bool,
+
+    /// Enable the `/tokenizer_info` endpoint. May expose chat
+    /// templates and other tokenizer configuration.
+    ///
+    /// The Rust frontend does not implement `/tokenizer_info` yet, so the
+    /// endpoint returns 501.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_tokenizer_info_endpoint: bool,
 
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
@@ -638,6 +667,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            trust_request_chat_template: self.trust_request_chat_template,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
@@ -704,6 +734,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            trust_request_chat_template: self.trust_request_chat_template,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
@@ -730,6 +761,7 @@ impl SharedRuntimeArgs {
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
+            enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }

@@ -32,10 +32,11 @@ pub struct RenderConfig {
     pub port: u16,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
-    pub tool_strict_level: ToolStrictLevel,
+    pub tool_strict_level: Option<ToolStrictLevel>,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    pub trust_request_chat_template: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
@@ -77,6 +78,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: Default::default(),
@@ -159,7 +161,7 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: ToolStrictLevel::Auto,
+                tool_strict_level: None,
                 model: "test-model".to_string(),
                 revision: None,
                 hf_overrides: Default::default(),
@@ -171,6 +173,7 @@ mod tests {
                 renderer: RendererSelection::Auto,
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                trust_request_chat_template: false,
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,

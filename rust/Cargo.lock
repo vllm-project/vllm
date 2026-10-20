@@ -5759,6 +5759,7 @@ dependencies = [
  "expect-test",
  "futures",
  "half",
+ "image",
  "itertools 0.14.0",
  "llm-multimodal",
  "minijinja",
@@ -5976,7 +5977,7 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "prost",
  "prost-types",

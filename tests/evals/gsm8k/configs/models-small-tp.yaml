@@ -1,0 +1,8 @@
+# Every machine runs `common`, then the sections named after its
+# current_platform.device_name (cuda, rocm) and, on ROCm, its CDNA generation
+# (cdna3: gfx942/MI300, cdna4: gfx950/MI355).
+common:
+- DiffusionGemma-26B-A4B-it-FP8-dynamic.yaml
+cdna4:
+# Dense MLA PCP accuracy (DP1/DCP1).
+- DeepSeek-V2-Lite-Instruct-FP8-TP1-PCP2-ROCm.yaml
