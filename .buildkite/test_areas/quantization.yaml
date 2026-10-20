@@ -137,6 +137,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"
