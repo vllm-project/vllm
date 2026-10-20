@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{digit1, multispace0 as ws0};
 use winnow::combinator::{alt, eof, repeat, seq};
 use winnow::prelude::*;
@@ -140,7 +140,7 @@ impl KimiK2ToolParser {
 }
 
 impl ToolParser for KimiK2ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {

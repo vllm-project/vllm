@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserEvent, ToolParserOutput};
 use crate::tool::ToolParserTestExt as _;
@@ -9,7 +9,7 @@ use crate::tool::ToolParserTestExt as _;
 struct DefaultParser;
 
 impl ToolParser for DefaultParser {
-    fn create(_tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -101,7 +101,7 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
     struct StreamingParser;
 
     impl ToolParser for StreamingParser {
-        fn create(_tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+        fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
@@ -177,19 +177,19 @@ pub(super) fn assert_tool_framing_preserves_body_whitespace<P: ToolParser + 'sta
     framing: &str,
     call: &str,
 ) {
-    use super::test_utils::{collect_stream, test_tools};
+    use super::test_utils::{collect_stream, test_tokenizer, test_tools};
 
     let body = "  before\n";
     let wire = format!("{body}{framing}{call}");
     for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
-        let mut parser = P::create(&test_tools()).unwrap();
+        let mut parser = P::create(&test_tools(), test_tokenizer()).unwrap();
         let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
         assert_eq!(output.normal_text(), body, "split {split}");
         assert_eq!(output.calls().len(), 1, "split {split}");
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
     }
     let plain = "  no tool\n\n<to";
-    let mut parser = P::create(&test_tools()).unwrap();
+    let mut parser = P::create(&test_tools(), test_tokenizer()).unwrap();
     assert_eq!(
         collect_stream(parser.as_mut(), &[plain]).normal_text(),
         plain

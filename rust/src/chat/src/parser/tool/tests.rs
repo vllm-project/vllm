@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
+
 use vllm_parser::tool::{Result, ToolParserOutput};
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 
+fn tokenizer() -> DynTokenizer {
+    Arc::new(TestTokenizer::new())
+}
+
 struct FakeToolParser;
 
 impl ToolParser for FakeToolParser {
-    fn create(_tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
+    fn create(_tools: &[ChatTool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -48,13 +55,13 @@ fn factory_contains_and_creates_registered_parsers() {
 
     assert!(factory.contains("fake"));
     assert!(factory.list().contains(&"fake".to_string()));
-    factory.create("fake", &[]).unwrap();
+    factory.create("fake", &[], tokenizer()).unwrap();
 }
 
 #[test]
 fn factory_rejects_unknown_parser_names() {
     let factory = ToolParserFactory::default();
-    let error = match factory.create("missing", &[]) {
+    let error = match factory.create("missing", &[], tokenizer()) {
         Ok(_) => panic!("expected parser lookup to fail"),
         Err(error) => error,
     };
@@ -64,7 +71,7 @@ fn factory_rejects_unknown_parser_names() {
 #[test]
 fn factory_rejects_unknown_models() {
     let factory = ToolParserFactory::default();
-    let error = match factory.create_for_model("definitely-unknown-model", &[]) {
+    let error = match factory.create_for_model("definitely-unknown-model", &[], tokenizer()) {
         Ok(_) => panic!("expected model lookup to fail"),
         Err(error) => error,
     };
@@ -78,7 +85,7 @@ fn factory_creates_registered_parser_for_model() {
         .register_parser::<FakeToolParser>("fake")
         .register_pattern("fake-model", "fake");
 
-    factory.create_for_model("my-fake-model-v1", &[]).unwrap();
+    factory.create_for_model("my-fake-model-v1", &[], tokenizer()).unwrap();
 }
 
 #[test]
@@ -104,7 +111,9 @@ fn factory_parses_qwen2_5_coder_template_with_qwen3_json() {
 {"name":"get_weather","arguments":{"location":"Tokyo"}}
 </tool_call>"#;
 
-    let mut parser = factory.create_for_model("Qwen/Qwen2.5-Coder-7B-Instruct", &[]).unwrap();
+    let mut parser = factory
+        .create_for_model("Qwen/Qwen2.5-Coder-7B-Instruct", &[], tokenizer())
+        .unwrap();
     let mut output = ToolParserOutput::default();
     parser.parse_into(DecodedText::unattributed(tool_call), &mut output).unwrap();
     output.append(parser.finish().unwrap());
@@ -127,7 +136,7 @@ Tokyo
 </function>
 </tool_call>";
 
-    let mut parser = factory.create(names::QWEN3_XML, &[]).unwrap();
+    let mut parser = factory.create(names::QWEN3_XML, &[], tokenizer()).unwrap();
     let mut output = ToolParserOutput::default();
     parser.parse_into(DecodedText::unattributed(tool_call), &mut output).unwrap();
     output.append(parser.finish().unwrap());
@@ -262,7 +271,7 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     let factory = ToolParserFactory::new();
 
     assert!(factory.contains(names::PHI4_MINI_JSON));
-    factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
+    factory.create(names::PHI4_MINI_JSON, &[], tokenizer()).unwrap();
 }
 
 #[test]
@@ -270,7 +279,7 @@ fn factory_parses_mimo_parameter_tags() {
     let factory = ToolParserFactory::new();
     for model in ["XiaomiMiMo/MiMo-V2.5", "XiaomiMiMo/MiMo-V2.5-Pro"] {
         assert_eq!(factory.resolve_name_for_model(model), Some(names::MIMO));
-        let mut parser = factory.create_for_model(model, &[]).unwrap();
+        let mut parser = factory.create_for_model(model, &[], tokenizer()).unwrap();
         let mut output = ToolParserOutput::default();
         parser.parse_into(DecodedText::unattributed("<tool_call>\n<function=lookup>\n<parameter=query>\n杭州\n</parameter>\n</function>\n</tool_call>"), &mut output).unwrap();
         output.append(parser.finish().unwrap());

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
 use super::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
@@ -24,7 +24,7 @@ pub struct Step5ToolParser {
 }
 
 impl ToolParser for Step5ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>> {
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>> {
         Ok(Box::new(Self {
             inner: Qwen3CoderToolParser::with_config(tools, STEP5_CONFIG),
         }))
@@ -53,7 +53,7 @@ mod tests {
 
     use super::*;
     use crate::tool::ToolParserTestExt as _;
-    use crate::tool::test_utils::{collect_stream, split_by_chars};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
 
     #[test]
@@ -80,7 +80,10 @@ mod tests {
         }];
         let call = "<tool_call>\n<function=convert>\n<parameter=flag>\nTrue\n</parameter>\n<parameter=empty>\nNone\n</parameter>\n<parameter=text>\nNone\n</parameter>\n<parameter=payload>\n{\"city\":\"杭州\"}\n</parameter>\n</function>\n</tool_call>";
         let input = format!("answer\n\n{call}{call}");
-        let expected = Step5ToolParser::create(&tools).unwrap().parse_complete(&input).unwrap();
+        let expected = Step5ToolParser::create(&tools, test_tokenizer())
+            .unwrap()
+            .parse_complete(&input)
+            .unwrap();
         assert_eq!(expected.normal_text(), "answer\n\n");
         assert_eq!(expected.calls().len(), 2);
         for call in expected.calls() {
@@ -92,7 +95,7 @@ mod tests {
             );
         }
         for size in 1..=input.chars().count() {
-            let mut parser = Step5ToolParser::create(&tools).unwrap();
+            let mut parser = Step5ToolParser::create(&tools, test_tokenizer()).unwrap();
             assert_eq!(
                 collect_stream(parser.as_mut(), &split_by_chars(&input, size)),
                 expected

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
@@ -12,7 +12,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 pub struct DeepSeekV41ToolParser(DeepSeekDsmlToolParser);
 
 impl ToolParser for DeepSeekV41ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {

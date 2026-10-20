@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -153,7 +153,7 @@ impl Granite4ToolParser {
 }
 
 impl ToolParser for Granite4ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {

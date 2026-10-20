@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use step5::Step5ToolParser;
 use tracing::warn;
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use xgrammar_structural_tag::ToolChoice;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 use xgrammar_structural_tag::format::Format;
@@ -190,7 +190,10 @@ impl ToolParserOutput {
 /// Incremental parser that extracts tool calls from assistant output.
 pub trait ToolParser: Send {
     /// Construct a boxed parser instance for one request stream.
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    ///
+    /// `tokenizer` is the model's tokenizer, for parsers that resolve the IDs of
+    /// their marker tokens.
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static;
 

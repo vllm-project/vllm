@@ -276,7 +276,7 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{Glm45MoeToolParser, Glm47MoeToolParser};
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -326,8 +326,8 @@ mod tests {
         let tools = test_tools();
         let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
         for mut parser in [
-            Glm45MoeToolParser::create(&tools).unwrap(),
-            Glm47MoeToolParser::create(&tools).unwrap(),
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
         ] {
             let output = parser.parse_complete(&text).unwrap();
             assert_eq!(
@@ -342,8 +342,8 @@ mod tests {
         let tools = test_tools();
         let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
         for mut parser in [
-            Glm45MoeToolParser::create(&tools).unwrap(),
-            Glm47MoeToolParser::create(&tools).unwrap(),
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
         ] {
             let output = collect_stream(&mut *parser, &split_by_chars(&text, 7));
             assert_eq!(

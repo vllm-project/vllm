@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -112,7 +112,7 @@ impl MinimaxM2ToolParser {
 }
 
 impl ToolParser for MinimaxM2ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {

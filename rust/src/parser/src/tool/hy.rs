@@ -5,7 +5,7 @@ mod structural_tag;
 
 use std::sync::Arc;
 
-use vllm_tokenizer::DecodedText;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -182,7 +182,7 @@ impl HyToolParser {
 impl ToolParser for HyToolParser {
     // Suffix discovery belongs to the unified HY parser so its reasoning and
     // tool delimiters always use the same tokenizer-derived value.
-    fn create(_tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {

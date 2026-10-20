@@ -3,6 +3,8 @@
 
 use serde_json::json;
 use vllm_tokenizer::DecodedText;
+#[cfg(test)]
+use vllm_tokenizer::DynTokenizer;
 
 use super::{ToolParser, ToolParserOutput};
 use crate::tool::Tool;
@@ -88,6 +90,12 @@ pub fn test_tools() -> Vec<Tool> {
             defer_loading: None,
         },
     ]
+}
+
+/// A tokenizer for parsers that do not resolve any tokens.
+#[cfg(test)]
+pub fn test_tokenizer() -> DynTokenizer {
+    std::sync::Arc::new(vllm_tokenizer::test_utils::TestTokenizer::new())
 }
 
 /// Push chunks through a streaming parser and coalesce its tool-call deltas.
