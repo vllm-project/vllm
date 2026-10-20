@@ -9,6 +9,7 @@ import glob
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -898,6 +899,8 @@ def drop_checkpoint_cache(
     revision: str | None = None,
     cache_dir: str | None = None,
 ) -> None:
+    if sys.platform != "linux":
+        return
     checkpoint_dir: Path | None = None
     if os.path.isdir(model_name_or_path):
         checkpoint_dir = Path(model_name_or_path)

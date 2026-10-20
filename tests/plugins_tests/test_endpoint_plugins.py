@@ -17,8 +17,8 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
+from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.entrypoints.launchers.app import build_app
-from vllm.entrypoints.launchers.cli_args import make_arg_parser
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
