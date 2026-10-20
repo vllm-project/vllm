@@ -137,9 +137,19 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         epilogue alphas.
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
+        block_fp8 = (
+            self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
+        )
+        if block_fp8 and layer.apply_router_weight_on_input:
+            # The SM90 FP8 kernel weights the activation before fc2, which is
+            # not equivalent to weighting the expert input.
+            raise ValueError(
+                f"{self.moe_config.moe_backend} with block-FP8 weights does not "
+                "support apply_router_weight_on_input"
+            )
         # Layer parameters the megakernel reads. They end up aliasing the
         # megakernel's own tensors, so EPLB permutes exactly what it uses.
-        # Block-FP8 layers name their scales weight_scale_inv.
+        # Block-FP8 layers may name their scales weight_scale_inv.
         scale = (
             "weight_scale_inv"
             if hasattr(layer, "w13_weight_scale_inv")
@@ -159,6 +169,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             ),
+            block_fp8=block_fp8,
         )
         adapter.warmup()
         for name, tensor in zip(names, adapter.kernel_weights()):

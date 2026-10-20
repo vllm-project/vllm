@@ -364,6 +364,7 @@ class FlashInferMoeEp:
         epilogue: FlashInferMoeEpEpilogue | None = None,
         *,
         apply_topk_in_fc1: bool,
+        block_fp8: bool = False,
     ) -> None:
         spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
         if spec.kernel == "deep_gemm":
@@ -383,8 +384,7 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
-        is_block_fp8 = weights.w13.dtype == torch.float8_e4m3fn
-        if is_block_fp8:
+        if block_fp8:
             megakernel = api.Sm90PullFp8MegaMoeConfig(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,
@@ -414,7 +414,7 @@ class FlashInferMoeEp:
                 activation_clamp=moe.swiglu_limit,
                 fast_math=True,
             )
-        if is_block_fp8:
+        if block_fp8:
             # The oracle already put w13 in the kernel's row order
             # (sm90_fp8_block_moe_ep_weights); the kernel reads (E, K, N) views
             # with K contiguous.
@@ -451,7 +451,7 @@ class FlashInferMoeEp:
         )
         # Created collectively, in the same order on every EP rank.
         self._workspaces: list[tuple[int, Any]] = []
-        if is_block_fp8:
+        if block_fp8:
             self._workspaces = [
                 (capacity, self._mega_layer.create_workspace(capacity))
                 for capacity in _SM90_WORKSPACE_CAPACITIES
@@ -464,6 +464,7 @@ class FlashInferMoeEp:
         self._top_k = moe.experts_per_token
         self._epilogue: FlashInferMoeEpEpilogue | None = epilogue
         self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
+        self._block_fp8 = block_fp8
 
     @property
     def can_overlap_shared_experts(self) -> bool:
@@ -572,11 +573,14 @@ class FlashInferMoeEp:
         (fc1_weight, fc1_sf, *_), (fc2_weight, fc2_sf, *_) = (
             self._mega_layer._transformed
         )
+        # Block-FP8 weights keep their dtype, so the layer stays a valid
+        # FP8 checkpoint that the kernel can be rebuilt from.
+        as_bytes = not self._block_fp8
         return (
-            _expert_major_bytes(fc1_weight),
-            _expert_major_bytes(fc1_sf),
-            _expert_major_bytes(fc2_weight),
-            _expert_major_bytes(fc2_sf),
+            _expert_major_bytes(fc1_weight, as_bytes),
+            _expert_major_bytes(fc1_sf, as_bytes),
+            _expert_major_bytes(fc2_weight, as_bytes),
+            _expert_major_bytes(fc2_sf, as_bytes),
         )
 
     def expert_weight_views(self) -> tuple[torch.Tensor, ...]:
@@ -599,8 +603,9 @@ class FlashInferMoeEp:
             self.destroy()
 
 
-def _expert_major_bytes(tensor: torch.Tensor) -> torch.Tensor:
-    """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8.
+def _expert_major_bytes(tensor: torch.Tensor, as_bytes: bool = True) -> torch.Tensor:
+    """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8
+    unless ``as_bytes`` is False.
 
     The CuTeDSL kernel keeps (E, K, N) transpose views over (E, N, K) storage.
     """
@@ -608,4 +613,6 @@ def _expert_major_bytes(tensor: torch.Tensor) -> torch.Tensor:
         tensor = tensor.transpose(1, 2)
     if not tensor.is_contiguous():
         raise ValueError(f"expert tensor is not expert-major: {tensor.stride()}")
-    return tensor.view(torch.uint8) if tensor.element_size() == 1 else tensor
+    if as_bytes and tensor.element_size() == 1:
+        return tensor.view(torch.uint8)
+    return tensor

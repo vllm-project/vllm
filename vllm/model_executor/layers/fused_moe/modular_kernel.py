@@ -1121,7 +1121,7 @@ class FusedMoEKernelModularImpl:
         Returns the workspace tensors, output tensor, and whether the output
         uses a prepare/finalize-provided allocation.
         """
-        assert M_full > 0 and M_chunk > 0
+        assert M_full >= 0 and M_chunk >= 0
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
@@ -1163,7 +1163,8 @@ class FusedMoEKernelModularImpl:
         # externally aliased. The workspace manager profiles and locks a
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
-        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        # Idle collective ranks still need the workspace manager initialized.
+        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
@@ -1319,13 +1320,9 @@ class FusedMoEKernelModularImpl:
             a1q, w1, w2, topk_ids
         )
 
-        # This happens when none of the tokens from the all2all reach this
-        # EP rank. Also, note that this is only relevant for CUDAGraph
-        # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
-        # low-latency kernels are always batched and can never run into
-        # the tensor.numel() == 0 case.
-        if M_full == 0:
+        # After dispatch, an EP rank may have no work. With passthrough,
+        # dispatch happens inside the experts, so idle ranks must participate.
+        if M_full == 0 and not self.moe_parallel_config.use_passthrough_all2all:
             out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
             return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 

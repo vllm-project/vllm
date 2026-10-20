@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
@@ -249,6 +250,25 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8StaticTensorSym)
     assert "with block FP8" in reason
+
+
+def test_block_fp8_megakernel_rejects_input_side_router_weights():
+    """The SM90 kernel weights the activation before fc2, which is not the same
+    as weighting the expert input (apply_router_weight_on_input, e.g. Llama4)."""
+    moe = make_dummy_moe_config(
+        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128
+    )
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=torch.ones(8, 2, 2),
+        w2_scale=torch.ones(8, 2, 1),
+        block_shape=[128, 128],
+    )
+    layer = SimpleNamespace(
+        expert_map_manager=SimpleNamespace(placement_strategy="linear"),
+        apply_router_weight_on_input=True,
+    )
+    with pytest.raises(ValueError, match="apply_router_weight_on_input"):
+        FlashInferMoeEpExperts(moe, quant_config).process_weights_after_loading(layer)
 
 
 def test_megakernels_are_oracle_backends():

@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
@@ -46,6 +47,9 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     apply_topk_in_fc1,
     sm90_fp8_block_moe_ep_weights,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
+    PassThroughPrepareAndFinalize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
@@ -53,6 +57,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.v1.worker.workspace import init_workspace_manager
 
 
 @dataclass(frozen=True)
@@ -286,6 +291,71 @@ def _check_expert_views_alias_kernel_memory(
     assert torch.equal(output, _expected_output(geometry, topk_ids, topk_weights))
 
 
+def _check_block_fp8_modular_kernel(
+    geometry: Geometry, moe: FusedMoEConfig, rank: int, device: torch.device
+) -> None:
+    """Block FP8 through the loading hook and ``FusedMoEKernel``.
+
+    Rank 1 has no tokens, but the other ranks route to its experts and it owns
+    part of the collective, so it must still enter the megakernel. Then the
+    same batch is replayed from a CUDA graph.
+    """
+    init_workspace_manager(device)
+    weights = _local_block_fp8_expert_weights(
+        geometry, rank, moe.num_local_experts, device
+    )
+    layer = torch.nn.Module()
+    for name, tensor in zip(
+        ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
+        (weights.w13, weights.w13_scale, weights.w2, weights.w2_scale),
+    ):
+        layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+    layer.apply_router_weight_on_input = False
+    layer.expert_map_manager = SimpleNamespace(placement_strategy="linear")
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=weights.w13_scale, w2_scale=weights.w2_scale, block_shape=[128, 128]
+    )
+    experts = FlashInferMoeEpExperts(moe, quant_config)
+    experts.process_weights_after_loading(layer)
+    assert layer.w13_weight.dtype == torch.float8_e4m3fn
+    kernel = mk.FusedMoEKernel(PassThroughPrepareAndFinalize(), experts)
+
+    topk_ids, topk_weights = _routing(geometry, rank, device)
+    hidden_states = _hidden_states(geometry, device, X_SENTINEL_FP8)
+    expected = _expected_output(geometry, topk_ids, topk_weights)
+    num_tokens = 0 if rank == 1 else NUM_TOKENS_PER_RANK
+
+    def forward(tokens: int) -> torch.Tensor:
+        return kernel.apply(
+            hidden_states[:tokens],
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights[:tokens],
+            topk_ids[:tokens],
+            MoEActivation.SILU,
+            geometry.num_experts,
+            None,
+            False,
+        )
+
+    try:
+        for tokens in (NUM_TOKENS_PER_RANK, num_tokens):
+            output = forward(tokens)
+            torch.accelerator.synchronize()
+            assert torch.equal(output, expected[:tokens])
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = forward(NUM_TOKENS_PER_RANK)
+        output.zero_()
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.equal(output, expected)
+    finally:
+        assert experts._adapter is not None
+        experts._adapter.destroy()
+
+
 def _init_warmup_forward(
     env: dict[str, str],
     world_size: int,
@@ -298,6 +368,9 @@ def _init_warmup_forward(
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
     vllm_config.kernel_config.moe_backend = backend
+    if block_fp8:
+        # What KernelConfig binds for megakernel backends.
+        vllm_config.parallel_config.all2all_backend = "passthrough"
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -327,6 +400,7 @@ def _init_warmup_forward(
             moe,
             make_weights(geometry, rank, moe.num_local_experts, device),
             apply_topk_in_fc1=apply_topk_in_fc1(moe),
+            block_fp8=block_fp8,
         )
         try:
             adapter.warmup()
@@ -352,6 +426,9 @@ def _init_warmup_forward(
                 )
         finally:
             adapter.destroy()
+
+        if block_fp8:
+            _check_block_fp8_modular_kernel(geometry, moe, rank, device)
 
 
 @pytest.mark.skipif(
@@ -425,7 +502,9 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Block-FP8 weights build the SM90 config and skip FlashInfer's own
-    preprocessing, which would requantize them from bf16."""
+    preprocessing, which would requantize them from bf16. The kernel tensors
+    bound back to the layer keep their dtypes, so a rebuild from them (e.g.
+    preprocessed-weight loading) selects the same kernel."""
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     workspace_capacities: list[int] = []
     layer_args = _fake_mega_layer(monkeypatch, moe_ep, workspace_capacities)
@@ -436,16 +515,34 @@ def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
     w2 = torch.zeros(2, hidden, intermediate, dtype=torch.float8_e4m3fn)
     w13_scale = torch.ones(2, 2 * intermediate // 128, hidden // 128)
     w2_scale = torch.ones(2, hidden // 128, intermediate // 128)
-    FlashInferMoeEp(
+    adapter = FlashInferMoeEp(
         moe,
         FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale),
         apply_topk_in_fc1=apply_topk_in_fc1(moe),
+        block_fp8=True,
+    )
+    kernel_weights = adapter.kernel_weights()
+    FlashInferMoeEp(
+        moe,
+        FlashInferMoeEpWeights(*kernel_weights),
+        apply_topk_in_fc1=apply_topk_in_fc1(moe),
+        block_fp8=True,
     )
 
-    ((_, _, weight_pack, mega_config),) = layer_args
+    assert [t.dtype for t in kernel_weights] == [
+        torch.float8_e4m3fn,
+        torch.float32,
+        torch.float8_e4m3fn,
+        torch.float32,
+    ]
+    assert [t.data_ptr() for t in kernel_weights] == [
+        t.data_ptr() for t in (w13, w13_scale, w2, w2_scale)
+    ]
+    (_, _, weight_pack, mega_config), (_, _, _, rebuilt) = layer_args
+    assert isinstance(rebuilt.megakernel, moe_ep.Sm90PullFp8MegaMoeConfig)
     assert weight_pack is None and not mega_config.preprocess_weights
     # Batches up to 64 tokens get their own workspace below the 128 maximum.
-    assert workspace_capacities == [64]
+    assert workspace_capacities == [64, 64]
     megakernel = mega_config.megakernel
     assert isinstance(megakernel, moe_ep.Sm90PullFp8MegaMoeConfig)
     assert megakernel.fp8_scale_mode == "blockwise"
@@ -468,6 +565,7 @@ def _fake_mega_layer(
     class FakeMegaLayer:
         def __init__(self, *args) -> None:
             layer_args.append(args)
+            self._transformed = args[3].transformed_weights
 
         def create_workspace(self, max_tokens_per_rank: int) -> object:
             assert workspace_capacities is not None
