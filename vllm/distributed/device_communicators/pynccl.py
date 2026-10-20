@@ -338,7 +338,7 @@ class PyNcclCommunicator:
         # a live user. Record the link in both directions so a teardown can see
         # it: the count tells a holder of the parent that it is not free to go,
         # and the reference keeps the parent from being collected meanwhile.
-        self._shrink_parent: PyNcclCommunicator | None = parent
+        self._shrink_parent = parent
         parent._shrink_children += 1
 
         with torch.accelerator.device_index(device.index):
