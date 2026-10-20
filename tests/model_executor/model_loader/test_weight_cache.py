@@ -543,7 +543,9 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         (True, "deepseek_yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
     ],
 )
-def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
+def test_ipc_rope_matching(
+    tmp_path, monkeypatch, default_vllm_config, fallback, nested, case
+):
     """Reloads accept constructor-normalized RoPE without weakening other checks."""
     import socket
     from concurrent.futures import ThreadPoolExecutor
