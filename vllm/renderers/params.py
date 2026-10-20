@@ -589,6 +589,9 @@ class TokenizeParams:
                 self.needs_detokenization
                 and token_prompt["prompt_token_ids"] is not original_token_ids
             ):
+                # Validation changed the token IDs, so the cached prompt text is stale.
+                # BaseRenderer only detokenizes when "prompt" is absent.
+                # Remove it to rebuild the text from the validated token IDs.
                 token_prompt.pop("prompt", None)
         if "prompt_embeds" in prompt:
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
