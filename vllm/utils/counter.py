@@ -19,10 +19,10 @@ class Counter:
 
 
 class AtomicCounter:
-    """An atomic, thread-safe counter"""
+    """An atomic, thread-safe counter."""
 
     def __init__(self, initial: int = 0) -> None:
-        """Initialize a new atomic counter to given initial value"""
+        """Initialize a new atomic counter to given initial value."""
         super().__init__()
 
         self._value = initial
@@ -33,13 +33,13 @@ class AtomicCounter:
         return self._value
 
     def inc(self, num: int = 1) -> int:
-        """Atomically increment the counter by num and return the new value"""
+        """Atomically increment the counter by num and return the new value."""
         with self._lock:
             self._value += num
             return self._value
 
     def dec(self, num: int = 1) -> int:
-        """Atomically decrement the counter by num and return the new value"""
+        """Atomically decrement the counter by num and return the new value."""
         with self._lock:
             self._value -= num
             return self._value

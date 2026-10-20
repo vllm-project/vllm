@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops as triton_ops
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -33,6 +34,13 @@ def reset_device(reset_default_device):
 def cleanup_fixture():
     """Override conftest's cleanup_fixture— not needed for punica tests."""
     yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cleanup_after_module():
+    """Release this module's cached GPU memory before later engine tests."""
+    yield
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(autouse=True)
@@ -160,8 +168,7 @@ def check_lora_shrink_kernel(
     seq_length: int,
     scaling: float,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
+    """Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -234,8 +241,7 @@ def check_lora_expand_kernel(
     seq_length: int,
     add_inputs: bool,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
+    """Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -438,9 +444,7 @@ def test_kernels(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests LoRA kernels.
-    """
+    """Tests LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)
@@ -491,9 +495,7 @@ def test_kernels_hidden_size(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests SGMV and LoRA kernels.
-    """
+    """Tests SGMV and LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)
@@ -526,8 +528,7 @@ def test_kernels_hidden_size(
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_add_lora_fused_moe_early_exit(device):
-    """
-    Ensures add_lora_fused_moe does not invoke the LoRA kernel or
+    """Ensures add_lora_fused_moe does not invoke the LoRA kernel or
     modify the output tensor when no_lora_flag_cpu is True
     """
     from types import SimpleNamespace

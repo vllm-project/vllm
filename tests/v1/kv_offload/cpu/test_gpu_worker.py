@@ -49,6 +49,22 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
+def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Triton load path dereferences CPU pointers on the GPU, so pageable
+    host memory takes the DMA path even for pages where Triton would win."""
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is not (
+        ops.swap_blocks_batch
+    )
+    assert gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, host_memory_is_pinned=False
+    ) is (ops.swap_blocks_batch)
+
+
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     """Both directions drain before the worker releases its shared region."""
     worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
@@ -327,16 +343,16 @@ def test_transfer(
     # set transfer direction
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
         dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
@@ -355,9 +371,9 @@ def test_transfer(
     # call transfer function via public API
     start_time = time.time()
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     # wait for transfer to complete
@@ -371,8 +387,11 @@ def test_transfer(
                 len(gpu_blocks)
                 * sum([x.page_size_bytes for x in handler.layer_refs_per_group[0]])
             )
-            assert finished[0].transfer_time > 0
-            assert finished[0].transfer_time < (time.time() - start_time)
+            # a successful CPU transfer always reports its duration
+            transfer_time = finished[0].transfer_time
+            assert transfer_time is not None
+            assert transfer_time > 0
+            assert transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 
@@ -530,10 +549,10 @@ def test_transfer_multi_group(
 
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         # per-group mapping: cpu sub-block -> gpu sub-block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
@@ -544,8 +563,8 @@ def test_transfer_multi_group(
         num_dst_sub_blocks = num_cpu_chunks * blocks_per_chunk
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
         # per-group mapping: gpu sub-block -> cpu sub-block
@@ -567,9 +586,9 @@ def test_transfer_multi_group(
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     end_time = time.time() + 10

@@ -75,7 +75,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
-from vllm.multimodal.processing.processor import MultiModalProcessingInfo
+from vllm.multimodal.processing.processor import MultiModalProcessingResult
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
@@ -199,6 +199,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 # Disable crop mode for multi-image input.
@@ -225,7 +226,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalProcessingInfo:
+    ) -> MultiModalProcessingResult:
         # The processor logic differs for single-image (crop) vs multi-image
         # (no crop) requests. The processing cache assumes per-item output is
         # invariant of how many images are passed per prompt, so we only cache

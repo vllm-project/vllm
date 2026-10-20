@@ -6,15 +6,16 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import torch
 
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
-    compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
-)
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+)
+from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
+    dsv41_o_proj,
+    register_dsv41_o_proj_warmup,
 )
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -41,6 +42,10 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuild
 
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
         return DeepseekSparseSWAFlashMLAMetadataBuilder
@@ -57,22 +62,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe(
             self._o_proj_block_size
         )
+        register_dsv41_o_proj_warmup(self)
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            o_lora_rank=self.o_lora_rank,
-            einsum_recipe=self._einsum_recipe,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        return dsv41_o_proj(self, attn_out, positions)
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -119,9 +112,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             else:
                 assert self.topk_indices_buffer is not None
                 top_k = self.topk_indices_buffer.shape[-1]
-            combined_topk = round_up(
-                top_k + self.window_size + self.max_image_tokens, 128
-            )
+            combined_topk = round_up(top_k + self.window_size, 128)
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -144,6 +135,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
+
+        if self.use_pcp:
+            num_tokens = (
+                swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+            )
+            output[num_tokens:].zero_()
+            if num_tokens == 0:
+                return
 
         swa_only = self.compress_ratio == 0
         # SWA-only layers (compress_ratio == 0) don't have their own KV cache
@@ -302,7 +301,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
+        combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
             workspace = workspace_manager.get_simultaneous(
@@ -360,21 +359,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_M,
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
-                left_visible=(
-                    swa_metadata.prefill_left_visible[
-                        num_decode_tokens + query_start : num_decode_tokens + query_end
-                    ]
-                    if swa_metadata.prefill_left_visible is not None
-                    else None
-                ),
-                right_visible=(
-                    swa_metadata.prefill_right_visible[
-                        num_decode_tokens + query_start : num_decode_tokens + query_end
-                    ]
-                    if swa_metadata.prefill_right_visible is not None
-                    else None
-                ),
-                max_image_tokens=self.max_image_tokens,
             )
             flash_mla_sparse_fwd(
                 q=q[query_start:query_end],

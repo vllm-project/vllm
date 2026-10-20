@@ -135,7 +135,12 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
-        sampled = gumbel_sample(
+        sampler = (
+            gumbel_sample
+            if self.draft_watermarker is None
+            else self.draft_watermarker.sample
+        )
+        return sampler(
             logits,
             idx_map,
             self.temperature,
@@ -147,18 +152,18 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
-        if self.draft_watermarker is not None:
-            sampled = self.draft_watermarker.sample(
-                logits,
-                sampled,
-                idx_map,
-                self.temperature,
-            )
-        return sampled
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
+            return
+        # A draft model can run the Markov steps below with its own kernels.
+        # It returns False, having done nothing, for a step that the loop
+        # below must run.
+        sample_sequential = getattr(self.model, "sample_sequential", None)
+        if sample_sequential is not None and sample_sequential(
+            self, num_reqs, head_hidden
+        ):
             return
 
         # Sequential Markov sampling over the backbone's output hidden states.

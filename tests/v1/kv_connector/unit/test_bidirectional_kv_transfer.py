@@ -52,6 +52,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     make_kv_cache_config,
+    maybe_update_block_size,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -89,10 +90,11 @@ def _make_connector_with_fake_worker(
     hand_shake_latency=0, cycles_before_done=0, do_handshake=True
 ):
     """Create a NixlConnector with FakeNixlConnectorWorker."""
+    block_size = maybe_update_block_size(32)
     vllm_config = create_vllm_config(
-        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=32
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(block_size=32, num_blocks=2)
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
@@ -987,6 +989,9 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
         [1] if expect_declined else []
     )
+    # KV expiry must not pollute the transport failure counters.
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
+    assert worker.xfer_stats.data["num_failed_handshakes"] == []
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert "req" in done_recving
 

@@ -46,12 +46,12 @@ class OMPProcessManager:
         self.reserve_cpu_num = (
             self.local_world_size
             if current_platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.RISCV)
+            in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.RISCV)
             else 1
         )
         # reserve at one more core for nixl_connector under p/d case
         if config.kv_transfer_config:
-            self.reserve_cpu_num += 1
+            self.reserve_cpu_num += self.local_world_size
 
         if envs.VLLM_CPU_NUM_OF_RESERVED_CPU is not None:
             if self.reserve_cpu_num > envs.VLLM_CPU_NUM_OF_RESERVED_CPU:
@@ -187,18 +187,19 @@ class OMPProcessManager:
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
     ) -> tuple[list[list[LogicalCPUInfo]], list[LogicalCPUInfo]]:
-        """
-        Return CPU ids to bind based on NUMA nodes, and CPU ids reserved for
+        """Return CPU ids to bind based on NUMA nodes, and CPU ids reserved for
         other processes.
         Currently for rank N, only CPU ids on the N-th node in available NUMA
         node list will be selected.
+
         Args:
             cpu_selector: a callable object to select CPUs from a CPU list
-            of a physical core. The input is a LogicalCPUInfo list contains
-            logical CPUs of a physical CPU, sorted by the LogicalCPUInfo.id.
-            A selected LogicalCPUInfo list should be returned.
-        """
+                of a physical core. The input is a LogicalCPUInfo list contains
+                logical CPUs of a physical CPU, sorted by the
+                LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
+                returned.
 
+        """
         # this memory node list has been sliced for DP offset
         allowed_numa_nodes = cr_utils.get_visible_memory_node()
         logical_cpu_list = cr_utils.get_allowed_cpu_list()
