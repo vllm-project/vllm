@@ -23,9 +23,9 @@ steps:
   mirror:
     amd:
       # Focused MRV2 regression; the broader model/backend matrix is pending.
-      label: ':amd: (MI355) MRV2 Sampler JIT Warmup'
+      label: ':amd: (MI355 DPX) MRV2 Sampler JIT Warmup'
       dind: false
-      device: mi355_1
+      device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 10
       working_dir: /vllm-workspace/

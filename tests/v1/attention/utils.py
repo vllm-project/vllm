@@ -180,7 +180,7 @@ def create_standard_kv_cache_spec(
 
 
 def create_vllm_config(
-    model_name: str = "meta-llama/Meta-Llama-3-8B",
+    model_name: str = "Qwen/Qwen3-0.6B",
     tensor_parallel_size: int = 1,
     max_model_len: int = 1024,
     dtype: ModelDType | torch.dtype = "auto",
@@ -260,27 +260,6 @@ def create_vllm_config(
         load_config=load_config,
         compilation_config=compilation_config,
     )
-
-
-def create_dummy_kv_cache(
-    block_size: int,
-    num_kv_heads: int,
-    head_size: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    num_blocks: int = 100,
-) -> torch.Tensor:
-    """Create a dummy KV cache tensor for testing."""
-    kv_cache = torch.randn(
-        num_blocks,
-        2,  # K and V
-        block_size,
-        num_kv_heads,
-        head_size,
-        dtype=dtype,
-        device=device,
-    )
-    return kv_cache
 
 
 @dataclass

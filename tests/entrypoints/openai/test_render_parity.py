@@ -225,7 +225,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
     renderer.tokenizer = MagicMock()
 
     return OnlineRenderer(
-        model_config=model_config,  # type: ignore[arg-type]
+        model_config=model_config,
         renderer=renderer,
         request_logger=None,
         chat_template=None,
@@ -233,6 +233,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
         enable_auto_tools=True,
         tool_parser="openai",
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        trust_request_mm_kwargs=True,
     )
 
 

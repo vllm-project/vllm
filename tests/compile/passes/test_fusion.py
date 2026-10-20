@@ -60,10 +60,6 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 
-FP8_DTYPE = current_platform.fp8_dtype()
-
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
@@ -111,6 +107,8 @@ AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # Per-token with ChannelWiseTorchFP8ScaledMMLinearKernel
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Static per-tensor: only the aiter quant op is matched by the pass
+    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, True),
     # Blockwise
     (AiterFp8BlockScaledMMKernel, GroupShape(1, 128), True),
 ]
@@ -201,6 +199,9 @@ class TestModel(torch.nn.Module):
             # Blockwise path
             if self.use_aiter_fusion and self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_group_quant_op()]
+        elif self.group_shape.is_per_tensor():
+            if self.use_aiter_quant_op:
+                return [rocm_aiter_ops.get_per_tensor_quant_op()]
         else:
             if self.use_aiter_quant_op:
                 return [rocm_aiter_ops.get_per_token_quant_op()]
@@ -224,6 +225,17 @@ class TestModel(torch.nn.Module):
                 return [
                     AiterFusedAddRMSFp8GroupQuantPattern.FUSED_OP,
                     AiterRMSFp8GroupQuantPattern.FUSED_OP,
+                ]
+            elif self.group_shape.is_per_tensor():
+                # Static per-tensor aiter fusion
+                from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+                    AiterFusedAddRMSNormStaticQuantPattern,
+                    AiterRMSNormStaticQuantPattern,
+                )
+
+                return [
+                    AiterFusedAddRMSNormStaticQuantPattern.FUSED_OP,
+                    AiterRMSNormStaticQuantPattern.FUSED_OP,
                 ]
             else:
                 # Per-token aiter fusion

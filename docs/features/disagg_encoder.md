@@ -45,9 +45,10 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
 ### ECMooncakeConnector
 
 **ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
-See the [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
-for a complete 1 Encoder instance + 1 PD instance setup, including the producer and
-consumer `--ec-transfer-config` settings and proxy configuration.
+See the [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md) for
+producer/consumer `--ec-transfer-config`, proxy `--ec-consumer-zmq-addrs`, and
+transport options. The [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
+is a complete 1 Encoder instance + 1 PD instance setup.
 
 With vLLM and Mooncake installed, run the example from the repository root:
 
