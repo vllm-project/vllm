@@ -22,7 +22,7 @@ from vllm.model_executor.models.step3p5 import (
 )
 from vllm.model_executor.models.step3p7 import Step3p7ForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.models.step5.common.config import Step5Config
+from vllm.models.step5.common.config import get_step5_sparse_config
 from vllm.models.step5.common.csa_attention import step5_csa_attention
 from vllm.models.step5.common.csa_cache import (
     Step5CSAIndexCache,
@@ -30,6 +30,7 @@ from vllm.models.step5.common.csa_cache import (
 )
 from vllm.models.step5.common.ops.csa import indexer_norm
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.step5 import Step5Config
 from vllm.utils.torch_utils import _encode_layer_name, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
@@ -48,14 +49,14 @@ class Step5SparseIndexer(nn.Module):
 
     def __init__(self, config: Step5Config, layer_idx: int, prefix: str) -> None:
         super().__init__()
-        sparse = config.sparse_config
+        sparse = get_step5_sparse_config(config)
         assert sparse is not None
         hidden = config.hidden_size
         self.proxy_dim = sparse.proxy_dim
         self.region_size = sparse.region_block_size
         self.topk = sparse.topk
-        self.num_groups = sparse.num_provider_groups
-        self.heads_per_group = sparse.indexer_heads_per_group
+        self.num_groups = sparse.index_tp_size
+        self.heads_per_group = sparse.sparse_indexer_num_heads // self.num_groups
         self.eps = config.rms_norm_eps
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -160,13 +161,25 @@ class Step5SparseIndexer(nn.Module):
         )
 
 
+def _layer_types(config: Step5Config) -> list[str]:
+    # `layer_types` covers only the dense stack; MTP layers index past it.
+    return config.layer_types_with_mtp or config.layer_types or []
+
+
+def _is_sparse_layer(config: Step5Config, layer_idx: int) -> bool:
+    sparse = get_step5_sparse_config(config)
+    layer_types = _layer_types(config)
+    return (
+        sparse is not None
+        and layer_idx < len(layer_types)
+        and layer_types[layer_idx] in sparse.apply_to_layer_types
+    )
+
+
 def _rope_scaling(config: Step5Config, layer_idx: int) -> dict | None:
     yarn_only = getattr(config, "yarn_only_types", None)
-    if (
-        yarn_only
-        and config.layer_types
-        and config.layer_types[layer_idx] not in yarn_only
-    ):
+    layer_types = _layer_types(config)
+    if yarn_only and layer_types and layer_types[layer_idx] not in yarn_only:
         return None
     return getattr(config, "rope_scaling", None)
 
@@ -177,7 +190,7 @@ class Step5Attention(Step3p5Attention):
         vllm_config = get_current_vllm_config()
         config = vllm_config.model_config.hf_config.get_text_config()
         self.indexer = None
-        if not config.is_sparse_layer(self.layer_idx):
+        if not _is_sparse_layer(config, self.layer_idx):
             return
         cache_dtype = kv_cache_dtype_str_to_dtype(
             vllm_config.cache_config.cache_dtype, vllm_config.model_config
@@ -200,7 +213,7 @@ class Step5Attention(Step3p5Attention):
     def _attn_backend(self) -> type[AttentionBackend] | None:
         # The CSA kernels read this backend's paged K/V layout.
         config = get_current_vllm_config().model_config.hf_config.get_text_config()
-        if not config.is_sparse_layer(self.layer_idx):
+        if not _is_sparse_layer(config, self.layer_idx):
             return None
         logger.info_once("Step-5 sparse attention layers use ROCM_AITER_UNIFIED_ATTN.")
         return RocmAiterUnifiedAttentionBackend

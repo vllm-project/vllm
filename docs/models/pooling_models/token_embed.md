@@ -59,6 +59,7 @@ Models of any architecture can be converted into embedding models using `--conve
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----- | ----------------- | ------------------------------ | ------------------------------------------ |
 | `ColModernVBertForRetrieval` | ColModernVBERT | T / I | `ModernVBERT/colmodernvbert-merged` | | |
+| `ColUltraVBertForRetrieval` | ColUltraVBERT | T / I | `athrael-soju/ColUltraVBERT` | | |
 | `ColPaliForRetrieval` | ColPali | T / I | `vidore/colpali-v1.3-hf` | | |
 | `ColQwen3` | Qwen3-VL | T / I | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` | | |
 | `ColQwen3_5` | ColQwen3.5 | T + I + V | `athrael-soju/colqwen3.5-4.5B-v3`, `vultr/VultronRetrieverPrime-Qwen3.5-8B` | | |

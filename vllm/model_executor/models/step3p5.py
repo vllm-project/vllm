@@ -416,7 +416,10 @@ class Step3p5DecoderLayer(nn.Module):
             num_attention_groups = None
             head_dim = None
             attention_other_setting = config.attention_other_setting
-            layer_types = config.layer_types
+            # Step-5 keeps the MTP layers' entries out of `layer_types`.
+            layer_types = (
+                getattr(config, "layer_types_with_mtp", None) or config.layer_types
+            )
             if (
                 attention_other_setting
                 and layer_types
@@ -447,7 +450,7 @@ class Step3p5DecoderLayer(nn.Module):
                 use_head_wise_attn_gate=getattr(
                     config, "use_head_wise_attn_gate", False
                 ),
-                layer_types=getattr(config, "layer_types", []),
+                layer_types=layer_types or [],
                 use_rope_layers=getattr(config, "use_rope_layers", []),
                 yarn_only_types=getattr(config, "yarn_only_types", []),
                 partial_rotary_factor=partial_rotary_factors[layer_idx]

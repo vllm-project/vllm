@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Step5 entry point: the NVIDIA or AMD implementation, picked on lookup."""
 
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .amd.model import Step5ForCausalLM, Step5ForConditionalGeneration
-    from .amd.mtp import Step5MTP
+    from .nvidia.model import Step5ForCausalLM
+    from .nvidia.mtp import Step5MTP
+    from .nvidia.vl import Step5ForConditionalGeneration
 
 
 def __getattr__(name: str) -> Any:
@@ -13,10 +15,13 @@ def __getattr__(name: str) -> Any:
         raise AttributeError(name)
     from vllm.platforms import current_platform
 
-    if not current_platform.is_rocm():
-        raise NotImplementedError("Step-5 currently supports ROCm only.")
-    from .amd.model import Step5ForCausalLM, Step5ForConditionalGeneration
-    from .amd.mtp import Step5MTP
+    if current_platform.is_rocm():
+        from .amd.model import Step5ForCausalLM, Step5ForConditionalGeneration
+        from .amd.mtp import Step5MTP
+    else:
+        from .nvidia.model import Step5ForCausalLM
+        from .nvidia.mtp import Step5MTP
+        from .nvidia.vl import Step5ForConditionalGeneration
 
     return {
         "Step5ForCausalLM": Step5ForCausalLM,

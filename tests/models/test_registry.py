@@ -70,9 +70,6 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
-    if model_arch.startswith("Step5") and not current_platform.is_rocm():
-        pytest.skip("Step-5 is only supported on ROCm")
-
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
@@ -96,6 +93,8 @@ def test_registry_imports(model_arch):
     [
         ("LlamaForCausalLM", False, "bi-encoder"),
         ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("Step5ForCausalLM", False, "bi-encoder"),
+        ("Step5ForConditionalGeneration", True, "bi-encoder"),
         ("DeepseekV41ForCausalLM", True, "bi-encoder"),
         ("BertForSequenceClassification", False, "cross-encoder"),
         ("RobertaForSequenceClassification", False, "cross-encoder"),
@@ -130,9 +129,9 @@ def test_registry_is_pp(model_arch, is_pp):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        ("Qwen4ExpForCausalLM", not current_platform.is_rocm()),
-        ("Qwen4ExpForConditionalGeneration", not current_platform.is_rocm()),
-        ("Qwen4ExpMTP", not current_platform.is_rocm()),
+        ("Qwen4ExpForCausalLM", True),
+        ("Qwen4ExpForConditionalGeneration", True),
+        ("Qwen4ExpMTP", True),
         ("LlamaForCausalLM", False),
     ],
 )

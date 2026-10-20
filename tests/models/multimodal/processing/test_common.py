@@ -495,8 +495,6 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
-    if model_id == "stepfun-ai/Step-5-Preview" and not current_platform.is_rocm():
-        pytest.skip("Step-5 is only supported on ROCm")
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(
             "LLaVA-OneVision-2 video processing routes frames through custom "

@@ -12,6 +12,7 @@ from torch import nn
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.models.step5.common.config import get_step5_sparse_config
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -77,7 +78,8 @@ class Step5CSAMetadataBuilder(AttentionMetadataBuilder[Step5CSAMetadata]):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        sparse = vllm_config.model_config.hf_text_config.sparse_config
+        sparse = get_step5_sparse_config(vllm_config.model_config.hf_text_config)
+        assert sparse is not None
         self.region_size = sparse.region_block_size
         self.per_token = int(kv_cache_spec.tokens_per_state) == 1
         self.token_req_buffer = torch.empty(
