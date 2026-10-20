@@ -8,7 +8,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::{FinishReason, GenerateOutput, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
@@ -55,6 +55,8 @@ pub struct Finished {
     pub ec_transfer_params: Option<Box<serde_json::Value>>,
     /// Sampling support sets aligned with all generated token positions.
     pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub timestamps: RequestTimestamps,
 }
 
@@ -176,6 +178,7 @@ pub async fn decoded_text_event_stream(
 
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
+        let spec_decode_metrics = output.spec_decode_metrics.map(|metrics| *metrics);
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -318,6 +321,7 @@ pub async fn decoded_text_event_stream(
                     kv_transfer_params,
                     ec_transfer_params,
                     sampling_mask,
+                    spec_decode_metrics,
                     timestamps: output.timestamps,
                 })),
             })
@@ -546,6 +550,12 @@ mod tests {
                 outputs: vec![
                     GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
                     GenerateOutput {
+                        spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
+                            num_spec_tokens: 2,
+                            histogram: vec![0, 1, 0],
+                            num_draft_tokens: 2,
+                            ..Default::default()
+                        })),
                         timestamps: RequestTimestamps {
                             queued_ts: 8.0,
                             scheduled_ts: 9.0,
@@ -579,6 +589,12 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                                num_spec_tokens: 2,
+                                histogram: vec![0, 1, 0],
+                                num_draft_tokens: 2,
+                                ..Default::default()
+                            }),
                             timestamps: RequestTimestamps {
                                 queued_ts: 8.0,
                                 scheduled_ts: 9.0,
@@ -617,6 +633,7 @@ mod tests {
                             kv_transfer_params: None,
                             ec_transfer_params: None,
                             sampling_mask: None,
+                            spec_decode_metrics: None,
                             timestamps: Default::default(),
                         }),
                     ),
