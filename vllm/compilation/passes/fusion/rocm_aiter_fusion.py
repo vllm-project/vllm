@@ -1219,6 +1219,69 @@ class MLADualRMSPerTokenQuantPattern(
         return _replacement
 
 
+class MLAQkvAProjDualRMSPerTokenQuantPattern(MLADualRMSPerTokenQuantPattern):
+    """Fuse the MLA input projection ``fused_qkv_a_proj`` GEMM,
+    q-latent RMSNorm + FP8 per-token quant and kv-latent RMSNorm into
+    ``fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant``.
+    """
+
+    GEMM_OP = torch.ops.vllm.rocm_aiter_triton_gemm_a8w8.default
+    QKV_A_PROJ_OP = (
+        torch.ops.vllm.fused_mla_qkv_a_proj_dual_rms_norm_per_token_quant.default
+    )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        q_dim, kv_c_dim, k_pe_dim = 256, 128, 64
+        n = q_dim + kv_c_dim + k_pe_dim
+        return [
+            self.empty(5, 128, dtype=FP8_DTYPE),
+            self.empty(n, 128, dtype=FP8_DTYPE),
+            self.empty_fp32(5, 1),
+            self.empty_fp32(n, 1),
+            self.empty_bf16(q_dim),
+            self.empty_bf16(kv_c_dim),
+        ]
+
+    @property
+    def pattern(self):
+        dual_rms_norm_quant = super().pattern
+
+        def _pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            x_scale: torch.Tensor,
+            weight_scale: torch.Tensor,
+            q_weight: torch.Tensor,
+            kv_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            projected = self.GEMM_OP(
+                x, weight, x_scale, weight_scale, None, torch.bfloat16
+            )
+            return dual_rms_norm_quant(projected, q_weight, kv_weight)
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        eps = self._epsilon
+
+        def _replacement(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            x_scale: torch.Tensor,
+            weight_scale: torch.Tensor,
+            q_weight: torch.Tensor,
+            kv_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            at = self.QKV_A_PROJ_OP(
+                x, x_scale, weight, weight_scale, q_weight, kv_weight, eps, eps
+            )
+            # q_fp8, q_scale, kv_normed, k_pe
+            return at[0], at[1], at[2], at[3]
+
+        return _replacement
+
+
 class MLADualRMSGroupQuantPattern(
     VllmPatternReplacement[
         ...,
@@ -1368,5 +1431,6 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
 
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
+            self.register(MLAQkvAProjDualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSPerTokenQuantPattern(epsilon))
             self.register(MLADualRMSGroupQuantPattern(epsilon))
