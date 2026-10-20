@@ -133,7 +133,7 @@ def aiter_indexer_unsupported_reason(
     sparse_block_size: int,
     num_index_heads: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     max_model_len: int,
     max_decode_query_len: int = 1,
     score_type: str = "max",
@@ -572,7 +572,7 @@ def select_aiter_indexer_impl_cls(
     sparse_block_size: int,
     num_index_heads: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     score_type: str = "max",
 ) -> type[MiniMaxM3IndexerAiterImpl] | None:
     """The AITER indexer impl if this config can use it, else None.
