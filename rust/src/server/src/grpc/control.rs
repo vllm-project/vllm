@@ -377,6 +377,9 @@ impl pb::control_server::Control for ControlServiceImpl {
         let request = request.into_inner();
         let mode = pause_mode(request.mode)?;
         let level = request.level.unwrap_or(1);
+        if level > 2 {
+            return Err(Status::invalid_argument("level must be between 0 and 2"));
+        }
         let _guard = self.rl_lock.lock().await;
         self.client()
             .sleep(level, mode)
