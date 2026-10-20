@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -28,11 +29,25 @@ def cleanup_ray_between_tests():
     yield
 
 
-MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+# DeepSeek-V2-Lite unless overridden; a larger model sets its own GSM8K
+# settings, accuracy bar, serve arguments and start-up wait below.
+MODEL_NAME = os.getenv(
+    "VLLM_TEST_ELASTIC_EP_MODEL", "deepseek-ai/DeepSeek-V2-Lite-Chat"
+)
 
-NUM_GSM8K_QUESTIONS = 256
-EXPECTED_ACCURACY = 0.58
-ACCURACY_TOL = 0.08
+NUM_GSM8K_QUESTIONS = int(os.getenv("VLLM_TEST_ELASTIC_EP_GSM8K_QUESTIONS", "256"))
+# The first and the last stage's question count; the stages between use
+# NUM_GSM8K_QUESTIONS.
+NUM_GSM8K_QUESTIONS_ENDS = int(
+    os.getenv("VLLM_TEST_ELASTIC_EP_GSM8K_QUESTIONS_ENDS", str(NUM_GSM8K_QUESTIONS))
+)
+NUM_GSM8K_SHOTS = int(os.getenv("VLLM_TEST_ELASTIC_EP_GSM8K_SHOTS", "5"))
+EXPECTED_ACCURACY = float(os.getenv("VLLM_TEST_ELASTIC_EP_ACCURACY_MIN", "0.58"))
+ACCURACY_TOL = float(os.getenv("VLLM_TEST_ELASTIC_EP_ACCURACY_MAX_DROP", "0.08"))
+# Appended to the serve arguments, so a repeated flag such as --max-model-len
+# overrides the default (the parser keeps the last value).
+EXTRA_SERVE_ARGS = shlex.split(os.getenv("VLLM_TEST_ELASTIC_EP_EXTRA_ARGS", ""))
+SERVER_WAIT_S = float(os.getenv("VLLM_TEST_ELASTIC_EP_SERVER_WAIT_S", "1200"))
 DEFAULT_ALL2ALL_BACKEND = "allgather_reducescatter"
 # The probe's sleep bounds downtime_seconds' resolution; traffic keeps 50 ms,
 # so num_503 (traffic requests only) is unchanged.
@@ -156,10 +171,13 @@ def _scale_with_traffic(
     )
 
 
-def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
+def _run_gsm8k_eval(
+    server: RemoteOpenAIServer, stage: str, num_questions: int = NUM_GSM8K_QUESTIONS
+) -> float:
     assert server.port is not None
     result = evaluate_gsm8k(
-        num_questions=NUM_GSM8K_QUESTIONS,
+        num_questions=num_questions,
+        num_shots=NUM_GSM8K_SHOTS,
         host=f"http://{server.host}",
         port=server.port,
     )
@@ -223,6 +241,7 @@ def _base_serve_args(
         args.extend(["--data-parallel-size-local", dp_local])
     if enforce_eager:
         args.append("--enforce-eager")
+    args.extend(EXTRA_SERVE_ARGS)
 
     return args
 
@@ -269,9 +288,9 @@ def test_elastic_ep_scaling(
     with RemoteOpenAIServer(
         MODEL_NAME,
         vllm_serve_args,
-        max_wait_seconds=1200,
+        max_wait_seconds=SERVER_WAIT_S,
     ) as server:
-        initial_accuracy = _run_gsm8k_eval(server, "Initial")
+        initial_accuracy = _run_gsm8k_eval(server, "Initial", NUM_GSM8K_QUESTIONS_ENDS)
 
         _scale_with_traffic(server, initial_dp_size, target_dp_size, traffic_mode)
         scale_up_accuracy = _run_gsm8k_eval(server, "After scale up")
@@ -281,7 +300,13 @@ def test_elastic_ep_scaling(
         )
 
         _scale_with_traffic(server, target_dp_size, initial_dp_size, traffic_mode)
-        scale_down_accuracy = _run_gsm8k_eval(server, "After scale down")
+        scale_down_accuracy = _run_gsm8k_eval(
+            server,
+            "After scale down",
+            NUM_GSM8K_QUESTIONS
+            if all2all_backend == "nixl_ep_v2"
+            else NUM_GSM8K_QUESTIONS_ENDS,
+        )
         assert scale_down_accuracy >= initial_accuracy - ACCURACY_TOL, (
             f"Scale down accuracy {scale_down_accuracy:.3f} dropped more than "
             f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
@@ -290,7 +315,9 @@ def test_elastic_ep_scaling(
         if all2all_backend == "nixl_ep_v2":
             # New processes take over the EP ranks the leavers had.
             _scale_with_traffic(server, initial_dp_size, target_dp_size, traffic_mode)
-            rescale_accuracy = _run_gsm8k_eval(server, "After second scale up")
+            rescale_accuracy = _run_gsm8k_eval(
+                server, "After second scale up", NUM_GSM8K_QUESTIONS_ENDS
+            )
             assert rescale_accuracy >= initial_accuracy - ACCURACY_TOL, (
                 f"Second scale up accuracy {rescale_accuracy:.3f} dropped more "
                 f"than {ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
@@ -340,13 +367,18 @@ def test_elastic_ep_scaling_sequence():
     with RemoteOpenAIServer(
         MODEL_NAME,
         _base_serve_args(sizes[0], max_dp_size, all2all_backend="nixl_ep_v2"),
-        max_wait_seconds=1200,
+        max_wait_seconds=SERVER_WAIT_S,
     ) as server:
-        initial_accuracy = _run_gsm8k_eval(server, "Initial")
-        for source_dp_size, new_dp_size in zip(sizes, sizes[1:]):
+        initial_accuracy = _run_gsm8k_eval(server, "Initial", NUM_GSM8K_QUESTIONS_ENDS)
+        for i, (source_dp_size, new_dp_size) in enumerate(zip(sizes, sizes[1:])):
             _scale_with_traffic(server, source_dp_size, new_dp_size, "heavy")
             stage = f"After {source_dp_size}->{new_dp_size}"
-            accuracy = _run_gsm8k_eval(server, stage)
+            last = i == len(sizes) - 2
+            accuracy = _run_gsm8k_eval(
+                server,
+                stage,
+                NUM_GSM8K_QUESTIONS_ENDS if last else NUM_GSM8K_QUESTIONS,
+            )
             assert accuracy >= initial_accuracy - ACCURACY_TOL, (
                 f"[{stage}] accuracy {accuracy:.3f} dropped more than "
                 f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
@@ -388,9 +420,9 @@ def test_elastic_ep_scale_while_scaling():
     with RemoteOpenAIServer(
         MODEL_NAME,
         _base_serve_args(2, 4, all2all_backend="nixl_ep_v2"),
-        max_wait_seconds=1200,
+        max_wait_seconds=SERVER_WAIT_S,
     ) as server:
-        initial_accuracy = _run_gsm8k_eval(server, "Initial")
+        initial_accuracy = _run_gsm8k_eval(server, "Initial", NUM_GSM8K_QUESTIONS_ENDS)
 
         # A second POST for the same target while 2->4 runs.
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -410,7 +442,9 @@ def test_elastic_ep_scale_while_scaling():
         # The current size: logs "already 4, skipping".
         _scale_until_done(server, 4)
 
-        accuracy = _run_gsm8k_eval(server, "After concurrent scales")
+        accuracy = _run_gsm8k_eval(
+            server, "After concurrent scales", NUM_GSM8K_QUESTIONS_ENDS
+        )
         assert accuracy >= initial_accuracy - ACCURACY_TOL, (
             f"Accuracy {accuracy:.3f} dropped more than {ACCURACY_TOL} below "
             f"initial accuracy {initial_accuracy:.3f}"
@@ -438,7 +472,7 @@ def test_elastic_ep_rejects_invalid_size():
         MODEL_NAME,
         _base_serve_args(initial_dp_size, max_dp_size, all2all_backend="nixl_ep_v2"),
         env_dict={"VLLM_NIXL_EP_V2_DOMAIN_SIZE": domain_size},
-        max_wait_seconds=1200,
+        max_wait_seconds=SERVER_WAIT_S,
     ) as server:
         response = requests.post(
             server.url_for("scale_elastic_ep"),
