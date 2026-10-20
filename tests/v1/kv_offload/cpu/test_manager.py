@@ -1235,6 +1235,28 @@ def test_evictable_cache_chunk_count():
     assert manager._num_evictable_cache_chunks == 4
 
 
+def test_prepare_load_does_not_pin_partial_batch():
+    """A failed prepare_load must not leave earlier keys in the batch pinned.
+
+    Keys are validated by lookup() earlier, but one can disappear before the
+    load is prepared. Pinning as we validate would leave the chunks already
+    visited with ref_cnt > 0 and permanently non-evictable, since no transfer
+    job exists to release them.
+    """
+    manager = make_cpu_manager(num_chunks=2, cache_policy="lru")
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    assert manager._num_evictable_cache_chunks == 2
+
+    with pytest.raises(AssertionError, match="not found in cache"):
+        manager.prepare_load(to_keys([1, 3]), _EMPTY_REQ_CTX)
+
+    # Key 1 was not pinned and its capacity is still evictable.
+    assert manager._policy.get(to_key(1)).ref_cnt == 0
+    assert manager._num_evictable_cache_chunks == 2
+    assert manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX) is not None
+
+
 def test_touch_forwards_req_context_to_policy(monkeypatch):
     """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru")

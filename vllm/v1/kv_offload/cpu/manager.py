@@ -220,17 +220,22 @@ class CPUOffloadingManager(OffloadingManager):
         *,
         record_access: bool,
     ) -> LoadStoreSpec:
+        # Validate the whole batch before pinning anything: a missing or
+        # not-ready chunk must not leave earlier keys in the batch pinned.
+        keys = list(keys)
         chunks = []
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
+            chunks.append(chunk)
+
+        for key, chunk in zip(keys, chunks):
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_chunks -= 1  # ref_cnt 0 -> 1
                 assert self._num_evictable_cache_chunks >= 0
             chunk.ref_cnt += 1
-            chunks.append(chunk)
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
