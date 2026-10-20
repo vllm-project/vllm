@@ -194,6 +194,7 @@ class DSV41MonoLayer:
         topk: int = TOPK,
         ug_groups: int = 2,
         swa_width: int = WINDOW,
+        generic: bool = False,
     ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
@@ -213,6 +214,8 @@ class DSV41MonoLayer:
         # rows) or the DSpark draft's, which has a runner of its own
         self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
         self.swa_width = swa_width
+        # every build generic (``MonoBuild.generic``): the tuned builds' reference
+        self.generic = generic
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
         self._scratch: dict[tuple[int, bool], torch.Tensor] = {}
@@ -301,6 +304,7 @@ class DSV41MonoLayer:
             topk=self.topk,
             ug_groups=self.ug_groups,
             swa_width=self.swa_width,
+            generic=self.generic,
         )
 
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):

@@ -100,6 +100,9 @@ class MonoBuild:
     topk: int = TOPK
     ug_groups: int = 2
     swa_width: int = WINDOW
+    # compile the generic code where the tuned paths would apply: the
+    # reference that the tests compare the tuned builds with
+    generic: bool = False
 
     @property
     def tuned(self) -> bool:
@@ -110,6 +113,7 @@ class MonoBuild:
         and a peer range of their own."""
         return (
             not GFX942
+            and not self.generic
             and self.tp == 2
             and self.ratio == 2
             and (self.experts, self.topk, self.ug_groups, self.swa_width)
