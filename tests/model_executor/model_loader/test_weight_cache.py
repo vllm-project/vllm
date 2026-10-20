@@ -694,7 +694,7 @@ def test_remote_artifact_listener_authenticates_and_serves_only_artifacts():
     )
 
     daemon = Daemon.__new__(Daemon)
-    daemon.artifact_token = "test-secret"
+    daemon.seed_token = "test-secret"
     daemon.artifacts = ArtifactStore()
     key = ArtifactCacheKey("flashinfer_autotune", "key")
     daemon.artifacts.put(key, b'{"tactic": 1}')

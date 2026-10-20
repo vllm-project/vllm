@@ -198,9 +198,9 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
-        artifact_source: tuple[str, int] | None = None,
-        artifact_listen: tuple[str, int] | None = None,
-        artifact_token: str | None = None,
+        seed_source: tuple[str, int] | None = None,
+        seed_listen: tuple[str, int] | None = None,
+        seed_token: str | None = None,
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
@@ -246,9 +246,9 @@ class WeightCacheDaemon:
         self.model: torch.nn.Module | None = None
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         self.artifacts = ArtifactStore()
-        self.artifact_source = artifact_source
-        self.artifact_listen = artifact_listen
-        self.artifact_token = artifact_token
+        self.seed_source = seed_source
+        self.seed_listen = seed_listen
+        self.seed_token = seed_token
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -305,7 +305,7 @@ class WeightCacheDaemon:
 
     @property
     def _uses_remote_artifacts(self) -> bool:
-        return self.artifact_source is not None or self.artifact_listen is not None
+        return self.seed_source is not None or self.seed_listen is not None
 
     def _load_remote_autotune_artifact(self, runner, *, skip_attn: bool) -> None:
         key = flashinfer_autotune_artifact_key(
@@ -331,17 +331,17 @@ class WeightCacheDaemon:
 
     def fetch_artifacts(self) -> None:
         """Best-effort import of autotune artifacts from another daemon."""
-        if self.artifact_source is None:
+        if self.seed_source is None:
             return
-        if not self.artifact_token:
+        if not self.seed_token:
             raise ValueError("artifact source requires an artifact token")
         try:
-            with socket.create_connection(self.artifact_source, timeout=30.0) as sock:
+            with socket.create_connection(self.seed_source, timeout=30.0) as sock:
                 send_json(
                     sock,
                     {
                         "cmd": "fetch_artifacts",
-                        "token": self.artifact_token,
+                        "token": self.seed_token,
                     },
                 )
                 response = recv_json(sock)
@@ -357,7 +357,7 @@ class WeightCacheDaemon:
         except (OSError, ConnectionError, ValueError, RuntimeError) as error:
             logger.warning(
                 "Cannot fetch autotune artifacts from %s; using local warmup: %s",
-                self.artifact_source,
+                self.seed_source,
                 error,
             )
 
@@ -444,11 +444,9 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         remote_server = None
-        if self.artifact_listen is not None:
-            family = (
-                socket.AF_INET6 if ":" in self.artifact_listen[0] else socket.AF_INET
-            )
-            remote_server = socket.create_server(self.artifact_listen, family=family)
+        if self.seed_listen is not None:
+            family = socket.AF_INET6 if ":" in self.seed_listen[0] else socket.AF_INET
+            remote_server = socket.create_server(self.seed_listen, family=family)
             threading.Thread(
                 target=self._serve_artifact_remote,
                 args=(remote_server,),
@@ -501,9 +499,9 @@ class WeightCacheDaemon:
                         request.get("token") if isinstance(request, dict) else None
                     )
                     if (
-                        not self.artifact_token
+                        not self.seed_token
                         or not isinstance(presented, str)
-                        or not hmac.compare_digest(presented, self.artifact_token)
+                        or not hmac.compare_digest(presented, self.seed_token)
                     ):
                         send_json(
                             conn,
@@ -636,9 +634,9 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
-    artifact_source: tuple[str, int] | None = None,
-    artifact_listen: tuple[str, int] | None = None,
-    artifact_token: str | None = None,
+    seed_source: tuple[str, int] | None = None,
+    seed_listen: tuple[str, int] | None = None,
+    seed_token: str | None = None,
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config,
@@ -649,9 +647,9 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
-        artifact_source,
-        artifact_listen,
-        artifact_token,
+        seed_source,
+        seed_listen,
+        seed_token,
     )
     daemon.load_model()
     daemon.warmup()

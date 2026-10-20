@@ -77,15 +77,15 @@ Enable a source daemon's artifact listener to share its per-rank FlashInfer auto
 ```bash
 # Source node
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
-    --weight-cache-artifact-listen-host 0.0.0.0 \
-    --weight-cache-artifact-listen-port 30000 \
-    --weight-cache-artifact-token "$ARTIFACT_TOKEN"
+    --weight-cache-listen-host 0.0.0.0 \
+    --weight-cache-listen-port 30000 \
+    --weight-cache-seed-token "$SEED_TOKEN"
 
 # Target node (use the source node's reachable hostname)
 vllm preload --model /path/to/model --tensor-parallel-size 4 \
-    --weight-cache-artifact-source-host source-host \
-    --weight-cache-artifact-source-port 30000 \
-    --weight-cache-artifact-token "$ARTIFACT_TOKEN"
+    --weight-cache-seed-host source-host \
+    --weight-cache-seed-port 30000 \
+    --weight-cache-seed-token "$SEED_TOKEN"
 ```
 
 Wait for the source daemon to become ready before starting the target. Each rank uses the base port plus its global rank; draft daemon ports follow the target daemon group's block. For a replica spanning several nodes, configure each target node with the source node holding its corresponding ranks.
