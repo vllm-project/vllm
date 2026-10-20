@@ -25,6 +25,7 @@ from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layou
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -65,8 +66,12 @@ def triton_w4a16_gemm_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
 ):
     """Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N].
+
+    With SPLIT_K > 1, program_id(2) selects a contiguous range of K tiles and
+    c_ptr is an fp32 [SPLIT_K, M, N] partials buffer.
 
     B is stored as [K, N//8] int32 using GPTQ sequential packing:
       each int32 packs 8 consecutive N-values at bit offsets [0,4,8,12,16,20,24,28].
@@ -77,6 +82,7 @@ def triton_w4a16_gemm_kernel(
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
+    pid_k = tl.program_id(2)
 
     # Row/col offsets for this tile
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -99,7 +105,12 @@ def triton_w4a16_gemm_kernel(
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for k_start in range(0, tl.cdiv(K, BLOCK_K)):
+    k_tiles = tl.cdiv(K, BLOCK_K)
+    tiles_per_split = tl.cdiv(k_tiles, SPLIT_K)
+    k_tile_begin = pid_k * tiles_per_split
+    k_tile_end = tl.minimum(k_tile_begin + tiles_per_split, k_tiles)
+
+    for k_start in range(k_tile_begin, k_tile_end):
         offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
 
@@ -154,10 +165,65 @@ def triton_w4a16_gemm_kernel(
         accumulator += tl.dot(a, b_fp, out_dtype=tl.float32)
 
     # ---- Store output C: [BLOCK_M, BLOCK_N] ----
-    c = accumulator.to(c_ptr.type.element_ty)
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, c, mask=mask_c)
+    if SPLIT_K == 1:
+        tl.store(c_ptrs, accumulator.to(c_ptr.type.element_ty), mask=mask_c)
+    else:
+        tl.store(c_ptrs + pid_k * M * N, accumulator, mask=mask_c)
+
+
+@triton.jit
+def triton_w4a16_splitk_reduce_kernel(
+    partials_ptr,
+    c_ptr,
+    MN,
+    SPLIT_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Sum fp32 [SPLIT_K, M*N] partials in fixed order; one cast to c dtype."""
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < MN
+    acc = tl.load(partials_ptr + offs, mask=mask, other=0.0)
+    for s in tl.static_range(1, SPLIT_K):
+        acc += tl.load(partials_ptr + s * MN + offs, mask=mask, other=0.0)
+    tl.store(c_ptr + offs, acc.to(c_ptr.type.element_ty), mask=mask)
+
+
+def _pow2_split_k(grid_mn: int, K: int, min_k: int, max_split: int, max_wgs: int):
+    split_k = 1
+    while (
+        split_k * 2 <= max_split
+        and grid_mn * split_k * 2 <= max_wgs
+        and K // (split_k * 2) >= min_k
+    ):
+        split_k *= 2
+    return split_k
+
+
+def _gfx950_config(M: int, N: int, K: int) -> tuple[int, int, int, int, int]:
+    """(BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps) for MI355X (gfx950).
+
+    Decode shapes are weight-streaming bound and launch too few workgroups
+    with a 2D grid, so K is split until the grid reaches ~8 workgroups per CU.
+    Fitted to a sweep over Qwen3.8-27B and Llama-3 projections (TP1/TP8).
+    """
+    num_cus = num_compute_units()
+    if M <= 64:
+        block_m = 16 if M <= 16 else 32 if M <= 32 else 64
+        if K <= 1024:
+            return block_m, 32, 128, 1, 8
+        block_n, block_k, num_warps = (128, 64, 8) if M <= 16 else (64, 64, 4)
+        grid_mn = triton.cdiv(M, block_m) * triton.cdiv(N, block_n)
+        split_k = _pow2_split_k(grid_mn, K, 256, 32, 8 * num_cus)
+        return block_m, block_n, block_k, split_k, num_warps
+    for block_m in (256, 128, 64):
+        grid_mn = triton.cdiv(M, block_m) * triton.cdiv(N, 128)
+        if block_m <= M and 4 * grid_mn >= num_cus:
+            break
+    block_k = 64 if block_m == 256 else 128
+    split_k = _pow2_split_k(grid_mn, K, 512, 2, 3 * num_cus)
+    return block_m, 128, block_k, split_k, 8
 
 
 def _triton_w4a16_gemm_impl(
@@ -207,10 +273,17 @@ def _triton_w4a16_gemm_impl(
     # Provide a dummy pointer when HAS_ZP=False (Triton requires a valid ptr)
     zeros_ptr = qzeros if has_zp else b_q
 
+    SPLIT_K, launch_kwargs = 1, {}
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x
+        from vllm.platforms.rocm import on_gfx1x, on_gfx950
 
-        if on_gfx1x():
+        if on_gfx950():
+            BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps = _gfx950_config(M, N, K)
+            # Triton's default 32x32 MFMA for BLOCK_M >= 32 is ~20% slower here.
+            launch_kwargs = dict(
+                num_warps=num_warps, num_stages=2, matrix_instr_nonkdim=16
+            )
+        elif on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
             if M <= 32:
                 BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
@@ -241,15 +314,20 @@ def _triton_w4a16_gemm_impl(
     # scale group per tile.
     if group_size < BLOCK_K:
         BLOCK_K = group_size
+    SPLIT_K = min(SPLIT_K, triton.cdiv(K, BLOCK_K))
 
-    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    out = c
+    if SPLIT_K > 1:
+        out = torch.empty((SPLIT_K, M, N), dtype=torch.float32, device=a.device)
+
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), SPLIT_K)
 
     triton_w4a16_gemm_kernel[grid](
         a,
         b_q,
         scales,
         zeros_ptr,
-        c,
+        out,
         M,
         N,
         K,
@@ -265,7 +343,14 @@ def _triton_w4a16_gemm_impl(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        SPLIT_K=SPLIT_K,
+        **launch_kwargs,
     )
+    if SPLIT_K > 1:
+        reduce_block = 1024
+        triton_w4a16_splitk_reduce_kernel[(triton.cdiv(M * N, reduce_block),)](
+            out, c, M * N, SPLIT_K=SPLIT_K, BLOCK=reduce_block
+        )
     return c
 
 
