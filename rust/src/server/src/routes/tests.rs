@@ -8830,7 +8830,7 @@ async fn raw_generate_top_k_http_framing_through_production_serve_loop() {
         "model": "Qwen/Qwen1.5-0.5B-Chat",
         "token_ids": [11, 22],
         "sampling_params": {"max_tokens": 20_000, "logprobs": 1},
-        "return_top_k_logprobs": true
+        "packed_top_k_logprobs": true
     });
     let (head, body) = raw_http_post(addr, "/inference/v1/generate", request.to_string()).await;
     assert!(head.starts_with("http/1.1 200"), "{head}");

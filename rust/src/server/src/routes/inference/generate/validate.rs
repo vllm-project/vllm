@@ -23,18 +23,18 @@ pub(crate) fn validate_request_compat(
         );
     }
 
-    if request.return_top_k_logprobs == Some(true) {
+    if request.packed_top_k_logprobs == Some(true) {
         if request.stream {
             bail_invalid_request!(
-                param = "return_top_k_logprobs",
-                "return_top_k_logprobs is not supported with stream=true"
+                param = "packed_top_k_logprobs",
+                "packed_top_k_logprobs is not supported with stream=true"
             );
         }
         let logprobs = request.sampling_params.inner.logprobs;
         if logprobs.is_none_or(|k| k < 1) {
             bail_invalid_request!(
-                param = "return_top_k_logprobs",
-                "return_top_k_logprobs requires sampling_params.logprobs >= 1, got {}",
+                param = "packed_top_k_logprobs",
+                "packed_top_k_logprobs requires sampling_params.logprobs >= 1, got {}",
                 logprobs.map_or("None".to_string(), |k| k.to_string())
             );
         }
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_return_top_k_logprobs() {
+    fn validate_request_compat_packed_top_k_logprobs() {
         let served = served(&["Qwen/Qwen1.5-0.5B-Chat"]);
         for (stream, sampling_params, ok) in [
             (false, json!({"logprobs": 1}), true),
@@ -161,7 +161,7 @@ mod tests {
         ] {
             let request: GenerateRequest = serde_json::from_value(json!({
                 "token_ids": [11, 22],
-                "return_top_k_logprobs": true,
+                "packed_top_k_logprobs": true,
                 "stream": stream,
                 "sampling_params": sampling_params
             }))

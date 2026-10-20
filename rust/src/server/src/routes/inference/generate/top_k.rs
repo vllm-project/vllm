@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! `return_top_k_logprobs` encoding of raw generate output logprobs (the
+//! `packed_top_k_logprobs` encoding of raw generate output logprobs (the
 //! `PackedTopK` layout). Every engine step is encoded as it arrives, and the
 //! encoded segments are sent in the response body without being copied into
 //! one buffer.
@@ -152,7 +152,7 @@ impl TopKLogprobsAccumulator {
     }
 }
 
-/// Finished `return_top_k_logprobs` output for one choice, with the arrays as
+/// Finished `packed_top_k_logprobs` output for one choice, with the arrays as
 /// base64 segments.
 pub(super) struct TopKLogprobs {
     pub num_positions: usize,

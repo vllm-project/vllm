@@ -142,7 +142,7 @@ async fn collect_response(
     options: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Response {
-    let mut top_k = options.top_k_logprobs.map(TopKLogprobsAccumulator::new);
+    let mut top_k = options.packed_top_k_logprobs.map(TopKLogprobsAccumulator::new);
     let collected = raw_stream
         .map_ok(|mut output| {
             // Top-k block: encode each step's logprobs as it arrives.
@@ -207,7 +207,7 @@ async fn generate_chunk_stream(
         include_prompt_logprobs: _,
         return_token_ids,
         // Rejected for streaming at validation.
-        top_k_logprobs: _,
+        packed_top_k_logprobs: _,
     }: ResponseOptions,
     mut mm_placeholders: Option<MultiModalPlaceholders>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
@@ -337,7 +337,7 @@ fn collect_generate(
         include_prompt_logprobs,
         return_token_ids,
         // The caller renders output logprobs as the top-k block instead.
-        top_k_logprobs: _,
+        packed_top_k_logprobs: _,
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
@@ -1305,7 +1305,7 @@ mod tests {
     fn top_k_options(k: usize) -> ResponseOptions {
         ResponseOptions {
             include_logprobs: true,
-            top_k_logprobs: Some(k),
+            packed_top_k_logprobs: Some(k),
             ..Default::default()
         }
     }

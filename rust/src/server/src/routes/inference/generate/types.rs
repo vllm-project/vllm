@@ -50,9 +50,11 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
-    /// Return `logprobs.top_k` instead of `logprobs.content`; non-streaming
-    /// only, requires `sampling_params.logprobs >= 1`.
-    pub return_top_k_logprobs: Option<bool>,
+    /// Encode the top `sampling_params.logprobs` candidates of every position
+    /// as the base64 arrays of `logprobs.top_k` instead of per-token
+    /// `logprobs.content`; non-streaming only, requires
+    /// `sampling_params.logprobs >= 1`.
+    pub packed_top_k_logprobs: Option<bool>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
@@ -219,7 +221,7 @@ pub(super) struct PlaceholderRangeInfo {
 #[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct GenerateLogProbs {
     pub content: Option<Vec<GenerateLogProbsContent>>,
-    /// `return_top_k_logprobs`.
+    /// Set instead of `content` for `packed_top_k_logprobs`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<PackedTopK>,
 }
