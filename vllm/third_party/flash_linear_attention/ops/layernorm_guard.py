@@ -93,6 +93,7 @@ def layer_norm_fwd_kernel(
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     ACTIVATION: tl.constexpr,
+    SHARED_WEIGHT: tl.constexpr = False,  # all groups use the same N weights
 ):
     # Map the program id to the starting row of X and Y it should compute.
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
@@ -149,7 +150,7 @@ def layer_norm_fwd_kernel(
     tl.store(Rstd + rstd_offsets, rstd, mask=rstd_mask)
 
     # Load weights and biases (broadcast across rows)
-    w_offsets = cols + group * N
+    w_offsets = cols if SHARED_WEIGHT else cols + group * N
     w_mask = cols < N
     w = tl.load(W + w_offsets, mask=w_mask, other=0.0).to(tl.float32)
 
@@ -206,6 +207,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         NORM_BEFORE_GATE: bool
         IS_RMS_NORM: bool
         ACTIVATION: str
+        SHARED_WEIGHT: bool = False
 
     kernel = staticmethod(layer_norm_fwd_kernel)
 
@@ -236,6 +238,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         norm_before_gate: bool,
         is_rms_norm: bool,
         activation: str,
+        shared_weight: bool = False,
     ) -> CompileKey:
         input_variant = TritonPointerInputVariant.from_alignment(
             x=x_aligned,
@@ -265,6 +268,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
             ACTIVATION=activation,
+            SHARED_WEIGHT=shared_weight,
         )
 
     def get_warmup_keys(
@@ -279,9 +283,22 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         norm_before_gate: bool,
         is_rms_norm: bool,
         activation: str,
+        row_stride: int | None = None,
+        z_row_stride: int | None = None,
+        shared_weight: bool = False,
     ) -> list[CompileKey]:
+        """Compile keys for ``rows_per_token`` rows of ``group_size`` per token.
+
+        ``row_stride`` / ``z_row_stride`` (default ``group_size``) are the row
+        strides of x/out and of the gate; ``shared_weight`` is the layout where
+        one row holds several groups that share one ``group_size`` weight.
+        """
         if max_num_tokens < 1 or rows_per_token < 1:
             return []
+        if row_stride is None:
+            row_stride = group_size
+        if z_row_stride is None:
+            z_row_stride = row_stride
 
         max_fused_size = 65536 // torch.empty((), dtype=x_dtype).element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
@@ -316,9 +333,9 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
                 z_aligned=True,
                 mean_aligned=True,
                 rstd_aligned=True,
-                stride_x_row=group_size,
-                stride_y_row=group_size,
-                stride_z_row=group_size,
+                stride_x_row=row_stride,
+                stride_y_row=row_stride,
+                stride_z_row=z_row_stride,
                 M=M,
                 N=group_size,
                 BLOCK_N=block_n,
@@ -326,6 +343,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
                 norm_before_gate=norm_before_gate,
                 is_rms_norm=is_rms_norm,
                 activation=activation,
+                shared_weight=shared_weight,
             )
             keys[key] = None
         return list(keys)
@@ -359,6 +377,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             NORM_BEFORE_GATE=compile_key.NORM_BEFORE_GATE,
             IS_RMS_NORM=compile_key.IS_RMS_NORM,
             ACTIVATION=compile_key.ACTIVATION,
+            SHARED_WEIGHT=compile_key.SHARED_WEIGHT,
             num_warps=min(max(compile_key.BLOCK_N // 256, 1), 8),
             grid=(1, 1),
         )
@@ -384,7 +403,8 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
         if group_size > block_n:
             raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
         rows_per_block = calc_rows_per_block(M, x.device)
-        grid = (cdiv(M, rows_per_block), x.shape[1] // group_size)
+        ngroups = x.shape[1] // group_size
+        grid = (cdiv(M, rows_per_block), ngroups)
         self.kernel[grid](
             x,
             out,
@@ -406,6 +426,7 @@ class LayerNormFwdKernel(VllmJitKernel["LayerNormFwdKernel.CompileKey"]):
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
             ACTIVATION=activation,
+            SHARED_WEIGHT=ngroups > 1 and weight.shape[0] == group_size,
             num_warps=min(max(block_n // 256, 1), 8),
         )
 
@@ -424,6 +445,9 @@ def warmup_layer_norm_fwd(
     norm_before_gate: bool,
     is_rms_norm: bool,
     activation: str,
+    row_stride: int | None = None,
+    z_row_stride: int | None = None,
+    shared_weight: bool = False,
 ) -> None:
     _LAYER_NORM_FWD_KERNEL.warmup(
         max_num_tokens=max_num_tokens,
@@ -435,6 +459,9 @@ def warmup_layer_norm_fwd(
         norm_before_gate=norm_before_gate,
         is_rms_norm=is_rms_norm,
         activation=activation,
+        row_stride=row_stride,
+        z_row_stride=z_row_stride,
+        shared_weight=shared_weight,
     )
 
 
@@ -459,11 +486,12 @@ def layer_norm_fwd(
     if z is not None:
         assert z.stride(-1) == 1
         assert z.shape == (M, N)
-    assert weight.shape == (N,)
+    # A (group_size,) weight is shared by all groups.
+    assert weight.shape in ((N,), (group_size,))
     assert weight.stride(-1) == 1
     if bias is not None:
         assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
+        assert bias.shape == weight.shape
     # allocate output
     if out is not None:
         assert out.shape == x.shape

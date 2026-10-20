@@ -2220,22 +2220,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         x_shape = x.shape
         assert output_gate.shape == x_shape
         assert out.shape == x_shape
-        x_2d = x.reshape(-1, x_shape[-1])
-        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
-        out_2d = out.reshape(-1, x_shape[-1])
+        group_size = (
+            x_shape[-1] if self.norm.group_size is None else self.norm.group_size
+        )
+        weight = self.norm.weight.contiguous()
+        if (
+            x.dim() == 3
+            and group_size == x_shape[-1]
+            and output_gate.stride(-1) == 1
+            and output_gate.stride(-2) == x_shape[-1]
+            and x.is_contiguous()
+            and out.is_contiguous()
+        ):
+            # One row per token, one group per head sharing the weight: the
+            # gate is a strided view of the input projection, and flattening
+            # it per head would copy it.
+            x_2d = x.view(x_shape[0], -1)
+            output_gate_2d = output_gate.flatten(-2)
+            out_2d = out.view(x_shape[0], -1)
+        else:
+            x_2d = x.reshape(-1, x_shape[-1])
+            output_gate_2d = output_gate.reshape(-1, x_shape[-1])
+            out_2d = out.reshape(-1, x_shape[-1])
         assert x_2d.stride(-1) == 1
         assert output_gate_2d.stride(-1) == 1
         assert out_2d.stride(-1) == 1
         layer_norm_fwd(
             x_2d,
-            self.norm.weight.contiguous(),
+            weight,
             self.norm.bias,
             self.norm.eps,
             z=output_gate_2d,
             out=out_2d,
-            group_size=(
-                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
-            ),
+            group_size=group_size,
             norm_before_gate=self.norm.norm_before_gate,
             is_rms_norm=True,
             activation=self.norm.activation,

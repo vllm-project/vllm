@@ -47,6 +47,9 @@ class _QwenGDNWarmupConfig:
     dt_bias: torch.Tensor
     state_stride_token: int
     state_dtype: torch.dtype
+    # Row stride of the output gate read in place by the spec-decode gated
+    # norm (the in_proj_qkvz output width), or None when that path is off.
+    gate_row_stride: int | None = None
 
     @property
     def conv_dim(self) -> int:
@@ -98,6 +101,17 @@ def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor]
     return None
 
 
+def _gate_row_stride(layer: object) -> int | None:
+    """Row stride of the gate the spec-decode gated norm reads in place."""
+    if not getattr(layer, "enable_fused_gdn_spec_decode", False):
+        return None
+    weight = getattr(getattr(layer, "in_proj_qkvz", None), "weight", None)
+    if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
+        return None
+    # The gate is a column slice of the in_proj_qkvz output.
+    return int(weight.shape[0])
+
+
 def _qwen_gdn_warmup_config(
     static_forward_context: object,
 ) -> _QwenGDNWarmupConfig | None:
@@ -136,6 +150,7 @@ def _qwen_gdn_warmup_config(
             dt_bias=layer.dt_bias,
             state_stride_token=int(ssm_state.stride(0)),
             state_dtype=ssm_state.dtype,
+            gate_row_stride=_gate_row_stride(layer),
         )
 
     if found_layer:
@@ -166,6 +181,23 @@ def _warm_gated_rms_norm_kernel(
         is_rms_norm=True,
         activation=config.norm_activation,
     )
+    if config.gate_row_stride is not None:
+        # The spec-decode path normalizes one token per row (the heads share
+        # the weight) and reads the gate in place from the projection output.
+        warmup_layer_norm_fwd(
+            max_num_tokens=max_num_tokens,
+            rows_per_token=1,
+            group_size=config.v,
+            x_dtype=x_dtype,
+            weight_dtype=config.norm_weight_dtype,
+            device=device,
+            norm_before_gate=config.norm_before_gate,
+            is_rms_norm=True,
+            activation=config.norm_activation,
+            row_stride=config.hv * config.v,
+            z_row_stride=config.gate_row_stride,
+            shared_weight=config.hv > 1,
+        )
 
 
 def _warm_causal_conv1d_fwd_kernel(
