@@ -60,7 +60,7 @@
 - [x] 7.2 Add the agreed open-source workload integration and RL weight-version correctness coverage.
 - [x] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
 - [ ] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
-- [ ] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
+- [x] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
 - [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
 - [x] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
 - [x] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
@@ -163,7 +163,7 @@ See the [October 19 report](../../../docs/programmable-kvc/rollout-report-2026-1
 Tasks 10.5/10.6 and 11.3/11.4 remain open for broader ablations, forecast sensitivity,
 fault/model checks, not merely the completed round here.
 
-## Remaining acceptance resumed, 2026-10-19
+## Remaining acceptance resumed, 2026-10-20
 
 The user requested completion of the remaining tasks and removed the two
 external-model evaluations from scope. Local Qwen TP=2 on GPUs 0/3 remains the
@@ -183,4 +183,12 @@ ROCm-specific skip; real lifecycle, Store outage/restart, IPC parameter change
 and rollback, load-budget partial/retry/fallback, and paired 128-question
 CPU/Mooncake evaluations passed. Both quality paths score 124/128 with zero
 answer mismatches and zero length cuts. See the
-[acceptance report](../../../docs/programmable-kvc/acceptance-report-2026-10-19.md).
+[acceptance report](../../../docs/programmable-kvc/acceptance-report-2026-10-20.md).
+
+Task 7.5 is supported by paired CPU/Mooncake model evaluations, six equal-work
+native/idle/noop overhead runs, repeated pressure forecast comparisons,
+per-family tails and server queue phases, physical transfer counters and
+shared-load correlation, CPU/index measurements, retained negative cases,
+and real failure recovery. Full direct/component/live comparisons and the
+final CPU/GPU profile remain open under 7.4, 10.5 and 11.3; final reconciliation
+and the complete PR description remain under 10.6 and 8.4.

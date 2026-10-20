@@ -203,7 +203,7 @@ Use the supplied model and dataset download functions, selecting only the intend
 
 The open-source workload is verl Agent Loop's multi-turn tool example.
 Preserve equivalent model-visible work across baselines.
-The user removed external-model evaluation from acceptance on October 19. Complete the local Qwen3.8-27B TP=2 validation on GPUs 0 and 3, with conclusions scoped to that configuration.
+The user removed external-model evaluation from acceptance on October 20. Complete the local Qwen3.8-27B TP=2 validation on GPUs 0 and 3, with conclusions scoped to that configuration.
 
 The installed native Mooncake CUDA 13 package is `0.3.13.post1`.
 Local development uses an isolated master on `127.0.0.1:19151`, metrics/admin on `127.0.0.1:19153`, and TCP transfer.
