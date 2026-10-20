@@ -112,8 +112,8 @@ class GPUWatermarkSampler(Sampler):
         )
         sampled = output.token_ids
         output_logits = output.logits
-        # Expanded rows repeat idx_mapping rows, so the CPU temperatures
-        # cover them all without a GPU sync.
+        # Expanded rows each copy a request's temperature, so checking the
+        # request temperatures covers all expanded rows
         if self.sampling_states.any_greedy(idx_mapping_np):
             sampled = torch.where(
                 temperatures == 0,
