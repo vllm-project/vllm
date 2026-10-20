@@ -87,6 +87,7 @@ from .plan import (
     TILE,
     WOA_ROWS,
     Dims,
+    ardy_tiles,
     back_scratch,
     cdiv,
     flag_stride,
@@ -1048,6 +1049,12 @@ def run_back(c, key, bid):
     tiles = token_tiles(s)
     _, n_split, n_comb, COMB0, WOA0, WOB0, early_wob = back_plan(key)
     stamp(c, 0)
+    if const_expr(c["tuned"]):
+        # wo_a's task ahead of the attention stages (no loads: the order the
+        # tuned builds' code was validated in)
+        woa_task = first_task(bid, WOA0)
+        has_woa = woa_task < woa_tasks
+        woa_t = fx.min(woa_task, woa_tasks - 1)
     for unit in range(first_task(bid, 0), n_split, BLOCKS):
         stage_split(c, unit)
     stamp(c, 1)
@@ -1057,9 +1064,10 @@ def run_back(c, key, bid):
     stamp(c, 2)
     # the GEMV weights, every CTA right after its attention work: its wo_a
     # task (if any), then its one or two wo_b tasks
-    woa_task = first_task(bid, WOA0)
-    has_woa = woa_task < woa_tasks
-    woa_t = fx.min(woa_task, woa_tasks - 1)
+    if const_expr(not c["tuned"]):
+        woa_task = first_task(bid, WOA0)
+        has_woa = woa_task < woa_tasks
+        woa_t = fx.min(woa_task, woa_tasks - 1)
     ops = gemv_loads(
         c,
         a["woa"],
@@ -1086,13 +1094,21 @@ def run_back(c, key, bid):
         rocdl.s_waitcnt(vmcnt=0)
         gpu.barrier()
     stamp(c, 8)
-    # wo_a: every token tile of its group's XO rows, the next tile's in flight
+    # wo_a: every token tile of its group's XO rows, the next tile's in flight.
+    # Tuned at some widths (``plan.ardy_tiles``): a tile once its own tokens'
+    # XO is in, its ready flags published at its end, wo_b taking a tile once
+    # every wo_a task published it.
+    ntiles = ardy_tiles(s, c["tuned"])
+    per_tile = ntiles > 1
     if has_woa:
         grp = woa_t // (woa_tasks // groups)
         if const_expr(c["tuned"]):
             ccopy = bid % CRDY_COPIES * flag_stride(s * (heads // COMB_HEADS))
             await_flags(
-                c, c["crdy"], s, lambda u: ccopy + u * (heads // COMB_HEADS) + grp
+                c,
+                c["crdy"],
+                tiles[0][1] if const_expr(per_tile) else s,
+                lambda u: ccopy + u * (heads // COMB_HEADS) + grp,
             )
         else:
             await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
@@ -1107,25 +1123,49 @@ def run_back(c, key, bid):
             grp * group_k // 32,
             group_k // 32,
         )
-        regs = rows_loads(c, *xo, *tiles[0])
-        for ti in range_constexpr(len(tiles)):
-            t0, n = tiles[ti]
-            rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
-            if const_expr(ti + 1 < len(tiles)):
-                regs = rows_loads(c, *xo, *tiles[ti + 1])
-            stage_woa(c, woa_t, ops, t0, n, settle=c["tuned"] and ti + 1 < len(tiles))
-        stamp(c, 10)
-        if const_expr(c["tuned"]):
-            publish_copies(c, c["ardy"], woa_t, ARDY_COPIES, woa_tasks)
+        if const_expr(per_tile):
+            for ti in range_constexpr(len(tiles)):
+                t0, n = tiles[ti]
+                if const_expr(ti > 0):
+                    await_flags(
+                        c,
+                        c["crdy"],
+                        n,
+                        lambda u, t0=t0: ccopy + (t0 + u) * (heads // COMB_HEADS) + grp,
+                    )
+                regs = rows_loads(c, *xo, t0, n)
+                rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
+                stage_woa(c, woa_t, ops, t0, n)
+                publish_copies(
+                    c,
+                    c["ardy"],
+                    ti * woa_tasks + woa_t,
+                    ARDY_COPIES,
+                    woa_tasks * ntiles,
+                )
+            stamp(c, 10)
         else:
-            publish(c, c["ardy"], woa_t)
+            regs = rows_loads(c, *xo, *tiles[0])
+            for ti in range_constexpr(len(tiles)):
+                t0, n = tiles[ti]
+                rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
+                if const_expr(ti + 1 < len(tiles)):
+                    regs = rows_loads(c, *xo, *tiles[ti + 1])
+                stage_woa(
+                    c, woa_t, ops, t0, n, settle=c["tuned"] and ti + 1 < len(tiles)
+                )
+            stamp(c, 10)
+            if const_expr(c["tuned"]):
+                publish_copies(c, c["ardy"], woa_t, ARDY_COPIES, woa_tasks)
+            else:
+                publish(c, c["ardy"], woa_t)
     stamp(c, 3)
     # wo_b
     if const_expr(not early_wob):
         ops1, ops2 = wob_weights()
     stamp(c, 11)
     if const_expr(c["tuned"]):
-        acopy = bid % ARDY_COPIES * woa_tasks
+        acopy = bid % ARDY_COPIES * woa_tasks * ntiles
         await_flags(c, c["ardy"], woa_tasks, lambda u: acopy + u)
     else:
         await_flags(c, c["ardy"], woa_tasks, lambda u: u)
@@ -1143,10 +1183,15 @@ def run_back(c, key, bid):
     regs = rows_loads(c, *x8b, *tiles[0])
     for ti in range_constexpr(len(tiles)):
         t0, n = tiles[ti]
+        if const_expr(per_tile and ti > 0):
+            await_flags(
+                c, c["ardy"], woa_tasks, lambda u, ti=ti: acopy + ti * woa_tasks + u
+            )
+            regs = rows_loads(c, *x8b, t0, n)
         rows_store(c, regs, o_rows // 4, o_rows // 32, c["xl"], c["xsl"], n)
         if const_expr(ti == 0):
             stamp(c, 14)
-        if const_expr(ti + 1 < len(tiles)):
+        if const_expr(ti + 1 < len(tiles) and not per_tile):
             regs = rows_loads(c, *x8b, *tiles[ti + 1])
         stage_wob(
             c,
@@ -1158,7 +1203,7 @@ def run_back(c, key, bid):
             t0,
             n,
             mark=ti == 0,
-            settle=c["tuned"] and ti + 1 < len(tiles),
+            settle=c["tuned"] and ti + 1 < len(tiles) and not per_tile,
         )
         if const_expr(ti == 0):
             stamp(c, 13)

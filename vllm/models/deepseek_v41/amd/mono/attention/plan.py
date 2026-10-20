@@ -51,6 +51,17 @@ QRDY_STRIDE = 64  # pairs a QRDY copy: >= the tokens a launch, 512 B
 ARDY_COPIES = 8
 XRDY_COPIES = 8
 CRDY_COPIES = 8
+# tuned, widths of several token tiles from this many rows that end in a
+# partial tile: wo_a's ready flags a (task, token tile), and wo_b takes a tile
+# once every wo_a task published that tile (``back.run_back``; 18 / 24 rows
+# measured a loss)
+ARDY_MIN_S = 30
+
+
+def ardy_tiles(s: int, tuned: bool = False) -> int:
+    """Token tiles wo_a publishes flags for (1: one flag a task)."""
+    nt = len(token_tiles(s))
+    return nt if tuned and nt > 1 and s >= ARDY_MIN_S and s % TILE != 0 else 1
 
 
 def flag_stride(n: int) -> int:
@@ -189,7 +200,12 @@ def back_scratch(s: int, d: Dims, start: int = 0, tuned: bool = False) -> dict:
             ),
             ("x8b", s * d.o_rows),
             ("x8bs", s * d.o_rows // 32 * 4),
-            ("ardy", (ARDY_COPIES if tuned else 1) * d.woa_tasks * PAIR),
+            (
+                "ardy",
+                (ARDY_COPIES * ardy_tiles(s, True) if tuned else 1)
+                * d.woa_tasks
+                * PAIR,
+            ),
         ],
         start=start,
     )
