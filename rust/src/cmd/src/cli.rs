@@ -155,6 +155,9 @@ pub struct RenderArgs {
     /// them.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     trust_request_chat_template: bool,
+    /// Exclude tool definitions from the prompt when `tool_choice` is `none`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    exclude_tools_when_tool_choice_none: bool,
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
@@ -188,6 +191,7 @@ impl RenderArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
+            exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
@@ -319,6 +323,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub trust_request_chat_template: bool,
+
+    /// If specified, exclude tool definitions in prompts when
+    /// tool_choice='none'.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub exclude_tools_when_tool_choice_none: bool,
 
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
@@ -675,6 +685,7 @@ impl SharedRuntimeArgs {
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
+            exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }

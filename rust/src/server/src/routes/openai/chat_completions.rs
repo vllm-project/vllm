@@ -26,7 +26,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 
-use self::convert::{ResponseOptions, prepare_chat_request};
+use self::convert::{ResponseOptions, exclude_tools_if_tool_choice_none, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
@@ -49,10 +49,14 @@ use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_chat_request(
-    request: ChatCompletionRequest,
+    mut request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    exclude_tools_when_tool_choice_none: bool,
 ) -> Result<ChatRequest, ApiError> {
+    if exclude_tools_when_tool_choice_none {
+        exclude_tools_if_tool_choice_none(&mut request);
+    }
     prepare_chat_request(request, lora_resolution, ctx).map(|prepared| prepared.chat_request)
 }
 
@@ -61,8 +65,11 @@ pub(crate) fn lower_chat_request(
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    ValidatedJson(mut body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
+    if state.api_server_options.exclude_tools_when_tool_choice_none {
+        exclude_tools_if_tool_choice_none(&mut body);
+    }
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());

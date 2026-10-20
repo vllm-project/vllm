@@ -195,6 +195,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -1100,6 +1101,7 @@ fn frontend_args_accept_json() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -1847,6 +1849,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         trust_request_chat_template: false,
+                        exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
@@ -2016,6 +2019,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
@@ -2113,6 +2117,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
@@ -2204,6 +2209,28 @@ fn frontend_config_trusts_request_chat_template_from_args_json() {
 }
 
 #[test]
+fn frontend_config_excludes_tools_when_tool_choice_none_from_args_json() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","exclude_tools_when_tool_choice_none":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().api_server_options.exclude_tools_when_tool_choice_none);
+}
+
+#[test]
 fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -2276,6 +2303,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                exclude_tools_when_tool_choice_none: false,
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {

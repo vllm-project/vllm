@@ -220,7 +220,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools()));
+        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
+    fn chat_template_exposes_tools_to_templates_for_any_tool_choice() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         let tools = vec![ChatTool {
             name: "get_weather".to_string(),
@@ -1467,21 +1467,25 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        request.tool_context = crate::request::ResolvedToolContext::new(
-            &request.messages,
-            tools,
-            Some(ChatToolChoice::Auto),
-            true,
-        )
-        .expect("tool context should resolve");
+        // Matches Python: `tool_choice=none` still renders tools unless the
+        // server drops them via `--exclude-tools-when-tool-choice-none`.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            request.tool_context = crate::request::ResolvedToolContext::new(
+                &request.messages,
+                tools.clone(),
+                Some(tool_choice),
+                true,
+            )
+            .expect("tool context should resolve");
 
-        let rendered = render(
-            Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
-            &request,
-        )
-        .unwrap();
+            let rendered = render(
+                Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
+                &request,
+            )
+            .unwrap();
 
-        assert_eq!(rendered, "get_weather|city");
+            assert_eq!(rendered, "get_weather|city");
+        }
     }
 
     #[test]

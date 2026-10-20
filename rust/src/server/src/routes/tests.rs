@@ -770,6 +770,7 @@ fn test_render_app_with(
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
+        exclude_tools_when_tool_choice_none: false,
     }))
 }
 
