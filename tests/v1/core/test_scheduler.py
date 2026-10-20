@@ -7850,6 +7850,8 @@ def _diffusion_request(req_id: str, extra_args: dict) -> Request:
 
 @pytest.fixture
 def diffusion_model_runner(monkeypatch):
+    # These CPU tests only exercise scheduling, not Triton kernels.
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
 

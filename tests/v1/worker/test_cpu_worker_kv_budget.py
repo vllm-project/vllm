@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The CPU worker's automatic KV cache sizing must report the right cause.
+"""The CPU worker must start and size its KV cache correctly.
 
 A worker whose own footprint exceeds its reservation and a node that is short
 of free memory need opposite remedies, so they get separate errors.
@@ -68,3 +68,35 @@ def test_short_node_memory_still_asks_to_free_memory(monkeypatch):
 def test_budget_that_fits_sizes_the_kv_cache(monkeypatch):
     worker = _worker(monkeypatch, reserved=3 * GiB, rss=1 * GiB)
     assert worker.determine_available_memory() == 2 * GiB
+
+
+def test_cpu_worker_defaults_to_v1_without_triton(monkeypatch):
+    import vllm.config.vllm as config_module
+    from vllm.config import VllmConfig
+    from vllm.v1.worker import cpu_worker, gpu_worker
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(config_module, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(cpu_worker, "get_visible_memory_node", lambda: [0])
+    monkeypatch.setattr(
+        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
+    )
+    monkeypatch.setattr(
+        cpu_worker,
+        "get_memory_node_info",
+        lambda node: MemoryNodeInfo(total_memory=8 * GiB, available_memory=8 * GiB),
+    )
+    monkeypatch.setattr(
+        cpu_worker.torch.ops._C,
+        "init_cpu_memory_env",
+        lambda nodes: None,
+        raising=False,
+    )
+
+    config = VllmConfig()
+    worker = cpu_worker.CPUWorker(
+        config, local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    assert not config.use_v2_model_runner
+    assert not worker.use_v2_model_runner

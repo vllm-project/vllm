@@ -50,7 +50,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -514,7 +514,22 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-def test_v2_config_can_be_created_without_triton():
+@pytest.mark.parametrize("platform_enum", list(PlatformEnum))
+@pytest.mark.parametrize("has_triton", [False, True])
+def test_model_runner_default_preserves_backend_fallback(
+    monkeypatch, platform_enum, has_triton
+):
+    platform = Platform()
+    platform._enum = platform_enum
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "current_platform", platform)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
+
+    config = VllmConfig()
+    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+
+
+def test_v2_frontend_config_can_be_created_without_triton():
     # Start fresh so config imports observe the frontend's Triton availability.
     subprocess.run(
         [
@@ -522,6 +537,11 @@ def test_v2_config_can_be_created_without_triton():
             "-c",
             textwrap.dedent("""
                 import os
+                import vllm.platforms as platforms
+                from vllm.platforms.interface import UnspecifiedPlatform
+
+                platforms._current_platform = UnspecifiedPlatform()
+                platforms._current_platform.device_type = "cpu"
                 import vllm.triton_utils
 
                 os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
@@ -575,6 +595,7 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -584,6 +605,7 @@ def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -659,6 +681,7 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
 )
 def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
         # Skip the HMA auto-detect block: it imports the connector class,
@@ -674,6 +697,7 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(device_buffer_size=512)
@@ -756,6 +780,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     default_breakable_cudagraph_architectures.cache_clear()
 
@@ -1381,6 +1406,7 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     # The expectations below are the platform-independent defaults; ROCm's
     # DeepSeek carve-out is covered by test_rocm_keeps_compiled_deepseek_defaults.
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     config = SimpleNamespace(
         model_config=model_config,
