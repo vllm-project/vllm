@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
+    VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS: bool = True
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
@@ -1362,6 +1363,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
+        in ("true", "1")
+    ),
+    # Use TRITON_ATTN's tuned launch configs on RDNA (gfx1201, gfx1100); 0 runs
+    # vLLM's default launch
+    "VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS": lambda: (
+        os.getenv("VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS", "True").lower()
         in ("true", "1")
     ),
     # Whether to use aiter fusion shared experts ops.

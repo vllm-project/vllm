@@ -40,7 +40,7 @@ is_gfx1201 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx1201
 
-    is_gfx1201 = on_gfx1201()
+    is_gfx1201 = on_gfx1201() and envs.VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS
 
 # gfx1201 2D launch configs for prefill / chunked-prefill / mixed batches:
 # padded head_size -> (config for 64 < max_seqlen_q < 4096,
@@ -68,7 +68,7 @@ is_gfx1100 = False
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx1100
 
-    is_gfx1100 = on_gfx1100()
+    is_gfx1100 = on_gfx1100() and envs.VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS
 
 # gfx1100 2D launch configs for batches with prefill tokens (max_seqlen_q > 1):
 # padded head_size -> (config for max_seqlen_q <= 64, 64 < max_seqlen_q < 4096,
