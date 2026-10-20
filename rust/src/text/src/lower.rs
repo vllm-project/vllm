@@ -8,7 +8,7 @@ pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs};
-use sampling::validate_resolved_sampling_params;
+use sampling::{SamplingParamsError, validate_resolved_sampling_params};
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -123,6 +123,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         structured_outputs,
         skip_reading_prefix_cache,
+        routed_experts_prompt_start,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -136,6 +137,15 @@ pub fn lower_sampling_params(
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
+    // Python validates against the (multimodal-expanded) prompt length.
+    let routed_experts_prompt_start = routed_experts_prompt_start.unwrap_or(0);
+    if routed_experts_prompt_start > prompt_len {
+        return Err(SamplingParamsError::RoutedExpertsPromptStartOutOfRange {
+            value: routed_experts_prompt_start,
+            prompt_len,
+        }
+        .into());
+    }
     // Validate the final constraint: chat may have replaced the user's
     // constraint with a parser-built output grammar.
     if let Some(structured_outputs) = &structured_outputs {
@@ -219,7 +229,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
-        routed_experts_prompt_start: 0,
+        routed_experts_prompt_start,
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -422,6 +432,26 @@ mod tests {
             3,
             &stub_tokenizer(),
         )
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_routed_experts_prompt_start() {
+        let lower = |start: Option<u32>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    routed_experts_prompt_start: start,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+            .map(|params| params.routed_experts_prompt_start)
+        };
+        // The prompt has 3 tokens; like Python, accept [0, prompt_len].
+        assert_eq!(lower(None).unwrap(), 0);
+        assert_eq!(lower(Some(3)).unwrap(), 3);
+        let error = lower(Some(4)).unwrap_err();
+        assert!(error.is_request_validation_error());
+        assert!(error.to_string().contains("routed_experts_prompt_start"));
     }
 
     #[test]
