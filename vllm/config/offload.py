@@ -103,6 +103,12 @@ class OffloadConfig:
     0 (default) keeps every expert on the GPU. Supported for the ModelOpt
     NVFP4 Marlin MoE backend without expert/data parallelism."""
 
+    moe_expert_pool_prefill_staging: bool = True
+    """With the expert pool, large prefill steps copy each layer's
+    non-resident expert rows into a device buffer (prefetched one layer
+    ahead) instead of letting the MoE kernel re-read them from host memory.
+    Costs two layers' worth of expert weights in GPU memory."""
+
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
         """Validate offload configuration constraints."""

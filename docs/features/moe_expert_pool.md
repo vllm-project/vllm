@@ -36,8 +36,14 @@ allocations. Rows can move between layers at run time.
   with logical expert alignment and a physical-row remap. No host-side
   routing readback or cache planning sits between routing and the GEMM, so
   the MoE layers stay inside the captured CUDA graph (`FULL_DECODE_ONLY`).
-- Wider batches (prefill): resident experts are read from the bank and the
-  rest directly from the pinned host source through its accelerator view.
+- Wider batches (prefill): resident experts are read from the bank. Marlin
+  reads its weights once per M-block, so a non-resident expert read through
+  the host view would cross PCIe several times per step. Prefill steps of
+  at least 512 tokens therefore copy each layer's non-resident rows into a
+  device staging buffer by DMA, one layer ahead of the compute, and read
+  them from there; smaller wide batches read their routed rows through the
+  host view. `--no-moe-expert-pool-prefill-staging` turns staging off and
+  saves its two full-layer buffers of GPU memory.
 
 ## Requirements and limits
 
@@ -56,9 +62,10 @@ allocations. Rows can move between layers at run time.
 - Each bank weight tensor must fit in 32 GiB, the range Marlin MoE indexes
   with 32-bit offsets (e.g. 8192 rows of 4 MiB gate/up weights); a larger
   bank is rejected at installation with the largest `N` that fits.
-- Prefill of long inputs reads the non-resident experts from host memory on
-  every chunk, which adds host-read transfer cost per chunk; the dominant
-  term of long-input prefill time has not been profiled.
+- Every prefill step still moves each layer's non-resident experts over
+  PCIe once, so long inputs prefill faster with larger
+  `--max-num-batched-tokens`. Staging reads the placement back to the host
+  once per prefill step.
 
 ## Example
 

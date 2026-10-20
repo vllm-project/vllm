@@ -21,6 +21,7 @@ from typing import Any
 import torch
 
 from vllm.model_executor.layers.fused_moe.expert_pool.pool import GlobalPool, copy_in
+from vllm.model_executor.layers.fused_moe.expert_pool.stage import PrefillStage
 from vllm.model_executor.layers.fused_moe.expert_pool.tables import (
     TENSORS,
     StepBuffers,
@@ -86,6 +87,7 @@ class PoolLayer:
         top_k: int,
         activation: Any,
         apply_router_weight_on_input: bool,
+        stage: PrefillStage | None = None,
     ) -> None:
         self.index = index
         self.pool = pool
@@ -106,6 +108,7 @@ class PoolLayer:
         self.width = buffers.gather_src.shape[0]
         self.hot_map = pool.tables.layer_slice(pool.tables.hot_phys, index)
         self.cold_map = pool.tables.layer_slice(pool.tables.cold_phys, index)
+        self.stage = stage  # shared by every layer, or None
         self.decode_steps = 0
         self.partition_steps = 0
 
@@ -124,15 +127,19 @@ class PoolLayer:
                 x, weights, ids, ((self.bank, self.buffers.step_map, self.bank_rows),)
             )
         # Wider batches (prefill): resident rows from the bank, the rest read
-        # straight from the pinned host source through its accelerator view.
+        # straight from the pinned host source through its accelerator view,
+        # or, for large uncaptured steps, from the prefill staging buffer.
         self.partition_steps += 1
+        cold = self.host
+        if self.stage is not None and self.stage.applies(x):
+            cold = self.stage.acquire(self)
         return self._run_marlin(
             x,
             weights,
             ids,
             (
                 (self.bank, self.hot_map, self.bank_rows),
-                (self.host, self.cold_map, self.num_experts),
+                (cold, self.cold_map, self.num_experts),
             ),
         )
 

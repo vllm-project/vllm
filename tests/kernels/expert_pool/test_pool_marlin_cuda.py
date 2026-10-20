@@ -16,6 +16,7 @@ from tests.kernels.expert_pool.marlin_fixture import (
     TOP_K,
     E,
     K,
+    M,
     dist_env,  # noqa: F401
     make_layer,
     quantized_weights,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.expert_pool.install import (
 )
 from vllm.model_executor.layers.fused_moe.expert_pool.pool import verify_bank_rows
 from vllm.model_executor.layers.fused_moe.expert_pool.tables import (
+    TENSORS,
     check_global_tables,
     resident_per_layer,
     set_gate,
@@ -159,3 +161,64 @@ def test_two_layer_pool_decode_prefill_decode_matches_the_uncached_layers(
         run(0, x, _decode(order, device), 1)
     run(1, x, _decode([0, 1], device), 1)
     assert pls[0].decode_steps == 9 and pls[1].decode_steps == 4  # 1 gate-closed
+
+
+def test_prefill_staging_matches_the_host_view(dist_env):  # noqa: F811
+    """Two layers staged at M tokens: each layer reads its non-resident rows
+    from a staging buffer filled while the previous layer ran; the outputs
+    equal the host-view read byte for byte, and a smaller batch is not
+    staged."""
+    device = torch.accelerator.current_accelerator()
+    ref_cfgs, pool_cfgs, refs, layers = [], [], [], []
+    for seed_offset in (0, 1):
+        params = quantized_weights(device, seed_offset=seed_offset)
+        ref_cfgs.append(vllm_config(0))
+        pool_cfgs.append(vllm_config(SLOTS))
+        refs.append(make_layer(ref_cfgs[-1], params))
+        layers.append(make_layer(pool_cfgs[-1], params, host_source=True))
+    for layer in layers:
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
+            p = getattr(layer.routed_experts, name)
+            p.data = p.data.to(device)
+    model = torch.nn.ModuleDict({"a": layers[0], "b": layers[1]})
+    pool = install_expert_pool(model, device, max_decode_tokens=1, stage_min_tokens=M)
+    assert pool is not None
+    pls = [layer.routed_experts.expert_pool_layer for layer in layers]
+    stage = pls[0].stage
+    assert stage is not None and stage is pls[1].stage and stage.layers == pls
+    from vllm.forward_context import set_forward_context
+
+    def forward(i, x, logits):
+        with set_forward_context(None, pool_cfgs[i], num_tokens=x.shape[0]):
+            out = layers[i](x, logits)
+        torch.accelerator.synchronize(device)
+        return out
+
+    # Rows 0..3 of each layer are resident. Rows 4..7 are staged whether
+    # routed (4, 5) or not (6, 7); resident rows are not copied.
+    logits = routing([0, 4, 1, 5, 2, 3, 0, 1], device)
+    x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    for buffer in stage.buffers:
+        for t in buffer.values():
+            t.zero_()
+    staged = [forward(i, x, logits) for i in (0, 1)]
+    assert stage.staged == 2 and stage.copied_rows == 8
+    for i, pl in enumerate(pls):
+        for name in TENSORS:
+            buf = stage.buffers[i][name].cpu()
+            assert torch.equal(buf[SLOTS:], pl.sources[name][SLOTS:]), (i, name)
+            assert not buf[:SLOTS].reshape(-1).view(torch.uint8).any(), (i, name)
+    for i, pl in enumerate(pls):
+        pl.stage = None
+        assert torch.equal(staged[i], forward(i, x, logits))
+        pl.stage = stage
+        with set_forward_context(None, ref_cfgs[i], num_tokens=M):
+            want = refs[i](x, logits)
+        torch.testing.assert_close(staged[i], want, rtol=2e-2, atol=2e-2)
+    # Below the threshold (still wider than the decode lanes) the partition
+    # step reads the host view.
+    assert pls[0].width < TOP_K * (M - 1)
+    forward(0, x[: M - 1].contiguous(), logits[: M - 1].contiguous())
+    assert stage.staged == 2 and pls[0].partition_steps == 3
+    check_global_tables(pool.tables)
+    assert int(pool.tables.error[0]) == 0

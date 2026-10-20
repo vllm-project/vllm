@@ -161,6 +161,7 @@ def process_weights_after_loading(
     # Expert pool (moe_expert_pool_rows > 0): one shared bank for all MoE
     # layers, bound after every layer's tensors are in their final layout.
     from vllm.model_executor.layers.fused_moe.expert_pool.install import (
+        PREFILL_STAGE_MIN_TOKENS,
         install_expert_pool,
     )
 
@@ -174,6 +175,11 @@ def process_weights_after_loading(
             scheduler_config.max_num_seqs * (1 + vllm_config.num_speculative_tokens)
             if scheduler_config is not None
             else 1
+        ),
+        stage_min_tokens=(
+            PREFILL_STAGE_MIN_TOKENS
+            if vllm_config.offload_config.moe_expert_pool_prefill_staging
+            else 0
         ),
     )
 

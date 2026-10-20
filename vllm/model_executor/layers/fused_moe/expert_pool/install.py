@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.expert_pool.copy import configure_copy
 from vllm.model_executor.layers.fused_moe.expert_pool.layer import PoolLayer
 from vllm.model_executor.layers.fused_moe.expert_pool.pool import GlobalPool
+from vllm.model_executor.layers.fused_moe.expert_pool.stage import PrefillStage
 from vllm.model_executor.layers.fused_moe.expert_pool.tables import (
     TENSORS,
     allocate_step_buffers,
@@ -36,6 +37,10 @@ MAX_DECODE_LANES = 64
 
 # Marlin MoE indexes its weight operand in 16-byte units with a 32-bit int.
 MARLIN_MAX_WEIGHT_BYTES = 16 * 2**31
+
+# Partition steps with at least this many tokens stage their non-resident
+# rows (see stage.py); smaller ones read only their routed rows from the host.
+PREFILL_STAGE_MIN_TOKENS = 512
 
 
 def _next_power_of_two(value: int) -> int:
@@ -131,9 +136,14 @@ def _sources(name: str, layer: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 
 def install_expert_pool(
-    model: torch.nn.Module, device: torch.device, max_decode_tokens: int = 1
+    model: torch.nn.Module,
+    device: torch.device,
+    max_decode_tokens: int = 1,
+    stage_min_tokens: int = 0,
 ) -> GlobalPool | None:
-    """Allocate the shared bank and bind every pending pool layer to it."""
+    """Allocate the shared bank and bind every pending pool layer to it.
+    With stage_min_tokens > 0, partition steps of at least that many tokens
+    read their non-resident rows from prefill staging buffers."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         make_nvfp4_moe_kernel,
     )
@@ -173,6 +183,13 @@ def install_expert_pool(
     _check_bank_size(sources[0], slots, len(layers), staging)
     pool = GlobalPool(device, sources[0], [slots] * len(layers), staging)
     configure_copy("chunks")
+    # Allocated here, before memory profiling, so the KV cache is sized
+    # around the staging buffers.
+    stage = (
+        PrefillStage(device, sources[0], num_experts, stage_min_tokens)
+        if stage_min_tokens > 0
+        else None
+    )
     for index, ((name, layer), src) in enumerate(zip(layers, sources)):
         method = layer.quant_method
         start = pool.offset(index)
@@ -218,6 +235,7 @@ def install_expert_pool(
             top_k=top_k,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            stage=stage,
         )
         layer.expert_pool_pending = False
     # Placement policy (the lab run's values): promotions on every forward,
@@ -248,6 +266,14 @@ def install_expert_pool(
         (pool.pool_bytes + pool.staging_bytes) / 2**30,
         type(layers[0][1].quant_method).__name__,
     )
+    if stage is not None:
+        stage.layers = [layer.expert_pool_layer for _, layer in layers]
+        logger.info(
+            "Expert pool prefill staging: partition steps with >= %d tokens "
+            "read non-resident rows from two prefetched device buffers (%.2f GiB)",
+            stage_min_tokens,
+            stage.bytes / 2**30,
+        )
     return pool
 
 

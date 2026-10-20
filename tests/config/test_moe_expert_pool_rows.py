@@ -40,3 +40,11 @@ def test_cli_flag_and_field():
         ).moe_expert_pool_rows
         == 16
     )
+
+
+def test_prefill_staging_is_on_by_default_and_can_be_disabled():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert parser.parse_args([]).moe_expert_pool_prefill_staging
+    args = parser.parse_args(["--no-moe-expert-pool-prefill-staging"])
+    assert not args.moe_expert_pool_prefill_staging
+    assert OffloadConfig().moe_expert_pool_prefill_staging
