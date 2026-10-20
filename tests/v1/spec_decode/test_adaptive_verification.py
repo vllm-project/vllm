@@ -83,6 +83,7 @@ def test_tp_budget_uses_leader_despite_confidence_drift(
         )
         total = manager.get_num_tokens({"low": 2, "high": 2}, {"low": [1], "high": [2]})
         assert total == 2 + expected_budget
+        assert manager._batch_budget is not None
         assert manager._batch_budget[2] == expected_budget
 
 
@@ -99,7 +100,7 @@ def test_tp_reallocation_agrees_on_request_boundaries(
     )
     monkeypatch.setattr(
         adaptive_module,
-        "async_copy_to_gpu",
+        "async_tensor_h2d",
         lambda array, *, out: out.copy_(torch.from_numpy(array)),
     )
     tp_group.world_size = tp_size
