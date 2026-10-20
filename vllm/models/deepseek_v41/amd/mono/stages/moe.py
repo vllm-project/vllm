@@ -729,6 +729,20 @@ def stage_shared(c, task, gops, t0, n, uops=None):
 
 
 @traced
+def shared_unit(c, t0, pu, shared_loads):
+    """Shared unit ``pu`` of the tile from token ``t0`` (``RouteShape.shared_v2``):
+    its ``shared_per_unit`` consecutive tasks against the tile's rows, loaded
+    once for them."""
+    per = c["rs"].shared_per_unit
+    n = fx.min(fx.Int32(TILE), c["S"] - t0)
+    load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j: t0 + j, n, True)
+    for q in range_constexpr(per):
+        task = pu * per + q
+        ops = shared_loads(task)
+        stage_shared(c, task, ops[0], t0, n, ops[1])
+
+
+@traced
 def smid_quant(c, task, t0, n):
     """Odd shared task ``task``: its 16 columns (LDS ``pair``) and the even
     task's (SMID) are a quantize_fp8 group of 32 (amax floored 1e-4, the ceil
@@ -1182,7 +1196,7 @@ def ug_pass(c, e, part0, first, count, col):
 
 
 @traced
-def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
+def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live, batch=False):
     """MXFP8 rows ``token_of(j)``, j < ``live`` (<= TILE; traced or int), of
     scratch ``words_mb`` / ``codes_mb`` into LDS rows j of ``xl`` / ``xsl``:
     the first ``live`` lanes wait on their token's X8RDY, then plain 16-byte
@@ -1192,7 +1206,7 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
         c["poll"]([(c["x8rdy"], token_of(fx.min(tid, live - 1)), 1)])
     gpu.barrier()
     tuned = c["rs"].tuned
-    if const_expr(tuned and isinstance(live, int)):
+    if const_expr(tuned and (isinstance(live, int) or batch)):
         load_x8_rows_all(c, words_mb, codes_mb, xl, xsl, token_of, live)
         gpu.barrier()
         return
@@ -1219,15 +1233,16 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
 
 @traced
 def load_x8_rows_all(c, words_mb, codes_mb, xl, xsl, token_of, live):
-    """``load_x8_rows``' copy of every token's rows (``live`` a Python int):
-    every load issued before the first store, where a load under its own
-    branch waited out its round trip before the next issued (a dozen in
-    series)."""
+    """``load_x8_rows``' copy of every token's rows (``live`` a Python int, or
+    a traced ``live`` <= TILE: the loads clamped into its rows): every load
+    issued before the first store, where a load under its own branch waited
+    out its round trip before the next issued (a dozen in series)."""
     tid = c["tid"]
     got = []
+    rows = live if isinstance(live, int) else TILE
     for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
         quads = width // 4
-        for i in range_constexpr(-(-live * quads // THREADS)):
+        for i in range_constexpr(-(-rows * quads // THREADS)):
             q = fx.min(tid + THREADS * i, live * quads - 1)
             v = fx.Vector(
                 bo.buffer_load(
@@ -3039,29 +3054,44 @@ def run_moe(c, key, bid, tls, tl0):
     if unit < c["rs"].shared_units:
         # the gate weights in flight before x's wait
         a = c["args"]
-        gops = gemv_fp8_loads(
-            c, a["sgu"], a["sgu_s"], HIDDEN, unit % shared_tasks, row_major=True
-        )
-        uops = None
-        if const_expr(key.tuned and multi):
-            # the up rows' too: the gate's and up's HBM latency overlapped,
-            # not in series
-            uops = gemv_fp8_loads(
-                c,
-                a["sgu"],
-                a["sgu_s"],
-                HIDDEN,
-                shared_tasks + unit % shared_tasks,
-                row_major=True,
-            )
+
+        def shared_loads(task=unit % shared_tasks):
+            gops = gemv_fp8_loads(c, a["sgu"], a["sgu_s"], HIDDEN, task, row_major=True)
+            uops = None
+            if const_expr(key.tuned and multi):
+                # the up rows' too: the gate's and up's HBM latency
+                # overlapped, not in series
+                uops = gemv_fp8_loads(
+                    c,
+                    a["sgu"],
+                    a["sgu_s"],
+                    HIDDEN,
+                    shared_tasks + task,
+                    row_major=True,
+                )
+            return gops, uops
+
         if const_expr(not multi):
+            gops, uops = shared_loads()
             load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j: j, s)
             stage_shared(c, unit, gops, 0, s, uops)
-        else:
+        elif const_expr(not c["rs"].shared_v2):
+            gops, uops = shared_loads()
             t0 = unit // shared_tasks * TILE
             n = fx.min(fx.Int32(TILE), s - t0)
             load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j: t0 + j, n)
             stage_shared(c, unit % shared_tasks, gops, t0, n, uops)
+        else:
+            # the weights are in L2 (``prefetch``) and x is ready by now: x's
+            # flag and rows first, then the weights (in front of them, x's
+            # wait was the weights' too: in-order vmcnt). A unit is
+            # ``shared_per_unit`` consecutive tasks of one tile: the tile's
+            # rows loaded once for them, the CTAs past them free for the ug
+            # stage when the routing lands
+            stride = c["rs"].shared_stride
+            pu = unit % stride
+            if pu * c["rs"].shared_per_unit < shared_tasks:
+                shared_unit(c, unit // stride * TILE, pu, shared_loads)
     stamp(timeline, tls, tid, tl0 + 4)
     c["xl"], c["xsl"] = c["x8rl"], c["x8rsl"]
     if const_expr(multi):

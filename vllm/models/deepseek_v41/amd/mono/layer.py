@@ -49,7 +49,7 @@ from .common.ops import bf16_pair, butterfly, fp8_pack4, peer_bases, traced
 from .common.plan import first_task, key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
-from .stages import moe, seam
+from .stages import moe, prefetch, seam
 from .stages.dims import Dims as StageDims
 from .stages.moe_shape import EXPERTS, SORT_NETS, TOPK, MoeBuild, route_shape
 
@@ -775,6 +775,12 @@ def run_ffn(
         # they run on the route CTAs past the route (``moe.run_moe``'s
         # ``after_route``): idle until the router's logits land, where in
         # front of the route they held it up.
+        # Past one token tile the shared expert's rows go into their XCDs' L2
+        # on the CTAs the seam leaves idle (``prefetch``).
+        tplan = prefetch.shared_touch_plan(s, SLICES, rs)
+        if const_expr(tplan is not None):  # noqa: SIM102
+            if (bid >= SLICES) & ((bid < NORM0) | (bid >= NORM0 + s)):
+                prefetch.stage_shared_touch(tid, bid, a["sgu"], a["sgu_s"], tplan)
         for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
             if const_expr(part is not None):
                 seam.stage_push(ca, task, part)

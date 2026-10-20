@@ -21,6 +21,13 @@ from vllm.models.deepseek_v41.amd.mono.stages.router import PARTS as ROUTER_PART
 EXPERTS, TOPK = 384, 6  # the target's routing (a build's: ``MoeBuild``)
 ROUTER0 = 8  # the router's first task: past the xq tasks (a token each)
 MASK_WORDS = 2  # an expert's token bitmap in the route table: tokens <= 64
+# tuned, past one token tile: a shared unit's tasks (consecutive, one tile): 2
+# halves the CTAs the shared stage holds past the routing (every tile's rows
+# each)
+SHARED_PER_UNIT = 2
+# ... and their L2 touch (``prefetch``) from this many tokens on: below it (18,
+# 24 rows) the one-task units measured as fast or faster
+SHARED_V2_MIN = 30
 # a route lane's experts (EXPERTS / 64) sorted descending, ties kept in index
 # order: the network by their count
 SORT_NETS = {
@@ -130,9 +137,38 @@ class RouteShape:
         return self.route0 + max(8, self.tokens)
 
     @property
+    def shared_per_unit(self) -> int:
+        """A shared unit's tasks: ``SHARED_PER_UNIT`` consecutive ones of a tile
+        (its rows loaded once) when ``shared_v2``, else one."""
+        return SHARED_PER_UNIT if self.shared_v2 else 1
+
+    @property
+    def shared_v2(self) -> bool:
+        """Multi-task shared units and their L2 touch: a tuned build past one
+        token tile, ``SHARED_V2_MIN`` tokens on."""
+        return self.tuned and self.multi and self.tokens >= SHARED_V2_MIN
+
+    @property
+    def shared_stride(self) -> int:
+        """A token tile's span of shared units: its units, padded past one unit
+        a task to a multiple of the XCD count -- a task's units of every tile
+        on one XCD (``prefetch``)."""
+        per = self.shared_per_unit
+        assert self.dims.shared_tasks % per == 0
+        units = self.dims.shared_tasks // per
+        return units if per == 1 else -(-units // 8) * 8
+
+    @property
     def shared_units(self) -> int:
-        """The shared expert's (task, token tile) units (``stage_shared``)."""
-        return self.dims.shared_tasks * len(token_tiles(self.tokens))
+        """The shared stage's span of units (``stage_shared``): (tasks, token
+        tile) unit ``u`` = tile ``u // shared_stride``, its unit ``u %
+        shared_stride`` if below the tile's units, else none."""
+        return self.shared_stride * len(token_tiles(self.tokens))
+
+    def shared_task_cta(self, task: int, tile: int) -> int:
+        """The CTA that runs shared task ``task`` of token tile ``tile``."""
+        per = self.shared_per_unit
+        return (self.shared0 + tile * self.shared_stride + task // per) % BLOCKS
 
     @property
     def ug0(self) -> int:
