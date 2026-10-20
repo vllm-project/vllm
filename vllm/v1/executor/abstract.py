@@ -9,6 +9,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.connector import AuxOutputAggregator
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -121,6 +122,13 @@ class Executor(ABC):
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
+        self.aux_output_aggregator: AuxOutputAggregator | None = None
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if vllm_config.aux_output_config.enabled and pp_size > 1:
+            world_size = self.parallel_config.world_size
+            self.aux_output_aggregator = AuxOutputAggregator(
+                range(0, world_size, world_size // pp_size)
+            )
 
     @abstractmethod
     def _init_executor(self) -> None:

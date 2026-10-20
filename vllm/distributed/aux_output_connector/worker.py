@@ -108,7 +108,7 @@ class AuxOutputWorkerConnector:
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
         # Every TP rank participates in capture collectives, but only the
-        # executor output rank owns the auxiliary output data plane.
+        # first TP rank of each PP stage owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
             return
 
@@ -121,9 +121,15 @@ class AuxOutputWorkerConnector:
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+            num_slots = kv_cache_config.num_blocks * hashes_per_kv_block
+        else:
+            # max_bytes covers all PP stages, which must hold the same blocks.
+            num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+            num_slots = max_bytes // (block_nbytes // shape_per_token[0] * num_layers)
         self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+            BlockObjectStore(
+                max_bytes=num_slots * block_nbytes, object_nbytes=block_nbytes
+            ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
         self._buffer = RoutedExpertsBuffer(

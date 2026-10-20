@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputAggregator,
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -31,6 +32,9 @@ from vllm.distributed.aux_output_connector.store import (
 )
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
+)
+from vllm.model_executor.layers.fused_moe import (
+    routed_experts_capturer as capturer_module,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -165,8 +169,11 @@ def _make_worker(
     max_num_batched_tokens: int | None = None,
     max_concurrent_batches: int = 2,
     max_store_blocks: int | None = None,
+    *,
+    shape_per_token: tuple[int, int] = _SHAPE,
+    dtype: np.dtype = _DTYPE,
 ) -> AuxOutputWorkerConnector:
-    object_nbytes = _BLOCK_SIZE * int(np.prod(_SHAPE))
+    object_nbytes = _BLOCK_SIZE * int(np.prod(shape_per_token)) * dtype.itemsize
     store = _make_store(
         max_bytes=(
             1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
@@ -176,8 +183,8 @@ def _make_worker(
     worker = object.__new__(AuxOutputWorkerConnector)
     worker._store = store
     worker._buffer = RoutedExpertsBuffer(
-        _DTYPE,
-        _SHAPE,
+        dtype,
+        shape_per_token,
         _BLOCK_SIZE,
         max_num_seqs,
         max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
@@ -291,6 +298,90 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     process_output.assert_called_once()
     assert worker._pending_outputs == []
     worker.close()
+
+
+def test_aux_only_outputs_keep_step_counts_and_accumulate_prefill(monkeypatch):
+    """Pending steps trim their own rows and retain prefill until sampling."""
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock())
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+    worker = _make_worker(2)
+    worker._capturer = Mock()
+    # Request IDs, token starts, scheduled tokens, sampled and rejected counts.
+    steps = [
+        (["decode", "prefill"], [4, 0], [3, 1], [2, 0], [1, 0]),
+        (["decode"], [6], [3], [1], [2]),
+        (["prefill"], [1], [1], None, None),
+        (["prefill"], [2], [1], [1], [0]),
+    ]
+    captures = []
+    pending_outputs = []
+    outputs = []
+    try:
+        for step, (request_ids, starts, scheduled, sampled, rejected) in enumerate(
+            steps
+        ):
+            metadata = _metadata(
+                0,
+                [
+                    _request_metadata(r, start, count, 4 if r == "decode" else 0, [])
+                    for r, start, count in zip(request_ids, starts, scheduled)
+                ],
+                {},
+            )
+            _begin_step(worker, metadata)
+            rows = (
+                np.arange(sum(scheduled) * np.prod(_SHAPE), dtype=_DTYPE).reshape(
+                    sum(scheduled), *_SHAPE
+                )
+                + step * 32
+            )
+            captures.append(rows)
+            worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+            pending = worker.prepare_output(
+                _input_batch(request_ids, np.array(starts), np.cumsum([0, *scheduled]))
+            )
+            pending_recv = (
+                SimpleNamespace(
+                    event=Mock(),
+                    num_sampled=torch.tensor(sampled, dtype=torch.int32),
+                    num_rejected=torch.tensor(rejected, dtype=torch.int32),
+                )
+                if sampled is not None
+                else None
+            )
+            pending_outputs.append(
+                async_utils.AsyncOutput(
+                    model_runner_output=ModelRunnerOutput(
+                        request_ids, {r: i for i, r in enumerate(request_ids)}
+                    ),
+                    sampler_output=None,
+                    num_sampled_tokens=None,
+                    main_stream=Mock(),
+                    copy_stream=Mock(),
+                    check_ep_fault=False,
+                    pending_aux_output=pending,
+                    pending_recv=pending_recv,
+                )
+            )
+            if len(pending_outputs) == 2:
+                outputs.append(pending_outputs.pop(0).get_output())
+        outputs.extend(output.get_output() for output in pending_outputs)
+
+        expected = [
+            {"decode": (4, captures[0][:2])},
+            {"decode": (6, captures[1][:1])},
+            {},
+            {"prefill": (0, np.concatenate([captures[0][3:], *captures[2:]]))},
+        ]
+        for output, requests in zip(outputs, expected, strict=True):
+            result = output.aux_output_connector_output
+            assert result is not None
+            assert result.keys() == requests.keys()
+            for request_id, (token_start, rows) in requests.items():
+                assert result[request_id].token_start == token_start
+                np.testing.assert_array_equal(result[request_id].rows, rows)
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("num_pending", [1, 2])
@@ -588,6 +679,95 @@ def test_worker_data_plane_publishes_blocks_and_reuses_prefix():
     assert output is not None
     np.testing.assert_array_equal(output["second"].rows, logical)
     worker.close()
+
+
+def test_pp_capture_aggregation_preserves_layers_and_cached_token_range(monkeypatch):
+    """Uneven PP stages return the same token interval in global layer order."""
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "2,3,2")
+    pp_group = SimpleNamespace(world_size=3, rank_in_group=0)
+    monkeypatch.setattr(capturer_module, "get_pp_group", lambda: pp_group)
+    monkeypatch.setattr(
+        capturer_module, "current_platform", SimpleNamespace(device_type="cpu")
+    )
+    monkeypatch.setattr(
+        capturer_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(dp_metadata=None, batch_descriptor=None),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            get_total_num_hidden_layers=lambda: 7,
+            get_num_experts=lambda: 512,
+            get_num_experts_per_tok=lambda: 2,
+            hf_text_config=SimpleNamespace(model_type="test"),
+        ),
+        parallel_config=SimpleNamespace(data_parallel_rank=0, tensor_parallel_size=1),
+    )
+    logical = np.arange(256, 256 + 10 * 7 * 2, dtype=np.uint16).reshape(10, 7, 2)
+    hashes = [b"a" * 32, b"b" * 32]
+    aggregator = AuxOutputAggregator(range(3))
+
+    with ExitStack() as stack:
+        workers = []
+        for rank, (start_layer, num_layers) in enumerate([(0, 2), (2, 3), (5, 2)]):
+            pp_group.rank_in_group = rank
+            capturer = capturer_module.RoutedExpertsCapturer(8, config)
+            assert capturer.start_layer == start_layer
+            assert capturer.shape_per_token == (num_layers, 2)
+            worker = _make_worker(
+                2,
+                shape_per_token=capturer.shape_per_token,
+                dtype=np.dtype(capturer.output_dtype_name),
+            )
+            stack.callback(worker.close)
+            worker._capturer = capturer
+            workers.append(worker)
+
+        for request_id, token_start, token_end in [("first", 0, 8), ("second", 8, 10)]:
+            num_tokens = token_end - token_start
+            step = _metadata(
+                0,
+                [_request_metadata(request_id, token_start, num_tokens, 2, hashes)],
+                {"first": []} if request_id == "second" else {},
+            )
+            outputs = []
+            for worker in workers:
+                _begin_step(worker, step)
+                capturer = worker._capturer
+                for layer_id in range(
+                    capturer.start_layer,
+                    capturer.start_layer + capturer.shape_per_token[0],
+                ):
+                    capturer.capture(
+                        layer_id,
+                        torch.from_numpy(
+                            logical[token_start:token_end, layer_id].astype(np.int64)
+                        ),
+                    )
+                pending = worker.prepare_output(
+                    _input_batch(
+                        [request_id], np.array([token_start]), np.array([0, num_tokens])
+                    )
+                )
+                assert pending is not None
+                capturer.device_buffer.fill_(-1)
+                pending.enqueue_cpu_copy(np.array([1]), np.array([0]))
+                outputs.append(
+                    ModelRunnerOutput(
+                        req_ids=[request_id],
+                        req_id_to_index={request_id: 0},
+                        aux_output_connector_output=worker.process_output(pending),
+                    )
+                )
+
+            output = aggregator.aggregate(outputs, output_rank=2)
+            assert output is not None
+            assert output.aux_output_connector_output is not None
+            result = output.aux_output_connector_output[request_id]
+            assert result.token_start == 2
+            assert result.token_start + len(result.rows) == token_end
+            assert result.rows.dtype == np.uint16
+            np.testing.assert_array_equal(result.rows, logical[2:token_end])
 
 
 def test_worker_matches_kv_eviction_order_after_requests_finish():

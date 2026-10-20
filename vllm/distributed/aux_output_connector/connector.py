@@ -12,6 +12,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.request import Request
 
 
@@ -39,6 +40,35 @@ class AuxOutputConnectorMetadata:
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+
+
+class AuxOutputAggregator:
+    """Concatenate the PP stages' auxiliary outputs along the layer axis."""
+
+    def __init__(self, stage_ranks: Sequence[int]) -> None:
+        # The first rank of each PP stage, in stage order.
+        self.stage_ranks = stage_ranks
+
+    def aggregate(
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int
+    ) -> ModelRunnerOutput | None:
+        output = outputs[output_rank]
+        if output is None or not output.aux_output_connector_output:
+            return output
+        stage_outputs: list[dict[str, AuxRequestOutput]] = []
+        for rank in self.stage_ranks:
+            stage_output = outputs[rank]
+            assert stage_output is not None
+            assert stage_output.aux_output_connector_output is not None
+            stage_outputs.append(stage_output.aux_output_connector_output)
+        output.aux_output_connector_output = {
+            request_id: AuxRequestOutput(
+                request_output.token_start,
+                np.concatenate([o[request_id].rows for o in stage_outputs], axis=1),
+            )
+            for request_id, request_output in output.aux_output_connector_output.items()
+        }
+        return output
 
 
 class AuxOutputSchedulerConnector:

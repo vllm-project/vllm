@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from vllm.distributed.aux_output_connector.connector import AuxOutputAggregator
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -100,6 +101,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator | None = None,
         ec_output_aggregator: ECOutputAggregator | None = None,
+        aux_output_aggregator: AuxOutputAggregator | None = None,
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
@@ -113,6 +115,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
             unique_reply_rank,
             kv_output_aggregator,
             ec_output_aggregator,
+            aux_output_aggregator,
         )
 
 

@@ -36,7 +36,8 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         global_batch=global_batch,
         restore_for_sampling=Mock(),
     )
-    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=False))
+    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=None))
+    runner.aux_output_connector = None
     runner.postprocess_num_computed_tokens = Mock()
     runner.model_state = SimpleNamespace(postprocess_state=Mock())
     runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
