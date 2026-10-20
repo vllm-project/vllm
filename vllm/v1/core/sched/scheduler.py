@@ -253,7 +253,6 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
-        self.missing_encoder_data_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -2024,34 +2023,6 @@ class Scheduler(SchedulerInterface):
         mm_features = request.mm_features
         assert mm_features is not None
         assert len(mm_features) > 0
-
-        for i, mm_feature in enumerate(mm_features):
-            if mm_feature.data is not None:
-                continue
-            mm_end = mm_feature.mm_position.offset + mm_feature.mm_position.length
-            if not self.is_encoder_decoder and mm_end <= num_computed_tokens:
-                continue
-            if not self.is_encoder_decoder:
-                cached_num_embeds = (
-                    self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
-                )
-                if cached_num_embeds is not None:
-                    if self._reject_on_encoder_cache_embed_mismatch(
-                        request,
-                        i,
-                        mm_feature.identifier,
-                        cached_num_embeds,
-                        mm_feature.mm_position.get_num_embeds(),
-                    ):
-                        return [], 0, encoder_compute_budget, [], []
-                    continue
-            if self.ec_connector is not None and self.ec_connector.has_cache_item(
-                mm_feature.identifier
-            ):
-                continue
-            self.missing_encoder_data_reqs.add(request.request_id)
-            return [], 0, encoder_compute_budget, [], []
-
         external_load_encoder_input = []
         duplicate_encoder_inputs = []
 
@@ -2198,10 +2169,6 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
-
-            if mm_feature.data is None:
-                self.missing_encoder_data_reqs.add(request.request_id)
-                return [], 0, encoder_compute_budget, [], []
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds
@@ -2561,8 +2528,6 @@ class Scheduler(SchedulerInterface):
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
-        error_req_ids.update(self.missing_encoder_data_reqs)
-        self.missing_encoder_data_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:

@@ -33,6 +33,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.cache import (
+    LruKeyReplicatedReceiverCache,
+    MultiModalCacheMissError,
+)
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
@@ -57,7 +61,7 @@ from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
@@ -5007,7 +5011,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
-    scheduler.missing_encoder_data_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -7233,91 +7236,83 @@ def test_encoder_cache_accepts_matching_embed_count():
     assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
 
 
-def test_missing_multimodal_data_fails_before_encoder_execution():
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    request = create_requests(
-        num_requests=1,
-        num_tokens=8,
-        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
-    )[0]
-    request.mm_features[0].data = None
-    scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-
-    assert not scheduler_output.num_scheduled_tokens
-    assert request.request_id in scheduler.missing_encoder_data_reqs
-    outputs = scheduler.update_from_output(
-        scheduler_output,
-        ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+@pytest.mark.parametrize(
+    "model", ["llava-hf/llava-1.5-7b-hf", "Qwen/Qwen2-VL-2B-Instruct"]
+)
+@pytest.mark.parametrize(
+    "cache_kind", ["none", "chunked", "encoder", "external", "prefix", "receiver"]
+)
+def test_admission_requires_resolved_multimodal_data(model, cache_kind):
+    """Only a receiver-cache hit supplies data needed at worker admission."""
+    scheduler = create_scheduler(
+        model=model,
+        enable_prefix_caching=True,
+        max_num_batched_tokens=16 if cache_kind == "chunked" else 8192,
     )
-    assert request.status == RequestStatus.FINISHED_ERROR
-    assert outputs[request.client_index].outputs[0].finish_reason == FinishReason.ERROR
-
-    healthy_request = create_requests(num_requests=1, num_tokens=8)[0]
-    scheduler.add_request(healthy_request)
-    next_output = scheduler.schedule()
-    assert healthy_request.request_id in next_output.num_scheduled_tokens
-
-
-def test_cached_multimodal_data_can_be_omitted():
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    owner, cached = create_requests(
+    assert scheduler.vllm_config.model_config.uses_mrope == model.startswith("Qwen/")
+    owner, candidate = create_requests(
         num_requests=2,
-        num_tokens=8,
+        num_tokens=33,
+        same_prompt=True,
         mm_hashes_list=[["shared-image"], ["shared-image"]],
         mm_positions=[
-            [PlaceholderRange(offset=0, length=4)],
-            [PlaceholderRange(offset=0, length=4)],
+            [PlaceholderRange(offset=20, length=4)],
+            [PlaceholderRange(offset=20, length=4)],
         ],
     )
-    scheduler.encoder_cache_manager.allocate(owner, 0)
-    cached.mm_features[0].data = None
-    scheduler.add_request(cached)
+    core = object.__new__(EngineCore)
+    core.scheduler = scheduler
+    core.mm_receiver_cache = None
+    core.request_block_hasher = None
+    if cache_kind == "encoder":
+        scheduler.encoder_cache_manager.allocate(owner, 0)
+        assert scheduler.encoder_cache_manager.check_and_update_cache(candidate, 0)
+    elif cache_kind == "external":
+        scheduler.ec_connector = Mock()
+        scheduler.ec_connector.has_cache_item.return_value = True
+    elif cache_kind == "prefix":
+        scheduler.add_request(owner)
+        _model_output(scheduler, scheduler.schedule(), [[100]])
+        _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(
+            candidate
+        )
+        assert num_cached_tokens >= 24
+    elif cache_kind == "receiver":
+        core.mm_receiver_cache = LruKeyReplicatedReceiverCache(
+            scheduler.vllm_config.model_config
+        )
+        core.mm_receiver_cache.get_and_update_features(owner.mm_features)
 
-    scheduler_output = scheduler.schedule()
-
-    assert cached.request_id in scheduler_output.num_scheduled_tokens
-    assert cached.request_id not in scheduler_output.scheduled_encoder_inputs
-    assert cached.request_id not in scheduler.missing_encoder_data_reqs
-
-
-def test_missing_future_multimodal_data_fails_before_worker_admission():
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf", max_num_seqs=1, max_num_batched_tokens=4
+    candidate.mm_features[0].data = None
+    request = EngineCoreRequest(
+        request_id=candidate.request_id,
+        external_req_id=candidate.request_id,
+        prompt_token_ids=candidate.prompt_token_ids,
+        mm_features=candidate.mm_features,
+        sampling_params=candidate.sampling_params,
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
     )
-    request = create_requests(
-        num_requests=1,
-        num_tokens=12,
-        mm_positions=[[PlaceholderRange(offset=6, length=4)]],
+    if cache_kind == "receiver":
+        admitted, _ = core.preprocess_add_request(request)
+        assert admitted.mm_features[0].data is not None
+    else:
+        with pytest.raises(MultiModalCacheMissError) as exc_info:
+            core.preprocess_add_request(request)
+        assert exc_info.value.mm_hashes == ["shared-image"]
+        assert candidate.request_id not in scheduler.requests
+        if cache_kind == "external":
+            scheduler.ec_connector.has_cache_item.assert_not_called()
+            scheduler.ec_connector = None
+
+    healthy_request = create_requests(
+        num_requests=1, num_tokens=8, req_ids=["healthy-request"]
     )[0]
-    request.mm_features[0].data = None
-    scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-
-    assert not scheduler_output.scheduled_new_reqs
-    assert not scheduler_output.num_scheduled_tokens
-    assert request.request_id in scheduler.missing_encoder_data_reqs
-
-
-def test_external_encoder_data_can_supply_missing_payload():
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    request = create_requests(
-        num_requests=1,
-        num_tokens=8,
-        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
-    )[0]
-    request.mm_features[0].data = None
-    scheduler.ec_connector = Mock()
-    scheduler.ec_connector.has_cache_item.return_value = True
-    scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-
-    assert request.request_id in scheduler_output.num_scheduled_tokens
-    assert request.request_id not in scheduler_output.scheduled_encoder_inputs
-    assert request.request_id not in scheduler.missing_encoder_data_reqs
+    scheduler.add_request(healthy_request)
+    assert healthy_request.request_id in scheduler.schedule().num_scheduled_tokens
 
 
 def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):
