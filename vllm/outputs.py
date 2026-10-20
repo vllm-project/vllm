@@ -211,6 +211,16 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        # With n > 1 in DELTA mode, each child sends its prompt logprobs only
+        # with its first output, which may be merged into another child's
+        # later output that has none.
+        if not self.prompt_logprobs and next_output.prompt_logprobs:
+            self.prompt_logprobs = next_output.prompt_logprobs
+        if (
+            self.prompt_token_id_logprobs is None
+            and next_output.prompt_token_id_logprobs is not None
+        ):
+            self.prompt_token_id_logprobs = next_output.prompt_token_id_logprobs
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
