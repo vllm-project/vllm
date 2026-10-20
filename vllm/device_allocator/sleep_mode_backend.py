@@ -73,6 +73,13 @@ class SleepModeBackend(ABC):
         (suspended) engine from a healthy-serving one (see RFC #34303)."""
         return self._state
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        """Discard selected tagged allocations without preserving contents."""
+        raise RuntimeError(
+            f"Sleep-mode backend {type(self).__name__!r} does not support "
+            "selective discard."
+        )
+
     # -- Capability introspection (no instance required) --
 
     @classmethod
@@ -81,9 +88,9 @@ class SleepModeBackend(ABC):
         return True
 
     @classmethod
-    def preserves_nccl(cls) -> bool:
-        """If False, NCCL communicators are destroyed by ``suspend`` and the
-        executor must re-initialize them on ``resume``."""
+    def preserves_communicators(cls) -> bool:
+        """If False, collective communicators (e.g. NCCL) are destroyed by
+        ``suspend`` and the executor must re-initialize them on ``resume``."""
         return False
 
     @classmethod
@@ -93,9 +100,10 @@ class SleepModeBackend(ABC):
         return False
 
     @classmethod
-    def preserves_graphs_with_nccl(cls) -> bool:
-        """If True, CUDA graphs containing NCCL collectives stay valid after
-        resume. False when NCCL is rebuilt (embedded comm handles go stale)."""
+    def preserves_graphs_with_communicators(cls) -> bool:
+        """If True, CUDA graphs containing collective communicators (e.g. NCCL)
+        stay valid after resume. False when communicators are rebuilt (embedded
+        comm handles go stale)."""
         return False
 
     @classmethod
@@ -121,7 +129,12 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        # Runtime state and graph pools are kept at every level; weights only
+        # at level 1.
+        offload_tags: tuple[str, ...] = ("runtime", "cudagraph")
+        if level == 1:
+            offload_tags = ("weights", *offload_tags)
+        allocator.sleep(offload_tags=offload_tags)
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
@@ -131,10 +144,16 @@ class CuMemBackend(SleepModeBackend):
         allocator.wake_up(tags)
         self._state = "RUNNING"
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        from vllm.device_allocator import get_mem_allocator_instance
+
+        allocator = get_mem_allocator_instance()
+        allocator.discard(tags)
+        self._state = "SUSPENDED"
+
     @classmethod
-    def preserves_nccl(cls) -> bool:
-        # NCCL buffers live outside CuMemAllocator's pool, so an allocator-level
-        # sleep leaves the communicators intact (no reinit needed on resume).
+    def preserves_communicators(cls) -> bool:
+        # Comm identity/topology survive memory suspension; no reinit needed.
         return True
 
 

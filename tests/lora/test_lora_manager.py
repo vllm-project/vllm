@@ -16,10 +16,12 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.model_manager import (
     DEFAULT_LANGUAGE_WRAPPER_KEY,
+    AdapterLRUCache,
     LoRAMapping,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
@@ -28,6 +30,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -45,6 +48,68 @@ DEVICES = (
 )
 
 DEFAULT_DTYPE = torch.get_default_dtype()
+
+
+@pytest.mark.parametrize(
+    "mixed,declared_3d", [(False, False), (False, True), (True, False)]
+)
+def test_reject_fused_moe_lora_before_registration(mixed, declared_3d):
+    """Missing format flags should produce guidance without caching the adapter."""
+    module_name = "model.layers.0.mlp.experts"
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(max_cpu_loras=1)
+    manager._registered_adapters = AdapterLRUCache(1, manager.deactivate_adapter)
+    manager._enable_mixed_moe_lora_format = mixed
+    manager.is_pooling_model = False
+    manager.modules = {module_name: FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)}
+    adapter = LoRAModel(
+        1,
+        8,
+        {
+            module_name: LoRALayerWeights(
+                module_name, 8, 16, torch.zeros(16, 4), torch.zeros(4, 16)
+            )
+        },
+    )
+    adapter.is_3d_lora_weight = declared_3d
+
+    with pytest.raises(ValueError, match="enable_mixed_moe_lora_format=True") as exc:
+        manager.add_adapter(adapter)
+    assert "is_3d_lora_weight=True" in str(exc.value)
+    assert module_name in str(exc.value)
+    assert manager.list_adapters() == {}
+
+
+@pytest.mark.parametrize(
+    "wrapper,mixed,declared_3d,weight_name",
+    [
+        (FusedMoE3DWithLoRA, False, False, "experts"),
+        (FusedMoEWithLoRA, True, True, "experts"),
+        (FusedMoEWithLoRA, False, False, "experts.0.down_proj"),
+        (FusedMoEWithLoRA, True, False, "experts.0.down_proj"),
+        (FusedMoEWithLoRA, False, False, "q_proj"),
+    ],
+)
+def test_moe_format_validation_allows_supported_layouts(
+    wrapper, mixed, declared_3d, weight_name
+):
+    """Preserve native 3D, mixed-format, per-expert and attention-only adapters."""
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager._enable_mixed_moe_lora_format = mixed
+    manager.is_pooling_model = False
+    manager.modules = {"experts": wrapper.__new__(wrapper)}
+    adapter = LoRAModel(
+        1,
+        8,
+        {
+            weight_name: LoRALayerWeights(
+                weight_name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8)
+            )
+        },
+    )
+    adapter.is_3d_lora_weight = declared_3d
+
+    manager._validate_moe_lora_format(adapter)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -72,6 +137,46 @@ def test_from_lora_tensors(qwen3_lora_files, device):
             f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
         )
         assert lora.lora_a.shape[0] == 8
+
+
+@pytest.mark.parametrize("is_pooling_model", [False, True])
+@pytest.mark.parametrize(
+    "lm_prefix,module_name,text_name",
+    [
+        (
+            "language_model",
+            "language_model.model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+        ("language_model", "language_model.lm_head", "lm_head"),
+        (
+            "model.text_model",
+            "model.text_model.layers.0.self_attn.o_proj",
+            "model.layers.0.self_attn.o_proj",
+        ),
+    ],
+)
+def test_text_only_lora_binds_to_multimodal_language_model(
+    lm_prefix, module_name, text_name, is_pooling_model
+):
+    """An adapter trained on the text-only *ForCausalLM must apply to the
+    language model of a multimodal wrapper instead of silently doing nothing."""
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.is_pooling_model = is_pooling_model
+    manager.supports_mm = True
+    manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
+
+    def weights(name):
+        return LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
+
+    text_lora = weights(text_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is text_lora
+    assert manager._get_lora_layer_weights(adapter, "visual.blocks.0.proj") is None
+
+    exact_lora = weights(module_name)
+    adapter = LoRAModel(1, 8, {text_name: text_lora, module_name: exact_lora})
+    assert manager._get_lora_layer_weights(adapter, module_name) is exact_lora
 
 
 def create_lora(
@@ -198,7 +303,7 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
             self.gate = gate  # canonical path: "moe.gate"
 
             # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how FusedMoE.runner.gate references the
+            # path. This mirrors how MoERunner.runner.gate references the
             # block's gate in qwen3_moe.
             class _Runner(nn.Module):
                 def __init__(self, g):
@@ -649,6 +754,59 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
         == device
     )
     assert manager.device == device
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_set_adapter_mapping_refreshes_after_slot_reassignment(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    # An out-of-band add_lora() can LRU-evict and reassign GPU slots while the
+    # running batch -- and therefore its LoRAMapping -- is unchanged. The
+    # punica metadata must still be re-derived, otherwise in-flight requests
+    # are routed to the evicted layout and decode with the wrong adapter.
+    model = dummy_model
+    model_lora1 = create_lora(1, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora2 = create_lora(2, model, ["dense1", "dense2", "lm_head"], device=device)
+    model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"], device=device)
+    manager = LRUCacheLoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+        vllm_config=default_vllm_config,
+    )
+    punica_wrapper = manager.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
+
+    assert manager.add_adapter(model_lora1)
+    assert manager.activate_adapter(1)
+    assert manager.add_adapter(model_lora2)
+    assert manager.activate_adapter(2)
+    assert manager.lora_index_to_id == [1, 2]
+
+    # Two in-flight requests, one token each, on adapters 1 and 2.
+    manager.set_adapter_mapping(LoRAMapping((1, 2), (1, 2)))
+    assert punica_wrapper.token_lora_indices.tolist() == [0, 1]
+
+    # Out-of-band add_lora() with both slots held by the running batch:
+    # activating 3 evicts 1; re-activating the batch's adapters lands them
+    # in swapped slots while the batch itself is unchanged.
+    assert manager.add_adapter(model_lora3)
+    assert manager.activate_adapter(3)
+    assert manager.activate_adapter(1)
+    assert manager.activate_adapter(2)
+    assert manager.lora_index_to_id == [2, 1]
+
+    # Identical mapping, but the metadata must follow the new slot layout.
+    manager.set_adapter_mapping(LoRAMapping((1, 2), (1, 2)))
+    assert punica_wrapper.token_lora_indices.tolist() == [1, 0]
+
+    manager.remove_all_adapters()
+    assert manager._last_mapping is None
+    assert manager._last_slot_layout is None
 
 
 @pytest.mark.parametrize("device", DEVICES)

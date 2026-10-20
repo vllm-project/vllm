@@ -163,9 +163,28 @@ class TestHoldbackTextRecovery:
         assert len(result) == 0
 
         flushed = scanner.flush_pending()
-        assert len(flushed) == 1
+        assert len(flushed) == 2
         assert isinstance(flushed[0], PreLexedTerminal)
         assert flushed[0].terminal == "TOOL_START"
+        assert isinstance(flushed[1], TextChunk)
+        assert flushed[1].text == ""
+        assert flushed[1].token_count == 2
+
+    def test_deferred_terminal_preserves_trailing_token_count(self, tokenizer):
+        tokenizer.decode.side_effect = lambda ids: {
+            CHANNEL_START_ID: CHANNEL_START,
+            201: "alpha",
+            202: "beta",
+        }[ids[0]]
+        scanner = TokenIDScanner({CHANNEL_START_ID: "THINK_START"}, tokenizer)
+
+        assert scanner.scan("", [CHANNEL_START_ID, 201, 202]) == []
+
+        result = scanner.scan(f"{CHANNEL_START}alphabeta", [])
+        assert isinstance(result[0], PreLexedTerminal)
+        assert isinstance(result[1], TextChunk)
+        assert result[1].text == "alphabeta"
+        assert result[1].token_count == 2
 
     def test_holdback_before_start_tag(self, scanner):
         result = scanner.scan(

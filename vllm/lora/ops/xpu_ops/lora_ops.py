@@ -3,29 +3,27 @@
 
 import torch
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
-def bgmv_shrink(
+def _bgmv_shrink_impl(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    scaling: float = 1.0,
+    scaling: float,
 ) -> None:
     torch.ops._xpu_C.bgmv_shrink(
         output_tensor, inputs, lora_a_weights, lora_indices_tensor, scaling
     )
 
 
-def bgmv_expand(
+def _bgmv_expand_impl(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
-    add_inputs: bool = True,
+    add_inputs: bool,
 ) -> None:
     weight_out_dim = lora_b_weights.size(-2)
     output_dim = output_tensor.size(1)
@@ -65,6 +63,71 @@ def bgmv_expand(
         )
 
 
+def _bgmv_expand_slice_impl(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool,
+) -> None:
+    assert slice_size == lora_b_weights.size(-2)
+    assert slice_offset + slice_size <= output_tensor.size(1)
+    torch.ops._xpu_C.bgmv_expand_slice(
+        output_tensor,
+        inputs,
+        lora_b_weights,
+        lora_indices_tensor,
+        slice_offset,
+        slice_size,
+        add_inputs,
+    )
+
+
+direct_register_custom_op(
+    op_name="xpu_bgmv_shrink",
+    op_func=_bgmv_shrink_impl,
+    mutates_args=["output_tensor"],
+)
+
+direct_register_custom_op(
+    op_name="xpu_bgmv_expand",
+    op_func=_bgmv_expand_impl,
+    mutates_args=["output_tensor"],
+)
+
+direct_register_custom_op(
+    op_name="xpu_bgmv_expand_slice",
+    op_func=_bgmv_expand_slice_impl,
+    mutates_args=["output_tensor"],
+)
+
+
+def bgmv_shrink(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    scaling: float = 1.0,
+) -> None:
+    torch.ops.vllm.xpu_bgmv_shrink(
+        inputs, lora_a_weights, output_tensor, lora_indices_tensor, scaling
+    )
+
+
+def bgmv_expand(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    add_inputs: bool = True,
+) -> None:
+    torch.ops.vllm.xpu_bgmv_expand(
+        inputs, lora_b_weights, output_tensor, lora_indices_tensor, add_inputs
+    )
+
+
 def bgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
@@ -74,12 +137,10 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ) -> None:
-    assert slice_size == lora_b_weights.size(-2)
-    assert slice_offset + slice_size <= output_tensor.size(1)
-    torch.ops._xpu_C.bgmv_expand_slice(
-        output_tensor,
+    torch.ops.vllm.xpu_bgmv_expand_slice(
         inputs,
         lora_b_weights,
+        output_tensor,
         lora_indices_tensor,
         slice_offset,
         slice_size,

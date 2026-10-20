@@ -20,8 +20,11 @@ Architecture
         ├── mark_dead() — signal that the peer is gone
         └── close()     — tear down the connection
 
-Threading model: all I/O is driven by the caller invoking poll().
-No background threads. poll() must be called periodically to:
+Threading model: all I/O is driven by the caller invoking poll(). No background
+threads of its own. More than one caller thread may drive poll() over a
+transport's lifetime, but never concurrently -- callers serialize themselves
+(the tiering manager does so with its lock), because sockets here are not
+thread-safe. poll() must be called periodically to:
   - receive messages (buffered per-connection)
   - accept new inbound peers
   - detect disconnections
@@ -97,6 +100,7 @@ class ControlConnection(ABC):
 
         After this call, alive returns False. The session should
         stop using this connection and the transport will clean it up.
+        Resources are not released here — close() must still run.
         """
         ...
 
@@ -134,6 +138,11 @@ class ControlTransport(ABC):
 
         The connection's send queue is live immediately — messages
         sent before the remote peer's poll() will be buffered.
+
+        A connection to peer_id that is registered but no longer alive is
+        retired and replaced; a live one is a duplicate and must not be
+        replaced.
+
         """
         ...
 
@@ -153,6 +162,7 @@ class ControlTransport(ABC):
             The returned sequence is read-only — callers must not mutate
             it. The caller is responsible for creating sessions for
             these connections.
+
         """
         ...
 

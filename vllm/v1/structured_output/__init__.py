@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
+
+import numpy as np
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -15,12 +17,11 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
-    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
-    import numpy as np
     import numpy.typing as npt
     import torch
 
@@ -31,6 +32,17 @@ else:
 
 
 logger = init_logger(__name__)
+
+
+class ConstraintBounds(NamedTuple):
+    """Where tokens start being fed to the grammar and being masked."""
+
+    grammar_start: int
+    constraint_start: int
+
+
+_CONSTRAINED_FROM_START = ConstraintBounds(0, 0)
+_NO_SPEC_TOKENS = ConstraintBounds(1, 1)
 
 
 class StructuredOutputManager:
@@ -164,30 +176,52 @@ class StructuredOutputManager:
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
 
+        grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
             grammar = self.executor.submit(self._create_grammar, request)
         else:
-            grammar = self._create_grammar(request)  # type: ignore[assignment]
-        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
+            try:
+                grammar = self._create_grammar(request)
+            except Exception as e:
+                grammar = Future()
+                grammar.set_exception(e)
+        request.structured_output_request.grammar = grammar
 
     def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
-        key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
-
+        struct_request = request.structured_output_request
+        assert struct_request is not None
         # Note that the request was validated in the engine core client,
-        # so at this point we know it is a supported type of request.
-        #
-        # TODO: we still need to handle xgrammar compilation failures,
-        # though it should be unlikely as we test that up front as well.
-        request_type, grammar_spec = key
-
-        assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        # so at this point we know it is a supported type of request. Grammar
+        # compilation may still fail; the Future carries that error to the
+        # scheduler so it can fail only this request.
+        try:
+            request_type, grammar_spec = struct_request.structured_output_key
+            assert self.backend is not None
+            stop_token_ids = (
+                request.sampling_params.all_stop_token_ids
+                if request.sampling_params is not None
+                else None
+            )
+            return self.backend.compile_grammar(
+                request_type, grammar_spec, stop_token_ids=stop_token_ids
+            )
+        except Exception:
+            logger.exception(
+                "Failed to compile grammar for request %s", request.request_id
+            )
+            raise
 
     def _fill_bitmasks(
-        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
+        self,
+        batch: Iterable[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]],
     ) -> None:
+        """Fill one bitmask row per entry.
+
+        A row the grammar does not constrain allows every token except
+        `masked_ids`, the implicit reasoning ends masked while reasoning.
+        """
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask in batch:
+        for grammar, index, apply_bitmask, masked_ids in batch:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
@@ -195,11 +229,139 @@ class StructuredOutputManager:
                 # reset the relevant part of the bitmask for consequent
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
+                if masked_ids:
+                    row = self._grammar_bitmask[index].numpy().view(np.uint32)
+                    for token_id in masked_ids:
+                        row[token_id >> 5] &= ~np.uint32(1 << (token_id & 31))
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: list[tuple[StructuredOutputGrammar, int, bool, tuple[int, ...]]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
+
+    def _masked_reasoning_ends(self, request: "Request") -> tuple[int, ...]:
+        """Implicit reasoning-end tokens the grammar rejects as first content.
+
+        Such a token (e.g. a tool-call start) ends reasoning and is also the
+        first content token, so sampling one where the grammar cannot start
+        with it would make the output invalid. These stay masked while the
+        request reasons. The grammar does not advance before reasoning ends,
+        so the set is fixed per request.
+        """
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.masked_reasoning_end_ids is None:
+            masked: tuple[int, ...] = ()
+            reasoner = self._get_reasoner(request)
+            if isinstance(reasoner, ParserEngineReasoningAdapter):
+                grammar = structured_req.grammar
+                assert isinstance(grammar, StructuredOutputGrammar)
+                masked = tuple(
+                    token_id
+                    for token_id in sorted(reasoner.implicit_reasoning_end_token_ids)
+                    if not grammar.validate_tokens([token_id])
+                )
+            structured_req.masked_reasoning_end_ids = masked
+        return structured_req.masked_reasoning_end_ids
+
+    def _get_constraint_bounds(
+        self,
+        request: "Request",
+        spec_tokens: Sequence[int],
+        spec_tokens_committed: bool = False,
+    ) -> ConstraintBounds:
+        """Return the index into `spec_tokens` where tokens should start being
+        constrained by the grammar.
+        Assumes `spec_tokens` are stripped of -1 padding tokens.
+        Returns `len(spec_tokens) + 1` if no token should be constrained after
+        accepting all `spec_tokens`.
+        This is `constraint_start`; `grammar_start` is one less if reasoning ends
+        implicitly on a content token (e.g. a tool-call start).
+
+        `spec_tokens_committed` is True if spec_tokens is already in
+        `request.all_token_ids`.
+        """
+        if self.enable_in_reasoning:
+            return _CONSTRAINED_FROM_START
+
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.reasoning_ended:
+            return _CONSTRAINED_FROM_START
+
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return _CONSTRAINED_FROM_START
+
+        if structured_req.reasoning_ended is None:
+            # This should be removed here, but since `openai_gptoss`
+            # is an independent code path, it is kept for now.
+            # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
+            # it can be removed.
+            if reasoner.is_reasoning_end(request.prompt_token_ids or []):
+                return _CONSTRAINED_FROM_START
+            structured_req.reasoning_ended = False
+
+        num_spec_tokens = len(spec_tokens)
+        if num_spec_tokens <= 0:
+            return _NO_SPEC_TOKENS
+
+        # Engine-based parsers also report whether the end token is content.
+        if (
+            isinstance(reasoner, ParserEngineReasoningAdapter)
+            and reasoner.reasoning_end_token_ids
+        ):
+            end = reasoner.find_reasoning_end(spec_tokens)
+            if end is not None:
+                constraint_start = end.offset + 1
+                if end.implicit:
+                    return ConstraintBounds(end.offset, constraint_start)
+                return ConstraintBounds(constraint_start, constraint_start)
+
+        # Fallback: the grammar starts after the end token.
+        # TODO: Build a read-only Sequence view over all_token_ids
+        # instead of copying the entire all_token_ids into input_ids.
+        if spec_tokens_committed:
+            if not spec_tokens or not reasoner.is_reasoning_end_streaming(
+                request.all_token_ids, spec_tokens
+            ):
+                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
+
+            input_ids = request.all_token_ids.copy()
+            delta_ids = list(spec_tokens)
+        else:
+            input_ids = request.all_token_ids.copy()
+            input_ids.extend(spec_tokens)
+            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
+                return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
+            delta_ids = list(spec_tokens)
+
+        for i in range(num_spec_tokens - 1, 0, -1):
+            input_ids.pop()
+            delta_ids.pop()
+            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+                return ConstraintBounds(i + 1, i + 1)
+        return ConstraintBounds(1, 1)
+
+    def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
+        """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
+        if not request.use_structured_output:
+            return spec_tokens
+
+        spec_tokens = strip_speculative_padding(spec_tokens)
+        grammar_start, _ = self._get_constraint_bounds(request, spec_tokens)
+        if grammar_start >= len(spec_tokens):
+            return spec_tokens
+
+        structured_req = request.structured_output_request
+        if TYPE_CHECKING:
+            assert structured_req is not None
+        grammar = structured_req.grammar
+        if TYPE_CHECKING:
+            assert isinstance(grammar, StructuredOutputGrammar)
+        prefix = spec_tokens[:grammar_start]
+        validated = grammar.validate_tokens(spec_tokens[grammar_start:])
+        return prefix + validated
 
     def grammar_bitmask(
         self,
@@ -213,6 +375,8 @@ class StructuredOutputManager:
 
         # Covers both speculative decoding and diffusion LLMs (canvas_length).
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        is_diffusion = self.vllm_config.model_config.is_diffusion
+        mask_stride = max_num_spec_tokens + (0 if is_diffusion else 1)
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -228,7 +392,7 @@ class StructuredOutputManager:
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
+        # Each request owns a fixed-width block of `mask_stride` rows.
         cumulative_index = 0
 
         # Optimized parallel filling of bitmasks for
@@ -244,11 +408,17 @@ class StructuredOutputManager:
                 structured_output_request = request.structured_output_request
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
-                    assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
+                if TYPE_CHECKING:
+                    assert isinstance(grammar, StructuredOutputGrammar)
 
-                apply_bitmask = self.should_fill_bitmask(request)
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                apply_bitmask = (
+                    self._get_constraint_bounds(request, ()).constraint_start == 0
+                )
+                masked_ids = (
+                    () if apply_bitmask else self._masked_reasoning_ends(request)
+                )
+                batch.append((grammar, cumulative_index, apply_bitmask, masked_ids))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -262,116 +432,119 @@ class StructuredOutputManager:
                 promise.result()
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
-            for req_id in structured_output_request_ids:
+            for grammar_idx, req_id in enumerate(structured_output_request_ids):
+                cumulative_index = grammar_idx * mask_stride
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
-                    assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
-                apply_bitmask = self.should_fill_bitmask(request)
+                if TYPE_CHECKING:
+                    assert isinstance(grammar, StructuredOutputGrammar)
 
+                req_tokens = scheduled_spec_decode_tokens.get(req_id, list())
+                grammar_start, constraint_start = self._get_constraint_bounds(
+                    request, strip_speculative_padding(req_tokens)
+                )
+                # Rows before constraint_start are still reasoning.
+                masked_ids = (
+                    self._masked_reasoning_ends(request) if constraint_start else ()
+                )
                 state_advancements = 0
-                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                if self.vllm_config.model_config.is_diffusion and req_tokens:
-                    # Diffusion LLMs don't sample a bonus token after the
-                    # scheduled positions, so don't append the -1 placeholder.
-                    token_iter: Iterable[int] = req_tokens
-                else:
-                    token_iter = itertools.chain(req_tokens, (-1,))
-                for token in token_iter:
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                seen_padding = False
+                # Row filled from the last valid grammar state before a draft
+                # was rejected; later rows reuse it rather than unconstraining.
+                failed_index: int | None = None
+                bitmask = self._grammar_bitmask
+                for i, token in enumerate(req_tokens):
+                    if failed_index is not None:
+                        bitmask[cumulative_index].copy_(bitmask[failed_index])
+                        cumulative_index += 1
+                        continue
+                    apply_bitmask = not seen_padding and i >= constraint_start
+                    reasoning = not seen_padding and i < constraint_start
+                    row_masked = masked_ids if reasoning else ()
+                    self._fill_bitmasks(
+                        ((grammar, cumulative_index, apply_bitmask, row_masked),)
+                    )
                     if token == -1:
-                        # Stop advancing the grammar once we hit a padding token.
-                        apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        seen_padding = True
+                    elif not seen_padding and i >= grammar_start:
+                        if not grammar.is_terminated() and grammar.accept_tokens(
+                            req_id, [token]
+                        ):
+                            state_advancements += 1
+                        else:
+                            failed_index = cumulative_index
+                            logger.error(
+                                "Unexpected: grammar terminated or rejected draft "
+                                "token %s for request %s during bitmask fill.",
+                                token,
+                                req_id,
+                            )
                     cumulative_index += 1
+
+                # Diffusion LLMs don't sample a bonus token after the
+                # scheduled positions, so skip its bitmask in that case.
+                if not (is_diffusion and req_tokens):
+                    if failed_index is not None:
+                        bitmask[cumulative_index].copy_(bitmask[failed_index])
+                    else:
+                        bonus_apply = not seen_padding and constraint_start <= len(
+                            req_tokens
+                        )
+                        bonus_reasoning = not seen_padding and not bonus_apply
+                        bonus_masked = masked_ids if bonus_reasoning else ()
+                        self._fill_bitmasks(
+                            ((grammar, cumulative_index, bonus_apply, bonus_masked),)
+                        )
+                    cumulative_index += 1
+
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < bitmask_tensor.shape[0]:
-            bitmask_tensor = bitmask_tensor[:cumulative_index]
+        num_masks = len(structured_output_request_ids) * mask_stride
+        if num_masks < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:num_masks]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def should_fill_bitmask(self, request: "Request") -> bool:
-        # NOTE (Hanchen) if enable_in_reasoning is True, it means that
-        # the model needs to be constrained in reasoning. So we should always
-        # enable the bitmask filling.
-        reasoner = self._get_reasoner(request)
-        if reasoner is not None:
-            if self.enable_in_reasoning:
-                return True
-            assert request.structured_output_request is not None
-            if request.structured_output_request.reasoning_ended is None:
-                # This should be removed here, but since `openai_gptoss`
-                # is an independent code path, it is kept for now.
-                # After unifying the `openai_gptoss` and non-`openai_gptoss` styles,
-                # it can be removed.
-                request.structured_output_request.reasoning_ended = (
-                    reasoner.is_reasoning_end(request.prompt_token_ids or [])
-                )
-            return request.structured_output_request.reasoning_ended
-        return True
-
-    def should_advance(self, request: "Request") -> bool:
-        if not request.use_structured_output:
-            return False
-
-        # To determine whether we can advance the FSM.
-        # Supports thinking usage where we skip the reasoning components.
-        if TYPE_CHECKING:
-            assert request.structured_output_request is not None
-            assert request.structured_output_request.grammar is not None
-        # by default, we should always advance
-        # for cases that don't use thinking mode.
-        reasoner = self._get_reasoner(request)
-        if reasoner is None:
-            return True
-
-        # if the model needs structured in reasoning, we should advance
-        if self.enable_in_reasoning:
+    def accept_tokens(self, request: "Request", new_token_ids: list[int]) -> bool:
+        """Advance grammar with accepted tokens. Returns False on rejection."""
+        if not request.use_structured_output or not new_token_ids:
             return True
 
         structured_req = request.structured_output_request
-        if structured_req.reasoning_ended:
-            return True
+        if TYPE_CHECKING:
+            assert structured_req is not None
+        grammar = structured_req.grammar
+        if TYPE_CHECKING:
+            assert isinstance(grammar, StructuredOutputGrammar)
 
-        # Check if reasoning ends in *this* step
-        delta_from = request.num_computed_tokens - request.num_output_placeholders
-        all_token_ids = request.all_token_ids
-        start = (
-            delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
+        grammar_start, _ = self._get_constraint_bounds(
+            request, new_token_ids, spec_tokens_committed=True
         )
-        if reasoner.is_reasoning_end_streaming(
-            all_token_ids, itertools.islice(all_token_ids, start, None)
-        ):
-            structured_req.reasoning_ended = True
-
-            # Reasoning just ended this step. Defer FSM advance until the next
-            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
-            # advancing on the closing boundary token can accept tokens that still
-            # belong to the reasoning stream. Structural tags are the only safe
-            # same-step exception: they model phased output (e.g. thinking tag ->
-            # answer tag), and speculative decoding must run grammar.validate_tokens
-            # on draft tokens produced immediately after that transition.
-            if (
-                self.vllm_config.speculative_config is not None
-                and structured_req.structured_output_key[0]
-                == StructuredOutputOptions.STRUCTURAL_TAG
-            ):
-                return True
-
-        return False
+        # Early return only when no reasoning-end token is present.
+        # Otherwise, latch structured_req.reasoning_ended.
+        if grammar_start > len(new_token_ids):
+            return True
+        structured_req.reasoning_ended = True
+        return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
 
     def clear_backend(self) -> None:
+        # Finish tasks that can still use the backend before releasing it.
+        if not self.vllm_config.model_config.skip_tokenizer_init:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        if (
+            self.fill_bitmask_parallel_threshold
+            < self.vllm_config.scheduler_config.max_num_seqs
+        ):
+            self.executor_for_fillmask.shutdown(wait=True, cancel_futures=True)
         if self.backend is not None:
             self.backend.destroy()
+            self.backend = None

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -15,9 +18,10 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -42,17 +46,9 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -69,15 +65,9 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -237,6 +227,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -260,6 +251,7 @@ impl ChatRenderer for FakeChatBackend {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
             effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
@@ -296,7 +288,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
 
 fn sample_tool_request(request_id: &str) -> ChatRequest {
     let mut request = sample_request(request_id);
-    request.tools = vec![ChatTool {
+    let tools = vec![ChatTool {
         name: "get_weather".to_string(),
         description: Some("Get weather".to_string()),
         parameters: serde_json::json!({
@@ -305,8 +297,15 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
             "required": ["city"],
         }),
         strict: None,
+        defer_loading: None,
     }];
-    request.tool_choice = ChatToolChoice::Auto;
+    request.tool_context = vllm_chat::ResolvedToolContext::new(
+        &request.messages,
+        tools,
+        Some(ChatToolChoice::Auto),
+        true,
+    )
+    .expect("tool context should resolve");
     request
 }
 
@@ -341,7 +340,7 @@ async fn chat_streams_text_events() {
                 );
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output("chat-1", vec![b'H' as u32], None, None),
                             request_output(
@@ -353,7 +352,8 @@ async fn chat_streams_text_events() {
                         ],
                         finished_requests: Some(BTreeSet::from(["chat-1".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -396,6 +396,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -404,6 +405,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -453,7 +455,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output("chat-utf8", bytes_to_token_ids(&[0xe4]), None, None),
                             request_output(
@@ -465,7 +467,8 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
                         ],
                         finished_requests: Some(BTreeSet::from(["chat-utf8".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -502,6 +505,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -541,7 +545,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-final-flush",
                             bytes_to_token_ids(b"ok st"),
@@ -550,7 +554,8 @@ async fn chat_stream_flushes_held_text_on_finish() {
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-final-flush".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -587,6 +592,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -661,7 +667,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-4",
                             vec![UNKNOWN_DECODE_TOKEN_ID],
@@ -669,7 +675,8 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
                             None,
                         )],
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -724,7 +731,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-include-stop",
                             vec![b'H' as u32, b'i' as u32, b'!' as u32],
@@ -733,7 +740,8 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-include-stop".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -772,6 +780,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -811,7 +820,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output(
                                 "chat-reasoning",
@@ -840,7 +849,8 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
                         ],
                         finished_requests: Some(BTreeSet::from(["chat-reasoning".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -878,6 +888,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "reason ".to_string(),
+            token_count: Some(7),
         }
     );
     assert_eq!(
@@ -886,6 +897,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "more".to_string(),
+            token_count: Some(4),
         }
     );
     assert_eq!(
@@ -910,6 +922,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 1,
             kind: AssistantBlockKind::Text,
             delta: "answer".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -925,12 +938,15 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
+            usage,
             finish_reason,
             ..
         })) => {
             assert_eq!(message.reasoning().unwrap(), "reason more");
             assert_eq!(message.text(), "answer");
             assert_eq!(finish_reason, FinishReason::Length);
+            // 7 tokens for "reason " plus 4 for "more"; markers are excluded.
+            assert_eq!(usage.reasoning_tokens, 11);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -954,7 +970,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-collect",
                             bytes_to_token_ids(b"<think>inner</think>outer"),
@@ -963,7 +979,8 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-collect".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -997,6 +1014,8 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         message.usage.output_token_count,
         "<think>inner</think>outer".len()
     );
+    // 5 tokens for "inner"; markers are excluded.
+    assert_eq!(message.usage.reasoning_tokens, 5);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1017,7 +1036,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output(
                                 "chat-reasoning-disabled",
@@ -1048,7 +1067,8 @@ async fn chat_explicitly_disables_reasoning_parser() {
                             "chat-reasoning-disabled".to_string()
                         ])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1075,6 +1095,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
     assert_eq!(message.message.reasoning(), None);
     assert_eq!(message.message.text(), "<think>reason more</think>answer");
     assert_eq!(message.finish_reason, FinishReason::Length);
+    assert_eq!(message.usage.reasoning_tokens, 0);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1095,7 +1116,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output(
                                 "chat-tool",
@@ -1120,7 +1141,8 @@ async fn chat_stream_parses_tool_calls_automatically() {
                         ],
                         finished_requests: Some(BTreeSet::from(["chat-tool".to_string()])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1203,7 +1225,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                 let _ = recv_engine_message(dealer).await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output(
                                 "chat-final-only-tool",
@@ -1230,7 +1252,8 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                             "chat-final-only-tool".to_string()
                         ])),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -1281,7 +1304,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
                     let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
                     send_outputs(
                         push,
-                        EngineCoreOutputs {
+                        RequestBatchOutputs {
                             outputs: vec![
                                 request_output_with_logprobs(
                                     &request.request_id,
@@ -1302,7 +1325,8 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
                             ],
                             finished_requests: Some(BTreeSet::from([request.request_id])),
                             ..Default::default()
-                        },
+                        }
+                        .into(),
                     )
                     .await;
                 }
@@ -1372,6 +1396,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(

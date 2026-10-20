@@ -20,7 +20,6 @@ pytestmark = pytest.mark.cpu_test
 
 def test_basic_lifecycle():
     """Test lifecycle of a Remote Decode request."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -117,7 +116,6 @@ def test_basic_lifecycle():
 
 def test_short_prompt_lifecycle():
     """Test lifecycle of a Remote Decode request with short prompt."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -164,7 +162,6 @@ def test_short_prompt_lifecycle():
 
 def test_prefix_cache_lifecycle():
     """Test that remote decode params still work with a prefix cache hit."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -224,7 +221,6 @@ def test_prefix_cache_lifecycle():
 
 def test_abort_during_kv_transfer():
     """Test aborting request does not release blocks for remote decode."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 

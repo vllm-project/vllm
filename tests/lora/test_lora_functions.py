@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Script to test add_lora, remove_lora, pin_lora, list_loras functions.
-"""
+"""Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.lora.request import LoRARequest

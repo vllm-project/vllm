@@ -20,6 +20,7 @@ def create_mock_request_output(
     output_token_ids=None,
     num_cached_tokens=0,
     finished=True,
+    num_cache_creation_tokens=None,
 ):
     """Helper function to create a mock RequestOutput object for testing."""
     outputs = []
@@ -44,6 +45,7 @@ def create_mock_request_output(
         outputs=outputs,
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -71,10 +73,10 @@ async def generate_mock_outputs(
 class FakeHarmonyParser(HarmonyParser):
     def __init__(self):
         # Skip HarmonyParser initialization and script outputs directly.
-        self.reasoning_parser = None
-        self.tool_parser = None
+        self._reasoning_parser = None
+        self._tool_parser = None
         self._chunk_results: list[ChunkResult] = []
-        self._flush_results: list[Segment | None] = []
+        self._flush_results: list[list[Segment]] = []
         self.processed_chunks: list[list[int]] = []
 
     def enqueue_chunk_result(
@@ -89,7 +91,7 @@ class FakeHarmonyParser(HarmonyParser):
             )
         )
 
-    def enqueue_flush_result(self, segment: Segment | None) -> None:
+    def enqueue_flush_result(self, segment: list[Segment]) -> None:
         self._flush_results.append(segment)
 
     def process_chunk(self, token_ids) -> ChunkResult:
@@ -98,10 +100,10 @@ class FakeHarmonyParser(HarmonyParser):
             return self._chunk_results.pop(0)
         return ChunkResult(segments=[], reasoning_token_count=0)
 
-    def flush(self) -> Segment | None:
+    def flush(self) -> list[Segment]:
         if self._flush_results:
             return self._flush_results.pop(0)
-        return None
+        return []
 
 
 def make_harmony_context(
@@ -117,7 +119,8 @@ def make_harmony_context(
     return context, fake_parser
 
 
-def test_single_turn_token_counting():
+@pytest.mark.parametrize("num_cache_creation_tokens", [None, 0, 3])
+def test_single_turn_token_counting(num_cache_creation_tokens):
     """Test token counting behavior for a single turn."""
     # Create a context
     context, _ = make_harmony_context()
@@ -127,6 +130,7 @@ def test_single_turn_token_counting():
         prompt_token_ids=[1, 2, 3, 4, 5],  # 5 prompt tokens
         output_token_ids=[6, 7, 8],  # 3 output tokens
         num_cached_tokens=2,  # 2 cached tokens
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
     # Append the output to the context
@@ -136,6 +140,7 @@ def test_single_turn_token_counting():
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3
     assert context.num_cached_tokens == 2
+    assert context.num_cache_creation_tokens == (num_cache_creation_tokens or 0)
     assert context.num_tool_output_tokens == 0  # No tool tokens in first turn
 
     # Verify internal state tracking
@@ -398,6 +403,7 @@ async def test_streaming_multi_turn_token_counting():
     num_prompt_tokens = [3, 8, 13]
     num_output_tokens = [3, 3, 2]
     num_cached_tokens = [0, 3, 8]
+    num_cache_creation_tokens = [3, 4, 2]
 
     # Simulate three turns of conversation:
     # Turn 1: stream tokens one by one, then finish the message
@@ -411,6 +417,7 @@ async def test_streaming_multi_turn_token_counting():
             prompt_token_ids=[1, 2, 3],  # 3 prompt tokens
             output_token_ids=[101],  # Single token
             num_cached_tokens=num_cached_tokens[0],
+            num_cache_creation_tokens=num_cache_creation_tokens[0],
             finished=False,  # Not end of message yet
         )
     )
@@ -419,6 +426,7 @@ async def test_streaming_multi_turn_token_counting():
     context.append_output(
         create_mock_request_output(
             output_token_ids=[102],
+            num_cache_creation_tokens=num_cache_creation_tokens[0],
             finished=False,
         )
     )
@@ -427,6 +435,7 @@ async def test_streaming_multi_turn_token_counting():
     context.append_output(
         create_mock_request_output(
             output_token_ids=[103],
+            num_cache_creation_tokens=num_cache_creation_tokens[0],
             finished=True,  # End of message
         )
     )
@@ -435,6 +444,7 @@ async def test_streaming_multi_turn_token_counting():
     assert context.num_prompt_tokens == 3  # Initial prompt tokens
     assert context.num_output_tokens == 3  # Three output tokens
     assert context.num_cached_tokens == 0
+    assert context.num_cache_creation_tokens == 3
     assert context.num_tool_output_tokens == 0  # No tool output in first turn
     assert context.first_tok_of_message is True  # Ready for next message
 
@@ -454,6 +464,7 @@ async def test_streaming_multi_turn_token_counting():
             ],  # 8 tokens (includes previous)
             output_token_ids=[201],
             num_cached_tokens=num_cached_tokens[1],  # Some tokens cached
+            num_cache_creation_tokens=num_cache_creation_tokens[1],
             finished=False,
         )
     )
@@ -463,6 +474,7 @@ async def test_streaming_multi_turn_token_counting():
     context.append_output(
         create_mock_request_output(
             output_token_ids=[202],
+            num_cache_creation_tokens=num_cache_creation_tokens[1],
             finished=False,
         )
     )
@@ -471,6 +483,7 @@ async def test_streaming_multi_turn_token_counting():
     context.append_output(
         create_mock_request_output(
             output_token_ids=[203],
+            num_cache_creation_tokens=num_cache_creation_tokens[1],
             finished=True,  # End of reasoning message
         )
     )
@@ -480,6 +493,7 @@ async def test_streaming_multi_turn_token_counting():
     assert context.num_output_tokens == 3 + 3  # First turn + second turn
     assert context.num_reasoning_tokens == 3  # All tokens in analysis channel
     assert context.num_cached_tokens == 3  # Cached tokens from second turn
+    assert context.num_cache_creation_tokens == 3 + 4
 
     # Formula: this turn prompt tokens - last turn prompt - last turn output
     expected_tool_tokens = 8 - 3 - 3  # = 2
@@ -505,6 +519,7 @@ async def test_streaming_multi_turn_token_counting():
             ],  # 13 tokens
             output_token_ids=[301],
             num_cached_tokens=num_cached_tokens[2],  # More cached tokens
+            num_cache_creation_tokens=num_cache_creation_tokens[2],
             finished=False,
         )
     )
@@ -512,6 +527,7 @@ async def test_streaming_multi_turn_token_counting():
     context.append_output(
         create_mock_request_output(
             output_token_ids=[302],
+            num_cache_creation_tokens=num_cache_creation_tokens[2],
             finished=True,
         )
     )
@@ -523,6 +539,7 @@ async def test_streaming_multi_turn_token_counting():
     assert context.num_cached_tokens == sum(
         num_cached_tokens
     )  # Accumulated cached tokens
+    assert context.num_cache_creation_tokens == sum(num_cache_creation_tokens)
 
     # Additional tool tokens from third turn
     # Formula: this turn prompt - last turn prompt - last turn output
@@ -544,7 +561,6 @@ async def test_streaming_multi_turn_token_counting():
 @pytest.mark.asyncio
 async def test_streaming_message_synchronization():
     """Completed messages from append-local and flush segments sync into context."""
-
     # Create a streaming context with some initial messages
     initial_messages = [
         Message(
@@ -598,13 +614,21 @@ async def test_streaming_message_synchronization():
         content=[TextContent(text=response_text)],
         recipient=Role.USER,
     )
-    flush_segment = Segment(
-        channel="commentary",
-        recipient=None,
-        delta="",
-        completed_message=message,
-    )
-    parser.enqueue_flush_result(flush_segment)
+    flush_segments = [
+        Segment(
+            channel="final",
+            recipient=None,
+            delta=response_text,
+            completed_message=None,
+        ),
+        Segment(
+            channel="final",
+            recipient=None,
+            delta="",
+            completed_message=message,
+        ),
+    ]
+    parser.enqueue_flush_result(flush_segments)
 
     # Create another output to trigger synchronization via flush()
     context.append_output(
@@ -618,8 +642,9 @@ async def test_streaming_message_synchronization():
     assert context.num_init_messages == 1
     assert context._messages[2].content[0].text == response_text
     assert context.last_append_flush_status is True
-    assert len(context.last_append_segments) == 1
-    assert context.last_append_segments[0].completed_message is message
+    assert len(context.last_append_segments) == 2
+    assert context.last_append_segments[-2].delta == response_text
+    assert context.last_append_segments[-1].completed_message is message
 
 
 def test_turn_metrics_copy_and_reset():
@@ -674,6 +699,7 @@ def create_simple_context_output(
     prompt="Test prompt",
     prompt_token_ids=None,
     num_cached_tokens=0,
+    num_cache_creation_tokens=None,
     logprobs=None,
     finished=True,
 ):
@@ -699,6 +725,7 @@ def create_simple_context_output(
         ],
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -819,6 +846,7 @@ def test_simple_context_token_counting():
             token_ids=[10, 11],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
     context.append_output(
@@ -827,12 +855,14 @@ def test_simple_context_token_counting():
             token_ids=[12],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
 
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
+    assert context.num_cache_creation_tokens == 3
 
 
 def test_simple_context_final_output():

@@ -4,23 +4,17 @@
 import asyncio
 import json
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pybase64 as base64
 import pytest
 import websockets
 
-from tests.entrypoints.speech_to_text.conftest import add_attention_backend
-from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.speech_to_text.realtime.connection import RealtimeConnection
 from vllm.multimodal.media.audio import load_audio
-
-# Increase engine iteration timeout for ROCm where first-use JIT compilation
-# can exceed the default 60s, causing a silent deadlock in feed_tokens.
-REALTIME_ENV_OVERRIDES = {
-    **ROCM_ENV_OVERRIDES,
-    "VLLM_ENGINE_ITERATION_TIMEOUT_S": "600",
-}
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -32,6 +26,46 @@ MISTRAL_FORMAT_ARGS = [
 ] + ROCM_EXTRA_ARGS
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
+
+
+def test_realtime_generation_preserves_watermarking():
+    transcription_outputs = []
+
+    class EngineClient:
+        def generate(self, **kwargs):
+            async def outputs():
+                output = SimpleNamespace(
+                    outputs=[],
+                    prompt_token_ids=[],
+                    is_watermarked=kwargs["sampling_params"].watermarking,
+                )
+                transcription_outputs.append(output)
+                yield output
+
+            return outputs()
+
+    async def streaming_input():
+        chunk: np.ndarray
+        for chunk in ():
+            yield chunk
+
+    async def send(_event):
+        return None
+
+    connection = object.__new__(RealtimeConnection)
+    connection.connection_id = "test"
+    connection.serving = SimpleNamespace(
+        model_cls=SimpleNamespace(realtime_max_tokens=1),
+        engine_client=EngineClient(),
+    )
+    connection.audio_queue = asyncio.Queue()
+    connection._is_connected = True
+    connection.send = send
+
+    asyncio.run(connection._run_generation(streaming_input(), asyncio.Queue()))
+
+    assert len(transcription_outputs) == 1
+    assert transcription_outputs[0].is_watermarked is None
 
 
 def _get_websocket_url(server: RemoteOpenAIServer) -> str:
@@ -72,20 +106,14 @@ def mary_had_lamb_audio_chunks() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_multi_chunk_streaming(
-    model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
-):
+async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
     """Test streaming multiple audio chunks before committing."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
 
-    add_attention_backend(server_args, rocm_aiter_fa_attention)
-
-    with RemoteOpenAIServer(
-        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
-    ) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         ws_url = _get_websocket_url(remote_server)
         async with websockets.connect(ws_url) as ws:
             # Receive session.created
@@ -174,7 +202,7 @@ async def test_multi_chunk_streaming(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_empty_commit_does_not_crash_engine(
-    model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
+    model_name, mary_had_lamb_audio_chunks
 ):
     """Test that committing without audio does not crash the engine.
 
@@ -189,11 +217,7 @@ async def test_empty_commit_does_not_crash_engine(
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
 
-    add_attention_backend(server_args, rocm_aiter_fa_attention)
-
-    with RemoteOpenAIServer(
-        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
-    ) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         ws_url = _get_websocket_url(remote_server)
 
         # --- First connection: empty commit (no audio appended) ----------
@@ -273,20 +297,14 @@ async def test_empty_commit_does_not_crash_engine(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_session_update_invalid_model_returns_error(
-    model_name, rocm_aiter_fa_attention
-):
+async def test_session_update_invalid_model_returns_error(model_name):
     """Test that session.update with an invalid model returns an error."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
 
-    add_attention_backend(server_args, rocm_aiter_fa_attention)
-
-    with RemoteOpenAIServer(
-        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
-    ) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         ws_url = _get_websocket_url(remote_server)
         async with websockets.connect(ws_url) as ws:
             event = await receive_event(ws, timeout=30.0)
@@ -305,9 +323,7 @@ async def test_session_update_invalid_model_returns_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_commit_without_session_update_returns_error(
-    model_name, rocm_aiter_fa_attention
-):
+async def test_commit_without_session_update_returns_error(model_name):
     """Test that committing before validating the model returns an error
     and does not fall through to processing."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
@@ -315,11 +331,7 @@ async def test_commit_without_session_update_returns_error(
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
 
-    add_attention_backend(server_args, rocm_aiter_fa_attention)
-
-    with RemoteOpenAIServer(
-        model_name, server_args, env_dict=REALTIME_ENV_OVERRIDES
-    ) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         ws_url = _get_websocket_url(remote_server)
         async with websockets.connect(ws_url) as ws:
             event = await receive_event(ws, timeout=30.0)

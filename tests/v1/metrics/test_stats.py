@@ -1,17 +1,154 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+
+from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
+    PrefixCacheStats,
     PromptTokenStats,
     RequestStateStats,
+    SchedulerIterationDetails,
+    SchedulerStats,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.utils import compute_iteration_details
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_scheduler_iteration_details_serialization():
+    iteration_details = SchedulerIterationDetails(
+        iteration_index=1,
+        num_ctx_requests=2,
+        num_ctx_tokens=3,
+        num_generation_requests=4,
+        num_generation_tokens=5,
+        elapsed_ms=6.7,
+        num_encoder_inputs=2,
+        num_encoder_output_tokens=392,
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            kv_cache_usage=0.5,
+            iteration_details=iteration_details,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.kv_cache_usage == 0.5
+    assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_prefix_cache_stats_hits_by_source_accumulate():
+    stats = PrefixCacheStats()
+    stats.record(
+        num_tokens=8,
+        num_hits=5,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 3, CacheHitSource.DISK: 2},
+    )
+    stats.record(
+        num_tokens=8,
+        num_hits=6,
+        preempted=False,
+        hits_by_source={CacheHitSource.P2P: 5, CacheHitSource.HOST: 1},
+    )
+    # Zero counts never create an entry.
+    stats.record(
+        num_tokens=8,
+        num_hits=4,
+        preempted=False,
+        hits_by_source={CacheHitSource.DISK: 4, CacheHitSource.P2P: 0},
+    )
+
+    assert stats.hits_by_source == {
+        CacheHitSource.HOST: 4,
+        CacheHitSource.DISK: 6,
+        CacheHitSource.P2P: 5,
+    }
+    assert sum(stats.hits_by_source.values()) == stats.hits == 15
+
+
+def test_prefix_cache_stats_record_hits_by_source():
+    stats = PrefixCacheStats()
+    stats.record(num_tokens=32, num_hits=16, preempted=False)
+    stats.record(
+        num_tokens=32,
+        num_hits=24,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 16, CacheHitSource.DISK: 8},
+    )
+    # Preempted re-admissions never contribute to hits or the split.
+    stats.record(
+        num_tokens=32,
+        num_hits=32,
+        preempted=True,
+        hits_by_source={CacheHitSource.P2P: 32},
+    )
+    # A connector miscount is reported as unspecified, not dropped or raised.
+    stats.record(
+        num_tokens=8,
+        num_hits=8,
+        preempted=False,
+        hits_by_source={CacheHitSource.HOST: 4},
+    )
+
+    assert stats.requests == 3
+    assert stats.hits == 48
+    assert stats.preempted_hits == 32
+    assert stats.hits_by_source == {
+        CacheHitSource.HOST: 16,
+        CacheHitSource.DISK: 8,
+        CacheHitSource.EXTERNAL_UNSPECIFIED: 8,
+    }
+    assert sum(stats.hits_by_source.values()) == 48 - 16
+
+
+def test_prefix_cache_stats_hits_by_source_serialization():
+    connector_stats = PrefixCacheStats()
+    connector_stats.record(
+        num_tokens=16,
+        num_hits=8,
+        preempted=False,
+        hits_by_source={CacheHitSource.P2P: 4, CacheHitSource.HOST: 4},
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            connector_prefix_cache_stats=connector_stats,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.connector_prefix_cache_stats is not None
+    assert decoded.scheduler_stats.connector_prefix_cache_stats.hits_by_source == {
+        CacheHitSource.P2P: 4,
+        CacheHitSource.HOST: 4,
+    }
+
+
+def test_compute_iteration_details_includes_encoder_stats():
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
+        num_inputs=2,
+        output_tokens=392,
+    )
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_encoder_inputs == 2
+    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():
