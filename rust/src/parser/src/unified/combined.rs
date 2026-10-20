@@ -6,7 +6,7 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningParser;
 use crate::tool::{Tool, ToolParser, ToolParserOutput};
 
@@ -81,6 +81,12 @@ impl UnifiedParser for CombinedParser {
     fn preserve_special_tokens(&self) -> bool {
         self.reasoning.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
             || self.tool.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
+    }
+
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        self.tool.as_ref().map_or(ToolStrictLevel::Auto, |parser| {
+            parser.default_tool_strict_level()
+        })
     }
 
     fn build_output_grammar(
