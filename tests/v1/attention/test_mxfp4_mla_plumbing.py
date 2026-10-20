@@ -23,6 +23,7 @@ def _layer_spec(block_size: int = 64):
         head_size=LATENT,
         sliding_window=None,
         indexer=None,
+        topk_buffer_width=None,
         non_causal_multi_token_decode=False,
         attn_backend=types.SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA_SPARSE"),
         _uses_flat_kv_cache=lambda: False,
