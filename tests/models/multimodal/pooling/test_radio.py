@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+import tempfile
+from pathlib import Path
+from typing import Any
+
 import pytest
 import torch
 import torch.nn as nn
+from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -223,3 +229,74 @@ def test_native_format_weight_loading(default_vllm_config, dist_init):
         assert torch.equal(params[name], original), (
             f"parameter mismatch after native load: {name}"
         )
+
+
+def test_native_format_from_transformers(default_vllm_config, dist_init):
+    # Real-checkpoint native-format round-trip: load a published (legacy)
+    # checkpoint through Transformers' native ``RadioModel`` (which converts it to
+    # the native layout), re-save it with ``save_original_format=False`` so the
+    # on-disk checkpoint stays native -- the default re-applies the reverse
+    # native->legacy mapping for backward compatibility -- then confirm vLLM's
+    # ``RadioModel`` loads that native checkpoint with values matching the
+    # reference. ``nvidia/C-RADIOv4-H`` loads on Transformers' config defaults and
+    # is already downloaded by ``test_radio``.
+    import transformers
+
+    hf_radio_cls: Any = getattr(transformers, "RadioModel", None)
+    if hf_radio_cls is None:
+        pytest.skip("this transformers version has no native RadioModel")
+
+    model_id = "nvidia/C-RADIOv4-H"
+    hf_native = hf_radio_cls.from_pretrained(model_id, dtype=torch.float32)
+    if (
+        "save_original_format"
+        not in inspect.signature(hf_native.save_pretrained).parameters
+    ):
+        pytest.skip("transformers save_pretrained has no save_original_format flag")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        hf_native.save_pretrained(tmp, save_original_format=False)
+        native_weights: dict[str, torch.Tensor] = {}
+        for shard in sorted(Path(tmp).glob("*.safetensors")):
+            native_weights.update(load_file(str(shard)))
+
+    # Guard that the saved checkpoint is genuinely native-layout (split attention
+    # under ``encoder.layer.N``), not the legacy ``radio_model.model.blocks.*``.
+    assert any(".attention.attention.query" in name for name in native_weights), (
+        "expected native-layout keys in the save_original_format=False checkpoint"
+    )
+    assert not any(name.startswith("radio_model.") for name in native_weights)
+
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    vllm_config = RadioConfig(model_name=hf_config.args["model"], **hf_config.args)
+    vllm_model = RadioModel(vllm_config)
+    loaded = vllm_model.load_weights(native_weights)
+
+    expected = {
+        name
+        for name, _ in vllm_model.named_parameters()
+        if not name.endswith((".layer_scale1.lambda1", ".layer_scale2.lambda1"))
+    }
+    missing = expected - loaded
+    assert not missing, f"native weights not loaded: {sorted(missing)}"
+
+    # Values match the reference: the fused qkv is the concatenation of the
+    # native split query/key/value, and proj is the native output.dense.
+    for name, param in vllm_model.named_parameters():
+        if ".attention.qkv." in name:
+            base, suffix = name.split(".attention.qkv.")
+            ref = torch.cat(
+                [
+                    native_weights[f"{base}.attention.attention.{proj}.{suffix}"]
+                    for proj in ("query", "key", "value")
+                ],
+                dim=0,
+            )
+        elif ".attention.proj." in name:
+            base, suffix = name.split(".attention.proj.")
+            ref = native_weights[f"{base}.attention.output.dense.{suffix}"]
+        elif name in native_weights:
+            ref = native_weights[name]
+        else:
+            continue
+        assert torch.equal(param, ref), f"value mismatch after native load: {name}"
