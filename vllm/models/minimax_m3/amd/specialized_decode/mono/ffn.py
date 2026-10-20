@@ -73,6 +73,7 @@ from .sync import (
     store_dev,
     sync_acquire,
     sync_release,
+    wave_sync,
 )
 
 _STREAM = fx.Stream(None)
@@ -204,7 +205,9 @@ T_SLOT_MASK = T_SLOT_E + 80
 T_SLOT_TOK = T_SLOT_MASK + 80
 T_SLOT_PICK = T_SLOT_TOK + 80 * 16
 T_MISC = T_SLOT_PICK + 80 * 16
+T_WAVE = T_MISC + 8  # a wave's down-stage lane counter
 T_WORDS = T_MISC + 16
+assert T_WAVE + WAVES <= T_WORDS
 assert slots(MAX_TOKENS) <= 80
 
 
@@ -521,6 +524,8 @@ def load_table(c):
         tab_st(c, got[1][0], T_PICK_W + tid)
     if tid < EXPERTS:
         tab_st(c, 0, T_MASK + tid)
+    if tid < WAVES:
+        tab_st(c, 0, T_WAVE + tid)
     gpu.barrier()
     if tid < n:
         e = tab_ld(c, T_PICK_E + tid)
@@ -689,13 +694,12 @@ def stage_down(c, tasks):
         wvs = [weight_loads(a["w2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
         svs = [scale_loads(a["s2"], rg, INTER, 0, K2_STEPS) for rg in rgs]
         cnt = slot_count(c, u)
-        # the UPF of every tile this lane's MID loads span (x_operands: K
-        # dwords 64 i + 16 (lane // 16) .. + 16 = tiles 8 i + 2 (lane // 16) + 0/1)
-        first = u * UP_TILES + 2 * (lane // 16)
         c["mb"].poll(
-            [(c["upf"], first + 8 * i, 2) for i in range(K2_STEPS)], site=SITE_DOWN
+            [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
         )
         c["mb"].acquire(Space.SCRATCH)
+        # a lane's MID loads span tiles other lanes polled
+        wave_sync(c["tab"] + (T_WAVE + wave), 64 * ((u - wave) // WAVES + 1))
         col = slot_col(c, cnt)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)

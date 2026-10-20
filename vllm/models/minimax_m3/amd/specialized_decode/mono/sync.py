@@ -165,6 +165,31 @@ def acquire_fence(scope):
     fx.memory_fence(syncscope=scope, ordering=fx.AtomicOrdering.Acquire)
 
 
+@traced
+def wave_sync(count, target):
+    """Every lane of the wave: what each lane did before (its acquires)
+    happens before what any lane does after. Each lane releases, adds one to
+    the wave's LDS ``count``, and acquires once it reads ``target``; the read
+    value comes after every lane's add in the counter's order (a release
+    sequence), so it synchronizes with every lane's release."""
+    sync_release("wavefront")
+    fx.llvm.atomic_add(count, fx.Int32(1), syncscope="wavefront")
+    n = fx.generic_load(
+        count,
+        dtype=fx.Int32,
+        memory_order=fx.AtomicOrdering.Monotonic,
+        syncscope="wavefront",
+    )
+    while n < target:
+        n = fx.generic_load(
+            count,
+            dtype=fx.Int32,
+            memory_order=fx.AtomicOrdering.Monotonic,
+            syncscope="wavefront",
+        )
+    sync_acquire("wavefront")
+
+
 def cta_sync(drain=False):
     """``gpu.barrier``: workgroup release fence, ``s_barrier``, acquire fence
     (HIP's ``__syncthreads``). ``drain``: every wave's stores complete first."""
