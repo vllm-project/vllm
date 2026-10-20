@@ -45,6 +45,9 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.renderers.chat_utils.content_parser import (
+    PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
+)
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -100,6 +103,37 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
     "Overriding `tokenize=False` to `True` because `prompt_embeds` "
     "post-processing requires tokenized IDs."
 )
+
+
+def _filter_prompt_embeds_by_template(
+    conversation: list[ConversationMessage],
+    prompt_embeds_tensors: list[torch.Tensor],
+    rendered: str,
+) -> tuple[list[torch.Tensor], list[ConversationMessage]]:
+    """Drop embeddings whose placeholders are omitted by the chat template."""
+    markers = [
+        f"{PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX}{index}__"
+        for index in range(len(prompt_embeds_tensors))
+    ]
+
+    def normalize_placeholders(value: Any) -> Any:
+        if isinstance(value, str):
+            for marker in markers:
+                value = value.replace(marker, PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
+            return value
+        if isinstance(value, list):
+            return [normalize_placeholders(item) for item in value]
+        if isinstance(value, dict):
+            return {key: normalize_placeholders(item) for key, item in value.items()}
+        return value
+
+    visible_tensors = [
+        tensor
+        for marker, tensor in zip(markers, prompt_embeds_tensors, strict=True)
+        if marker in rendered
+    ]
+    normalized_conversation = normalize_placeholders(copy.deepcopy(conversation))
+    return visible_tensors, normalized_conversation
 
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
@@ -1054,6 +1088,22 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
         if prompt_embeds_tensors:
+            visibility_kwargs = chat_template_kwargs.copy()
+            visibility_kwargs["tokenize"] = False
+            rendered = safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                **visibility_kwargs,
+            )
+            assert isinstance(rendered, str)
+            prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
+                conversation,
+                prompt_embeds_tensors,
+                rendered,
+            )
+
+        if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
@@ -1157,6 +1207,24 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_data = None
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        if prompt_embeds_tensors:
+            visibility_kwargs = chat_template_kwargs.copy()
+            visibility_kwargs["tokenize"] = False
+            rendered = await self._render_with_timeout(
+                self._apply_chat_template_async(
+                    model_config,
+                    tokenizer,
+                    conversation,
+                    **visibility_kwargs,
+                )
+            )
+            assert isinstance(rendered, str)
+            prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
+                conversation,
+                prompt_embeds_tensors,
+                rendered,
+            )
+
         if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:

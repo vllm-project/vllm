@@ -487,6 +487,7 @@ def parse_chat_message_content_part(
         uuid = str(uuid)
 
     modality = None
+    prompt_embeds_placeholder = None
     if part_type == "image_pil":
         image_content = cast(Image.Image, content) if content is not None else None
         mm_parser.parse_image_pil(image_content, uuid)
@@ -518,7 +519,7 @@ def parse_chat_message_content_part(
             raise VLLMValidationError(
                 _PROMPT_EMBEDS_MISSING_DATA_ERROR, parameter="prompt_embeds"
             )
-        mm_parser.parse_prompt_embeds(cast(str, content))
+        prompt_embeds_placeholder = mm_parser.parse_prompt_embeds(cast(str, content))
         modality = "prompt_embeds"
     elif part_type == "audio_url":
         str_content = cast(str, content)
@@ -550,18 +551,16 @@ def parse_chat_message_content_part(
     if wrap_dicts:
         if modality == "prompt_embeds":
             # Chat templates don't know about the "prompt_embeds" modality,
-            # emit the single sentinel token as text so the template renders
-            # it inline. The renderer later expands it to N tokens post-tokenize.
-            return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
+            # emit a unique sentinel as text so the template renders it inline.
+            return {"type": "text", "text": cast(str, prompt_embeds_placeholder)}
         result = {"type": modality}
         result.update(_collect_extra_fields(cast(dict[str, Any], part)))
         return result
     if modality == "prompt_embeds":
-        # Emit the renderer token inline regardless of `interleave_strings`,
-        # prompt_embeds are spliced at the token offset so position matters.
+        # Emit the renderer token inline regardless of `interleave_strings`.
         # Falling back to front-padding via `missing_placeholders` would
         # reorder them relative to surrounding text.
-        return PROMPT_EMBEDS_PLACEHOLDER_TOKEN
+        return cast(str, prompt_embeds_placeholder)
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
