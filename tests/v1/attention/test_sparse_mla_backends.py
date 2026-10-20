@@ -1162,6 +1162,58 @@ def test_index_group_convert_during_piecewise_capture():
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+def test_index_group_convert_sees_block_table_written_after_topk_ready():
+    """HiSparse builds the leader's batch block table on the compute stream
+    after the indexer recorded ``logical_topk_ready``; the side-stream convert
+    must still read the finished table."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, num_topk, num_requests, blocks_per_req, block_size = 8, 128, 4, 4, 16
+
+    logical_topk_indices = torch.randint(
+        0,
+        block_size * blocks_per_req,
+        (num_tokens, num_topk),
+        dtype=torch.int32,
+        device=device,
+    )
+    builder = SparseMLAIndexGroupBuilder(logical_topk_indices)
+    group, layer_index = builder.register_layer(is_index_producing_layer=True)
+
+    req_id = torch.arange(num_tokens, dtype=torch.int32, device=device) % num_requests
+    final_table = torch.arange(
+        num_requests * blocks_per_req, dtype=torch.int32, device=device
+    ).view(num_requests, blocks_per_req)
+    block_table = torch.zeros_like(final_table)
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=req_id, block_table=block_table, block_size=block_size
+    )
+    expected = triton_convert_req_index_to_global_index(
+        req_id,
+        final_table,
+        logical_topk_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk,
+    )
+    torch.accelerator.synchronize()
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    with set_forward_context(None, vllm_config):
+        group.set_logical_topk_ready(layer_index)
+        torch.cuda._sleep(100_000_000)
+        block_table.copy_(final_table)
+        group.convert_logical_to_physical_topk(
+            layer_index,
+            logical_topk_indices,
+            attn_metadata,
+            block_stride_rows=None,
+            return_valid_counts=False,
+        )
+    torch.accelerator.synchronize()
+
+    result = group.physical_topk_indices[:num_tokens]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() < (9, 0),

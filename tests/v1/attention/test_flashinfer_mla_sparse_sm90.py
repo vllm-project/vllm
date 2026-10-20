@@ -10,6 +10,7 @@ causality), ckv/kpe cache splitting, and the backend's model-shape gates.
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -21,6 +22,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Builder,
     FlashInferMLASparseSM90Impl,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # isort: on
 
@@ -41,7 +43,9 @@ def ref_convert(req_id, block_table, token_indices, BLOCK_SIZE=64, **kw):
             blk = int(block_table[int(req_id[t]), pos // BLOCK_SIZE])
             if blk < 0:
                 continue
-            vals.append(blk * kw["BLOCK_STRIDE_ROWS"] + pos % BLOCK_SIZE)
+            vals.append(
+                blk * kw.get("BLOCK_STRIDE_ROWS", BLOCK_SIZE) + pos % BLOCK_SIZE
+            )
         out[t, : len(vals)] = torch.tensor(vals, dtype=out.dtype)
         counts[t] = len(vals)
     return out, counts
@@ -76,8 +80,9 @@ class FakeState:
         self.index_kpool = 4
         self.max_valid = 2051
 
-    def plan(self, num_tokens, kv_lens, cam, req_id_per_token):
+    def plan(self, num_tokens, kv_lens, cam, req_id_per_token, row_offset=0):
         self.plan_calls.append((num_tokens, kv_lens))
+        self.row_offset = row_offset
 
     def pack_indices(self, slots):
         for row in range(slots.shape[0]):
@@ -94,6 +99,7 @@ def make_impl(qk_rope, kv_dtype="fp8_e4m3", num_heads=2, topk_width=TOPK):
     impl.qk_rope_head_dim = qk_rope
     impl.kv_cache_dtype = kv_dtype
     impl.use_fp8_kv_cache = kv_dtype in ("fp8", "fp8_e4m3")
+    impl.index_group = None
     rows = 4
     impl.topk_indices_buffer = torch.full((rows, topk_width), -1, dtype=torch.int32)
     return impl, rows
@@ -176,6 +182,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
     builder.state = FakeState(TOPK)
+    builder.prefill_state = None
     builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
     metadata.state = None
@@ -206,6 +213,131 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
         expected_lens += [1, 2, 3, 4, 5]
     assert builder.state.plan_calls[0][0] == len(expected_lens)
     assert builder.state.plan_calls[0][1].tolist() == expected_lens
+
+
+@pytest.mark.parametrize(
+    "num_decodes,num_tokens,resident",
+    [(4, 4, False), (0, 4, True), (0, 4, False), (1, 4, False)],
+    ids=["decode", "resident_prefill", "staged_prefill", "mixed"],
+)
+def test_hisparse_forward_reads_physical_caches(
+    monkeypatch, num_decodes, num_tokens, resident
+):
+    """With HiSparse the layer's paged KV holds stale rows for offloaded
+    pages: decode and resident-prefill rows must read the hot cache through
+    HiSparse's physical indices, staged prefill rows the staging workspace,
+    each through the state planned for those rows."""
+    impl, _ = make_impl(0, "auto")
+    monkeypatch.setattr(
+        sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
+    )
+    num_prefill = num_tokens - num_decodes
+    hot = torch.zeros(2, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+    staged = torch.zeros(3, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+    paged = torch.zeros(5, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.convert_logical_to_physical_topk = MagicMock(
+        side_effect=lambda _i, topk, *_a, **_k: (
+            torch.full_like(topk, 7),
+            torch.zeros(topk.shape[0], dtype=torch.int32),
+        )
+    )
+    index_group.physical_kv_cache = MagicMock(return_value=hot)
+    index_group.cache = MagicMock(
+        return_value=SimpleNamespace(all_context_pages_resident=resident)
+    )
+    index_group.stage_prefill_rows = MagicMock(
+        return_value=(
+            staged,
+            torch.tensor([[2]], dtype=torch.int32),
+            torch.zeros(num_prefill, dtype=torch.int32),
+        )
+    )
+    impl.index_group = index_group
+    impl.index_group_index = 0
+    impl.topk_indices_buffer[:, :1] = 3
+    state, prefill_state = FakeState(TOPK), FakeState(TOPK)
+    for fake, rows in ((state, num_decodes or num_tokens), (prefill_state, 4)):
+        fake.kv_indptr.copy_(torch.arange(fake.kv_indptr.numel()).clamp(max=rows))
+    meta = SimpleNamespace(
+        num_decode_tokens=num_decodes,
+        block_size=BLOCK_SIZE,
+        state=state,
+        prefill_state=prefill_state if num_decodes else state,
+    )
+    q_nope = torch.randn(num_tokens, impl.num_heads, HEAD)
+    q_rope = q_nope[..., :0]
+
+    out, _ = impl.forward_mqa((q_nope, q_rope), paged, meta, SimpleNamespace())
+
+    assert out.shape == (num_tokens, impl.num_heads, HEAD)
+    expected_runs = []
+    if num_decodes or resident:
+        expected_runs.append((state, hot, 7, num_decodes or num_tokens))
+    if num_prefill and not resident:
+        prefill_runs_on = prefill_state if num_decodes else state
+        expected_runs.append((prefill_runs_on, staged, 2 * BLOCK_SIZE + 3, num_prefill))
+    if num_decodes == 0:
+        assert prefill_state.wrapper.run_args is None
+    for fake, cache, slot, rows in expected_runs:
+        assert fake.wrapper.run_args is not None
+        q, _, ckv, _, _ = fake.wrapper.run_args
+        assert q.shape[0] == rows
+        assert ckv.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
+        assert fake.kv_indices[:rows].tolist() == [slot] * rows
+    if num_prefill:
+        assert index_group.stage_prefill_rows.called == (not resident)
+
+
+@pytest.mark.parametrize(
+    "num_decodes,num_tokens",
+    [(2, 5), (0, 5)],
+    ids=["mixed", "prefill"],
+)
+def test_builder_plans_hisparse_prefill_rows_separately(
+    monkeypatch, num_decodes, num_tokens
+):
+    """HiSparse runs staged prefill rows of a mixed batch as a second kernel
+    call over another cache, so they need their own plan whose device clamp
+    addresses batch rows from the first prefill row."""
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._adaptive_verification = False
+    builder.state = FakeState(TOPK)
+    builder.prefill_state = FakeState(TOPK)
+    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: False)
+    metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.req_id_per_token = None
+    metadata.num_prefills = int(num_decodes < num_tokens)
+    metadata.num_decode_tokens = num_decodes
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "build",
+        lambda *_args, **_kwargs: metadata,
+    )
+    lens = list(range(10, 10 + num_tokens))
+    cam = SimpleNamespace(num_reqs=num_tokens, query_start_loc_cpu=None)
+    monkeypatch.setattr(
+        builder,
+        "_kv_lens_host",
+        lambda _: (num_tokens, torch.tensor(lens, dtype=torch.int32), False),
+    )
+
+    result = builder.build(0, cam)
+
+    split = 0 < num_decodes < num_tokens
+    first = lens[:num_decodes] if split else lens
+    assert [c[1].tolist() for c in builder.state.plan_calls] == [first]
+    assert builder.state.row_offset == 0
+    assert result.state is builder.state
+    if split:
+        assert [c[1].tolist() for c in builder.prefill_state.plan_calls] == [
+            lens[num_decodes:]
+        ]
+        assert builder.prefill_state.row_offset == num_decodes
+        assert result.prefill_state is builder.prefill_state
+    else:
+        assert builder.prefill_state.plan_calls == []
+        assert result.prefill_state is builder.state
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
@@ -393,6 +525,7 @@ def test_builder_kpool_from_model_config(
             max_num_batched_tokens=64, async_scheduling=False
         ),
         model_config=SimpleNamespace(hf_text_config=hf_config),
+        attention_config=SimpleNamespace(hisparse_config=None),
         speculative_config=None,
     )
     builder = FlashInferMLASparseSM90Builder(
@@ -456,22 +589,25 @@ def _clamp_batch(num_reqs, q_per_req, lo, hi, topk, kpool, width):
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
 @pytest.mark.parametrize(
-    "num_reqs,q_per_req,lo,hi",
+    "num_reqs,q_per_req,lo,hi,row_offset",
     [
-        (64, 1, 1, 3000),
-        (16, 6, 2030, 2070),  # MTP-style rows straddling index_topk
-        (4096, 1, 1, 3000),  # clamp spans several program blocks
+        (64, 1, 1, 3000, 0),
+        (16, 6, 2030, 2070, 0),  # MTP-style rows straddling index_topk
+        (4096, 1, 1, 3000, 0),  # clamp spans several program blocks
+        (64, 1, 1, 3000, 13),  # HiSparse prefill rows after the decodes
     ],
 )
-def test_upper_bound_plan_matches_exact(num_reqs, q_per_req, lo, hi):
+def test_upper_bound_plan_matches_exact(num_reqs, q_per_req, lo, hi, row_offset):
     """Sync-free planning from optimistic host bounds (async spec decode)
     must match exact planning: the device clamp trims every work item back
-    to its row's valid count, so no -1 slot is read."""
+    to its row's valid count, so no -1 slot is read. A plan covering only
+    the batch rows from ``row_offset`` clamps against those rows."""
     torch.manual_seed(0)
     heads, topk, kpool, width = SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
     ctx, valid, cam, req_id, slots = _clamp_batch(
         num_reqs, q_per_req, lo, hi, topk, kpool, width
     )
+    ctx, valid, slots = ctx[row_offset:], valid[row_offset:], slots[row_offset:]
     rows = ctx.numel()
 
     kv = torch.randn(1 << 16, 1, HEAD, device="cuda", dtype=torch.bfloat16)
@@ -486,7 +622,7 @@ def test_upper_bound_plan_matches_exact(num_reqs, q_per_req, lo, hi):
     exact.plan(rows, valid, None, None)
     ub = _real_state(rows)
     host_bound = torch.clamp(ctx + torch.randint(0, 7, (rows,)), max=ub.max_valid)
-    ub.plan(rows, host_bound, cam, req_id)
+    ub.plan(rows, host_bound, cam, req_id, row_offset)
     out = run(ub)
     assert not out.isnan().any()
     torch.testing.assert_close(out, run(exact), atol=1e-2, rtol=1e-2)

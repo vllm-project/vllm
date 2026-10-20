@@ -138,10 +138,7 @@ class SparseMLAIndexGroup:
         valid_topk_counts = self.valid_topk_counts[:num_tokens]
         compute_stream = current_stream()
         if layer_index == 0:
-            if self.has_indexer and not in_piecewise_cudagraph():
-                self.side_stream.wait_event(self.logical_topk_ready)
-            else:
-                self.side_stream.wait_stream(compute_stream)
+            self.side_stream.wait_stream(compute_stream)
             with self.side_stream:
                 triton_convert_req_index_to_global_index(
                     req_id_per_token,

@@ -32,6 +32,7 @@ per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
+import functools
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -56,6 +57,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     FlashInferMLASparseMetadataBuilder,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
@@ -116,6 +118,7 @@ def _clamp_work_kv_end(
     seq_lens,
     query_start_loc,
     req_id_per_token,
+    row_offset,
     num_works_idx,
     q_indptr_off,
     kv_start_off,
@@ -128,7 +131,7 @@ def _clamp_work_kv_end(
     # from the device batch layout exactly as the convert kernel counts it.
     works = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = works < tl.load(int_ws + num_works_idx)
-    row = tl.load(int_ws + q_indptr_off + works, mask=mask, other=0)
+    row = tl.load(int_ws + q_indptr_off + works, mask=mask, other=0) + row_offset
     req = tl.load(req_id_per_token + row, mask=mask, other=0)
     seq_len = tl.load(seq_lens + req, mask=mask, other=0)
     query_end = tl.load(query_start_loc + req + 1, mask=mask, other=0)
@@ -151,6 +154,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
+
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -253,10 +260,15 @@ class _SM90State:
         sm_scale: float,
         index_topk: int,
         index_kpool: int,
+        workspace: torch.Tensor | None = None,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        self.workspace = (
+            torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+            if workspace is None
+            else workspace
+        )
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
@@ -297,6 +309,7 @@ class _SM90State:
         # sized on first plan to the planner's work capacity.
         self._saved_kv_end = torch.empty(0, dtype=torch.int32, device=device)
         self._planned_num_tokens = -1
+        self._row_offset = 0
         self._int_ws: torch.Tensor | None = None
         self._plan_offsets: tuple[int, int, int, int] | None = None
 
@@ -306,8 +319,10 @@ class _SM90State:
         kv_lens: torch.Tensor,
         cam: CommonAttentionMetadata | None,
         req_id_per_token: torch.Tensor | None,
+        row_offset: int = 0,
     ) -> None:
-        """Plan per-row KV lengths (CPU int32, ``[num_tokens]``).
+        """Plan per-row KV lengths (CPU int32, ``[num_tokens]``) for the
+        batch rows starting at ``row_offset``.
 
         The wrapper bakes kv_len into its int schedule from host values, so
         rows past their valid count would send the kernel into the -1 tail of
@@ -338,6 +353,7 @@ class _SM90State:
                 num_tokens, torch.clamp(kv_lens + _PLAN_SLACK, max=self.max_valid)
             )
             self._planned_num_tokens = num_tokens
+        self._row_offset = row_offset
         self._clamp_kv_end(cam, req_id_per_token)
 
     def _plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
@@ -405,6 +421,7 @@ class _SM90State:
             cam.seq_lens,
             cam.query_start_loc,
             req_id_per_token,
+            self._row_offset,
             *self._plan_offsets,
             TOPK=self.index_topk,
             KPOOL=self.index_kpool,
@@ -421,6 +438,9 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    # HiSparse reads prefill rows from a different cache than decode rows
+    # when it stages them, so mixed batches plan them separately.
+    prefill_state: _SM90State | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
@@ -456,7 +476,8 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             if kv_cache_spec.dtype == torch.uint8
             else kv_cache_spec.dtype
         )
-        self.state = _SM90State(
+        make_state = functools.partial(
+            _SM90State,
             device,
             impl.num_heads,
             kv_plan_dtype,
@@ -467,6 +488,12 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             sm_scale=impl.scale,
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
+        )
+        self.state = make_state()
+        self.prefill_state = (
+            make_state(workspace=self.state.workspace)
+            if vllm_config.attention_config.hisparse_config is not None
+            else None
         )
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
@@ -539,14 +566,46 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        if exact:
-            self.state.plan(num_rows, kv_lens, None, None)
-        else:
-            self.state.plan(
-                num_rows, kv_lens, common_attn_metadata, metadata.req_id_per_token
+        num_decode_rows = metadata.num_decode_tokens
+        split = self.prefill_state is not None and 0 < num_decode_rows < num_rows
+        num_first_rows = num_decode_rows if split else num_rows
+        self._plan(
+            self.state,
+            0,
+            kv_lens[:num_first_rows],
+            exact,
+            common_attn_metadata,
+            metadata,
+        )
+        metadata.state = metadata.prefill_state = self.state
+        if split:
+            assert self.prefill_state is not None
+            self._plan(
+                self.prefill_state,
+                num_decode_rows,
+                kv_lens[num_decode_rows:],
+                exact,
+                common_attn_metadata,
+                metadata,
             )
-        metadata.state = self.state
+            metadata.prefill_state = self.prefill_state
         return metadata
+
+    @staticmethod
+    def _plan(
+        state: _SM90State,
+        row_offset: int,
+        kv_lens: torch.Tensor,
+        exact: bool,
+        cam: CommonAttentionMetadata,
+        metadata: FlashInferMLASparseSM90Metadata,
+    ) -> None:
+        if exact:
+            state.plan(kv_lens.shape[0], kv_lens, None, None)
+        else:
+            state.plan(
+                kv_lens.shape[0], kv_lens, cam, metadata.req_id_per_token, row_offset
+            )
 
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
@@ -609,7 +668,72 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_tokens]
-        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            outputs = []
+            if num_decode_tokens:
+                topk_slots, _ = index_group.convert_logical_to_physical_topk(
+                    self.index_group_index,
+                    topk_indices[:num_decode_tokens],
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=True,
+                )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[:num_decode_tokens],
+                        q_pe[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index),
+                        topk_slots,
+                        attn_metadata.state,
+                        attn_metadata.block_size,
+                        layer,
+                    )
+                )
+            if num_decode_tokens < num_tokens:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    topk_slots, _ = index_group.convert_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices,
+                        attn_metadata,
+                        block_stride_rows=None,
+                        return_valid_counts=True,
+                    )
+                    prefill_cache = index_group.physical_kv_cache(
+                        self.index_group_index
+                    )
+                else:
+                    prefill_cache, block_table, req_ids = (
+                        index_group.stage_prefill_rows(
+                            self.index_group_index,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
+                    )
+                    topk_slots, _ = triton_convert_req_index_to_global_index(
+                        req_ids,
+                        block_table,
+                        topk_indices[num_decode_tokens:],
+                        BLOCK_SIZE=attn_metadata.block_size,
+                        NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        return_valid_counts=True,
+                    )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[num_decode_tokens:],
+                        q_pe[num_decode_tokens:],
+                        prefill_cache,
+                        topk_slots,
+                        attn_metadata.prefill_state,
+                        attn_metadata.block_size,
+                        layer,
+                    )
+                )
+            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+
+        _, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
         # return_valid_counts=True keeps the compacted-prefix layout: valid
@@ -624,15 +748,34 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        state = attn_metadata.state
+        out = self._run_mqa_kernel(
+            q_nope,
+            q_pe,
+            kv_c_and_k_pe_cache,
+            topk_slots,
+            attn_metadata.state,
+            attn_metadata.block_size,
+            layer,
+        )
+        return out, None
+
+    def _run_mqa_kernel(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_slots: torch.Tensor,
+        state: _SM90State | None,
+        block_size: int,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
         assert state is not None
         # Pack valid prefixes at the offsets refreshed by plan() before replay.
         state.pack_indices(topk_slots)
 
+        kv_rows, _ = flat_kv_row_view(kv_cache, block_size)
         flat = (
-            kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
-            if self.use_fp8_kv_cache
-            else kv_c_and_k_pe_cache
+            kv_rows.view(torch.float8_e4m3fn) if self.use_fp8_kv_cache else kv_rows
         ).reshape(-1, 1, self.head_size)
         ckv = flat[..., : self.kv_lora_rank]
         kpe = flat[..., self.kv_lora_rank :]
@@ -642,5 +785,4 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
-        return out, None
+        return state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)

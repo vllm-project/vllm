@@ -2051,7 +2051,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                self.kv_connector.pre_forward(scheduler_output, input_batch)
+                self.kv_connector.pre_forward(
+                    scheduler_output, input_batch, attn_metadata=attn_metadata
+                )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
