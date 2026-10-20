@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""LoRA shrink/expand Triton launch configs as a TunableConfigTable."""
+"""LoRA Triton autotuning table."""
 
 from __future__ import annotations
 
+import math
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -55,8 +56,7 @@ class LoRAShape:
         return self.op_type, self.add_inputs
 
     def table_keys(self, m: int) -> TableKeys:
-        """Keys of this shape's entry in config_data[max_loras][num_slices][m][k][n],
-        as the shrink and expand ops look them up."""
+        """Return this shape's nested config-table keys."""
         hidden_size = max(self.slice_sizes)
         k, n = (
             (hidden_size, self.rank)
@@ -73,8 +73,7 @@ class LoRAShape:
 
 
 def _expand_add_inputs(module: BaseLinearLayerWithLoRA) -> bool:
-    # With dual-stream LoRA, the shared apply() expands into a separate buffer;
-    # layers that override apply() always add into the base output.
+    # Shared dual-stream paths expand into a separate buffer.
     shared_apply = type(module).apply in (
         BaseLinearLayerWithLoRA.apply,
         MergedColumnParallelLinearWithLoRA.apply,
@@ -83,8 +82,7 @@ def _expand_add_inputs(module: BaseLinearLayerWithLoRA) -> bool:
 
 
 def discover_lora_shapes(worker: Worker) -> dict[LoRAShape, int]:
-    """Shrink and expand shapes of the model's LoRA linear and lm_head layers,
-    each mapped to the most tokens it runs on."""
+    """Return LoRA kernel shapes and maximum token counts."""
     max_loras = worker.vllm_config.lora_config.max_loras
     max_tokens = worker.scheduler_config.max_num_batched_tokens
     spec_config = worker.vllm_config.speculative_config
@@ -134,6 +132,10 @@ def _get_entry(table: dict[str, Any], keys: TableKeys) -> Any:
 class LoRAConfigTable(TunableConfigTable):
     name = "lora"
 
+    def __init__(self) -> None:
+        # Starting points from buckets tuned earlier.
+        self._tuned: dict[tuple[LoRAShape, int], Config] = {}
+
     def pending_items(self, worker: Worker) -> list[TuningItem]:
         if not current_platform.is_cuda_alike():
             return []
@@ -141,22 +143,23 @@ class LoRAConfigTable(TunableConfigTable):
         if worker.vllm_config.lora_config is None or envs.VLLM_BATCH_INVARIANT:
             return []
         user_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+        force = envs.VLLM_TRITON_AUTOTUNE_FORCE
         cached: dict[tuple[str, bool | None], dict[str, Any]] = {}
-        items = []
+        items: list[TuningItem] = []
         for shape, max_tokens in discover_lora_shapes(worker).items():
+            file_key = shape.file_key
             # A user-supplied file replaces the autotune cache for its op.
             has_user_file = user_folder is not None and os.path.exists(
-                os.path.join(user_folder, get_lora_op_config_file_name(*shape.file_key))
+                os.path.join(user_folder, get_lora_op_config_file_name(*file_key))
             )
-            if shape.file_key not in cached:
-                cached[shape.file_key] = load_lora_autotune_configs(*shape.file_key)
+            if file_key not in cached:
+                cached[file_key] = load_lora_autotune_configs(*file_key)
+            configs = cached[file_key]
             for m in lora_m_buckets(max_tokens):
-                has_config = (
+                if not force and (
                     has_user_file
-                    or _get_entry(cached[shape.file_key], shape.table_keys(m))
-                    is not None
-                )
-                if has_config and not envs.VLLM_TRITON_AUTOTUNE_FORCE:
+                    or _get_entry(configs, shape.table_keys(m)) is not None
+                ):
                     continue
                 items.append(TuningItem(self.name, shape, m))
         return items
@@ -177,14 +180,29 @@ class LoRAConfigTable(TunableConfigTable):
         if lora_scratch_bytes(case) > free_bytes // 2:
             logger.warning("Skipping LoRA tuning for %s: low free memory.", item)
             return None
-        return tune_lora_case(case)
+        # Transfer configs from nearby buckets with the same search axes.
+        num_slices = len(shape.slice_sizes)
+        nearby = sorted(
+            (
+                key
+                for key in self._tuned
+                if key[0].op_type == shape.op_type
+                and len(key[0].slice_sizes) == num_slices
+            ),
+            key=lambda key: (abs(math.log(key[1] / item.bucket)), key[0] != shape),
+        )[:2]
+        config = tune_lora_case(case, seeds=[self._tuned[key] for key in nearby])
+        if config is not None:
+            self._tuned[shape, item.bucket] = config
+        return config
 
     def commit(self, results: dict[TuningItem, Config]) -> None:
         by_file: dict[tuple[str, bool | None], dict[TableKeys, Config]] = defaultdict(
             dict
         )
         for item, config in results.items():
-            by_file[item.shape.file_key][item.shape.table_keys(item.bucket)] = config
+            shape = item.shape
+            by_file[shape.file_key][shape.table_keys(item.bucket)] = config
         for file_key, configs in by_file.items():
             merged = load_lora_autotune_configs(*file_key)
             for keys, config in configs.items():

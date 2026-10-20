@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import json
+import math
 import os
 from types import SimpleNamespace
 
@@ -13,12 +15,16 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.ops.triton_ops import lora_tuning
 from vllm.lora.ops.triton_ops.lora_tuning import (
+    MAX_CONFIGS_PER_BUCKET,
     LoRATuningCase,
     default_config,
     lora_m_buckets,
     make_lora_inputs,
-    search_space,
+    normalize_config,
+    search_axes,
+    starting_configs,
     tune_lora_case,
     validate_lora_config,
 )
@@ -36,7 +42,7 @@ from vllm.lora.ops.triton_ops.utils import (
 )
 from vllm.model_executor.warmup import lora_autotune
 from vllm.model_executor.warmup.lora_autotune import LoRAShape
-from vllm.model_executor.warmup.triton_autotune import run_config_tuning
+from vllm.model_executor.warmup.triton_autotune import TuningItem, run_config_tuning
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -53,8 +59,7 @@ _SHRINK_CONFIG = {
     "group_size_m": 8,
     "num_stages": 2,
 }
-# config_data[max_loras][num_slices][m][k][n] for max_loras=1 (key 2), one
-# slice, M=16, hidden size 4096 and rank 16.
+# config_data[max_loras][num_slices][m][k][n]
 _SHRINK_TABLE = {"2": {"1": {"16": {"4096": {"16": _SHRINK_CONFIG}}}}}
 
 _SHRINK_SHAPE = LoRAShape("shrink", 1, 16, (512, 512), None, torch.bfloat16)
@@ -120,7 +125,7 @@ def test_autotune_cache_file_uses_the_platform_device_name(monkeypatch):
     assert os.path.basename(path) == "AMD_Instinct_MI300X_EXPAND_FALSE.json"
 
 
-def test_m_buckets_stop_at_the_first_entry_covering_the_limit():
+def test_m_buckets_cover_the_limit_up_to_the_grid_maximum():
     assert lora_m_buckets(256) == [1, 16, 32, 64, 128, 256]
     assert lora_m_buckets(300) == [1, 16, 32, 64, 128, 256, 512]
     assert lora_m_buckets(8192)[-1] == 4096
@@ -171,23 +176,130 @@ def test_override_applies_only_to_its_op():
     assert _shrink_lookup() == _default_lora_op_config("shrink", 16, 1, 16)
 
 
-def test_search_space_starts_with_the_default_and_prunes_block_m():
-    small = _case(_SHRINK_SHAPE, 1)
-    candidates = search_space(small)
-    assert candidates[0] == default_config(small)
-    assert {c["block_m"] for c in candidates[1:]} == {16}
-    assert all(c["block_k"] * c["split_k"] <= 512 for c in candidates[1:])
-    assert len(candidates) == 6
-    assert len(search_space(_case(_SHRINK_SHAPE, 4096))) == 21
+def test_search_axes_limit_block_m_to_the_token_count():
+    assert search_axes(_case(_SHRINK_SHAPE, 1))["block_m"] == (16,)
+    assert search_axes(_case(_SHRINK_SHAPE, 48))["block_m"] == (16, 32, 64)
+    assert search_axes(_case(_SHRINK_SHAPE, 4096)) == {
+        "block_m": (16, 32, 64, 128),
+        "block_n": (16,),
+        "block_k": (64, 128),
+        "split_k": (2, 4, 8, 16, 32),
+    }
     # Shrink also tries BLOCK_N equal to a rank above 16.
     rank_64 = LoRAShape("shrink", 1, 64, (512,), None, torch.bfloat16)
-    assert len(search_space(_case(rank_64, 4096))) == 41
+    assert search_axes(_case(rank_64, 16))["block_n"] == (16, 64)
+    assert search_axes(_case(_EXPAND_SHAPE, 1))["block_m"] == (16,)
+    assert search_axes(_case(_EXPAND_SHAPE, 4096)) == {
+        "block_m": (16, 32, 64),
+        "block_n": (32, 64, 128, 256),
+        "num_warps": (2, 4, 8),
+    }
 
-    expand = search_space(_case(_EXPAND_SHAPE, 4096))
-    assert expand[0] == default_config(_case(_EXPAND_SHAPE, 4096))
-    assert len(expand) == len({json.dumps(c, sort_keys=True) for c in expand})
-    assert len(expand) == 37
-    assert len(search_space(_case(_EXPAND_SHAPE, 1))) == 13
+
+def test_normalize_rejects_tiles_past_m_and_k_splits_past_k():
+    case = _case(_SHRINK_SHAPE, 16)
+    assert normalize_config(_SHRINK_CONFIG, case) == _SHRINK_CONFIG
+    assert normalize_config({**_SHRINK_CONFIG, "block_m": 32}, case) is None
+    assert normalize_config({**_SHRINK_CONFIG, "split_k": 16}, case) is None
+    snapped = starting_configs(case)[1]
+    assert snapped["block_k"] * snapped["split_k"] <= 512
+
+
+def test_starting_configs_are_the_default_then_the_seeds():
+    case = _case(_EXPAND_SHAPE, 16)
+    default = default_config(case)
+    seed = {**lora_tuning._EXPAND_FIXED, "block_m": 16, "block_n": 32, "num_warps": 2}
+    wide_m = {**seed, "block_m": 64}
+    starts = starting_configs(case, [seed, wide_m, default])
+    assert starts == [default, {**default, "block_m": 16, "block_k": 16}, seed]
+
+
+def _stub_kernels(monkeypatch, fake_benchmark):
+    monkeypatch.setattr(lora_tuning, "make_lora_inputs", lambda case: None)
+    monkeypatch.setattr(
+        lora_tuning,
+        "_isolated_ptr_cache",
+        lambda case, inputs: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(lora_tuning, "_output", lambda *args: None)
+    monkeypatch.setattr(lora_tuning, "validate_lora_config", lambda *a, **k: True)
+    monkeypatch.setattr(lora_tuning, "benchmark_lora_config", fake_benchmark)
+
+
+def _log2_distance(config, target) -> float:
+    return sum(abs(math.log2(config[name] / target[name])) for name in target)
+
+
+def test_search_beats_every_starting_point_within_the_budget(monkeypatch):
+    case = _case(LoRAShape("shrink", 1, 64, (4096,), None, torch.bfloat16), 4096)
+    axes = search_axes(case)
+    target = {name: values[len(values) // 2] for name, values in axes.items()}
+    searched = []
+
+    def fake_benchmark(case, config, cutoff_us=None, **kwargs):
+        if cutoff_us is not None:
+            searched.append(config)
+        return 1.0 + _log2_distance(config, target)
+
+    _stub_kernels(monkeypatch, fake_benchmark)
+    tuned = tune_lora_case(case)
+    assert len({lora_tuning._key(c) for c in searched}) == MAX_CONFIGS_PER_BUCKET
+    best_start = min(_log2_distance(c, target) for c in starting_configs(case))
+    assert _log2_distance(tuned, target) < best_start
+    # With room to walk, the search reaches the optimum.
+    optimum = {**lora_tuning._SHRINK_FIXED, **target}
+    assert tune_lora_case(case, max_configs=40) == optimum
+
+
+def test_search_only_grows_block_m_when_it_helps(monkeypatch):
+    case = _case(_EXPAND_SHAPE, 64)
+    seed = {**lora_tuning._EXPAND_FIXED, "block_m": 16, "block_n": 128, "num_warps": 2}
+    searched = []
+
+    def fake_benchmark(case, config, cutoff_us=None, **kwargs):
+        if cutoff_us is not None:
+            searched.append(config)
+        return (
+            1.0
+            + 10 * math.log2(config["block_m"] / 16)
+            + abs(math.log2(config["block_n"] / 128))
+            + abs(math.log2(config["num_warps"] / 2))
+        )
+
+    _stub_kernels(monkeypatch, fake_benchmark)
+    assert tune_lora_case(case, seeds=[seed]) == seed
+    starts = starting_configs(case, [seed])
+    grown = [c for c in searched if c["block_m"] > 16 and c not in starts]
+    # Slow 32-row neighbors are not expanded further.
+    assert grown
+    assert all(c["block_m"] == 32 for c in grown)
+
+
+@pytest.mark.parametrize(
+    "side_by_side_us,keeps_winner",
+    [(1.0, True), (1.95, True), (1.97, False), (3.0, False)],
+)
+def test_winner_must_clearly_beat_the_default_side_by_side(
+    monkeypatch, side_by_side_us, keeps_winner
+):
+    case = _case(_EXPAND_SHAPE, 64)
+    default = default_config(case)
+    other = {**lora_tuning._EXPAND_FIXED, "block_m": 16, "block_n": 128, "num_warps": 2}
+    calls = {lora_tuning._key(default): 0, lora_tuning._key(other): 0}
+
+    def fake_benchmark(case, config, **kwargs):
+        key = lora_tuning._key(config)
+        calls[key] = calls.get(key, 0) + 1
+        if config == default:
+            return 2.0
+        if config == other:
+            return 1.0 if calls[key] == 1 else side_by_side_us
+        return 3.0
+
+    _stub_kernels(monkeypatch, fake_benchmark)
+    tuned = tune_lora_case(case, seeds=[other], max_configs=3)
+    assert tuned == (other if keeps_winner else default)
+    assert calls[lora_tuning._key(other)] == 1 + lora_tuning._HEAD_TO_HEAD_ROUNDS
 
 
 def _fake_layer(cls, lora_a, lora_b, dual_stream: bool = False):
@@ -278,14 +390,58 @@ def test_pending_items_are_per_shape_and_bucket(monkeypatch, tmp_path):
     assert table.pending_items(worker) == []
 
 
+def test_each_bucket_starts_from_the_nearest_buckets_tuned_before(monkeypatch):
+    seeds_by_item = {}
+
+    def fake_tune(case, seeds):
+        seeds_by_item[case.op_type, case.slice_sizes, case.M] = seeds
+        return {"slices": case.slice_sizes, "M": case.M}
+
+    monkeypatch.setattr(lora_autotune, "tune_lora_case", fake_tune)
+    monkeypatch.setattr(lora_autotune, "lora_scratch_bytes", lambda case: 0)
+    monkeypatch.setattr(torch.accelerator, "get_memory_info", lambda: (1, 1))
+    table = lora_autotune.LoRAConfigTable()
+    wider = LoRAShape("shrink", 1, 16, (1024, 1024), None, torch.bfloat16)
+    one_slice = LoRAShape("shrink", 1, 16, (512,), None, torch.bfloat16)
+    for shape, m in [
+        (_SHRINK_SHAPE, 1),
+        (_SHRINK_SHAPE, 16),
+        (_SHRINK_SHAPE, 32),
+        (_SHRINK_SHAPE, 64),
+        (_EXPAND_SHAPE, 32),
+        (one_slice, 32),
+        (wider, 32),
+        (wider, 16),
+    ]:
+        table.tune(TuningItem(table.name, shape, m))
+
+    def winner(shape, m):
+        return {"slices": shape.slice_sizes, "M": m}
+
+    assert seeds_by_item["shrink", (512, 512), 1] == []
+    assert seeds_by_item["shrink", (512, 512), 64] == [
+        winner(_SHRINK_SHAPE, 32),
+        winner(_SHRINK_SHAPE, 16),
+    ]
+    # Expand and one-slice shrink run other kernels, so they never seed it.
+    assert seeds_by_item["shrink", (1024, 1024), 32] == [
+        winner(_SHRINK_SHAPE, 32),
+        winner(_SHRINK_SHAPE, 16),
+    ]
+    # On equal distance the shape's own winner beats the other shape's.
+    assert seeds_by_item["shrink", (1024, 1024), 16] == [
+        winner(_SHRINK_SHAPE, 16),
+        winner(wider, 32),
+    ]
+
+
 @requires_gpu
 @pytest.mark.parametrize("shape", [_SHRINK_SHAPE, _EXPAND_SHAPE])
-def test_tuned_config_is_a_candidate_and_matches_the_default_output(shape):
+def test_tuned_config_matches_the_default_output(shape):
     a_keys, b_keys = set(_LORA_A_PTR_DICT), set(_LORA_B_PTR_DICT)
     case = _case(shape, 64)
-    candidates = search_space(case)[:4]
-    config = tune_lora_case(case, candidates=candidates, num_iters=3)
-    assert config in candidates
+    config = tune_lora_case(case, max_configs=4, num_iters=3)
+    assert config is not None
     assert validate_lora_config(case, config)
     # Scratch weights must not stay in the data_ptr-keyed pointer caches.
     assert set(_LORA_A_PTR_DICT) == a_keys
@@ -309,8 +465,8 @@ def test_table_fills_missing_configs_then_has_nothing_left(monkeypatch):
     monkeypatch.setattr(
         lora_autotune,
         "tune_lora_case",
-        lambda case: tune_lora_case(
-            case, candidates=search_space(case)[:3], num_iters=3
+        lambda case, seeds: tune_lora_case(
+            case, seeds=seeds, max_configs=3, num_iters=3
         ),
     )
     table = lora_autotune.LoRAConfigTable()

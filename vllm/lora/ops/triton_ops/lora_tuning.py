@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import math
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
@@ -27,14 +28,15 @@ from .utils import (
 logger = init_logger(__name__)
 
 Config = dict[str, int]
+ConfigKey = tuple[tuple[str, int], ...]
+ConfigBenchmark = Callable[[Config, float | None], float | None]
 
-# Triton compiles M == 1 and M % 16 == 0 separately, so every config on this
-# grid compiles twice per kernel variant.
+# Representative token-count buckets used by config lookup.
 LORA_M_BUCKETS = (1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 
-# Pruned from a wide sweep on MI300X (Llama-3.2-3B shapes at ranks 16 and 64,
-# 1 and 4 adapters, M from 1 to 4096): these lists stay within 3% of the wide
-# space's best. Shrink also tries BLOCK_N equal to the rank.
+# Maximum distinct configs timed per bucket, including starting points.
+MAX_CONFIGS_PER_BUCKET = 12
+
 SHRINK_BLOCK_M_CHOICES = [16, 32, 64, 128]
 SHRINK_BLOCK_N_CHOICES = [16]
 SHRINK_BLOCK_K_CHOICES = [64, 128]
@@ -44,20 +46,31 @@ EXPAND_BLOCK_N_CHOICES = [32, 64, 128, 256]
 EXPAND_BLOCK_K = 16
 EXPAND_NUM_WARPS_CHOICES = [2, 4, 8]
 
-# A candidate whose first timed replay is this much slower than the best so
-# far cannot win, so its full timing is skipped.
+# Stop timing a candidate after one replay when it exceeds this ratio.
 _EARLY_EXIT_RATIO = 1.5
+
+_HEAD_TO_HEAD_ROUNDS = 2
+
+# Required speedup over the default.
+_MIN_SPEEDUP = 1.02
+
+_SHRINK_FIXED: Config = {
+    "num_warps": 4,
+    "num_ctas": 1,
+    "group_size_m": 8,
+    "num_stages": 2,
+}
+_EXPAND_FIXED: Config = {"block_k": EXPAND_BLOCK_K, "num_ctas": 1, "num_stages": 2}
 
 
 @dataclass(frozen=True)
 class LoRATuningCase:
     op_type: str  # "shrink" or "expand"
     M: int
-    # Adapter slots (LoRAConfig.max_loras); the kernels see max_loras + 1 ids.
+    # Adapter slots; kernel metadata adds a no-LoRA slot.
     max_loras: int
     rank: int
-    # Hidden size of each slice: the input size for shrink (equal for every
-    # slice), the output size for expand.
+    # Input sizes for shrink, output sizes for expand.
     slice_sizes: tuple[int, ...]
     add_inputs: bool | None  # expand only
     dtype: torch.dtype
@@ -86,8 +99,7 @@ class LoRAInputs:
 
 
 def lora_m_buckets(max_tokens: int) -> list[int]:
-    """Grid entries up to the first one at or above max_tokens, so the
-    runtime's nearest-M lookup never leaves the tuned range."""
+    """Return representative M buckets, capped at the largest grid entry."""
     buckets: list[int] = []
     if max_tokens <= 0:
         return buckets
@@ -103,59 +115,105 @@ def default_config(case: LoRATuningCase) -> Config:
     return {k: v for k, v in config.items() if v is not None}
 
 
-def search_space(case: LoRATuningCase) -> list[Config]:
-    """The default config first, then candidates that can differ for this case.
+def _key(config: Config) -> ConfigKey:
+    return tuple(sorted(config.items()))
 
-    BLOCK_M above next_pow2(M) only masks out rows, and a shrink K tile wider
-    than K only masks out columns.
-    """
-    bm_ceiling = max(16, next_power_of_2(case.M))
-    configs = [default_config(case)]
+
+def _block_m_ceiling(case: LoRATuningCase) -> int:
+    return max(16, next_power_of_2(case.M))
+
+
+def search_axes(case: LoRATuningCase) -> dict[str, tuple[int, ...]]:
+    """Return the values searched for each config field."""
+    bm_ceiling = _block_m_ceiling(case)
     if case.op_type == "shrink":
         rank_block = min(64, max(16, next_power_of_2(case.rank)))
-        block_n_choices = sorted({*SHRINK_BLOCK_N_CHOICES, rank_block})
-        for block_m, block_n, block_k, split_k in product(
-            SHRINK_BLOCK_M_CHOICES,
-            block_n_choices,
-            SHRINK_BLOCK_K_CHOICES,
-            SHRINK_SPLIT_K_CHOICES,
-        ):
-            if block_m > bm_ceiling or block_k * split_k > case.hidden_size:
-                continue
-            configs.append(
-                {
-                    "block_m": block_m,
-                    "block_n": block_n,
-                    "block_k": block_k,
-                    "split_k": split_k,
-                    "num_warps": 4,
-                    "num_ctas": 1,
-                    "group_size_m": 8,
-                    "num_stages": 2,
-                }
-            )
-    else:
-        for block_m, block_n, num_warps in product(
-            EXPAND_BLOCK_M_CHOICES, EXPAND_BLOCK_N_CHOICES, EXPAND_NUM_WARPS_CHOICES
-        ):
-            if block_m > bm_ceiling:
-                continue
-            configs.append(
-                {
-                    "block_m": block_m,
-                    "block_n": block_n,
-                    "block_k": EXPAND_BLOCK_K,
-                    "num_warps": num_warps,
-                    "num_ctas": 1,
-                    "num_stages": 2,
-                }
-            )
-    return [c for i, c in enumerate(configs) if c not in configs[:i]]
+        return {
+            "block_m": tuple(m for m in SHRINK_BLOCK_M_CHOICES if m <= bm_ceiling),
+            "block_n": tuple(sorted({*SHRINK_BLOCK_N_CHOICES, rank_block})),
+            "block_k": tuple(SHRINK_BLOCK_K_CHOICES),
+            "split_k": tuple(SHRINK_SPLIT_K_CHOICES),
+        }
+    return {
+        "block_m": tuple(m for m in EXPAND_BLOCK_M_CHOICES if m <= bm_ceiling),
+        "block_n": tuple(EXPAND_BLOCK_N_CHOICES),
+        "num_warps": tuple(EXPAND_NUM_WARPS_CHOICES),
+    }
+
+
+def normalize_config(config: Config, case: LoRATuningCase) -> Config | None:
+    """Return the config if it fits the case."""
+    if config["block_m"] > _block_m_ceiling(case):
+        return None
+    if (
+        case.op_type == "shrink"
+        and config["block_k"] * config["split_k"] > case.hidden_size
+    ):
+        return None
+    return config
+
+
+def _grid_configs(
+    case: LoRATuningCase, axes: dict[str, tuple[int, ...]]
+) -> list[Config]:
+    fixed = _SHRINK_FIXED if case.op_type == "shrink" else _EXPAND_FIXED
+    configs = (
+        normalize_config({**dict(zip(axes, values)), **fixed}, case)
+        for values in product(*axes.values())
+    )
+    return [config for config in configs if config is not None]
+
+
+def _snap(
+    config: Config,
+    axes: dict[str, tuple[int, ...]],
+    grid: Sequence[Config],
+) -> Config | None:
+    """The grid config closest to config, measured in powers of two."""
+
+    def distance(grid_config: Config) -> float:
+        return sum(abs(math.log2(grid_config[k] / config[k])) for k in axes)
+
+    return min(grid, key=distance, default=None)
+
+
+def _neighbors(
+    config: Config, axes: dict[str, tuple[int, ...]], case: LoRATuningCase
+) -> Iterator[Config]:
+    """Grid configs one step away along a single axis."""
+    fixed = _SHRINK_FIXED if case.op_type == "shrink" else _EXPAND_FIXED
+    if (
+        set(config) != {*axes, *fixed}
+        or any(config.get(name) not in values for name, values in axes.items())
+        or any(config.get(name) != value for name, value in fixed.items())
+    ):
+        return
+    for name, values in axes.items():
+        i = values.index(config[name])
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(values):
+                neighbor = normalize_config({**config, name: values[j]}, case)
+                if neighbor is not None:
+                    yield neighbor
+
+
+def starting_configs(
+    case: LoRATuningCase, seeds: Sequence[Config] = ()
+) -> list[Config]:
+    """Return the default plus deduplicated, grid-aligned starting points."""
+    default = default_config(case)
+    axes = search_axes(case)
+    grid = _grid_configs(case, axes)
+    starts = {_key(default): default}
+    for config in [default, *seeds]:
+        snapped = _snap(config, axes, grid)
+        if snapped is not None:
+            starts.setdefault(_key(snapped), snapped)
+    return list(starts.values())
 
 
 def lora_scratch_bytes(case: LoRATuningCase) -> int:
-    """Peak scratch memory: input, weights, and four copies of the output
-    (working, initial, reference, candidate)."""
+    """Return peak scratch memory in bytes."""
     itemsize = case.dtype.itemsize
     total_n = sum(case.slice_sizes)
     if case.op_type == "shrink":
@@ -170,7 +228,7 @@ def lora_scratch_bytes(case: LoRATuningCase) -> int:
 
 
 def make_lora_inputs(case: LoRATuningCase) -> LoRAInputs:
-    """Scratch tensors shaped like PunicaWrapperGPU's add_lora_linear call."""
+    """Create representative scratch inputs."""
     device, dtype = case.device, case.dtype
     meta = LoRAKernelMeta.make(case.max_loras, case.M, device)
     # Contiguous runs of tokens, one per active adapter.
@@ -205,13 +263,7 @@ def make_lora_inputs(case: LoRATuningCase) -> LoRAInputs:
 
 @contextmanager
 def _isolated_ptr_cache(case: LoRATuningCase, inputs: LoRAInputs) -> Iterator[None]:
-    """Keep the scratch weights out of the LoRA pointer caches.
-
-    The caches are keyed by data_ptr() and hold references to the weights, so a
-    leftover entry would pin scratch memory and could be hit by a later tensor
-    at the same address. An entry already present under these addresses is
-    stale, because the scratch weights are fresh allocations.
-    """
+    """Keep scratch weights out of the global pointer cache."""
     cache = _LORA_A_PTR_DICT if case.op_type == "shrink" else _LORA_B_PTR_DICT
     key = tuple(w.data_ptr() for w in inputs.weights)
     cache.pop(key, None)
@@ -252,11 +304,7 @@ def benchmark_lora_config(
     graph_batch_size: int = 10,
     cutoff_us: float | None = None,
 ) -> float | None:
-    """Benchmark one config on disposable buffers and return microseconds.
-
-    If the first timed replay is slower than cutoff_us per call, that rough
-    time is returned without the remaining replays.
-    """
+    """Return mean latency, stopping early when the first replay exceeds cutoff."""
     try:
         if inputs is None:
             inputs = make_lora_inputs(case)
@@ -307,7 +355,7 @@ def validate_lora_config(
     reference: torch.Tensor | None = None,
     rtol: float = 1e-2,
 ) -> bool:
-    """Check a candidate against the default launch config on identical inputs."""
+    """Compare a candidate with the default output."""
     if inputs is None:
         inputs = make_lora_inputs(case)
     with _isolated_ptr_cache(case, inputs):
@@ -319,53 +367,116 @@ def validate_lora_config(
     return torch.allclose(out.float(), ref, rtol=rtol, atol=atol)
 
 
+def _ranked_configs(timings: dict[ConfigKey, float | None]) -> list[ConfigKey]:
+    timed = ((elapsed, key) for key, elapsed in timings.items() if elapsed is not None)
+    return [key for _, key in sorted(timed)]
+
+
+def _benchmark_configs(
+    configs: Sequence[Config],
+    timings: dict[ConfigKey, float | None],
+    *,
+    max_configs: int,
+    best_us: float,
+    benchmark: ConfigBenchmark,
+) -> float:
+    new = {_key(config): config for config in configs if _key(config) not in timings}
+    for key, config in list(new.items())[: max_configs - len(timings)]:
+        elapsed_us = benchmark(config, best_us * _EARLY_EXIT_RATIO)
+        timings[key] = elapsed_us
+        if elapsed_us is not None:
+            best_us = min(best_us, elapsed_us)
+    return best_us
+
+
+def _search_configs(
+    case: LoRATuningCase,
+    seeds: Sequence[Config],
+    max_configs: int,
+    benchmark: ConfigBenchmark,
+) -> dict[ConfigKey, float | None]:
+    axes = search_axes(case)
+    timings: dict[ConfigKey, float | None] = {}
+    best_us = _benchmark_configs(
+        starting_configs(case, seeds),
+        timings,
+        max_configs=max_configs,
+        best_us=float("inf"),
+        benchmark=benchmark,
+    )
+    expanded: set[ConfigKey] = set()
+    while len(timings) < max_configs:
+        center = next(
+            (key for key in _ranked_configs(timings) if key not in expanded), None
+        )
+        if center is None:
+            break
+        expanded.add(center)
+        best_us = _benchmark_configs(
+            list(_neighbors(dict(center), axes, case)),
+            timings,
+            max_configs=max_configs,
+            best_us=best_us,
+            benchmark=benchmark,
+        )
+    return timings
+
+
 def tune_lora_case(
     case: LoRATuningCase,
     *,
-    candidates: list[Config] | None = None,
+    seeds: Sequence[Config] = (),
+    max_configs: int = MAX_CONFIGS_PER_BUCKET,
     num_iters: int = 10,
     num_warmup: int = 5,
 ) -> Config | None:
-    """Return the fastest candidate that reproduces the default config's output."""
-    if candidates is None:
-        candidates = search_space(case)
+    """Return the fastest valid config found within the search budget."""
     default = default_config(case)
     inputs = make_lora_inputs(case)
     with _isolated_ptr_cache(case, inputs):
         reference = _output(case, inputs, default)
 
-        best_us = float("inf")
-        default_us: float | None = None
-        timings: list[tuple[float, int]] = []
-        for index, config in enumerate(candidates):
-            elapsed_us = benchmark_lora_config(
-                case,
-                config,
-                inputs=inputs,
-                num_iters=num_iters,
-                num_warmup=num_warmup,
-                cutoff_us=best_us * _EARLY_EXIT_RATIO,
-            )
-            if elapsed_us is None:
-                continue
-            if config == default:
-                default_us = elapsed_us
-            timings.append((elapsed_us, index))
-            best_us = min(best_us, elapsed_us)
+    def time_config(config: Config, cutoff_us: float | None = None) -> float | None:
+        return benchmark_lora_config(
+            case,
+            config,
+            inputs=inputs,
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            cutoff_us=cutoff_us,
+        )
 
-        for elapsed_us, index in sorted(timings):
-            config = candidates[index]
-            if validate_lora_config(case, config, inputs=inputs, reference=reference):
-                logger.info(
-                    "LoRA %s tuned slices=%s,rank=%d,M=%d to %s "
-                    "(%.2f us, default %s us).",
-                    case.op_type,
-                    case.slice_sizes,
-                    case.rank,
-                    case.M,
-                    config,
-                    elapsed_us,
-                    "n/a" if default_us is None else f"{default_us:.2f}",
-                )
-                return config
-    return None
+    timings = _search_configs(case, seeds, max_configs, time_config)
+    winner = next(
+        (
+            dict(key)
+            for key in _ranked_configs(timings)
+            if validate_lora_config(case, dict(key), inputs=inputs, reference=reference)
+        ),
+        None,
+    )
+    if winner is None:
+        return None
+
+    # Recheck a close winner against the default.
+    winner_us = default_us = float("inf")
+    for _ in range(_HEAD_TO_HEAD_ROUNDS):
+        default_us = min(default_us, time_config(default) or float("inf"))
+        if winner != default:
+            winner_us = min(winner_us, time_config(winner) or float("inf"))
+    if default_us < winner_us * _MIN_SPEEDUP:
+        winner, winner_us = default, default_us
+
+    logger.info(
+        "LoRA %s tuned slices=%s,rank=%d,M=%d to %s (%.2f us, default %.2f us, "
+        "%d configs timed).",
+        case.op_type,
+        case.slice_sizes,
+        case.rank,
+        case.M,
+        winner,
+        winner_us,
+        default_us,
+        len(timings),
+    )
+    return winner

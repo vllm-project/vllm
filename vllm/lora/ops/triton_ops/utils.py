@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import json
-import os
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -167,7 +165,6 @@ def _get_lora_b_ptr(
 
 
 def _lora_op_config_suffix(op_type: str, add_inputs: bool | None) -> str:
-    # only expand op needs to consider add_inputs
     if op_type == "expand":
         return f"{op_type.upper()}_{str(add_inputs).upper()}.json"
     return f"{op_type.upper()}.json"
@@ -175,64 +172,58 @@ def _lora_op_config_suffix(op_type: str, add_inputs: bool | None) -> str:
 
 def get_lora_op_config_file_name(op_type: str, add_inputs: bool | None) -> str:
     """File name of a user-tuned config in VLLM_TUNED_CONFIG_FOLDER."""
-    gpu_name = torch.cuda.get_device_name()
-    gpu_name = gpu_name.replace(" ", "_")
-    gpu_name = gpu_name.replace("-", "_")
+    gpu_name = torch.cuda.get_device_name().replace(" ", "_").replace("-", "_")
     return f"{gpu_name}_{_lora_op_config_suffix(op_type, add_inputs)}"
 
 
 def get_lora_autotune_config_file_path(op_type: str, add_inputs: bool | None) -> str:
-    # torch.cuda.get_device_name() can be empty on ROCm, so the autotune
-    # cache uses the platform device name like the other tuned tables.
+    # The platform name remains available when torch reports an empty ROCm name.
     device_name = get_device_name_as_file_name()
     file_name = f"{device_name}_{_lora_op_config_suffix(op_type, add_inputs)}"
-    return os.path.join(get_autotune_cache_dir("lora"), file_name)
+    return str(Path(get_autotune_cache_dir("lora")) / file_name)
 
 
-@functools.lru_cache
+def _read_lora_config(path: str | Path) -> dict:
+    with open(path) as f:
+        config = json.load(f)
+    config.pop("triton_version", None)
+    return config
+
+
+@lru_cache
 def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
-    # Avoid optimizing for the batch invariant case. Use default config
     if is_batch_invariant:
         return None
 
     config_paths: list[Path] = []
-    # User-supplied override
-    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
-        config_fname = get_lora_op_config_file_name(op_type, add_inputs)
-        config_paths.append(Path(user_defined_config_folder) / config_fname)
-    # Configs tuned at startup by --kernel-config.enable_triton_autotune
+    user_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_folder is not None:
+        file_name = get_lora_op_config_file_name(op_type, add_inputs)
+        config_paths.append(Path(user_folder) / file_name)
     if current_platform.is_cuda_alike():
-        autotune_path = get_lora_autotune_config_file_path(op_type, add_inputs)
-        config_paths.append(Path(autotune_path))
+        config_paths.append(
+            Path(get_lora_autotune_config_file_path(op_type, add_inputs))
+        )
 
     for config_path in config_paths:
         if config_path.exists():
             logger.info_once(f"Using tuned LoRA kernel configs from {config_path}.")
-            with open(str(config_path)) as f:
-                config_data = json.load(f)
-            # triton_version included in the config file only for reference
-            config_data.pop("triton_version", None)
-            return config_data
+            return _read_lora_config(config_path)
 
-    if user_defined_config_folder is not None:
+    if user_folder is not None:
         logger.warning_once(f"No LoRA kernel configs found in {config_paths[0]}")
     return None
 
 
 def load_lora_autotune_configs(op_type: str, add_inputs: bool | None) -> dict:
-    path = get_lora_autotune_config_file_path(op_type, add_inputs)
-    if not os.path.exists(path):
+    path = Path(get_lora_autotune_config_file_path(op_type, add_inputs))
+    if not path.exists():
         return {}
-    with open(path) as f:
-        raw = json.load(f)
-    raw.pop("triton_version", None)
-    return raw
+    return _read_lora_config(path)
 
 
 def save_lora_configs(op_type: str, add_inputs: bool | None, configs: dict) -> str:
-    """Write a config_data[max_loras][num_slices][m][k][n] table to the
-    autotune cache and clear the lookup caches."""
+    """Save an autotune table and clear its lookup caches."""
     path = get_lora_autotune_config_file_path(op_type, add_inputs)
     atomic_write_json(
         path,
@@ -308,8 +299,7 @@ _lora_op_config_override: tuple[str, dict[str, int | None]] | None = None
 
 @contextmanager
 def override_lora_op_config(op_type: str, config: dict[str, int | None]):
-    """Pin ``get_lora_op_configs(op_type, ...)`` to ``config`` for the duration
-    of the context. Used by the tuning benchmark to time specific configs."""
+    """Temporarily override one LoRA operation's config."""
     global _lora_op_config_override
     prev = _lora_op_config_override
     _lora_op_config_override = (op_type, config)
@@ -345,7 +335,7 @@ def get_lora_op_configs(
     )
 
 
-@functools.lru_cache
+@lru_cache
 def _get_lora_op_configs_cached(
     op_type: str,
     max_loras: int,
