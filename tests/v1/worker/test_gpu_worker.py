@@ -71,9 +71,8 @@ def test_weights_wake_resets_lora_state_after_level2_sleep(monkeypatch, level):
         suspend=lambda level: None, resume=lambda tags: None
     )
     worker._sleep_saved_parameters = {}
-    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_buffers = None
     worker._sleep_saved_draft_buffers = {}
-    worker._sleep_discarded_weights = False
     worker.model_config = SimpleNamespace(sleep_preserve_parameter_names=[])
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=False)

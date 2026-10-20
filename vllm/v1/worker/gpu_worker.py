@@ -221,10 +221,9 @@ class Worker(WorkerBase):
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_buffers: dict[str, torch.Tensor] | None = None
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_discarded_weights = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -302,7 +301,6 @@ class Worker(WorkerBase):
 
         # Save the buffers before level 2 sleep
         if level == 2:
-            self._sleep_discarded_weights = True
             model = self.model_runner.model
             self._save_sleep_parameters(model)
             self._sleep_saved_buffers = {
@@ -348,12 +346,13 @@ class Worker(WorkerBase):
         wake_weights = tags is None or "weights" in tags
         if wake_weights and self._sleep_saved_parameters:
             self._restore_sleep_parameters(self.model_runner.model)
-        if wake_weights and len(self._sleep_saved_buffers):
+        if wake_weights and self._sleep_saved_buffers is not None:
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
+            self._sleep_saved_buffers = None
+            self.model_runner.reset_lora_state()
 
         if wake_weights and len(self._sleep_saved_draft_buffers):
             draft = self.get_draft_model()
@@ -362,10 +361,6 @@ class Worker(WorkerBase):
                     if name in self._sleep_saved_draft_buffers:
                         buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
-
-        if wake_weights and self._sleep_discarded_weights:
-            self._sleep_discarded_weights = False
-            self.model_runner.reset_lora_state()
 
         self.synchronize_device()
 
