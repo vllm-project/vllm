@@ -77,6 +77,21 @@ _assign_draft_token_budget_compiled = torch.compile(
 )
 
 
+def _broadcast_from_tp_leader(tensor: torch.Tensor) -> None:
+    """Overwrite `tensor` in place with TP rank 0's copy.
+
+    Uses PyNCCL when it is enabled: on CUDA no other TP collective touches the
+    torch device group, so `GroupCoordinator.broadcast` would create its NCCL
+    communicator on the first trimmed serving step, after the KV cache is sized.
+    """
+    tp_group = get_tp_group()
+    pynccl_comm = getattr(tp_group.device_communicator, "pynccl_comm", None)
+    if pynccl_comm is not None and not pynccl_comm.disabled:
+        pynccl_comm.broadcast(tensor, src=0)
+    else:
+        tp_group.broadcast(tensor, src=0)
+
+
 def build_cost_tables_from_curves(
     draft_curve: list[tuple[int, float]],
     verify_curve: list[tuple[int, float]],
@@ -427,7 +442,7 @@ class AdaptiveVerificationManager:
                     self.num_speculative_steps,
                 )
                 # Equal totals alone do not ensure identical request boundaries.
-                get_tp_group().broadcast(capacities, src=0)
+                _broadcast_from_tp_leader(capacities)
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)

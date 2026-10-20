@@ -43,6 +43,9 @@ def tp_group(monkeypatch):
 
     group.broadcast_object = broadcast_object
     group.broadcast = broadcast
+    group.device_communicator = SimpleNamespace(
+        pynccl_comm=SimpleNamespace(disabled=False, broadcast=broadcast)
+    )
     monkeypatch.setattr(adaptive_module, "get_tp_group", lambda: group)
     return group
 
@@ -89,10 +92,22 @@ def test_tp_budget_uses_leader_despite_confidence_drift(
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("budget", [0, 2, 3])
+@pytest.mark.parametrize("pynccl_enabled", [True, False])
 def test_tp_reallocation_agrees_on_request_boundaries(
-    monkeypatch, tp_group, tp_size, budget
+    monkeypatch, tp_group, tp_size, budget, pynccl_enabled
 ):
     """Equal totals are insufficient: request/logit boundaries must also agree."""
+
+    def unexpected_broadcast(value, src=0):
+        raise AssertionError("capacities broadcast took the wrong transport")
+
+    # Without PyNCCL (e.g. VLLM_DISABLE_PYNCCL=1) fall back to the group broadcast.
+    pynccl_comm = tp_group.device_communicator.pynccl_comm
+    if pynccl_enabled:
+        monkeypatch.setattr(tp_group, "broadcast", unexpected_broadcast)
+    else:
+        pynccl_comm.disabled = True
+        monkeypatch.setattr(pynccl_comm, "broadcast", unexpected_broadcast)
     monkeypatch.setattr(
         adaptive_module,
         "_assign_draft_token_budget_compiled",
