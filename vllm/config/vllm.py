@@ -1284,6 +1284,33 @@ class VllmConfig:
                 "are normalized over the same nucleus as the sampling mask"
             )
 
+    def _verify_last_hidden_states_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_return_last_hidden_states:
+            return
+        # The restrictions below are configurations the feature has not been
+        # validated with yet.
+        if model_config.runner_type != "generate" or model_config.is_diffusion:
+            raise ValueError(
+                "enable_return_last_hidden_states only supports autoregressive "
+                "generation models"
+            )
+        if self.speculative_config is not None:
+            raise ValueError(
+                "enable_return_last_hidden_states does not support speculative decoding"
+            )
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "enable_return_last_hidden_states does not support pipeline parallelism"
+            )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            or self.parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError(
+                "enable_return_last_hidden_states does not support context parallelism"
+            )
+
     def _verify_trace_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.enable_trace_replay:
@@ -1511,6 +1538,7 @@ class VllmConfig:
 
         self._verify_sampling_replay_config()
         self._verify_trace_replay_config()
+        self._verify_last_hidden_states_config()
 
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
