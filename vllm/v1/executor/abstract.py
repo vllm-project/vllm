@@ -36,6 +36,7 @@ _R = TypeVar("_R")
 SLEEP_TAGS = frozenset(("weights", "kv_cache"))
 
 FailureCallback = Callable[[], None]
+IterationTimingPoll = Callable[[], tuple[tuple[int, float], ...] | None]
 
 
 def _check_worker_profile_kwargs(worker_cls: str, kwargs: dict[str, int]) -> None:
@@ -269,12 +270,39 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(
+        self, iteration_metrics_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
+        if iteration_metrics_id is None:
+            self.collective_rpc("execute_dummy_batch")
+            return None
+        outputs: list[tuple[tuple[int, float], ...]] = self.collective_rpc(
+            "execute_dummy_batch", args=(iteration_metrics_id,)
+        )
+        return tuple(sample for samples in outputs for sample in samples)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
+
+    def start_iteration_timing_poll(self) -> IterationTimingPoll | None:
+        """Start a nonblocking timing query and return a result poller.
+
+        Executors with lazy futures must override this to advance their response
+        transport without waiting. None means submission should be retried later.
+        The poller returns None while pending, or a possibly empty tuple of
+        (iteration_id, elapsed_ms) samples once the response arrives.
+        """
+        future: Future[list[tuple[tuple[int, float], ...]]] = self.collective_rpc(
+            "poll_iteration_timing", non_block=True
+        )
+
+        def poll() -> tuple[tuple[int, float], ...] | None:
+            if not future.done():
+                return None
+            return tuple(sample for samples in future.result() for sample in samples)
+
+        return poll
 
     def profile(
         self,

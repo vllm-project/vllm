@@ -3,6 +3,7 @@
 """Math utility functions for vLLM."""
 
 from bisect import bisect_left
+from dataclasses import dataclass
 
 # Approximate value of 1/ln(2), used for log/exp base conversion
 # Best FP32 approximation: 1.4426950216 (hex 0x3FB8AA3B)
@@ -43,3 +44,24 @@ def round_up_to(values: list[int], n: int) -> int | None:
     """Round `n` up to the smallest member of sorted `values` >= n, or None."""
     i = bisect_left(values, n)
     return values[i] if i < len(values) else None
+
+
+@dataclass(slots=True)
+class WelfordAccumulator:
+    """Single-pass count, exact integer sum, and population variance."""
+
+    count: int = 0
+    total: int = 0
+    _mean: float = 0.0
+    _m2: float = 0.0
+
+    def add(self, value: int) -> None:
+        self.count += 1
+        self.total += value
+        delta = value - self._mean
+        self._mean += delta / self.count
+        self._m2 += delta * (value - self._mean)
+
+    @property
+    def variance(self) -> float:
+        return self._m2 / self.count if self.count else 0.0
