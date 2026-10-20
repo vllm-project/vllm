@@ -57,6 +57,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -570,7 +571,9 @@ class AliceAIModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights=weights,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
+            fuse_by_layer=get_fused_shared_expert_layer_map(
+                self, AliceAISparseMoeBlock
+            ),
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",

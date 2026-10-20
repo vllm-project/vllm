@@ -71,6 +71,7 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    get_fused_shared_expert_layer_map,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
@@ -498,7 +499,7 @@ class Glm4MoeModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
+            fuse_by_layer=get_fused_shared_expert_layer_map(self, Glm4MoE),
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
@@ -502,12 +502,32 @@ class AutoWeightsLoader:
                 )
 
 
+def get_fused_shared_expert_layer_map(
+    module: nn.Module,
+    moe_cls: type[nn.Module],
+) -> dict[int, bool]:
+    """Map layer index -> whether that layer fused its shared expert.
+
+    Built from the live module tree, so the keys follow the same index space
+    as the caller's weight names: 0-based for modules stored in an
+    ``nn.ModuleList``, and absolute for ``nn.ModuleDict`` MTP layers keyed by
+    layer index. This removes the need to hard-code an offset per loader.
+    """
+    return {
+        extract_layer_index(name): bool(
+            getattr(mod, "is_fused_shared_expert_enabled", False)
+        )
+        for name, mod in module.named_modules()
+        if isinstance(mod, moe_cls)
+    }
+
+
 def maybe_fuse_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
     n_routed_experts: int,
     n_shared_experts: int,
-    fused_shared_expert_layers: Collection[int],
+    fuse_by_layer: Mapping[int, bool],
     ckpt_prefix: str = "mlp.shared_experts",
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
@@ -524,15 +544,16 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
-        fused_shared_expert_layers: Layer indices with shared experts fused
-            at construction time. Only weights belonging to these layers
-            are routed to fused slots.
+        fuse_by_layer: Mapping from layer index to whether that layer fused its
+            shared expert, as returned by
+            `get_fused_shared_expert_layer_map`. Only weights belonging to
+            fused layers are routed to fused slots.
 
     Yields:
         `(name, tensor)` pairs with shared experts routed to fused slots.
 
     """
-    if not fused_shared_expert_layers:
+    if not any(fuse_by_layer.values()):
         yield from weights
         return
 
@@ -543,7 +564,7 @@ def maybe_fuse_shared_experts(
         if prefix not in name:
             yield name, loaded_weight
             continue
-        if extract_layer_index(name) not in fused_shared_expert_layers:
+        if not fuse_by_layer.get(extract_layer_index(name), False):
             yield name, loaded_weight
             continue
         # gate/up split on the output dim; down_proj on the input dim.

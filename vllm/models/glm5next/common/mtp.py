@@ -24,7 +24,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
-from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layer_map,
+    maybe_prefix,
+)
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -302,9 +306,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, Glm5NextMoE)
         num_fused_shared = _num_fused_shared_experts(
             self.config.n_shared_experts,
-            bool(self.fused_shared_expert_layers),
+            any(fuse_by_layer.values()),
         )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -336,9 +341,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            if (
-                "mlp.shared_experts." in name
-                and extract_layer_index(name) in self.fused_shared_expert_layers
+            if "mlp.shared_experts." in name and fuse_by_layer.get(
+                extract_layer_index(name), False
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 

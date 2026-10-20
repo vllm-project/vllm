@@ -17,6 +17,7 @@ from transformers import Qwen3_5MoeTextConfig
 import vllm.config as vllm_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
@@ -31,6 +32,10 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 )
 from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
+)
+from vllm.model_executor.models.utils import (
+    get_fused_shared_expert_layer_map,
+    maybe_fuse_shared_experts,
 )
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
@@ -155,8 +160,8 @@ class _StubGlm5NextAttention(nn.Module):
 def get_fse_test_model_config(
     model_type: str,
     quantization_config: dict[str, Any],
-) -> tuple[object, type[nn.Module]]:
-    config: object
+) -> tuple[Any, type[nn.Module]]:
+    config: Any
     if model_type == "minimax_m3":
         config = MiniMaxM3TextConfig(
             hidden_size=128,
@@ -562,7 +567,7 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
         "is_shared_expert_quant_fse_compatible",
         lambda *_, **__: (False, "shared experts are excluded"),
     )
-    fused_moe_utils._report_skip_reasons.clear()
+    _print_warning_once.cache_clear()
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
         ExpertsInt8Config(), "model.layers.0.mlp"
@@ -945,6 +950,134 @@ def test_aiter_fused_moe_validates_shared_expert_arguments() -> None:
     assert validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, 0)
 
 
+def test_deepseek_v4_shared_expert_mapper_fallback() -> None:
+    """Mixed and all-excluded DSV4 checkpoints map shared experts correctly."""
+    from vllm.models.deepseek_v4.amd.model import (
+        _make_deepseek_v4_weights_mapper,
+        _redirect_shared_expert_name,
+    )
+
+    tensor = torch.empty(0)
+    fuse_by_layer = {5: False, 6: True}
+    # Mixed: any fused layer puts the mapper in fused mode, which leaves the
+    # checkpoint .w2 names untouched; the loader redirects per layer.
+    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=True)
+    for raw, expected in [
+        (
+            "layers.5.ffn.shared_experts.w2.weight",
+            "model.layers.5.ffn.shared_experts.down_proj.weight",
+        ),
+        (
+            "layers.5.ffn.shared_experts.w2.scale",
+            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
+        ),
+        (
+            "layers.6.ffn.shared_experts.w2.weight",
+            "model.layers.6.ffn.experts.4.w2.weight",
+        ),
+        (
+            "layers.6.ffn.shared_experts.w2.scale",
+            "model.layers.6.ffn.experts.4.w2.weight_scale_inv",
+        ),
+    ]:
+        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
+        assert _redirect_shared_expert_name(mapped, fuse_by_layer, 4) == expected
+
+    # All layers excluded (fused_shared_expert_layers == []) selects the
+    # unfused mapper, which renames .w2 -> .down_proj itself.
+    mapper = _make_deepseek_v4_weights_mapper("fp8", fuse_shared_experts=False)
+    for raw, expected in [
+        (
+            "layers.5.ffn.shared_experts.w2.weight",
+            "model.layers.5.ffn.shared_experts.down_proj.weight",
+        ),
+        (
+            "layers.5.ffn.shared_experts.w2.scale",
+            "model.layers.5.ffn.shared_experts.down_proj.weight_scale_inv",
+        ),
+    ]:
+        [(mapped, _)] = list(mapper.apply([(raw, tensor)]))
+        assert _redirect_shared_expert_name(mapped, {}, 4) == expected
+
+
+def test_fused_shared_expert_layer_map_matches_container_index_space() -> None:
+    """The layer map follows the module tree, not a hard-coded offset.
+
+    ``nn.ModuleList`` MTP layers (Qwen3 Next/3.5, Qwen4 Exp) are 0-based,
+    while ``nn.ModuleDict`` MTP layers (GLM4, DeepSeek) are keyed by absolute
+    layer index. Both must redirect without a per-loader offset.
+    """
+
+    class MoE(nn.Module):
+        def __init__(self, enabled: bool) -> None:
+            super().__init__()
+            self.is_fused_shared_expert_enabled = enabled
+
+    class Layer(nn.Module):
+        def __init__(self, enabled: bool) -> None:
+            super().__init__()
+            self.mlp = MoE(enabled)
+
+    class ListModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([Layer(True), Layer(False)])
+
+    class DictModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleDict({"28": Layer(False), "29": Layer(True)})
+
+    list_map = get_fused_shared_expert_layer_map(ListModel(), MoE)
+    dict_map = get_fused_shared_expert_layer_map(DictModel(), MoE)
+    assert list_map == {0: True, 1: False}
+    assert dict_map == {28: False, 29: True}
+
+    weight = torch.arange(8.0).reshape(4, 2)
+
+    def redirected(name: str, fuse_by_layer: dict[int, bool]) -> bool:
+        [(out_name, _)] = list(
+            maybe_fuse_shared_experts(
+                [(name, weight)],
+                n_routed_experts=4,
+                n_shared_experts=1,
+                fuse_by_layer=fuse_by_layer,
+                ckpt_prefix="mlp.shared_expert",
+            )
+        )
+        return ".experts." in out_name
+
+    # ModuleList: 0-based names, including the Qwen4 Exp MTP case where the
+    # quant-config prefix uses an absolute index but the weight names do not.
+    assert redirected("layers.0.mlp.shared_expert.down_proj.weight", list_map)
+    assert not redirected("layers.1.mlp.shared_expert.down_proj.weight", list_map)
+    # ModuleDict: absolute names, including the MTP layer offset.
+    assert redirected("layers.29.mlp.shared_expert.down_proj.weight", dict_map)
+    assert not redirected("layers.28.mlp.shared_expert.down_proj.weight", dict_map)
+
+
+def _assert_mtp_fused_shared_expert_redirect(
+    mtp: nn.Module, ckpt_prefix: str, moe: nn.Module, n_routed_experts: int
+) -> None:
+    """Load a fused MTP shared expert and verify it lands in the appended slot.
+
+    The MTP loaders see different name/index spaces (0-based ``ModuleList`` or
+    absolute ``ModuleDict``); using the live module map must redirect either.
+    """
+    packed_down = torch.full((128, 16), 3, dtype=torch.uint8)
+    down_scale = torch.full((128, 1), 127, dtype=torch.uint8)
+    mtp.load_weights(
+        [
+            (f"{ckpt_prefix}.down_proj.weight", packed_down),
+            (f"{ckpt_prefix}.down_proj.weight_scale", down_scale),
+        ]
+    )
+    torch.testing.assert_close(
+        moe.experts.routed_experts.w2_weight[n_routed_experts][:128, :16].float(),
+        packed_down.float(),
+    )
+
+
 @pytest.mark.parametrize(
     "model_type",
     [
@@ -980,7 +1113,7 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
-    fused_moe_utils._report_skip_reasons.clear()
+    _print_warning_once.cache_clear()
     per_layer_fse = model_type in {
         "qwen3_next",
         "qwen3_5",
@@ -1221,6 +1354,36 @@ def test_models_fse_init(
                     use_dspark=lambda: False,
                 )
                 ds_mtp = DeepSeekMTP(vllm_config=vllm_config)
+            qwen3_mtp = None
+            if model_type == "qwen3_next" and use_fse and not exclude:
+                from vllm.model_executor.models.qwen3_next_mtp import Qwen3NextMTP
+
+                vllm_config.speculative_config = SimpleNamespace(
+                    draft_model_config=SimpleNamespace(
+                        hf_config=config, hf_text_config=config
+                    ),
+                    target_model_config=vllm_config.model_config,
+                    method="mtp",
+                    parallel_drafting=False,
+                    enable_adaptive_verification=False,
+                    use_dspark=lambda: False,
+                )
+                qwen3_mtp = Qwen3NextMTP(vllm_config=vllm_config)
+            qwen3_5_mtp = None
+            if model_type == "qwen3_5" and use_fse and not exclude:
+                from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MoeMTP
+
+                vllm_config.speculative_config = SimpleNamespace(
+                    draft_model_config=SimpleNamespace(
+                        hf_config=config, hf_text_config=config
+                    ),
+                    target_model_config=vllm_config.model_config,
+                    method="mtp",
+                    parallel_drafting=False,
+                    enable_adaptive_verification=False,
+                    use_dspark=lambda: False,
+                )
+                qwen3_5_mtp = Qwen3_5MoeMTP(vllm_config=vllm_config)
         if per_layer_fse:
             expected_policy = {
                 "layers.0.mlp": bool(fse_enabled and not exclude),
@@ -1316,6 +1479,37 @@ def test_models_fse_init(
                     )
             with set_current_vllm_config(vllm_config):
                 loaded = model.load_weights(checkpoint)
+                base = config.num_hidden_layers
+                mtp_cases = [
+                    (
+                        mtp_model,
+                        f"model.layers.{base}.mlp.{shared}",
+                        mtp_model.model.layers[str(base)].mtp_block.mlp,
+                        getattr(config, "n_routed_experts", 0),
+                    )
+                    for mtp_model, shared in (
+                        (glm4_mtp, "shared_experts"),
+                        (glm4_lite_mtp, "shared_experts"),
+                        (ds_mtp, "shared_experts"),
+                        (ds_v32_mtp, "shared_experts"),
+                        (glm5_mtp, "shared_experts"),
+                    )
+                    if mtp_model is not None
+                ]
+                mtp_cases += [
+                    (
+                        mtp_model,
+                        "mtp.layers.0.mlp.shared_expert",
+                        mtp_model.model.layers[0].mlp,
+                        getattr(config, "num_experts", 0),
+                    )
+                    for mtp_model in (qwen3_mtp, qwen3_5_mtp)
+                    if mtp_model is not None
+                ]
+                for mtp_model, ckpt_prefix, moe, n_routed in mtp_cases:
+                    _assert_mtp_fused_shared_expert_redirect(
+                        mtp_model, ckpt_prefix, moe, n_routed
+                    )
             for idx in range(2):
                 prefix = f"layers.{idx}.mlp"
                 expected_name = (

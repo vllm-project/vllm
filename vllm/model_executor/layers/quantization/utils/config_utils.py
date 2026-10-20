@@ -24,7 +24,7 @@ def get_fused_shared_expert_layers(
     moe_name: str,
     enable_eplb: bool = False,
 ) -> list[int]:
-    """Collect fused MoE layer indices, rejecting mixed fusion with EPLB."""
+    """Collect fused MoE layer indices, rejecting mixed fusion within one EPLB model."""
     from vllm.model_executor.models.utils import PPMissingLayer
 
     fused_layers = []
@@ -40,14 +40,19 @@ def get_fused_shared_expert_layers(
         moe_layer_indices.append(idx)
         if getattr(moe, "is_fused_shared_expert_enabled", False):
             fused_layers.append(idx)
+    # EPLB bookkeeping is per rank/model: `EplbState` builds each model's
+    # `expert_weights`/`num_moe_layers` from the local `MixtureOfExperts` (one
+    # pipeline stage here), while main and draft models have separate
+    # `EplbModelState`s keyed by model config. The uniformity requirement is
+    # therefore stage/model-local by design: mixed within a stage is rejected,
+    # mixed across PP stages (or main vs draft) is allowed.
     if enable_eplb and 0 < len(fused_layers) < len(moe_layer_indices):
         raise NotImplementedError(
-            "Mixed per-layer shared-expert fusion is not supported with EPLB"
+            "Mixed per-layer shared-expert fusion within a pipeline "
+            "stage/model is not supported with EPLB"
         )
     if fused_layers:
-        skipped_layers = [
-            idx for idx in moe_layer_indices if idx not in fused_layers
-        ]
+        skipped_layers = [idx for idx in moe_layer_indices if idx not in fused_layers]
         logger.info(
             "AITER fused shared experts: enabled on MoE layer(s) %s; "
             "disabled on MoE layer(s) %s.",

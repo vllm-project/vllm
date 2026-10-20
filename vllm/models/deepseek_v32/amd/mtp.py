@@ -35,6 +35,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     get_pp_missing_layer_names,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -271,13 +272,14 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, DeepseekV2MoE)
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
+            + (self.config.n_shared_experts if any(fuse_by_layer.values()) else 0),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -301,7 +303,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                 continue
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
-                and extract_layer_index(name) in self.fused_shared_expert_layers
+                and fuse_by_layer.get(extract_layer_index(name), False)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 

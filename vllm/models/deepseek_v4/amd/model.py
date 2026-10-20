@@ -71,6 +71,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -1301,11 +1302,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # at init) as the single source of truth, so the redirect below cannot
         # diverge from how the module was built if per-layer quantization ever
         # mixes fused and non-fused layers.
-        fuse_by_layer = {
-            extract_layer_index(mod_name): mod.is_fused_shared_expert_enabled
-            for mod_name, mod in self.named_modules()
-            if isinstance(mod, DeepseekV4MoE)
-        }
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, DeepseekV4MoE)
         n_routed = self.config.n_routed_experts
         # The redirect below maps the single shared-expert tensor group to one
         # appended slot; multiple shared experts would need per-expert slicing
@@ -1321,20 +1318,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             # into appended routed-expert slot ``.ffn.experts.{n_routed}``
             # so the MXFP4-quantized shared expert loads through the routed
             # expert loader (grouped GEMM). Single shared expert only.
-            if ".ffn.shared_experts.w" in name:
-                if fuse_by_layer.get(extract_layer_index(name), False):
-                    name = name.replace(
-                        ".ffn.shared_experts.w",
-                        f".ffn.experts.{n_routed}.w",
-                    )
-                else:
-                    # When any layer is fused the mapper leaves the checkpoint
-                    # ``.w2`` names untouched; non-fused layers still need the
-                    # native ``down_proj`` parameter name.
-                    name = name.replace(
-                        ".ffn.shared_experts.w2",
-                        ".ffn.shared_experts.down_proj",
-                    )
+            name = _redirect_shared_expert_name(name, fuse_by_layer, n_routed)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -1422,6 +1406,24 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             num_experts=num_experts,
             routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
+
+
+def _redirect_shared_expert_name(
+    name: str, fuse_by_layer: dict[int, bool], n_routed_experts: int
+) -> str:
+    """Route a DSV4 shared-expert checkpoint name to its final parameter name.
+
+    Fused layers go to the appended routed-expert slot. When any layer is fused
+    the weight mapper leaves the checkpoint ``.w2`` names untouched, so
+    non-fused layers still need the native ``down_proj`` parameter name.
+    """
+    if ".ffn.shared_experts.w" not in name:
+        return name
+    if fuse_by_layer.get(extract_layer_index(name), False):
+        return name.replace(
+            ".ffn.shared_experts.w", f".ffn.experts.{n_routed_experts}.w"
+        )
+    return name.replace(".ffn.shared_experts.w2", ".ffn.shared_experts.down_proj")
 
 
 def _make_deepseek_v4_weights_mapper(

@@ -56,6 +56,7 @@ from .glm4_moe import (
 )
 from .utils import (
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     get_spec_layer_idx_from_weight_name,
     maybe_prefix,
 )
@@ -265,8 +266,9 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, Glm4MoE)
         num_experts = self.config.n_routed_experts
-        if self.fused_shared_expert_layers and self.config.n_shared_experts:
+        if any(fuse_by_layer.values()) and self.config.n_shared_experts:
             num_experts += self.config.n_shared_experts
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -292,7 +294,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
-                and extract_layer_index(name) in self.fused_shared_expert_layers
+                and fuse_by_layer.get(extract_layer_index(name), False)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

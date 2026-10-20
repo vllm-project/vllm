@@ -64,6 +64,7 @@ from .glm4_moe_lite import (
 from .interfaces import SupportsPP
 from .utils import (
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     get_spec_layer_idx_from_weight_name,
     maybe_prefix,
 )
@@ -287,13 +288,14 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, Glm4MoeLite)
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
+            + (self.config.n_shared_experts if any(fuse_by_layer.values()) else 0),
         )
 
         params_dict = dict(self.named_parameters())
@@ -306,7 +308,7 @@ class Glm4MoeLiteMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 continue
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
-                and extract_layer_index(name) in self.fused_shared_expert_layers
+                and fuse_by_layer.get(extract_layer_index(name), False)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
             for param_name, weight_name, shard_id in stacked_params_mapping:

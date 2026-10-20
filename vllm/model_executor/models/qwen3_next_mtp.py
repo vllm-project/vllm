@@ -33,6 +33,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
+    get_fused_shared_expert_layer_map,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -165,7 +166,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            fused_shared_expert_layers=self.fused_shared_expert_layers,
+            fuse_by_layer=get_fused_shared_expert_layer_map(
+                self, Qwen3NextSparseMoeBlock
+            ),
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",

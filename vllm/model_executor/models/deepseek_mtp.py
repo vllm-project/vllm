@@ -42,6 +42,7 @@ from .deepseek_v2 import (
 from .interfaces import SupportsPP
 from .utils import (
     extract_layer_index,
+    get_fused_shared_expert_layer_map,
     get_pp_missing_layer_names,
     get_spec_layer_idx_from_weight_name,
     make_empty_intermediate_tensors_factory,
@@ -322,13 +323,14 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         ]
         stacked_params_mapping.extend(indexer_fused_mapping)
 
+        fuse_by_layer = get_fused_shared_expert_layer_map(self, DeepseekV2MoE)
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
+            + (self.config.n_shared_experts if any(fuse_by_layer.values()) else 0),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -352,7 +354,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                 continue
             is_fusion_moe_shared_experts_layer = (
                 "mlp.shared_experts" in name
-                and extract_layer_index(name) in self.fused_shared_expert_layers
+                and fuse_by_layer.get(extract_layer_index(name), False)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
