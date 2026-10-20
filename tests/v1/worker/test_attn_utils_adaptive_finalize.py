@@ -55,6 +55,13 @@ def _vc(adaptive: bool = True):
         speculative_config=SimpleNamespace(
             enable_adaptive_verification=adaptive,
         ),
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            use_ubatching=False,
+            num_ubatches=1,
+        ),
     )
 
 
