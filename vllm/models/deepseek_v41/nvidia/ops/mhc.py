@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from .mega_mhc import (
+    MegaMhcFp8Out,
     can_use_mega_mhc,
     mhc_shifted_post_pre_deep_gemm,
 )
@@ -208,13 +209,22 @@ def mhc_shifted_post_pre(
     *,
     stream: torch.cuda.Stream | None = None,
     reduce_results: bool = False,
+    fp8_out: MegaMhcFp8Out | None = None,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    MegaMhcFp8Out | None,
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
 
     A MoE output left unfinalized is finalized inside the fused all-reduce.
     When stream is supplied, join it before consuming the returned coefficients.
+    The last output is ``fp8_out`` when the path taken (Mega-mHC) also wrote
+    the normalized input there as MXFP8, else None.
     """
     layer_input = None
     if isinstance(x, MoEOutput):
@@ -278,7 +288,7 @@ def mhc_shifted_post_pre(
             stream=stream,
             layer_input=layer_input,
         )
-        return residual, *pre_outputs, aux
+        return residual, *pre_outputs, aux, None
 
     assert isinstance(x, torch.Tensor)
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
@@ -299,10 +309,11 @@ def mhc_shifted_post_pre(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
+            fp8_out=fp8_out,
         )
-        return *outputs, x.new_empty(0, x.shape[1])
+        return *outputs, x.new_empty(0, x.shape[1]), fp8_out
 
-    return mhc_fused_post_pre_delayed_tilelang(
+    return *mhc_fused_post_pre_delayed_tilelang(
         x,
         residual,
         post_layer_mix,
@@ -319,4 +330,4 @@ def mhc_shifted_post_pre(
         norm_weight=norm_weight,
         norm_eps=norm_eps,
         capture_aux=capture_aux,
-    )
+    ), None

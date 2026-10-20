@@ -687,6 +687,62 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     assert ("shared_l1_weights" in launches[-1]) == fused
 
 
+@pytest.mark.parametrize("hidden_staged", [False, True])
+@pytest.mark.parametrize("routing_staged", [False, True])
+def test_deep_gemm_mega_moe_stages_only_inputs_not_in_buffer(
+    monkeypatch, hidden_staged, routing_staged
+):
+    """Routing already in the buffer's top-k slices and activations a producer
+    wrote are not staged again."""
+    staging = []
+    module = "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe"
+    monkeypatch.setattr(
+        f"{module}.prepare_megamoe_inputs", lambda *args, **kwargs: staging.append(args)
+    )
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        lambda: SimpleNamespace(
+            fp8_fp4_mega_moe=lambda y, *args, **kwargs: y.zero_(),
+            get_block_m_for_mega_moe=lambda *args: 8,
+        ),
+    )
+    monkeypatch.setattr(f"{module}.get_ep_group", lambda: SimpleNamespace(world_size=1))
+    experts = _make_experts(
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=128,
+    )
+    symm_buffer = SimpleNamespace(
+        x=torch.empty(4, 128, dtype=torch.float8_e4m3fn),
+        x_sf=torch.empty(4, 1, dtype=torch.int32),
+        topk_idx=torch.empty(4, 1, dtype=torch.int64),
+        topk_weights=torch.empty(4, 1),
+        num_max_tokens_per_rank=4,
+    )
+    experts.get_symm_buffer = lambda: symm_buffer
+    experts._synchronize_first_launch = lambda: None
+    inputs = experts.input_buffers(2)
+    assert inputs is not None and inputs.x_sf is not None
+    routing = (
+        (inputs.topk_weights, inputs.topk_idx)
+        if routing_staged
+        else (torch.ones(2, 1), torch.zeros(2, 1, dtype=torch.int64))
+    )
+
+    experts(
+        torch.zeros(2, 128, dtype=torch.bfloat16),
+        *routing,
+        hidden_states_staged=hidden_staged,
+    )
+
+    ((hidden, topk_weights, topk_ids, *_),) = staging
+    assert (hidden is None) == hidden_staged
+    assert (topk_ids is None) == (topk_weights is None) == routing_staged
+
+
 @requires_sm100
 @pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
@@ -760,6 +816,43 @@ def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
         fused_topk_weights.view(torch.uint8),
         ref_topk_weights.view(torch.uint8),
     )
+
+
+@requires_sm100
+@pytest.mark.parametrize("staged", ["hidden", "routing"])
+def test_prepare_megamoe_inputs_stages_only_the_missing_half(staged):
+    """Inputs a producer already wrote are left alone; the rest is staged
+    exactly as the full staging writes it."""
+    device = torch.device("cuda")
+    num_tokens, hidden_size, top_k = 65, 256, 8
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, device=device, dtype=torch.bfloat16
+    )
+    topk_ids = torch.randint(0, 256, (num_tokens, top_k), device=device)
+    topk_weights = torch.rand(num_tokens, top_k, device=device)
+
+    def buffers():
+        return (
+            torch.full((num_tokens, hidden_size), 3.0, device=device).to(
+                torch.float8_e4m3fn
+            ),
+            torch.full((num_tokens, hidden_size // 128), 7, device=device).int(),
+            torch.full((num_tokens, top_k), 5, device=device, dtype=torch.int64),
+            torch.full((num_tokens, top_k), 0.5, device=device),
+        )
+
+    full = buffers()
+    prepare_megamoe_inputs(hidden_states, topk_weights, topk_ids, *full)
+    partial = buffers()
+    untouched = buffers()
+    if staged == "hidden":
+        prepare_megamoe_inputs(None, topk_weights, topk_ids, *partial)
+        expected = (*untouched[:2], *full[2:])
+    else:
+        prepare_megamoe_inputs(hidden_states, None, None, *partial)
+        expected = (*full[:2], *untouched[2:])
+    for actual, reference in zip(partial, expected, strict=True):
+        assert torch.equal(actual.view(torch.uint8), reference.view(torch.uint8))
 
 
 def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
@@ -1149,9 +1242,15 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
         for shared in (None, *(spec.dtype for spec in fmt.shared))
     ],
 )
-def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_name):
-    """``shared`` is the fused shared-expert dtype; None runs it unfused."""
+@pytest.mark.parametrize("staged", [False, True])
+def test_deep_gemm_mega_moe_matches_reference(
+    dist_init, fmt_name, shared, act_name, staged
+):
+    """``shared`` is the fused shared-expert dtype; None runs it unfused.
+    ``staged`` writes the inputs into the buffer the way producers do."""
     fmt, act = MEGA_MOE_WEIGHT_FORMATS[fmt_name], ACTIVATIONS[act_name]
+    if staged and fmt.hidden_quant != kMxfp8Dynamic:
+        pytest.skip("only MXFP8 activations are written by producers")
     shared_spec = next(
         (spec for spec in fmt.shared if spec.dtype == shared), fmt.shared[0]
     )
@@ -1249,12 +1348,32 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
     scores = torch.randn(NUM_TOKENS, NUM_EXPERTS, device=device)
     topk_weights, topk_ids = torch.topk(scores.softmax(-1), TOP_K, dim=-1)
 
-    output = experts(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        None if fuse_shared else reference_shared,
-    )
+    unfused_shared = None if fuse_shared else reference_shared
+    if staged:
+        inputs = experts.input_buffers(NUM_TOKENS)
+        assert inputs is not None
+        prepare_megamoe_inputs(
+            hidden_states,
+            None,
+            None,
+            inputs.x,
+            inputs.x_sf,
+            inputs.topk_idx,
+            inputs.topk_weights,
+            shared_x_sf=inputs.shared_x_sf,
+            shared_block_m=inputs.shared_block_m,
+        )
+        inputs.topk_idx.copy_(topk_ids)
+        inputs.topk_weights.copy_(topk_weights)
+        output = experts(
+            hidden_states,
+            inputs.topk_weights,
+            inputs.topk_idx,
+            unfused_shared,
+            hidden_states_staged=True,
+        )
+    else:
+        output = experts(hidden_states, topk_weights, topk_ids, unfused_shared)
 
     x = _round_trip(hidden_states.float(), fmt.hidden_quant)
     l2_scale = experts.l2_activation_scale

@@ -18,11 +18,15 @@ class Mxfp8LinearLayerConfig:
 
     Attributes:
         weight_shape: The layer's `(out_features, in_features)`, i.e. `(N, K)`.
+        bmm_batch_size: Group count of a grouped (BMM) projection.
+        input_quant_key: Format the layer's producer already quantizes its
+            input in; the kernel must consume it (see ``input_quant_key()``).
 
     """
 
     weight_shape: tuple[int, int]
     bmm_batch_size: int | None = None
+    input_quant_key: QuantKey | None = None
 
 
 class Mxfp8LinearKernel(ABC):
