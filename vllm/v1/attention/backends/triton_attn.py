@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)

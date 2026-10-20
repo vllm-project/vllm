@@ -144,20 +144,21 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
+  automatic_shard: true
   timeout_in_minutes: 45
-  parallelism: 4
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 KV Connectors Shard %N"
+      label: ":amd: (MI355 DPX) V1 KV Connectors"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -654,6 +655,8 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/check_trust_remote_code.py
+  - tests/tools/test_check_trust_remote_code.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -705,6 +708,7 @@ steps:
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
+  - pytest -v -s tools/test_check_trust_remote_code.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
