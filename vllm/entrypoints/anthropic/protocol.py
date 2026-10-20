@@ -38,10 +38,8 @@ _ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
     HTTPStatus.NOT_FOUND.value: "not_found_error",
     HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value: "request_too_large",
     HTTPStatus.TOO_MANY_REQUESTS.value: "rate_limit_error",
-    # vLLM reports overload (e.g. QueueOverflowError) as 503; Anthropic
-    # documents overloaded_error at 529, so map both.
+    # vLLM reports overload (e.g. QueueOverflowError) as HTTP 503.
     HTTPStatus.SERVICE_UNAVAILABLE.value: "overloaded_error",
-    529: "overloaded_error",
 }
 
 

@@ -25,10 +25,7 @@ pytestmark = pytest.mark.skip_global_cleanup
         (429, "rate_limit_error"),
         (500, "api_error"),
         (501, "api_error"),
-        # vLLM overload (e.g. QueueOverflowError) is 503; Anthropic overload
-        # vocabulary is overloaded_error, which it documents at 529. Map both.
         (503, "overloaded_error"),
-        (529, "overloaded_error"),
     ],
 )
 def test_error_type_is_translated_to_anthropic_vocabulary(
