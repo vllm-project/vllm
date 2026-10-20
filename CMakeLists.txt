@@ -1290,11 +1290,54 @@ endif()
 # _moe_C_stable_libtorch extension
 #
 
+#
+# The softplus-sqrt topk kernels are instantiated per (gating dtype,
+# topk_indices dtype) in their own translation unit, generated from the single
+# variant list in generate_topk_softplus_sqrt.py. Instantiating the full cross
+# product in one file serializes ~100 s of device code generation onto a single
+# core, which made it the critical path of a whole-ROCm build.
+#
+set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/generate_topk_softplus_sqrt.py)
+file(MD5 ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT} TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH)
+message(STATUS "softplus-sqrt topk generation script hash: ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}")
+
+file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  "csrc/moe/topk_softplus_sqrt_launch_*.cu")
+if (NOT TOPK_SOFTPLUS_SQRT_GEN_SRC
+    OR NOT DEFINED CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
+    OR NOT $CACHE{TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH} STREQUAL ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH})
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env
+    PYTHONPATH=$ENV{PYTHONPATH}
+      ${Python_EXECUTABLE} ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT}
+    RESULT_VARIABLE topk_softplus_sqrt_generation_result
+    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
+    ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log
+  )
+
+  if (NOT topk_softplus_sqrt_generation_result EQUAL 0)
+    message(FATAL_ERROR "softplus-sqrt topk generation failed."
+                        " Result: \"${topk_softplus_sqrt_generation_result}\""
+                        "\nCheck the log for details: "
+                        "${CMAKE_CURRENT_BINARY_DIR}/topk_softplus_sqrt_generation.log")
+  else()
+    set(TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH ${TOPK_SOFTPLUS_SQRT_GEN_SCRIPT_HASH}
+        CACHE STRING "Last run softplus-sqrt topk generate script hash" FORCE)
+    message(STATUS "softplus-sqrt topk generation completed successfully.")
+  endif()
+  file(GLOB TOPK_SOFTPLUS_SQRT_GEN_SRC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+    "csrc/moe/topk_softplus_sqrt_launch_*.cu")
+else()
+  message(STATUS "softplus-sqrt topk generation script has not changed, skipping generation.")
+endif()
+
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt_kernels.cu"
+  ${TOPK_SOFTPLUS_SQRT_GEN_SRC})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1468,6 +1511,28 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+
+  # The softplus-sqrt topk kernel is specialized on the wavefront size, but ROCm
+  # only exposes that value at runtime (Utils::get_warp_size()), so the wave64
+  # and the wave32 kernel are both instantiated unless the build tells us which
+  # one is reachable. The wavefront size is fixed per GPU family: CDNA (gfx9xx)
+  # is wave64, RDNA (gfx10xx and later) is wave32. Instantiate only the arm that
+  # the targeted archs can select.
+  set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
+  set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
+  list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
+  if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave64 only (CDNA archs: ${VLLM_GPU_ARCHES})")
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
+  elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
+    message(STATUS "topk softplus-sqrt: wave32 only (RDNA archs: ${VLLM_GPU_ARCHES})")
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
+  else()
+    message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")
+  endif()
 endif()
 
 # On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
