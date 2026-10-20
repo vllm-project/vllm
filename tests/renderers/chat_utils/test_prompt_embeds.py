@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import io
+from types import SimpleNamespace
 from typing import Final
 from unittest import mock
 
@@ -16,9 +17,10 @@ import regex as re
 import torch
 from transformers import AutoTokenizer
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt
-from vllm.renderers import TokenizeParams
+from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import parse_chat_messages, parse_chat_messages_async
 from vllm.renderers.chat_utils.chat_message import (
     _PROMPT_EMBEDS_MISSING_DATA_ERROR,
@@ -32,6 +34,7 @@ from vllm.renderers.chat_utils.content_parser import (
 )
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
+    HfRenderer,
     _build_mixed_prompt_embeds,
     _build_prompt_embeds_positions,
     _build_prompt_embeds_updates,
@@ -172,6 +175,73 @@ def test_parse_chat_messages_openai_format():
     assert torch.equal(embeds[0], t)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_format", ["string", "openai"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+async def test_reasoning_embeds_render_before_content(
+    tokenizer, content_format, reasoning_field, is_async
+):
+    """The real renderer preserves both embedding tensors in prompt order."""
+    reasoning = torch.full((2, _MOCK_HIDDEN_SIZE), 1.0)
+    content = torch.full((3, _MOCK_HIDDEN_SIZE), 2.0)
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "prompt_embeds", "data": _encode_tensor(content)}],
+                reasoning_field: {
+                    "type": "prompt_embeds",
+                    "data": _encode_tensor(reasoning),
+                },
+            }
+        ],
+        kv_transfer_params={"prompt_token_ids": [1, 2, 3]},
+    )
+    assert request.kv_transfer_params is not None
+    assert "prompt_token_ids" not in request.kv_transfer_params
+    mc = _make_mock_model_config()
+    mc.renderer_num_workers = 1
+    mc.supports_multimodal_inputs = False
+    mc.hf_config = SimpleNamespace(model_type="gpt2", use_unified_vision_chunk=False)
+    renderer = HfRenderer(
+        SimpleNamespace(
+            model_config=mc,
+            parallel_config=SimpleNamespace(_api_process_rank=0),
+        ),
+        tokenizer,
+    )
+    template = (
+        "{% for m in messages %}<think>{{ m['" + reasoning_field + "'] }}</think>"
+        "{% if m['content'] is string %}{{ m['content'] }}"
+        "{% else %}{% for p in m['content'] %}{{ p['text'] }}{% endfor %}"
+        "{% endif %}{% endfor %}"
+    )
+    params = ChatParams(
+        chat_template=template,
+        chat_template_content_format=content_format,
+        chat_template_kwargs={"tokenize": True},
+    )
+    try:
+        render = (
+            renderer.render_messages_async if is_async else renderer.render_messages
+        )
+        _, prompt = await _maybe_await(render, request.messages, params)
+        mask = torch.tensor(prompt["prompt_is_token_ids"])
+        assert len(mask) == len(prompt["prompt_token_ids"])
+        assert torch.equal(
+            prompt["prompt_embeds"][~mask], torch.cat([reasoning, content])
+        )
+        text_ids = [
+            t for t, is_token in zip(prompt["prompt_token_ids"], mask) if is_token
+        ]
+        assert text_ids == tokenizer.encode(
+            "<think>", add_special_tokens=False
+        ) + tokenizer.encode("</think>", add_special_tokens=False)
+    finally:
+        renderer.shutdown()
+
+
 # Each layout entry is one content part:
 #   ("text", "A")  -> {"type": "text", "text": "A"}
 #   ("embed", N)   -> {"type": "prompt_embeds", "data": <base64 of (N, H) tensor>}
@@ -262,17 +332,14 @@ def test_parse_chat_messages_string_format_preserves_position(
         assert torch.equal(got, want)
 
 
-def test_parse_chat_messages_requires_flag():
+@pytest.mark.parametrize("field", ["content", "reasoning"])
+def test_parse_chat_messages_requires_flag(field):
     t = torch.randn(2, 4)
     b64 = _encode_tensor(t)
     mc = _make_mock_model_config(enable_prompt_embeds=False)
 
-    messages = [
-        {
-            "role": "user",
-            "content": [{"type": "prompt_embeds", "data": b64}],
-        }
-    ]
+    part = {"type": "prompt_embeds", "data": b64}
+    messages = [{"role": "assistant", field: [part] if field == "content" else part}]
     with pytest.raises(VLLMValidationError, match=_ENABLE_PROMPT_EMBEDS_ERROR):
         parse_chat_messages(
             messages,
@@ -281,17 +348,14 @@ def test_parse_chat_messages_requires_flag():
         )
 
 
-def test_parse_chat_messages_rejects_missing_data():
+@pytest.mark.parametrize("field", ["content", "reasoning"])
+def test_parse_chat_messages_rejects_missing_data(field):
     # `data` is marked `Required` on `ChatCompletionContentPartPromptEmbedsParam`;
     # malformed requests without `data` must surface a clear validation error
     # rather than being silently dropped.
     mc = _make_mock_model_config()
-    messages = [
-        {
-            "role": "user",
-            "content": [{"type": "prompt_embeds"}],  # no `data`
-        }
-    ]
+    part = {"type": "prompt_embeds"}
+    messages = [{"role": "assistant", field: [part] if field == "content" else part}]
     with pytest.raises(VLLMValidationError, match=_PROMPT_EMBEDS_MISSING_DATA_ERROR):
         parse_chat_messages(
             messages,
