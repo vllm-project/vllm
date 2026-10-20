@@ -9,6 +9,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -151,6 +154,10 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.moe_config.is_lora_enabled and apply_router_weight_on_input:
+            raise NotImplementedError(
+                "XPU MXFP4 MoE LoRA requires routing weights on the output."
+            )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             if (
@@ -180,6 +187,29 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             # expert not owned by this rank so they are skipped.
             sentinel = global_num_experts - 1 if self.moe_config.ep_rank == 0 else 0
             topk_ids = torch.where(topk_ids < 0, sentinel, topk_ids)
+        self._apply_experts(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            expert_map,
+            a1q_scale,
+        )
+
+    def _apply_experts(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+    ) -> None:
+        assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
@@ -308,7 +338,7 @@ class XPUExpertsWNA16(XPUExperts):
         )
 
 
-class XPUExpertsMxFp4(XPUExperts):
+class XPUExpertsMxFp4(LoRAExpertsMixin, XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -321,6 +351,117 @@ class XPUExpertsMxFp4(XPUExperts):
             quant_config,
             max_num_tokens,
             num_dispatchers,
+        )
+
+    def _apply_experts(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+    ) -> None:
+        ctx = self._lora_context
+        if ctx is None:
+            return super()._apply_experts(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                expert_map,
+                a1q_scale,
+            )
+
+        assert self.fused_moe_impl is not None
+        num_tokens, top_k = topk_ids.shape
+        # moe_gather weights both base and LoRA outputs after the hooks.
+        unweighted = torch.ones_like(topk_weights)
+        lora_meta: (
+            tuple[
+                torch.Tensor | None,
+                torch.Tensor | None,
+                torch.Tensor | None,
+                torch.Tensor | None,
+            ]
+            | None
+        ) = None
+
+        def add_grouped_delta(
+            grouped: torch.Tensor, delta: torch.Tensor, row_map: torch.Tensor
+        ) -> None:
+            indices = row_map.flatten().long()
+            delta = delta.reshape(indices.numel(), -1).masked_fill(
+                (indices < 0).unsqueeze(1), 0
+            )
+            grouped.index_add_(0, indices.clamp_min(0), delta)
+
+        def activation_with_lora(
+            gemm1_output: torch.Tensor, row_map: torch.Tensor
+        ) -> None:
+            nonlocal lora_meta
+            delta = torch.zeros(
+                (num_tokens, top_k, gemm1_output.shape[-1]),
+                device=gemm1_output.device,
+                dtype=gemm1_output.dtype,
+            )
+            lora_meta = self.apply_w13_lora(
+                ctx,
+                y=delta,
+                x=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=unweighted,
+                expert_map=expert_map,
+                w1=w1,
+                w2=w2,
+                num_tokens=num_tokens,
+                top_k_num=top_k,
+            )
+            add_grouped_delta(gemm1_output, delta, row_map)
+
+        def output_with_lora(
+            gemm2_output: torch.Tensor,
+            act_output: torch.Tensor,
+            row_map: torch.Tensor,
+        ) -> None:
+            assert lora_meta is not None
+            indices = row_map.flatten().long()
+            act = act_output.index_select(0, indices.clamp_min(0)).masked_fill(
+                (indices < 0).unsqueeze(1), 0
+            )
+            delta = torch.zeros(
+                (num_tokens, top_k, gemm2_output.shape[-1]),
+                device=gemm2_output.device,
+                dtype=gemm2_output.dtype,
+            )
+            self.apply_w2_lora(
+                ctx,
+                y=delta,
+                x=act,
+                topk_weights=unweighted,
+                sorted_token_ids_lora=lora_meta[0],
+                expert_ids_lora=lora_meta[1],
+                num_tokens_post_padded_lora=lora_meta[2],
+                token_lora_mapping=lora_meta[3],
+                num_tokens=num_tokens,
+                w1=w1,
+                w2=w2,
+                top_k_num=top_k,
+            )
+            add_grouped_delta(gemm2_output, delta, row_map)
+
+        self.fused_moe_impl.apply(
+            output=output,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            a1q_scale=a1q_scale,
+            activation_hook=activation_with_lora,
+            output_hook=output_with_lora,
         )
 
     def workspace_shapes(
