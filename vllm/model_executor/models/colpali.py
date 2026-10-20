@@ -120,7 +120,15 @@ class ColPaliModel(
 
         hidden_size = getattr(config, "hidden_size", None)
         if hidden_size is None and hasattr(config, "text_config"):
-            hidden_size = config.text_config.hidden_size
+            text_config = config.text_config
+            # Recent transformers versions may leave `text_config` as a plain
+            # dict (e.g. when loading vidore/colpali-v1.3-hf), so handle both
+            # the dict and the config-object forms.
+            hidden_size = (
+                text_config.get("hidden_size")
+                if isinstance(text_config, dict)
+                else getattr(text_config, "hidden_size", None)
+            )
         if hidden_size is None:
             raise ValueError(
                 "Unable to determine text hidden size from config. "
