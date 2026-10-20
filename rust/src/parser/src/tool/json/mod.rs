@@ -9,7 +9,7 @@ pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
-pub use qwen::Qwen3XmlToolParser;
+pub use qwen::Qwen3JsonToolParser;
 
 mod granite4;
 mod hermes;

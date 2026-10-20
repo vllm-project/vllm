@@ -59,7 +59,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
@@ -576,7 +575,7 @@ class Gemma4DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         # Gemma4 uses different head dimensions for sliding vs full attention
-        layer_config = gemma4_layer_config(config, layer_idx)
+        layer_config = config.per_layer_config[layer_idx]
         head_dim = layer_config.head_dim
         num_kv_heads = layer_config.num_key_value_heads
 
@@ -628,9 +627,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
 
         # MoE (Mixture of Experts) — router + expert block parallel to MLP
-        self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
-            config, "use_second_mlp_block", False
-        )
+        self.enable_moe_block = getattr(config, "num_experts", None) is not None
         self.router: Gemma4Router | None
         self.experts: MoERunner | None
         self.post_feedforward_layernorm_1: RMSNorm | None

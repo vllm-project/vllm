@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Collection, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
 from kvcr import (
@@ -22,7 +22,6 @@ from kvcr import (
     KVCRBindings,
 )
 from kvcr.config import (
-    FrameworkDramInput,
     G3Options,
     KeyAdapter,
     KVCRBackendConfigs,
@@ -43,11 +42,13 @@ from kvcr.types import (
     BlockKey,
     CacheTier,
     InventoryEvent,
-    MemDescriptor,
+    KVCRStartupError,
+    MemoryRef,
     OpHandle,
     PinRequestId,
     PinResult,
     QueryStatus,
+    RegionDescriptor,
 )
 from typing_extensions import override
 
@@ -82,6 +83,7 @@ from vllm.v1.kv_offload.tiering.base import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 
 
 _REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
@@ -177,7 +179,7 @@ class _FrameworkPinAdapter:
 
     def _resolve_pin(
         self, parent: ParentManager, keys: Collection[BlockKey]
-    ) -> tuple[str, dict[BlockKey, list[MemDescriptor] | None]] | None:
+    ) -> tuple[str, dict[BlockKey, list[MemoryRef] | None]] | None:
         offload_keys = tuple(OffloadKey(bytes(key)) for key in keys)
         request_id = f"kvcr-source:{self._next_request_id}"
         self._next_request_id += 1
@@ -202,7 +204,7 @@ class _FrameworkPinAdapter:
             if len(job_keys) != len(chunk_ids) or set(job_keys) != set(hit_keys):
                 return None
 
-            descriptors: dict[BlockKey, list[MemDescriptor] | None] = {
+            descriptors: dict[BlockKey, list[MemoryRef] | None] = {
                 BlockKey(bytes(key)): None for key in offload_keys
             }
             descriptors.update(
@@ -261,8 +263,20 @@ class _VllmKeyAdapter:
 _JobState = tuple[int, int, bool, set[OffloadKey] | None]
 
 
+# Held for the process lifetime after a startup failure that could not stop
+# native work: an export blocks close() and keeps the mapping alive against GC,
+# so nothing can unmap memory NIXL may still be writing into.
+_RETAINED_NATIVE_BUFFERS: list[object] = []
+
+
 class KVCRSecondaryTierManager(SecondaryTierManager):
     """Secondary tier wrapper around the KVCR KV P2P API."""
+
+    # Serves framework pin requests from serve_external_requests(), but only
+    # once per step for now: opting in would also poll the KVCR library from
+    # the tiering manager's polling thread, which it is not yet verified to
+    # tolerate.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     @classmethod
     @override
@@ -295,8 +309,11 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         g3: dict[str, Any] | None = None,
         local_dram_backend: str = "UCX",
         remote_fw_dram_backend: str = "UCX",
+        backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+        )
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):
             raise ValueError(
@@ -350,12 +367,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         with socket.socket() as _s:
             _s.bind(("", 0))
             _nixl_listen_port = _s.getsockname()[1]
-        self._primary_base_addr = ctypes.addressof(
-            ctypes.c_char.from_buffer(primary_kv_view)
-        )
-        if primary_kv_view.strides is None:
-            raise ValueError("primary KV memoryview must expose strides")
-        self._primary_row_stride = int(primary_kv_view.strides[0])
         if secondary_g2_slots < 0:
             raise ValueError("secondary_g2_slots must be non-negative")
         if (
@@ -375,7 +386,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
             else:
                 local_mapping = mmap.mmap(
-                    -1, secondary_g2_slots * self._primary_row_stride
+                    -1, secondary_g2_slots * self.block_size_bytes
                 )
                 local_dram = LocalDramOptions(
                     pools=[
@@ -408,7 +419,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         try:
             self._kvcr = KVCR(
                 KVCRConfig(
-                    pool_layouts=[("", self._primary_row_stride)],
+                    pool_layouts=[("", self.block_size_bytes)],
                     enable_telemetry=enable_telemetry,
                     operation_timeout_ms=operation_timeout_ms,
                     abandon_timeout_ms=abandon_timeout_ms,
@@ -429,9 +440,15 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     policy=selected_policy,
                 ),
                 KVCRBackendConfigs(
-                    framework_dram=FrameworkDramInput(
-                        self._primary_base_addr, primary_kv_view.nbytes
-                    ),
+                    framework_regions=[
+                        RegionDescriptor(
+                            addr=ctypes.addressof(
+                                ctypes.c_char.from_buffer(primary_kv_view)
+                            ),
+                            size=self.block_size_bytes,
+                            count=len(primary_kv_view),
+                        )
+                    ],
                     local_dram=local_dram,
                     g3=g3_config,
                     remote_fw_dram=RemoteFWDramOptions(
@@ -443,7 +460,17 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 ),
                 guard_config,
             )
-        except BaseException:
+        except BaseException as exc:
+            if not isinstance(exc, Exception) or isinstance(exc, KVCRStartupError):
+                # Native work may still touch these.
+                _RETAINED_NATIVE_BUFFERS.append(
+                    ctypes.c_char.from_buffer(primary_kv_view)
+                )
+                if local_mapping is not None:
+                    _RETAINED_NATIVE_BUFFERS.append(
+                        ctypes.c_char.from_buffer(local_mapping)
+                    )
+                raise
             control.close()
             if local_mapping is not None:
                 local_mapping.close()
@@ -519,7 +546,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         stats = cast(OffloadingConnectorStats | None, self._kvcr.get_stats())
         if stats is not None:
             # Add the framework namespace only at the vLLM boundary.
-            for metrics in stats.data.values():
+            for metrics in stats.metric_sections():
                 for name in tuple(metrics):
                     metrics[_vllm_metric_name(name)] = metrics.pop(name)
         return stats
@@ -620,12 +647,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         )
 
-    def _make_descriptor(self, chunk_id: int) -> MemDescriptor:
-        return MemDescriptor(
+    def _make_descriptor(self, chunk_id: int) -> MemoryRef:
+        return MemoryRef(
             end_point_name=self._kvcr.config.nixl_agent_name,
-            mem_type="DRAM",
-            addr=self._primary_base_addr + chunk_id * self._primary_row_stride,
-            size=self._primary_row_stride,
-            device_Id=0,
-            info="",
+            element_index=chunk_id,
         )
