@@ -877,6 +877,13 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx942
+
+            # On gfx942 (MI325X), BLOCK_N=32 is ~2x faster with BLOCK_M=16
+            # but ~5x slower with BLOCK_M=8.
+            if on_gfx942() and block_m >= 16:
+                block_n = 32
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
