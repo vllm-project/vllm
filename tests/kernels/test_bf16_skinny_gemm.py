@@ -185,10 +185,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
     let (3216, 7168) ship without its DISPATCH_DSV3_SHAPE(7168, 3216).
     """
     source = (
-        Path(__file__).resolve().parents[2]
-        / "csrc"
-        / "libtorch_stable"
-        / "dsv3_fused_a_gemm.cu"
+        Path(__file__).resolve().parents[2] / "csrc" / "dsv3_fused_a_gemm.cu"
     ).read_text(encoding="utf-8")
     # Benchmark-only shapes live behind VLLM_K3_BENCH_SHAPES and are not built
     # by default, so they must not count as available.

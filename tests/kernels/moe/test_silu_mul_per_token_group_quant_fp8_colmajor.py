@@ -116,7 +116,7 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 @pytest.mark.parametrize("scale_format", ["packed", "float32", "ceil_ue8m0"])
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph test")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm graph test")
 def test_silu_quant_skips_expert_padding_on_graph_replay(
     counts: list[int],
     group_size: int,
@@ -135,7 +135,10 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
     x *= 16
     clean_x = x.clone()
     ends = torch.empty(len(counts), device=DEVICE, dtype=torch.int32)
-    output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=FLOAT8_DTYPE)
+    output_dtype = (
+        FLOAT8_DTYPE if scale_format == "packed" else current_platform.fp8_dtype()
+    )
+    output = torch.empty((capacity, hidden_size), device=DEVICE, dtype=output_dtype)
 
     def set_counts(values):
         positions = []
@@ -187,6 +190,7 @@ def test_silu_quant_skips_expert_padding_on_graph_replay(
         output.view(torch.uint8).fill_(91)
         graph.replay()
         reference_q, reference_s = quantize(x)
+        assert actual_q.dtype == reference_q.dtype
         torch.testing.assert_close(
             actual_q.view(torch.uint8)[live],
             reference_q.view(torch.uint8)[live],

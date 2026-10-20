@@ -84,6 +84,8 @@ class TensorizerLoader(BaseModelLoader):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
+            if hasattr(model, "process_weights_after_loading"):
+                model.process_weights_after_loading()
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
