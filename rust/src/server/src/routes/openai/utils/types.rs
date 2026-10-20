@@ -755,13 +755,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================
