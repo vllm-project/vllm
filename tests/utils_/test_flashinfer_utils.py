@@ -3,6 +3,7 @@
 import importlib.util
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,3 +59,18 @@ def test_has_flashinfer_requires_ninja(
     _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
     monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()
+
+
+@pytest.mark.parametrize("has_class", [False, True])
+def test_one_sided_availability_requires_the_wrapper(monkeypatch, has_class):
+    """A module without the legacy wrapper must not break other EP backends."""
+    module = SimpleNamespace(moe_a2a_get_workspace_size_per_rank=lambda: 0)
+    if has_class:
+        module.MoeAlltoAll = object
+    monkeypatch.setattr(fi, "has_flashinfer_comm", lambda: True)
+    monkeypatch.setattr(fi, "_get_submodule", lambda name: module)
+    fi.has_flashinfer_nvlink_one_sided.cache_clear()
+    try:
+        assert fi.has_flashinfer_nvlink_one_sided() == has_class
+    finally:
+        fi.has_flashinfer_nvlink_one_sided.cache_clear()

@@ -11,6 +11,7 @@ from vllm.config import get_current_vllm_config
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
+    FLASHINFER_MOE_EP_SM90,
     MoEBackend,
 )
 from vllm.config.quantization import QuantizationConfigArgs
@@ -169,6 +170,7 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer MoE-EP megakernels: routing outside, dispatch/GEMMs/combine fused.
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
     FLASHINFER_MOE_EP_DEEP_GEMM = "FLASHINFER_MOE_EP_DEEP_GEMM"
+    FLASHINFER_MOE_EP_SM90 = "FLASHINFER_MOE_EP_SM90"
 
 
 # Backends that share the same TRTLLM weight format
@@ -194,6 +196,7 @@ B12X_BACKENDS = (
 FLASHINFER_MOE_EP_MXFP4_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
     Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM,
+    Mxfp4MoeBackend.FLASHINFER_MOE_EP_SM90,
 )
 
 
@@ -367,6 +370,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "flashinfer_cutlass_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8],
         "flashinfer_moe_ep_cutedsl": [Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL],
+        "flashinfer_moe_ep_sm90": [Mxfp4MoeBackend.FLASHINFER_MOE_EP_SM90],
         "flashinfer_moe_ep_mega_deep_gemm": [
             Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM
         ],
@@ -2051,11 +2055,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_moe_ep_weights,
         )
 
-        # DeepGEMM consumes MXFP4 directly; CuTeDSL gets bf16 and requantizes.
+        # SM90/DeepGEMM consume MXFP4; Blackwell CuTeDSL requantizes from bf16.
+        backend_names = {
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL: FLASHINFER_MOE_EP_CUTEDSL,
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_DEEP_GEMM: FLASHINFER_MOE_EP_DEEP_GEMM,
+            Mxfp4MoeBackend.FLASHINFER_MOE_EP_SM90: FLASHINFER_MOE_EP_SM90,
+        }
         weights = mxfp4_moe_ep_weights(
-            FLASHINFER_MOE_EP_CUTEDSL
-            if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
-            else FLASHINFER_MOE_EP_DEEP_GEMM,
+            backend_names[mxfp4_backend],
             w13_weight,
             w2_weight,
             w13_weight_scale,
