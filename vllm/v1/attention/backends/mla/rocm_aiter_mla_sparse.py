@@ -323,16 +323,15 @@ def generate_sparse_seqlen_kernel(
 
 
 def generate_sparse_seqlen_triton(
-    query_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     cu_query_lens: torch.Tensor,
     topk_token: int,
     num_tokens: int,
     max_query_len: int,
 ):
-    num_seqs = query_lens.size(0)
+    num_seqs = cu_query_lens.size(0) - 1
     # zero initialize the tensor to make sure invalid positions will be zero
-    out = torch.zeros([num_tokens], dtype=torch.int32, device=query_lens.device)
+    out = torch.zeros([num_tokens], dtype=torch.int32, device=cu_query_lens.device)
     block_size = 64
     num_block_per_row = triton.cdiv(max_query_len, block_size)
     grid = (
@@ -644,7 +643,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             )
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
-
         if pure_decode:
             # One token per request, so req_id is 0..n-1: what qo_indptr holds.
             if num_tokens > self._decode_req_id_extent:
@@ -673,10 +671,8 @@ class ROCMAiterMLASparseMetadataBuilder(
                 np_to_pinned_tensor(req_id_per_token), non_blocking=True
             )
             query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
             seq_lens = common_attn_metadata.seq_lens[:num_reqs]
             sparse_seqlen = generate_sparse_seqlen_triton(
-                query_lens,
                 seq_lens,
                 query_start_loc,
                 self.topk_tokens,
@@ -686,8 +682,10 @@ class ROCMAiterMLASparseMetadataBuilder(
             torch.cumsum(
                 sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
             )
-            self.paged_kv_indptr[num_tokens + 1 :].fill_(
-                self.paged_kv_indptr[num_tokens]
+            # fill_() with a value that aliases the destination clones it first.
+            indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+            indptr_tail.copy_(
+                self.paged_kv_indptr[num_tokens].expand_as(indptr_tail)
             )
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
