@@ -2156,8 +2156,8 @@ class AiterMLAHelper:
         if num_heads >= m or max_qo_len != 1:
             return False
         # fp8 KV takes Gluon only through _gluon_fp8_decode_max_batch, which keeps
-        # the query bf16 for Gluon's fp8-KV regime. Checked before the mode knob:
-        # an explicit "gluon" request under fp8 would hand Gluon an fp8 query.
+        # the query bf16 for Gluon's fp8-KV regime. Checked before the mode knob,
+        # so an explicit "gluon" request under fp8 cannot bypass it.
         if is_quantized_kv_cache(kv_cache_dtype):
             return False
         mode = _aiter_mla_small_head_mode()
@@ -2184,9 +2184,10 @@ class AiterMLAHelper:
         bf16 has no gqa<16, qseqlen>1 asm kernel, so verify goes through
         ``mla_gluon``'s 4-D MTP entry (``q`` shaped ``[batch, qlen, nhead, dim]``)
         with ``use_2d_view=False``. fp8 has one via the q-row fold and must not
-        come here: the MTP path hands Gluon the batch size its fp8 regime
-        asserts against. A predicate rather than inline in forward_mqa so the
-        builder sees the same answer the impl acts on.
+        come here: Gluon's fp8-KV regime reads a bf16 query, and verify keeps
+        the fp8 one (``_gluon_fp8_decode_max_batch`` is 0 under speculative
+        decoding). A predicate rather than inline in forward_mqa so the builder
+        sees the same answer the impl acts on.
 
         DCP verify is excluded: its per-row causal windows are served by the
         segmented path, which Gluon's MTP entry cannot express.
