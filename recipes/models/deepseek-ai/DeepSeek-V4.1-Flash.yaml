@@ -856,6 +856,11 @@ guide: |
   (`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`), with prefill
   eager.
 
+  This recipe does not pass `--monokernel`. With the kernels' weight copies
+  included, #60731 measured 170.11 GiB of weights a rank. At
+  `--gpu-memory-utilization 0.9` a 192 GiB MI300X leaves about 2.7 GiB beside
+  those weights.
+
   The offload resolves on gfx942 only on builds carrying
   [vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491),
   the same gate MI325X and MI355X need. Those builds also default `cpu_offload`
@@ -886,10 +891,8 @@ guide: |
   five DSpark drafts). Larger steps, prefill, and mixed batches take the
   regular path, and TP2 stays on vLLM's path. With their weight copies
   included, #60731 measured 170.11 GiB of weights a rank, up from 98.88 GiB.
-  At `--gpu-memory-utilization 0.9` the MI325X KV pool still held 11.18
-  million tokens. The same cap on a 192 GiB MI300X leaves about 2.7 GiB
-  beside those weights, so this recipe does not pass the flag there. Use a
-  ROCm nightly from 2026-10-20 or later;
+  At `--gpu-memory-utilization 0.9` the KV pool still held 11.18 million
+  tokens. Use a ROCm nightly from 2026-10-20 or later;
   `nightly-rocm100-df3bd094aeea829f27baa0a5282830464f601d9f` is the first.
   Earlier builds have the flag for gfx950 only and refuse to start on MI325X.
 
