@@ -11,6 +11,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -21,10 +22,12 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 from .data import (
     BlockIdentityCodec,
+    KVLayoutDescriptor,
     KVLayoutPlanner,
     RankTopology,
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
+    UMBPHandshakeMetadata,
     UMBPNamespace,
 )
 from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
@@ -56,38 +59,77 @@ class UMBPStoreConnector(KVConnectorBase_V1):
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
             )
         runtime = UMBPRuntimeFactory.build(runtime_config)
-        namespace = UMBPNamespace.from_vllm_config(vllm_config, kv_cache_config)
-        codec = BlockIdentityCodec(
+        self._runtime = runtime
+        self._topology = topology
+        self._store_submitted = False
+        self._namespace: UMBPNamespace | None = None
+        self.connector_scheduler: UMBPStoreConnectorScheduler | None = None
+        self.connector_worker: UMBPStoreConnectorWorker | None = None
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = UMBPStoreConnectorScheduler(
+                vllm_config, kv_cache_config, None, None, topology
+            )
+            namespace = UMBPNamespace.configured(vllm_config)
+            if namespace is not None:
+                self._bind_scheduler_namespace(namespace)
+        else:
+            self._namespace = UMBPNamespace.from_vllm_config(
+                vllm_config, kv_cache_config
+            )
+            layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
+            self.connector_worker = UMBPStoreConnectorWorker(
+                runtime.create_worker_handle(
+                    self._namespace.value, topology, layout.describe(topology)
+                ),
+                layout,
+                codec=self._codec(self._namespace),
+            )
+
+    def _codec(self, namespace: UMBPNamespace) -> BlockIdentityCodec:
+        topology = self._topology
+        return BlockIdentityCodec(
             namespace=namespace,
             tp_rank=topology.tp_rank,
             pp_rank=topology.pp_rank,
             pcp_rank=topology.pcp_rank,
             dcp_rank=topology.dcp_rank,
         )
-        layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
-        layout_descriptor = layout.describe(topology)
-        self._runtime = runtime
-        self._store_submitted = False
-        self.connector_scheduler: UMBPStoreConnectorScheduler | None = None
-        self.connector_worker: UMBPStoreConnectorWorker | None = None
-        if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = UMBPStoreConnectorScheduler(
-                vllm_config,
-                kv_cache_config,
-                runtime.create_scheduler_handle(
-                    namespace.value, topology, layout_descriptor
-                ),
-                codec,
-                topology,
+
+    def _bind_scheduler_namespace(self, namespace: UMBPNamespace) -> None:
+        assert self.connector_scheduler is not None
+        self._namespace = namespace
+        # Only workers see per-layer specs, so only they plan byte ranges.
+        layout = KVLayoutDescriptor(regions=(), topology=self._topology)
+        self.connector_scheduler.bind_namespace(
+            self._runtime.create_scheduler_handle(
+                namespace.value, self._topology, layout
+            ),
+            self._codec(namespace),
+        )
+
+    def get_handshake_metadata(self) -> UMBPHandshakeMetadata | None:
+        if self.connector_worker is None or self._namespace is None:
+            return None
+        return UMBPHandshakeMetadata(self._namespace.value)
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        if self.connector_scheduler is None or self._namespace is not None:
+            return
+        # Reports are keyed by worker rank, but ranks may share a key (PCP
+        # without DCP), so require agreement rather than one per rank.
+        namespaces = {
+            report.namespace
+            for report in metadata.values()
+            if isinstance(report, UMBPHandshakeMetadata)
+        }
+        if len(namespaces) != 1:
+            raise ValueError(
+                "UMBP workers must report exactly one namespace, got "
+                f"{sorted(namespaces)}"
             )
-        else:
-            self.connector_worker = UMBPStoreConnectorWorker(
-                runtime.create_worker_handle(
-                    namespace.value, topology, layout_descriptor
-                ),
-                layout,
-                codec=codec,
-            )
+        self._bind_scheduler_namespace(UMBPNamespace(namespaces.pop()))
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
