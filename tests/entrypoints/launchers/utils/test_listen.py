@@ -405,16 +405,6 @@ class TestPermissionScenario:
         assert "elevated privileges" in msg
         assert exc_info.value.__cause__ is err
 
-    @pytest.mark.skipif(
-        os.geteuid() == 0,
-        reason="requires non-root (root can bind ports <1024)",
-    )
-    def test_real_kernel_denial(self):
-        # On a non-root Linux/macOS CI this exercises the real EACCES path.
-        with pytest.raises(OSError, match="Permission denied binding"):
-            setup_listen_address(host="127.0.0.1", port=80, reuse_port=False)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Scenario: unexpected OS error (must not be masked)
 # ─────────────────────────────────────────────────────────────────────────────

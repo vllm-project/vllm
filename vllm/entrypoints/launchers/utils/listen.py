@@ -94,7 +94,6 @@ def setup_listen_address(
                 raise OSError(
                     f"Permission denied binding to "
                     f"{host or '0.0.0.0'}:{port}. "
-                    f"Ports below 1024 typically require elevated privileges."
                 ) from e
             if e.errno == errno.ENOPROTOOPT and reuse_port:
                 raise OSError(
