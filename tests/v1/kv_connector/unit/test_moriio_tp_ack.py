@@ -333,7 +333,7 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     # A layer maps to the list of reads posted for it (a KDA layer posts two).
     worker._recving_transfers = {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
     worker._recving_transfers_callback_addr = {
-        "req": ("127.0.0.1", "7000", "tx-release")
+        "req": ("127.0.0.1", ("7000",), "tx-release")
     }
     # Transfer-timeout reaping state consulted by _pop_done_transfers.
     worker._recving_transfers_start = {}
@@ -434,7 +434,7 @@ def test_read_completion_waits_for_every_posted_read():
         "req": {"kda_layer": [Status(done=True), Status(done=False)]}
     }
     worker._recving_transfers_callback_addr = {
-        "req": ("127.0.0.1", "7000", "tx-pending")
+        "req": ("127.0.0.1", ("7000",), "tx-pending")
     }
     worker._recving_transfers_start = {"req": float("inf")}
     worker._recving_local_blocks = {"req": [1, 2]}

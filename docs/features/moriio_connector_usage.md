@@ -146,15 +146,15 @@ Hybrid READ keeps its existing single-transferable-attention-group requirement. 
 
 ### Different prefill and decode TP sizes
 
-In WRITE mode, the prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. Each prefill rank writes its shard into the decode ranks that hold it:
+The prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. In WRITE mode each prefill rank writes its shard into the decode ranks that hold it; in READ mode each decode rank reads the same bytes from the prefill ranks that hold them:
 
 - With a larger decode TP size, MLA latents and replicated KV heads are copied to every decode rank that needs them, while split KV heads and Mamba/KDA state are sliced so that each decode rank receives its own part.
-- With a larger prefill TP size, the prefill ranks feeding a decode rank write their parts side by side into its blocks. Identical copies (MLA latents, replicated KV heads) are written once.
+- With a larger prefill TP size, the prefill ranks feeding a decode rank write their parts side by side into its blocks. Identical copies (MLA latents, replicated KV heads) are written once. In READ mode the decode rank reads such a copy from one prefill rank (round-robin over the prefill ranks with the RDMA backend) and releases the blocks on every prefill rank that holds them.
 
 The number of KV heads must be a multiple or a divisor of each TP size. Blocks are copied as units, so both instances must use the same number of tokens per attention block. Hybrid models size attention blocks to the per-rank recurrent state; with MLA attention (e.g. Kimi-Linear) that size changes with the TP size, so pass the same `--block-size`, at least the larger of the two automatic sizes, to both instances. Mismatched block sizes fail with an error naming the layer. Both instances must advertise their KV head and recurrent-state layouts in the MoRIIO handshake, so they must run a vLLM version with this support; otherwise a transfer between different TP sizes fails with an error naming the layer.
 
 !!! note
-    On a single node with the xGMI backend, a larger decode TP size does not work yet: MoRI cannot open a session from a prefill rank to memory on a decode rank's second or later visible GPU when the prefill rank sees fewer GPUs, and the transfer fails with an error naming the decode rank. A larger prefill TP size works on xGMI, and the RDMA backend is not affected.
+    On a single node with the xGMI backend, MoRI cannot open a session to memory on a peer's second or later GPU from a rank that sees fewer GPUs, and the transfer fails with an error naming the peer. In WRITE mode this rules out a larger decode TP size. In READ mode it rules out a larger prefill TP size, except for MLA models without recurrent state, which read every replicated latent from the first prefill rank. The other directions work on xGMI, and the RDMA backend is not affected.
 
 ### Transport configuration
 
