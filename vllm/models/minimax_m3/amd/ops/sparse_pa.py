@@ -12,7 +12,6 @@ except ModuleNotFoundError:
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
-from vllm.platforms import current_platform
 
 ASM_PAGE_SIZE = 16
 PAGES_PER_SPARSE_BLOCK = SPARSE_BLOCK_SIZE // ASM_PAGE_SIZE
@@ -344,12 +343,8 @@ def minimax_m3_insert_index_cache(
     head_dim = index_k.shape[1]
     fp8_max = 0.0
     if index_cache.element_size() == 1:
-        # 224 for e4m3fnuz, matching quant_type_max in the fused writer.
-        fp8_max = (
-            get_fp8_min_max()[1]
-            if index_cache.dtype == current_platform.fp8_dtype()
-            else torch.finfo(index_cache.dtype).max
-        )
+        # get_fp8_min_max() returns 224 for fnuz, 448 for fn.
+        fp8_max = get_fp8_min_max()[1]
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
