@@ -14,6 +14,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -39,6 +41,9 @@ from openai.types.responses import (
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
 from openai.types.responses import (
+    ResponseIncompleteEvent as OpenAIResponseIncompleteEvent,
+)
+from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
@@ -48,26 +53,29 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     BeforeValidator,
     Field,
+    PrivateAttr,
     ValidationError,
     field_serializer,
     model_validator,
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
+    MMPayload,
     PerRequestMetrics,
     StopParam,
     TopLogprobsParam,
+    resolve_return_mm_kwargs_alias,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -330,15 +338,25 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    return_mm_kwargs: bool = Field(
-        default=True,
+    mm_payload: MMPayload = Field(
+        default="tensors",
         description=(
-            "If false, the render response's `features` set `kwargs_data` "
-            "and `mm_metadata` to null, for callers that need only the token "
-            "layout and item hashes, such as cache-aware routers. Do not send "
-            "such a response to `/inference/v1/generate`, which reads a null "
-            "`kwargs_data` as every item being cached. Only supported on the "
-            "render endpoints; ignored on regular generation endpoints."
+            "What the render response's `features` carry for multimodal "
+            "items. 'tensors' serializes the processed tensors into "
+            "`kwargs_data` and `mm_metadata`. 'none' sets both to null for "
+            "callers that need only the token layout and item hashes, such as "
+            "cache-aware routers. Do not send a 'none' response to "
+            "`/inference/v1/generate` which reads a null `kwargs_data` as "
+            "every item being cached. Only supported on the render endpoints. "
+            "Ignored on regular generation endpoints."
+        ),
+    )
+    return_mm_kwargs: bool | None = Field(
+        default=None,
+        deprecated="return_mm_kwargs is deprecated in favor of the mm_payload field",
+        description=(
+            "Deprecated alias: false is the same as `mm_payload='none'`. "
+            "Ignored when `mm_payload` is set."
         ),
     )
     cache_salt: str | None = Field(
@@ -446,11 +464,19 @@ class ResponsesRequest(OpenAIBaseModel):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            max_output_tokens=self.max_output_tokens or 0,
+            max_output_tokens=self.max_output_tokens,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
+
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
+
+    _parser_structured_outputs: StructuredOutputsParams | None = PrivateAttr(
+        default=None
+    )
+    """Parser-derived constraints that preserve the public request's text metadata."""
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
@@ -461,6 +487,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
+        if self._parser_structured_outputs is not None:
+            return self._parser_structured_outputs
         if self.text is None or self.text.format is None:
             return self.structured_outputs
 
@@ -565,6 +593,11 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
+        return resolve_return_mm_kwargs_alias(data)
 
     @model_validator(mode="before")
     @classmethod
@@ -701,6 +734,34 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_custom_tool_format(cls, data):
+        if not isinstance(data, dict):
+            return data
+        tools = data.get("tools")
+        if not isinstance(tools, list):
+            return data
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, "model_dump"):
+                tool_dict = tool.model_dump()
+            else:
+                continue
+            tool_format = tool_dict.get("format")
+            if (
+                tool_dict.get("type") == "custom"
+                and isinstance(tool_format, dict)
+                and tool_format.get("type") == "grammar"
+            ):
+                raise VLLMValidationError(
+                    "Custom tools with a grammar format are not supported; "
+                    "only free-form text custom tools are accepted.",
+                    parameter="tools",
+                )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_tool_usage(cls, data):
         if not isinstance(data, dict):
             return data
@@ -708,9 +769,9 @@ class ResponsesRequest(OpenAIBaseModel):
         tools = data.get("tools")
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
-        is_named_tool_choice = (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
-        )
+        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
+            "type"
+        ) in ("function", "custom")
 
         if not has_tools:
             if tool_choice in ("auto", "none"):
@@ -897,6 +958,10 @@ class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
+class ResponseIncompleteEvent(OpenAIResponseIncompleteEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
 class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
@@ -909,10 +974,13 @@ StreamingResponsesResponse: TypeAlias = (
     ResponseCreatedEvent
     | ResponseInProgressEvent
     | ResponseCompletedEvent
+    | ResponseIncompleteEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
     | ResponseContentPartDoneEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent

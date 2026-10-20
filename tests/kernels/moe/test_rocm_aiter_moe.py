@@ -28,6 +28,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
@@ -304,14 +305,6 @@ def _make_moe_case(
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
     }
-
-
-def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
-    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
-    e, two_i = t.shape[0], t.shape[1]
-    i, rest = two_i // 2, t.shape[2:]
-    perm = (0, 2, 1, *range(3, 3 + len(rest)))
-    return t.view(e, 2, i, *rest).permute(*perm).contiguous().view(e, two_i, *rest)
 
 
 def _make_aiter_mxfp4_moe_case(
@@ -638,6 +631,33 @@ def test_aiter_moe_padding_env_var(
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
 
 
+@pytest.mark.parametrize(
+    ("activation", "use_mxfp4_w4a4", "tp_size", "pads", "expected"),
+    [
+        # W4A4 SiLU: AITER doubles the pad itself, at TP1 (and EP) as at TP2.
+        ("SILU", True, 1, (0, 64), (0, 64)),
+        ("SILU", True, 1, (0, 128), (0, 128)),
+        ("SILU", True, 2, (0, 64), (0, 64)),
+        # gpt-oss W4A16 at TP1 keeps the doubled pad.
+        ("SWIGLUOAI", False, 1, (0, 192), (0, 384)),
+        # BF16 SiLU at TP1 keeps the doubled pad.
+        ("SILU", False, 1, (0, 192), (0, 384)),
+        # SITU passes through unrounded.
+        ("SITU", False, 1, (40, 96), (40, 96)),
+    ],
+)
+def test_aiter_moe_pads(activation, use_mxfp4_w4a4, tp_size, pads, expected):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        aiter_moe_pads,
+    )
+
+    assert (
+        aiter_moe_pads(*pads, MoEActivation[activation], use_mxfp4_w4a4, tp_size)
+        == expected
+    )
+
+
 # a4w4 (FP4 activation) opt-in gating test ---------------------------------
 
 
@@ -848,13 +868,13 @@ def test_activation_method_enum_values():
 def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
     """AITER MXFP4 MoE support should stay gfx950-only."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterMxfp4Experts,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kMxfp4Static,
     )
 
-    assert AiterExperts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
+    assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")

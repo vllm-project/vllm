@@ -13,7 +13,7 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
 
-    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+    from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -152,8 +152,11 @@ class TokenizeParams:
     Usually, this refers to the model's context length.
     """
 
-    max_output_tokens: int = 0
-    """Maximum requested number of output tokens."""
+    max_output_tokens: int | None = 0
+    """Maximum requested output tokens; ``None`` means no explicit limit.
+
+    Zero indicates a request that does not need generated tokens, such as pooling.
+    """
 
     pad_prompt_tokens: int | None = None
     """

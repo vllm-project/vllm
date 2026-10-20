@@ -502,11 +502,12 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_v2_model_state_gathers_lookback_window():
+@pytest.mark.parametrize("pcp", [False, True])
+def test_v2_model_state_gathers_lookback_window(pcp):
     """The window is gathered on device from the runner's token history."""
     from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 
-    depth, max_num_reqs, max_model_len = 3, 4, 16
+    depth, max_num_reqs, max_model_len = 3, 6, 16
     state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
     state.rope_state = None
     state.supports_mm_inputs = False
@@ -527,15 +528,23 @@ def test_v2_model_state_gathers_lookback_window():
     # Batch rows -> request state rows: a request two decode steps in, a fresh
     # request, and one at the end of a 5-token prompt.
     input_batch = SimpleNamespace(
-        idx_mapping=torch.tensor([2, 0, 3], dtype=torch.int64, device="cuda")
+        idx_mapping=torch.tensor(
+            [2, 0, 3, 2] if pcp else [2, 0, 3], dtype=torch.int64, device="cuda"
+        ),
+        query_start_loc=torch.arange(5 if pcp else 4, dtype=torch.int32, device="cuda"),
+        positions=torch.tensor([8, 0, 6, 5] if pcp else [8, 0, 6], device="cuda"),
     )
     window = state.prepare_inputs(input_batch, req_states)["lookback_token_ids"]
-    assert window.cpu().tolist() == [
+    expected = [
         [22, 21, 16],
         [-1, -1, -1],
         [0, 0, 0],
-        [-1, -1, -1],
     ]
+    if pcp:
+        # The second PCP chunk of request 2 starts at 5, not at its global 8.
+        expected.append([15, 14, 13])
+    expected.extend([[-1] * depth] * (max_num_reqs - len(expected)))
+    assert window.cpu().tolist() == expected
     # Graph capture runs on the dummy inputs and replays read the same buffer.
     dummy = state.prepare_dummy_inputs(num_reqs=3, num_tokens=3)["lookback_token_ids"]
     assert dummy is window and torch.all(dummy == -1)

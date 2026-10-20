@@ -34,9 +34,12 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
+    _mega_moe_fused_shared_experts,
     _num_fused_shared_experts,
+    _routed_experts_prefix,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
+    get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
 
@@ -52,20 +55,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
 
-        # Reserve room for the incomplete pool tail and align the sparse MLA
-        # buffer width to BLOCK_N=128.
-        topk_tokens = config.index_topk
-        assert topk_tokens is not None
-        kpool = config.index_kpool
-        assert kpool is not None
-        buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
-        sparse_topk_block_n = 128
-        buffer_width = (
-            (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
-        ) * sparse_topk_block_n
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
-            buffer_width,
+            get_sparse_topk_buffer_width(config),
             dtype=torch.int32,
             device=current_platform.device_type,
         )
@@ -316,6 +308,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix=_routed_experts_prefix(self.moe_mlp_layers),
         )
 
         params_dict = dict(self.named_parameters())
@@ -339,6 +332,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            mega_experts = _mega_moe_fused_shared_experts(self, name)
+            if mega_experts is not None:
+                loaded_params.add(
+                    mega_experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
             if self.is_fused_shared_expert_enabled:
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
