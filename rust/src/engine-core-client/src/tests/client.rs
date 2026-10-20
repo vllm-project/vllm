@@ -2893,7 +2893,22 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         ec_transfer_params: None,
                         trace_headers: None,
                         prefill_stats: None,
-                        routed_experts: None,
+                        routed_experts: Some(
+                            WireArray {
+                                dtype: NumpyDtype {
+                                    scalar: U8,
+                                    endianness: Native,
+                                },
+                                shape: [
+                                    2,
+                                    1,
+                                    2,
+                                ],
+                                data: RawView(
+                                    b"\0\x01\x02\x03",
+                                ),
+                            },
+                        ),
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
