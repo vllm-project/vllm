@@ -17,10 +17,10 @@ import queue
 import socket
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import zmq
@@ -34,6 +34,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_checksum.checksum import BLOCK_CHECKSUM_BYTES
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -41,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    offloads_kv_checksums,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -52,6 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     PoolKey,
+    RankLocalStoreLayout,
     ReqMeta,
     StoreShardId,
     TailKeyBoundary,
@@ -59,6 +62,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
+    REMOVE_MSG,
     RESET_MSG,
     RESP_ERR,
     RESP_OK,
@@ -89,6 +93,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .metrics import MooncakeStoreConnectorStats
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
 
 logger = init_logger(__name__)
 
@@ -1498,6 +1505,8 @@ class MooncakeStoreWorker:
 
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
+        self._kv_checksums = False
+        self._kv_checksum_worker: KVChecksumWorker | None = None
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
@@ -1515,6 +1524,13 @@ class MooncakeStoreWorker:
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
+        self._kv_checksums = offloads_kv_checksums(
+            self.coord, vllm_config, kv_cache_config
+        )
+        if self._kv_checksums:
+            # The values carry each block's checksum, so they do not mix with
+            # those stored without one.
+            store_namespace += "@kv_checksums"
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1726,6 +1742,59 @@ class MooncakeStoreWorker:
             for g_idx, db in enumerate(self.token_dbs)
         )
 
+    def remove_blocks(
+        self, group_ids: Sequence[int], block_hashes: Sequence[BlockHash]
+    ) -> bool:
+        """Remove the stored KV of these (store group, block hash) blocks on
+        every rank, even while a load holds it.
+
+        Returns:
+            Whether every key is gone.
+
+        """
+        keys = [
+            PoolKey.build_key_string(prefix, block_hash.hex())
+            for group_id, block_hash in zip(group_ids, block_hashes, strict=True)
+            for prefix in self._lookup_key_prefixes[group_id]
+        ]
+        try:
+            codes = self.store.batch_remove(keys, force=True)
+        except Exception as e:
+            logger.error("Mooncake batch_remove failed: %s", e)
+            return False
+        # A rank-local key exists only on the ranks that stored the block.
+        failed = [
+            (key, code)
+            for key, code in zip(keys, codes)
+            if code not in (0, _MOONCAKE_OBJECT_NOT_FOUND)
+        ]
+        if failed:
+            logger.warning("Mooncake could not remove %d keys: %s", len(failed), failed)
+        return not failed
+
+    def set_kv_checksum_worker(self, kv_checksum_worker: "KVChecksumWorker") -> None:
+        if self._kv_checksums:
+            self._kv_checksum_worker = kv_checksum_worker
+
+    def _register_block_checksums(self, kv_checksum_worker: "KVChecksumWorker") -> None:
+        """Store each block's checksum with its KV: one more region of every
+        store value, 8 bytes per block."""
+        checksums = kv_checksum_worker.init_block_checksums(
+            self._kv_cache_config.prefix_cacheable_group_ids
+        )
+        ret = self.store.register_buffer(
+            checksums.data_ptr(), checksums.numel() * checksums.element_size()
+        )
+        if ret != 0:
+            raise RuntimeError(
+                f"Mooncake register_buffer failed for the KV checksums: {ret}"
+            )
+        for db in self.token_dbs:
+            layout = db.store_layout
+            assert isinstance(layout, RankLocalStoreLayout)
+            layout.kv_caches_base_addr.append(checksums.data_ptr())
+            layout.block_len.append(BLOCK_CHECKSUM_BYTES)
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1778,6 +1847,8 @@ class MooncakeStoreWorker:
                     )
             for db in self.token_dbs:
                 db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
+            if self._kv_checksum_worker is not None:
+                self._register_block_checksums(self._kv_checksum_worker)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -1954,6 +2025,31 @@ class MooncakeStoreWorker:
 
         assert self.load_async, "load_async must be True for better performance."
 
+    def _block_checksum_runs(
+        self, requests: Sequence[ReqMeta]
+    ) -> Iterator[tuple[int, int, list[int], list[BlockHash]]]:
+        """The blocks the saves of ``requests`` cover, as ``(KV cache group
+        id, position of the first block, block ids, block hashes)`` runs.
+
+        Each save covers the tokens past the previous one, so every block a
+        retry stores again had its checksum saved then.
+        """
+        group_ids = self._kv_cache_config.prefix_cacheable_group_ids
+        for request in requests:
+            if not request.can_save:
+                continue
+            for group, group_id, block_ids in zip(
+                self._kv_cache_groups, group_ids, request.block_ids, strict=True
+            ):
+                block_size = group.kv_cache_spec.block_size
+                first = request.token_ids_start // block_size
+                end = request.token_len_chunk // block_size
+                ratio = block_size // self.hash_block_size
+                block_hashes = request.block_hashes[
+                    (first + 1) * ratio - 1 : end * ratio : ratio
+                ]
+                yield group_id, first, block_ids[first:end], block_hashes
+
     def wait_for_save(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async stores with CUDA event synchronization.
 
@@ -1962,6 +2058,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        if self._kv_checksum_worker is not None:
+            # Queued before the event the sending thread waits on.
+            self._kv_checksum_worker.save_block_checksums(
+                self._block_checksum_runs(metadata.requests)
+            )
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2298,11 +2399,16 @@ class MooncakeStoreWorker:
 # ============================================================
 
 
+# Mooncake's ErrorCode::OBJECT_NOT_FOUND.
+_MOONCAKE_OBJECT_NOT_FOUND = -704
+
+
 class LookupKeyServer:
     """ZMQ server on worker rank 0 for the LookupKey admin channel.
 
-    Handles two request types, tagged at frame 0:
+    Handles three request types, tagged at frame 0:
     - ``LOOKUP_MSG``: prefix-cache hit query, returns its load plan.
+    - ``REMOVE_MSG``: removes the keys of the given blocks on every rank.
     - ``RESET_MSG``: drains the send thread queue, then runs
       ``store.remove_all(force=True)``. Caller must have paused the
       scheduler first.
@@ -2340,6 +2446,17 @@ class LookupKeyServer:
                     block_hashes = BlobBlockHashes(blob, hash_len)
                     result = self.store_worker.lookup(num_tokens, block_hashes)
                     self.socket.send(encode_lookup_response(result))
+
+                elif msg_type == REMOVE_MSG:
+                    group_frame = bytes(all_frames[1])
+                    group_ids = [
+                        int.from_bytes(group_frame[i : i + 4], byteorder="big")
+                        for i in range(0, len(group_frame), 4)
+                    ]
+                    hash_len = int.from_bytes(all_frames[2], byteorder="big")
+                    block_hashes = BlobBlockHashes(all_frames[3].buffer, hash_len)
+                    removed = self.store_worker.remove_blocks(group_ids, block_hashes)
+                    self.socket.send(RESP_OK if removed else RESP_ERR)
 
                 elif msg_type == RESET_MSG:
                     try:
@@ -2458,6 +2575,23 @@ class LookupKeyClient:
 
     def reset(self) -> bool:
         return self.executor.submit(self._reset).result()
+
+    def _remove(self, group_ids: list[int], block_hashes: list[BlockHash]) -> bool:
+        all_frames = (
+            REMOVE_MSG,
+            b"".join(group_id.to_bytes(4, byteorder="big") for group_id in group_ids),
+            len(block_hashes[0]).to_bytes(2, byteorder="big"),
+            b"".join(block_hashes),
+        )
+        self.socket.send_multipart(all_frames, copy=False)
+        return bytes(self.socket.recv()) == RESP_OK
+
+    def remove(
+        self, group_ids: list[int], block_hashes: list[BlockHash]
+    ) -> Future[bool]:
+        """Remove the keys of these (store group, block hash) blocks on every
+        rank, without waiting."""
+        return self.executor.submit(self._remove, group_ids, block_hashes)
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)

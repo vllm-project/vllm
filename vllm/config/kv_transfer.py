@@ -93,7 +93,9 @@ class KVTransferConfig:
     enable_kv_checksum: bool = False
     """Checksum transferred KV blocks on the producer and verify them on the
     consumer once loaded. Must be set on both sides; applies to requests with
-    do_remote_decode (producer) or do_remote_prefill (consumer) set."""
+    do_remote_decode (producer) or do_remote_prefill (consumer) set. A
+    connector that offloads KV and loads it back (e.g. MooncakeStoreConnector)
+    may also store each block's checksum with its KV and check its loads."""
 
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,

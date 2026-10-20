@@ -24,6 +24,13 @@ Wire format (REQ/REP over IPC):
           (no payload frames)
         Response: [RESP_OK] or [RESP_ERR]
 
+      msg_type == REMOVE_MSG:
+          frame 1: store group indices (u32 big-endian each), one per hash
+          frame 2: hash_len (u16 big-endian, 2 bytes)
+          frame 3: raw block hashes concatenated back-to-back
+        Removes the keys of those (group, hash) blocks on every rank.
+        Response: [RESP_OK] or [RESP_ERR]
+
 The first frame of every request is a named bytes tag (not a numeric
 sentinel that aliases the data field) so the protocol stays
 self-describing and extensible: adding new admin commands requires
@@ -41,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 # Request message-type tags. Frame 0 of every request.
 LOOKUP_MSG: bytes = b"lookup"
 RESET_MSG: bytes = b"reset"
+REMOVE_MSG: bytes = b"remove"
 
 # Single-byte response status codes for admin commands.
 RESP_OK: bytes = b"\x01"

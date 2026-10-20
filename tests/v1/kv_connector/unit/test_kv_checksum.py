@@ -351,6 +351,28 @@ def test_gqa_replicas_are_checked_per_replica():
         )
 
 
+def test_replicas_save_the_same_block_checksums():
+    """Ranks that replicate a head save the same checksum for a block, so a
+    store can keep one copy that every replica checks its load against."""
+    logical = _logical_kv(heads=2)
+    saved = []
+    for rank in range(4):
+        worker = _worker(
+            _config(_group(_spec(1))),
+            {_name(0): _cache(logical[:, rank // 2 : rank // 2 + 1])},
+            tp_rank=rank,
+            tp_size=4,
+            uniform_kv_heads=2,
+        )
+        checksums = worker.init_block_checksums([0])
+        worker.save_block_checksums([(0, 0, [3, 1], [b"block0hash", b"block1hash"])])
+        saved.append(checksums.cpu())
+
+    assert torch.equal(saved[0], saved[1])
+    assert torch.equal(saved[2], saved[3])
+    assert not torch.equal(saved[0], saved[2])
+
+
 @pytest.mark.parametrize("declared", [True, False])
 def test_mla_replicas_are_checked_per_replica(declared):
     """A cache with one TP shard (MLA) is replicated on every rank, as its

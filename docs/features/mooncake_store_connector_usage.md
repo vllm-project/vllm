@@ -252,6 +252,19 @@ Set `tenant_id` in the Mooncake JSON config when different vLLM deployments shou
 
 Strict isolation requires a Mooncake master started with `--enable_multi_tenants=true` and a tenant quota policy that registers each tenant. Non-default `tenant_id` also requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts the `tenant_id` parameter. In `standalone-store` mode, start the external `mooncake_client` with the matching tenant id because that process owns the real store client.
 
+### KV Checksums
+
+With `"enable_kv_checksum": true` in `--kv-transfer-config`, each stored block carries a checksum of its KV, bound to the block's hash, and KV loaded back from the store is checked against it: corrupted KV fails the check, and so does a value that belongs to another block. A load that fails the check is a KV load failure, handled per `kv_load_failure_policy`, and the failing blocks are removed from the store so that later requests do not load them again.
+
+This requires:
+
+- rank-local keys: neither `store_tp_size` nor `enable_store_tp_lcm` set,
+- full-attention models only,
+- a hash block size equal to the block size,
+- no `custom_mem_pool` and no HiSparse.
+
+Otherwise vLLM logs a warning at startup and loads from the store are not checked. Values stored with checksums use separate keys, so blocks stored before enabling checksums are not reused.
+
 ## Environment Variables
 
 | Variable | Description | Default |

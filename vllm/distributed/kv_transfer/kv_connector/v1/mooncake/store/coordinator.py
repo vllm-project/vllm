@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple, cast
 
+from vllm.distributed.kv_transfer.kv_checksum.checksum import kv_checksum_enabled
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
@@ -29,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    is_full_attention_spec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -508,6 +510,32 @@ class MooncakeStoreCoordinator:
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
             hit_length,
         )
+
+
+def offloads_kv_checksums(
+    coord: MooncakeStoreCoordinator,
+    vllm_config: "VllmConfig",
+    kv_cache_config: KVCacheConfig,
+) -> bool:
+    """Whether each block's KV checksum is stored with its KV: KV checksums
+    are enabled, the store keeps each rank's KV under rank-local keys, every
+    key holds one whole full-attention block, and the KV cache is not in a
+    custom memory pool (which the checksums are not allocated from)."""
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    return (
+        kv_checksum_enabled(vllm_config)
+        and kv_cache_config.hisparse_host_num_blocks is None
+        and extra_config.get("enable_store_tp_lcm") is not True
+        and extra_config.get("store_tp_size") is None
+        and not extra_config.get("custom_mem_pool")
+        and not coord.enable_partial_hash_hits
+        and all(
+            is_full_attention_spec(group.kv_cache_spec)
+            and group.kv_cache_spec.block_size == coord.hash_block_size
+            for group in coord.kv_cache_groups
+        )
+    )
 
 
 def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:

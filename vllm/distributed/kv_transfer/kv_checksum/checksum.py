@@ -65,6 +65,10 @@ MAX_KV_HEADS_PER_LAYER = 1 << 16
 """``H`` in the slice factor; groups with more KV heads per layer are not
 checksummed."""
 
+BLOCK_CHECKSUM_BYTES = 8
+"""Bytes per block of the ``KVChecksumWorker.init_block_checksums`` tensor:
+one int64."""
+
 ReplicaKey = tuple[int, int]
 """``(replicas, replica_index)`` of the layers a partial checksum covers."""
 
