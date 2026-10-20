@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Extension point for verifying non-chain drafts on gated delta net layers.
+"""Extension point for verifying non-chain drafts on linear-attention layers.
 
-GDN layers verify speculative tokens as a chain: row ``i`` of a request's query
-continues from row ``i - 1``, each row writes its own recurrent / convolution
-state to ``state_indices[req, i]``, and the next step resumes from row
-``num_accepted_tokens - 1``. A draft *tree* needs row ``i`` to continue from
-another earlier row instead, which the in-tree kernels cannot express.
+Gated delta net (GDN) and Mamba2 layers verify speculative tokens as a chain:
+row ``i`` of a request's query continues from row ``i - 1``, each row writes
+its own recurrent / convolution state to ``state_indices[req, i]``, and the
+next step resumes from row ``num_accepted_tokens - 1``. A draft *tree* needs
+row ``i`` to continue from another earlier row instead, which the in-tree
+kernels cannot express.
 
 A speculative method registered with ``register_speculative_method`` can set
 ``SpeculativeMethodSpec.linear_attn_verify_extension`` to a factory for a
-``LinearAttnVerifyExtension``. Every ``GDNAttentionMetadataBuilder`` then
-creates one and attaches it to the metadata it builds, and the GDN layer hands
-the spec-decode rows of every forward to ``forward_spec_rows`` instead of
-running its own convolution and recurrence on them. With no extension (the
-default) nothing changes.
+``LinearAttnVerifyExtension``. Every ``GDNAttentionMetadataBuilder`` and
+``Mamba2AttentionMetadataBuilder`` then creates one and attaches it to the
+metadata it builds, and the layer hands the spec-decode rows of every forward
+to the extension (``forward_spec_rows`` for GDN, ``forward_mamba2_spec_rows``
+for Mamba2) instead of running its own convolution and recurrence on them.
+With no extension (the default) nothing changes.
 """
 
 from dataclasses import dataclass
@@ -71,9 +73,56 @@ class GDNSpecRows:
     """``[T, num_v_heads, head_v_dim]``, written by the extension."""
 
 
+@dataclass(frozen=True)
+class Mamba2SpecRows:
+    """The spec-decode rows of one Mamba2 layer's forward.
+
+    ``T`` is the number of spec-decode tokens and ``B`` the number of their
+    requests (a CUDA graph batch may pad ``B``; the in-tree kernels see the
+    same padding). Heads and groups are per tensor-parallel rank.
+    """
+
+    layer_name: str
+    """The layer's prefix, its key in the forward context."""
+    hidden_states_B_C: torch.Tensor
+    """``[T, conv_dim]`` convolution input (the x, B and C columns). May be a
+    view whose row stride is larger than ``conv_dim``."""
+    dt: torch.Tensor
+    """``[T, num_heads]`` time step before ``dt_bias`` and softplus. May be a
+    strided view."""
+    conv_state: torch.Tensor
+    """``[num_slots, conv_dim, kernel_size - 1 + num_spec]`` convolution
+    states."""
+    conv_weight: torch.Tensor
+    """``[conv_dim, kernel_size]``."""
+    conv_bias: torch.Tensor | None
+    activation: str | None
+    ssm_state: torch.Tensor
+    """``[num_slots, num_heads, head_dim, ssm_state_size]`` SSM states."""
+    A: torch.Tensor
+    """``[num_heads]`` float32 (``-exp(A_log)``)."""
+    D: torch.Tensor
+    """``[num_heads]``."""
+    dt_bias: torch.Tensor
+    """``[num_heads]``; the in-tree kernels use ``softplus(dt + dt_bias)``."""
+    num_heads: int
+    head_dim: int
+    n_groups: int
+    ssm_state_size: int
+    state_indices: torch.Tensor
+    """``[B, max_query_len]``: the state slot of each row of each request."""
+    num_accepted_tokens: torch.Tensor
+    """``[B]``: request ``b`` starts from ``state_indices[b, n - 1]``."""
+    query_start_loc: torch.Tensor
+    """``[B + 1]``: the rows of each request in ``hidden_states_B_C``."""
+    out: torch.Tensor
+    """``[T, num_heads * head_dim]`` SSM output (before the gated norm),
+    written by the extension."""
+
+
 class LinearAttnVerifyExtension:
-    """Runs the convolution and the recurrence of a GDN layer's spec-decode
-    rows in place of the in-tree chain kernels.
+    """Runs the convolution and the recurrence of a GDN or Mamba2 layer's
+    spec-decode rows in place of the in-tree chain kernels.
 
     State layout contract (the in-tree chain one): row ``i`` of request ``b``
     stores its convolution and recurrent state at ``state_indices[b, i]``; the
@@ -88,6 +137,13 @@ class LinearAttnVerifyExtension:
         and every row's states as described above. Called for every forward
         with spec-decode rows, including CUDA graph captures."""
         raise NotImplementedError
+
+    def forward_mamba2_spec_rows(self, rows: Mamba2SpecRows) -> None:
+        """As ``forward_spec_rows``, for a Mamba2 layer's decode rows."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not verify Mamba2 layers; the "
+            "in-tree kernels would verify its drafts as chains"
+        )
 
 
 def create_linear_attn_verify_extension(
