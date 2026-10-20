@@ -29,6 +29,7 @@ from vllm.config import (
     HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     ObservabilityConfig,
     ParallelConfig,
@@ -284,10 +285,53 @@ def test_kda_recoverssm_derivation_is_revalidated():
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize("supported", [True, False])
+def test_lora_rejected_at_config_time_for_unsupported_model(supported):
+    """Models without SupportsLoRA must fail during config validation with a
+    clear message, not with a bare assert inside the model constructor."""
+    model_config = SimpleNamespace(
+        is_lora_supported=supported,
+        architecture="Zamba2ForCausalLM",
+        architectures=["Zamba2ForCausalLM"],
+        model="Zyphra/Zamba2-1.2B-instruct",
+        dtype=torch.bfloat16,
+    )
+    lora_config = LoRAConfig()
+    if supported:
+        lora_config.verify_with_model_config(model_config)
+    else:
+        with pytest.raises(
+            ValueError, match="LoRA is not supported for Zamba2ForCausalLM"
+        ):
+            lora_config.verify_with_model_config(model_config)
+
+
 def test_mamba_cache_mode_all_is_rejected():
     """The removed 'all' mode must fail validation instead of being ignored."""
     with pytest.raises(ValidationError, match="mamba_cache_mode"):
         CacheConfig(mamba_cache_mode="all")
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "model_dtype", "should_raise"),
+    [
+        ("float16", torch.bfloat16, True),
+        ("bfloat16", torch.float16, True),
+        ("float16", torch.float32, True),
+        ("float16", torch.float16, False),
+        ("auto", torch.bfloat16, False),
+        ("fp8", torch.bfloat16, False),
+    ],
+)
+def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_raise):
+    config = VllmConfig(cache_config=CacheConfig(cache_dtype=cache_dtype))
+    config.model_config = SimpleNamespace(dtype=model_dtype)
+
+    if should_raise:
+        with pytest.raises(ValueError, match="kv_cache_dtype"):
+            config._reject_mismatched_float_kv_cache()
+    else:
+        config._reject_mismatched_float_kv_cache()
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -902,7 +946,10 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["DFlash2DraftModel", "DFlash2BeamDraftModel", "LiLiCorrDraftModel"],
+)
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""
@@ -1983,9 +2030,7 @@ def test_draft_inherits_ep_only_for_moe(
     draft_is_moe: bool,
 ):
     """Validate final draft configs without loading weights or mocking validation."""
-    from transformers import LlamaConfig, MixtralConfig
-
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config, LlamaConfig, MixtralConfig
 
     common = dict(
         hidden_size=128,
@@ -2002,7 +2047,7 @@ def test_draft_inherits_ep_only_for_moe(
             n_routed_experts=4,
             num_experts_per_tok=2,
             num_nextn_predict_layers=1,
-            compress_ratios=[1, 1],
+            layer_types=["sliding_attention"] * 2,
             head_dim=32,
             **common,
         )
@@ -2075,8 +2120,8 @@ def test_draft_parallel_config_preserves_ep_without_model(
     [
         pytest.param("eagle3", False, 0, id="eagle3"),
         pytest.param("eagle3", True, 7, id="p-eagle"),
-        pytest.param("dflash", True, 8, id="dflash"),
-        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("dflash", True, 0, id="dflash"),
+        pytest.param("dspark", True, 0, id="dspark"),
         pytest.param("mtp", False, 0, id="mtp"),
         pytest.param("ngram", False, 0, id="ngram"),
         pytest.param("draft_model", False, 1, id="draft-model"),
@@ -3712,34 +3757,48 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
-def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting"),
+    [
+        ("eagle", False),
+        ("eagle3", False),
+        ("mtp", False),
+        ("dspark", True),
+        ("dflash", True),
+    ],
+)
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
+    method, parallel_drafting
+):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
+        parallel_drafting=parallel_drafting,
     )
 
     config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_supports_dspark():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
-        method="dspark",
+        method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
         parallel_drafting=True,
+        draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
-    config._check_supports_watermarking()
+    with pytest.raises(ValueError, match="candidate-head drafters"):
+        config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
+def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
@@ -3749,7 +3808,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="autoregressive model-based"):
+    with pytest.raises(ValueError, match="Watermarking supports only"):
         config._check_supports_watermarking()
 
 
@@ -4110,7 +4169,7 @@ def test_revision_resolved_for_model(mock_resolve):
 
 
 @pytest.mark.parametrize(
-    "enabled,supported,is_cuda,tp_size,pp_size,error",
+    "enabled,supported,cuda_alike,tp_size,pp_size,error",
     [
         (True, True, True, 2, 1, None),
         (True, False, True, 2, 1, "not supported for this model"),
@@ -4121,7 +4180,7 @@ def test_revision_resolved_for_model(mock_resolve):
         (False, False, False, 2, 1, None),
     ],
 )
-def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, error):
+def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, error):
     """Validate active HC SP configurations and ignore the flag with TP=1."""
     from vllm.model_executor.models.registry import ModelRegistry
 
@@ -4139,7 +4198,10 @@ def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, erro
         distributed_executor_backend="mp",
     )
     with (
-        patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda),
+        patch(
+            "vllm.config.model.current_platform.is_cuda_alike",
+            return_value=cuda_alike,
+        ),
         patch.object(ModelRegistry, "is_hc_sp_supported_model", return_value=supported),
         patch.object(ModelRegistry, "is_pp_supported_model", return_value=True),
     ):

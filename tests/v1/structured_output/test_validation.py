@@ -17,6 +17,13 @@ from vllm.sampling_params import (
 )
 from vllm.tokenizers import mistral as mistral_tokenizers
 from vllm.v1.structured_output import backend_guidance
+from vllm.v1.structured_output.backend_lm_format_enforcer import (
+    validate_structured_output_request_lm_format_enforcer,
+)
+from vllm.v1.structured_output.backend_outlines import (
+    validate_structured_output_request_outlines,
+)
+from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
 pytestmark = pytest.mark.cpu_test
 
@@ -213,6 +220,9 @@ def test_schema_at_nesting_limit_accepted(field):
 
 
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
+STRUCTURAL_TAG = (
+    '{"type": "structural_tag", "format": {"type": "const_string", "value": "hi"}}'
+)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +237,9 @@ INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}
         ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
         ("outlines", StructuredOutputsParams(regex="(")),
         ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
+        ("outlines", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
+        ("lm-format-enforcer", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
+        ("outlines", StructuredOutputsParams(json_object=True)),
     ],
 )
 def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
@@ -239,6 +252,50 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             StructuredOutputsConfig(backend=backend),
             tokenizer=object(),
         )
+
+
+@pytest.mark.parametrize(
+    "backend, structured_outputs",
+    [
+        ("xgrammar", StructuredOutputsParams(json_object=True)),
+        ("xgrammar", StructuredOutputsParams(regex="[0-9]+")),
+        ("xgrammar", StructuredOutputsParams(regex="")),
+        ("xgrammar", StructuredOutputsParams(json={})),
+        ("lm-format-enforcer", StructuredOutputsParams(json_object=True)),
+        ("lm-format-enforcer", StructuredOutputsParams(regex="")),
+        ("lm-format-enforcer", StructuredOutputsParams(json={})),
+        ("outlines", StructuredOutputsParams(regex="")),
+        ("outlines", StructuredOutputsParams(json={})),
+    ],
+)
+def test_supported_spec_is_not_rejected(backend, structured_outputs):
+    """Supported specs, including the falsy but valid regex="" and json={}, must
+    not reach the validators' final rejection."""
+    params = SamplingParams(structured_outputs=structured_outputs)
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend=backend),
+        tokenizer=object(),
+    )
+
+
+@pytest.mark.parametrize(
+    "validate",
+    [
+        validate_structured_output_request_outlines,
+        validate_structured_output_request_lm_format_enforcer,
+        validate_xgrammar_grammar,
+    ],
+    ids=["outlines", "lm-format-enforcer", "xgrammar"],
+)
+def test_unhandled_spec_is_a_validation_error(validate):
+    """json_object=False is rejected before backend selection, so only a direct
+    validator call reaches the final branch; it must still be a 400."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json_object=False)
+    )
+    with pytest.raises(VLLMValidationError, match="does not support this"):
+        validate(params)
 
 
 @pytest.mark.parametrize(
