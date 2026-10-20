@@ -215,7 +215,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             self.block_tables.gather_block_tables(
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
-            
+
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
 
