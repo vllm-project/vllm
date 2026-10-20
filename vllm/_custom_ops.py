@@ -2672,12 +2672,12 @@ def fused_qknorm_rope_cache(
     rotary_dim: int,
     eps: float,
     norm_weight_bias: float = 0.0,
+    *,
+    q_dtype: torch.dtype | None = None,
     kv_cache_dtype: str = "auto",
+    q_scale: float = 1.0,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
-    *,
-    fp8_query: bool = False,
-    q_scale: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse per-head RMSNorm, partial NeoX RoPE and KV insertion.
 
@@ -2689,7 +2689,7 @@ def fused_qknorm_rope_cache(
     q = torch.empty(
         (qkv.shape[0], num_q_heads * head_dim),
         device=qkv.device,
-        dtype=torch.float8_e4m3fn if fp8_query else qkv.dtype,
+        dtype=qkv.dtype if q_dtype is None else q_dtype,
     )
     k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
     v = torch.empty_like(k)
@@ -2714,9 +2714,9 @@ def fused_qknorm_rope_cache(
         eps,
         norm_weight_bias,
         kv_cache_dtype,
+        q_scale,
         k_scale,
         v_scale,
-        **({"q_scale": q_scale} if fp8_query else {}),
     )
     return q, k, v
 

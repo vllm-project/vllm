@@ -1028,7 +1028,8 @@ class Step5Attention(nn.Module):
                 Step5DSAAttentionBackend.supports_compute_capability(capability)
             ):
                 raise NotImplementedError(
-                    f"Step5 DSA requires SM90, SM100 or SM103; got {capability}."
+                    f"Step5 {vllm_config.kernel_config.step5_attention_backend} "
+                    f"DSA does not support GPU capability {capability}."
                 )
             if self.head_dim not in (128, 192):
                 raise ValueError(
@@ -1294,6 +1295,8 @@ class Step5Attention(nn.Module):
             qkzg = None
             extra_dims = None
 
+        # PrimTS also covers DSA and ungated layers. DSA gets its gate from
+        # qkzg; only gated SWA may need a separate projection here.
         if (
             (self.fuse_swa_gate or self.prims_ts_attention)
             and not self.use_dsa_backend
@@ -1330,9 +1333,11 @@ class Step5Attention(nn.Module):
             key_cache, value_cache = typing.cast(Any, self.attn.impl)._split_kv_cache(
                 kv_cache
             )
-            fp8_query = self.prims_ts_attention and key_cache.dtype in (
-                torch.uint8,
-                torch.float8_e4m3fn,
+            q_dtype = (
+                torch.float8_e4m3fn
+                if self.prims_ts_attention
+                and key_cache.dtype in (torch.uint8, torch.float8_e4m3fn)
+                else None
             )
             if (
                 self.sparse_attn is not None
@@ -1349,7 +1354,7 @@ class Step5Attention(nn.Module):
                     key_cache,
                     value_cache,
                     decode_slots,
-                    fp8_query=fp8_query,
+                    q_dtype=q_dtype,
                 )
             else:
                 q, k, v = ops.fused_qknorm_rope_cache(
@@ -1367,11 +1372,11 @@ class Step5Attention(nn.Module):
                     self.rotary_dim if self.use_rope else 0,
                     self.q_norm.variance_epsilon,
                     float(self.zero_centered),
-                    self.attn.kv_cache_dtype,
-                    self.attn._k_scale,
-                    self.attn._v_scale,
-                    fp8_query=fp8_query,
+                    q_dtype=q_dtype,
+                    kv_cache_dtype=self.attn.kv_cache_dtype,
                     q_scale=self.attn._q_scale_float,
+                    k_scale=self.attn._k_scale,
+                    v_scale=self.attn._v_scale,
                 )
             kv_cache_dummy_dep = q.new_empty(0)
         else:
@@ -1410,6 +1415,7 @@ class Step5Attention(nn.Module):
                 and self.attn.kv_sharing_target_layer_name is None
             ):
                 unified_kv_cache_update(key, value, self.attn.layer_name)
+            # Q may be FP8; K/V retain the model activation dtype for output.
             attn_output = torch.empty(
                 (q.shape[0], self.num_heads, self.head_dim),
                 dtype=k.dtype,
@@ -1483,7 +1489,7 @@ class Step5SparseAttention:
         value_cache,
         decode_slots,
         *,
-        fp8_query=False,
+        q_dtype=None,
     ):
         from .ops.qkv_indexer_norm_rope import qkv_indexer_norm_rope
 
@@ -1524,7 +1530,7 @@ class Step5SparseAttention:
             decode_ring=impl.csa_ring if cache is not None else None,
             decode_z=index_z if cache is not None else None,
             decode_slots=decode_slots,
-            fp8_query=fp8_query,
+            q_dtype=q_dtype,
             q_scale=owner.attn._q_scale_float,
         )
         return (q, k, v), (
@@ -1595,6 +1601,7 @@ class Step5SparseAttention:
     ) -> torch.Tensor:
         attn = self.owner.attn
         hidden_size = attn.num_heads * attn.head_size_v
+        # Q may be FP8; K/V retain the model activation dtype for output.
         output = torch.empty(
             (query.shape[0], hidden_size),
             dtype=key.dtype,

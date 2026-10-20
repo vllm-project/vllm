@@ -70,6 +70,8 @@ class Step5FlashInferSparse:
         scale,
         *,
         contiguous_query=True,
+        request_offsets=None,
+        num_kv_groups=1,
     ) -> CompactPagedPrefill | None:
         """Plan paged prefill over dense model-dtype single-group pages.
 
@@ -114,6 +116,7 @@ class Step5FlashInferSparse:
         out,
         scale,
         *,
+        seq_lens=None,
         topk_lengths=None,
         clear_inactive=True,
         k_scale=None,
@@ -152,7 +155,17 @@ class Step5FlashInferSparse:
             gate=gate,
         )
 
-    def prefill_metadata(self, owners, positions, regions, topk, *, paged_prefill=None):
+    def prefill_metadata(
+        self,
+        owners,
+        positions,
+        regions,
+        topk,
+        *,
+        paged_prefill=None,
+        out=None,
+        history_only=False,
+    ):
         return prepare_prefill_indexer(
             owners,
             positions,
@@ -160,6 +173,8 @@ class Step5FlashInferSparse:
             topk,
             self._num_sms,
             paged_prefill=paged_prefill,
+            out=out,
+            history_only=history_only,
         )
 
     def warmup_prefill_scoring(self, max_regions, topk, paired_heads, device):
@@ -314,6 +329,8 @@ class Step5FlashInferSparse:
         topk_lengths=None,
         paged_prefill=None,
         sort=True,
+        out=None,
+        history_only=False,
     ):
         return select_regions(
             scores,
@@ -323,6 +340,8 @@ class Step5FlashInferSparse:
             topk_lengths=topk_lengths,
             paged_prefill=paged_prefill,
             sort=sort,
+            out=out,
+            history_only=history_only,
         )
 
     def logits(
