@@ -944,9 +944,8 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""
-    from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
-
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
 
     device = torch.device("cuda")
     hidden_size, top_k, shared_block_m = 5120, 8, 32
@@ -1039,16 +1038,15 @@ ACTIVATIONS = {
 def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
     """Return checkpoint ``(weight, scale, global_scale)`` and the dequantized
     weight; NVFP4 takes ``global_scale`` as ``weight_scale_2``."""
-    from vllm.third_party.deep_gemm.utils.nvfp4 import (
-        cast_back_from_nvfp4,
-        per_token_cast_to_nvfp4,
-    )
-
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp4,
         cast_back_from_fp8,
         per_token_cast_to_fp4,
         per_token_cast_to_fp8,
+    )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
     )
 
     if spec.scale_group_k is None:
@@ -1069,14 +1067,13 @@ def _quantize(w: torch.Tensor, spec: MegaMoEWeightSpec):
 
 def _round_trip(x: torch.Tensor, quant, nvfp4_scale: float | None = None):
     """What the kernel computes on: x after ``quant`` (None keeps BF16)."""
-    from vllm.third_party.deep_gemm.utils.nvfp4 import (
-        cast_back_from_nvfp4,
-        per_token_cast_to_nvfp4,
-    )
-
     from vllm.third_party.deep_gemm.utils.math import (
         cast_back_from_fp8,
         per_token_cast_to_fp8,
+    )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
     )
 
     if quant is None:
