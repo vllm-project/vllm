@@ -88,9 +88,13 @@ def test_fuse_gemm_add_rms(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from aiter.ops.triton.normalization import fused_reduce_add_rmsnorm as mod
+    if (
+        fused_op_available
+        and not rocm_aiter_ops.is_fused_reduce_add_rmsnorm_supported()
+    ):
+        pytest.skip("Needs AITER's fused_reduce_add_rmsnorm (ROCm/aiter#6678)")
 
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             RocmAiterGemmAddRMSNormFusionPass,
         )
@@ -111,14 +115,17 @@ def test_fuse_gemm_add_rms(
             "vllm.model_executor.layers.utils._aiter_tuned_gemm_libtype",
             lambda *args: "triton",
         )
-        input_ranks = []
-        fused_reduce_add_rmsnorm = mod.fused_reduce_add_rmsnorm
+        input_ranks: list[int] = []
+        if fused_op_available:
+            from aiter.ops.triton.normalization import fused_reduce_add_rmsnorm as mod
 
-        def spy(x, *args, **kwargs):
-            input_ranks.append(x.dim())
-            return fused_reduce_add_rmsnorm(x, *args, **kwargs)
+            fused_reduce_add_rmsnorm = mod.fused_reduce_add_rmsnorm
 
-        m.setattr(mod, "fused_reduce_add_rmsnorm", spy)
+            def spy(x, *args, **kwargs):
+                input_ranks.append(x.dim())
+                return fused_reduce_add_rmsnorm(x, *args, **kwargs)
+
+            m.setattr(mod, "fused_reduce_add_rmsnorm", spy)
 
         fusion_pass = RocmAiterGemmAddRMSNormFusionPass(vllm_config)
         passes = [
