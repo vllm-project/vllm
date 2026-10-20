@@ -1698,7 +1698,7 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             response = producer._xfer_resp_decoder.decode(payload)
             assert response.status == MooncakeXferResponseStatus.FINISH
             assert not response.ok_reqs
-            assert not response.err_reqs
+            assert response.err_reqs == ["d-req-1"]
         finally:
             producer.shutdown()
             producer.is_kv_consumer = True
@@ -2959,3 +2959,72 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_cancelled_producer_wakes_waiter_without_sending(replacement):
+    """Cancelled waits fail promptly and cannot send a replacement's KV."""
+    with mooncake_register_worker(
+        _make_test_kv_cache_config(), kv_role="kv_producer"
+    ) as (worker, _):
+        try:
+            worker.kv_caches_base_addr = [0x1000]
+            worker.block_len_per_layer = worker.kv_block_len_per_layer = [256]
+            worker.registered_layer_names = ["model.layers.0.self_attn"]
+            worker.registered_layer_indices = [0]
+            metadata = MooncakeConnectorMetadata()
+            metadata.reqs_to_send["p-old"] = ("transfer", [])
+            await worker.record_send_reqs(metadata)
+            old = worker.reqs_need_send["transfer"]
+            old.local_block_ids = [[1]]
+            started = asyncio.Event()
+            original_wait = old.ready.wait
+
+            async def wait_ready():
+                started.set()
+                await original_wait()
+
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            pull = _xfer_meta(
+                [_region(0x2000, layer_name=worker.registered_layer_names[0])],
+                {"d-old": ("transfer", [[2]])},
+            )
+            with (
+                patch.object(old.ready, "wait", side_effect=wait_ready),
+                patch.object(worker, "_send_blocks") as send,
+            ):
+                task = asyncio.create_task(
+                    worker.send_kv_to_decode(b"consumer", sock, pull)
+                )
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    cancelled = MooncakeConnectorMetadata()
+                    cancelled.reqs_not_processed.add("transfer")
+                    await worker.record_send_reqs(cancelled)
+                    if replacement:
+                        admitted = MooncakeConnectorMetadata()
+                        admitted.reqs_to_send["p-new"] = ("transfer", [])
+                        await worker.record_send_reqs(admitted)
+                    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+                    response = worker._xfer_resp_decoder.decode(
+                        sock.send_multipart.call_args.args[0][1]
+                    )
+                    assert response.status == MooncakeXferResponseStatus.FINISH
+                    assert response.err_reqs == ["d-old"]
+                    assert response.ok_reqs is None
+                    assert "cancelled or expired" in response.err_msg
+                    assert not worker.finished_sending_reqs
+                    send.assert_not_called()
+                    if replacement:
+                        assert worker.reqs_need_send["transfer"].p_req_id == "p-new"
+                        assert not worker.reqs_need_send["transfer"].ready.is_set()
+                    else:
+                        await worker.record_send_reqs(cancelled)
+                        assert not worker.reqs_need_send
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        finally:
+            worker.shutdown()
+            worker.is_kv_consumer = True
