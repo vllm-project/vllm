@@ -49,7 +49,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
@@ -58,6 +58,15 @@ from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
+
+
+class _StreamError(Exception):
+    """Carries an ErrorResponse error payload through the stream converter so
+    the SSE ``error`` event keeps the original HTTP status code."""
+
+    def __init__(self, error_info: ErrorInfo) -> None:
+        super().__init__(error_info.message)
+        self.error_info = error_info
 
 
 def _build_anthropic_usage(
@@ -1000,7 +1009,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             async for origin_chunk in generator:
                 if isinstance(origin_chunk, ErrorResponse):
-                    raise RuntimeError(origin_chunk.error.message)
+                    raise _StreamError(origin_chunk.error)
                 if first_item:
                     chunk = AnthropicStreamEvent(
                         type="message_start",
@@ -1200,11 +1209,22 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             for event in stop_active_block():
                 yield event
+            if isinstance(e, _StreamError):
+                # Preserve the HTTP status carried by ErrorResponse so the
+                # SSE error event uses the same Anthropic vocabulary as the
+                # non-streaming path (e.g. overloaded_error, not_found_error).
+                # Local import: api_router imports this module, so a
+                # module-level import would be circular.
+                from vllm.entrypoints.anthropic.api_router import translate_error_type
+
+                error_type = translate_error_type(ErrorResponse(error=e.error_info))
+                message = sanitize_message(e.error_info.message)
+            else:
+                error_type = "internal_error"
+                message = sanitize_message(str(e))
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(
-                    type="internal_error", message=sanitize_message(str(e))
-                ),
+                error=AnthropicError(type=error_type, message=message),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")

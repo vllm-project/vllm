@@ -45,12 +45,14 @@ _ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
     HTTPStatus.NOT_FOUND.value: "not_found_error",
     HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value: "request_too_large",
     HTTPStatus.TOO_MANY_REQUESTS.value: "rate_limit_error",
-    # Anthropic uses 529 for overloaded_error.
+    # vLLM reports overload (e.g. QueueOverflowError) as 503; Anthropic uses
+    # 529 for overloaded_error, so map both.
+    HTTPStatus.SERVICE_UNAVAILABLE.value: "overloaded_error",
     529: "overloaded_error",
 }
 
 
-def _translate_error_type(response: ErrorResponse) -> str:
+def translate_error_type(response: ErrorResponse) -> str:
     status_code = response.error.code
     error_type = _ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code)
     if error_type is not None:
@@ -63,7 +65,7 @@ def _translate_error_type(response: ErrorResponse) -> str:
 def translate_error_response(response: ErrorResponse) -> JSONResponse:
     anthropic_error = AnthropicErrorResponse(
         error=AnthropicError(
-            type=_translate_error_type(response),
+            type=translate_error_type(response),
             message=response.error.message,
         )
     )
