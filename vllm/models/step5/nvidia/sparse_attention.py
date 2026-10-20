@@ -13,14 +13,13 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .ops.attention_gate import headwise_sigmoid_gate
@@ -145,7 +144,7 @@ def _validate_step5_dsa_attention_contract(
     dtype: torch.dtype,
     head_size: int,
     q_heads_per_kv: int,
-    alibi_slopes: torch.Tensor | None,
+    alibi_slopes: list[float] | torch.Tensor | None,
     sliding_window: tuple[int, int],
     logits_soft_cap: float,
     attn_type: str,
@@ -244,7 +243,7 @@ class Step5DSAMetadataBuilder(FlashAttentionMetadataBuilder):
                 impl.num_heads // spec.num_kv_heads,
                 spec.head_size,
                 spec.num_kv_heads,
-                self.vllm_config.model_config.dtype,
+                cast(torch.dtype, self.vllm_config.model_config.dtype),
                 is_quantized_kv_cache(impl.kv_cache_dtype),
                 spec.block_size,
                 kv_page_stride(layer.kv_cache),
