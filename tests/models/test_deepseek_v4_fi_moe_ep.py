@@ -34,6 +34,13 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
     epilogue_from_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    map_fp8_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    backend_to_kernel_cls as fp8_backend_to_kernel_cls,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     Mxfp4MoeBackend,
@@ -59,6 +66,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
     kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -126,7 +136,7 @@ def test_dsv4_requests_pre_fc2_router_weight_placement():
 def test_backend_specs_preserve_weight_format_contracts():
     cutedsl = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_CUTEDSL)
     assert cutedsl.kernel == "cutedsl"
-    assert cutedsl.weight_formats == frozenset({"nvfp4", "mxfp4"})
+    assert cutedsl.weight_formats == frozenset({"nvfp4", "mxfp4", "fp8_block"})
 
     deep_gemm = fi_ep.flashinfer_moe_ep_backend_spec(FLASHINFER_MOE_EP_DEEP_GEMM)
     assert deep_gemm.kernel == "deep_gemm"
@@ -179,6 +189,7 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
     return config
 
 
@@ -212,6 +223,34 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
     assert reason.endswith("EPLB")
 
 
+def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    cutedsl = _megakernel_moe(
+        FLASHINFER_MOE_EP_CUTEDSL, routing_method=RoutingMethodType.Renormalize
+    )
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    assert _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym) == (
+        True,
+        "",
+    )
+    _, reason = _is_supported(cutedsl, kNvfp4Static, kNvfp4Dynamic)
+    assert "NVFP4 weights on this GPU" in reason
+
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    assert "FP8_BLOCK weights on this GPU" in reason
+
+    deep_gemm = _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM)
+    _, reason = _is_supported(deep_gemm, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    assert "FP8_BLOCK weights" in reason
+
+    # The kernel quantizes bf16 activations per 1x128 group itself.
+    monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8StaticTensorSym)
+    assert "with block FP8" in reason
+
+
 def test_megakernels_are_oracle_backends():
     """Quant methods reach the megakernel through the NVFP4/MXFP4 oracles."""
     nvfp4 = map_nvfp4_backend(FLASHINFER_MOE_EP_CUTEDSL)
@@ -232,6 +271,58 @@ def test_megakernels_are_oracle_backends():
         Mxfp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL, w1_scale=None, w2_scale=None
     )
     assert quant_config is not None and quant_config.use_nvfp4_w4a4
+
+    fp8 = map_fp8_backend(FLASHINFER_MOE_EP_CUTEDSL)
+    assert fp8 is Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
+    assert fp8_backend_to_kernel_cls(fp8) == [FlashInferMoeEpExperts]
+
+
+def _block_fp8(real: torch.Tensor, power_of_two: bool):
+    """E4M3 weights with one float32 scale per 128x128 block."""
+    *lead, rows, cols = real.shape
+    blocks = real.reshape(*lead, rows // 128, 128, cols // 128, 128)
+    scale = blocks.abs().amax(dim=(-3, -1)) / 448.0
+    if power_of_two:
+        scale = torch.exp2(torch.ceil(torch.log2(scale)))
+    return (real / _per_element(scale)).to(torch.float8_e4m3fn), scale
+
+
+def _per_element(scale: torch.Tensor) -> torch.Tensor:
+    return scale.repeat_interleave(128, -2).repeat_interleave(128, -1)
+
+
+def _gate_up_interleaved(w13: torch.Tensor) -> torch.Tensor:
+    """Rows ordered [pair, {gate, up}, 8], the SM90 megakernel's FC1 layout."""
+    experts, rows, cols = w13.shape
+    gate, up = w13.view(experts, 2, rows // 16, 8, cols).unbind(1)
+    return torch.stack((gate, up), dim=2).reshape(experts, rows, cols)
+
+
+@pytest.mark.parametrize("power_of_two", [True, False])
+def test_sm90_fp8_block_weights_keep_checkpoint_values(power_of_two: bool):
+    """Interleaving gate and up rows puts two checkpoint blocks under one scale.
+
+    Power-of-two scales (GLM-5.x checkpoints) survive that up to rounding
+    below the E4M3 normal range; other scales round the rescaled half once.
+    """
+    torch.manual_seed(0)
+    real = torch.randn(2, 512, 256) * 0.02
+    # Gate blocks 8x the up blocks, so each interleaved block mixes scales.
+    real[:, :256] *= 8.0
+    w13, scale = _block_fp8(real, power_of_two)
+
+    kernel_w13, kernel_scale = fi_ep.sm90_fp8_block_moe_ep_weights(w13, scale)
+
+    assert kernel_w13.dtype == w13.dtype and kernel_w13.shape == w13.shape
+    assert kernel_scale.shape == scale.shape
+    restored = kernel_w13.float() * _per_element(kernel_scale)
+    expected = _gate_up_interleaved(w13.float() * _per_element(scale))
+    error = (restored - expected).abs()
+    if power_of_two:
+        # Half the smallest E4M3 subnormal step.
+        assert torch.all(error <= 2.0**-10 * _per_element(kernel_scale))
+    else:
+        assert (error.norm() / expected.norm()).item() < 0.03
 
 
 def test_megakernel_is_a_modular_kernel_with_pass_through_stages():

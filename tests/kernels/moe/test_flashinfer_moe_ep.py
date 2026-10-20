@@ -11,9 +11,12 @@ the DeepGEMM kernel (FP8 activations and FP4 weights, power-of-two scales per
 32). The expected output is then known in closed form and compared bit for
 bit.
 
-A test that needs no SM100 also checks the adapter's kwargs against the
-installed FlashInfer's config types, so config drift fails on any CI runner
-with FlashInfer installed.
+On Hopper the same exact forward runs the SM90 FP8 megakernel on block-FP8
+weights (power-of-two scales per 128x128 block, FP8 activations per 1x128).
+
+Tests that need no GPU also check the adapter's kwargs against the installed
+FlashInfer's config types, so config drift fails on any CI runner with
+FlashInfer installed.
 """
 
 from dataclasses import dataclass
@@ -41,8 +44,13 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     FlashInferMoeEp,
     FlashInferMoeEpWeights,
     apply_topk_in_fc1,
+    sm90_fp8_block_moe_ep_weights,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -67,6 +75,12 @@ GEOMETRIES = (
     Geometry("mistral-large-3", 7168, 4096, 128, 4),
 )
 BACKENDS = (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM)
+# Routed-expert geometry of block-FP8 checkpoints for the Hopper megakernel.
+BLOCK_FP8_GEOMETRIES = (
+    Geometry("glm-5.3-flash", 4096, 2048, 288, 8),
+    Geometry("deepseek-v3", 7168, 2048, 256, 8),
+    Geometry("qwen3-235b", 4096, 1536, 128, 8),
+)
 
 NUM_TOKENS_PER_RANK = 4
 MAX_TOKENS_PER_RANK = 128
@@ -81,6 +95,8 @@ MAX_TOKENS_PER_RANK = 128
 # it; every weight column the sentinel meets is zero.
 X_SIGNAL = 2.0
 X_SENTINEL = 6.0
+# FP8 activations take absmax / 448 per 1x128 group: 448 pins that scale to 1.
+X_SENTINEL_FP8 = 448.0
 # Gate and up rows are identical, so h = silu(12) * 12 = 144 = 6 * 24
 # whichever half the kernel treats as the gate, and 144 requantizes exactly.
 W13_DIAG = 6.0
@@ -128,13 +144,15 @@ def _routing(
     return topk_ids, topk_weights
 
 
-def _hidden_states(geometry: Geometry, device: torch.device) -> torch.Tensor:
+def _hidden_states(
+    geometry: Geometry, device: torch.device, sentinel: float = X_SENTINEL
+) -> torch.Tensor:
     x = torch.zeros(
         NUM_TOKENS_PER_RANK, geometry.hidden_size, dtype=torch.bfloat16, device=device
     )
     for t in range(NUM_TOKENS_PER_RANK):
         x[t, 16 * t] = X_SIGNAL
-        x[t, 16 * t + 1] = X_SENTINEL
+        x[t, 16 * t + 1] = sentinel
     return x
 
 
@@ -163,6 +181,30 @@ def _local_expert_weights(
         w2[local, expert, 0] = _expert_out(expert)
         w2[local, expert, 2] = W2_SENTINEL
     return FlashInferMoeEpWeights(w13=w13, w2=w2)
+
+
+def _block_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Block FP8 with power-of-two scales: exact for the grid weights."""
+    experts, rows, cols = weight.shape
+    blocks = weight.float().view(experts, rows // 128, 128, cols // 128, 128)
+    absmax = blocks.abs().amax(dim=(2, 4))
+    scale = torch.where(
+        absmax > 0,
+        torch.exp2(torch.ceil(torch.log2(absmax / 448.0))),
+        torch.ones_like(absmax),
+    )
+    quantized = blocks / scale[:, :, None, :, None]
+    return quantized.view(experts, rows, cols).to(torch.float8_e4m3fn), scale
+
+
+def _local_block_fp8_expert_weights(
+    geometry: Geometry, rank: int, num_local_experts: int, device: torch.device
+) -> FlashInferMoeEpWeights:
+    """The grid weights in block FP8, in the oracle's SM90 kernel layout."""
+    weights = _local_expert_weights(geometry, rank, num_local_experts, device)
+    w13, w13_scale = sm90_fp8_block_moe_ep_weights(*_block_fp8(weights.w13))
+    w2, w2_scale = _block_fp8(weights.w2)
+    return FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale)
 
 
 def _expected_output(
@@ -219,6 +261,7 @@ def _check_expert_views_alias_kernel_memory(
     rank: int,
     num_local_experts: int,
     device: torch.device,
+    sentinel: float = X_SENTINEL,
 ) -> None:
     """EPLB moves experts through ``expert_weight_views``; the kernel must see it.
 
@@ -236,13 +279,19 @@ def _check_expert_views_alias_kernel_memory(
     slot = topk_ids % num_local_experts
     physical_ids = torch.where(slot == 0, topk_ids + 1, topk_ids)
     physical_ids = torch.where(slot == 1, topk_ids - 1, physical_ids)
-    output = adapter(_hidden_states(geometry, device), physical_ids, topk_weights)
+    output = adapter(
+        _hidden_states(geometry, device, sentinel), physical_ids, topk_weights
+    )
     torch.accelerator.synchronize()
     assert torch.equal(output, _expected_output(geometry, topk_ids, topk_weights))
 
 
 def _init_warmup_forward(
-    env: dict[str, str], world_size: int, geometry: Geometry, backend: str
+    env: dict[str, str],
+    world_size: int,
+    geometry: Geometry,
+    backend: str,
+    block_fp8: bool = False,
 ) -> None:
     set_env_vars_and_device(env)
     vllm_config = VllmConfig()
@@ -257,25 +306,35 @@ def _init_warmup_forward(
         rank = torch.distributed.get_rank()
         device = torch.device(f"cuda:{rank}")
         moe = _moe_config(vllm_config, geometry, world_size, device, backend)
+        if block_fp8:
+            weight_key, activation_key = kFp8Static128BlockSym, kFp8Dynamic128Sym
+            make_weights = _local_block_fp8_expert_weights
+            sentinel = X_SENTINEL_FP8
+        else:
+            weight_key, activation_key = kMxfp4Static, None
+            make_weights = _local_expert_weights
+            sentinel = X_SENTINEL
         supported, reason = FlashInferMoeEpExperts.is_supported_config(
             FlashInferMoeEpExperts,
             moe,
-            kMxfp4Static,
-            None,
+            weight_key,
+            activation_key,
             mk.FusedMoEActivationFormat.Standard,
         )
         assert supported, reason
 
         adapter = FlashInferMoeEp(
             moe,
-            _local_expert_weights(geometry, rank, moe.num_local_experts, device),
+            make_weights(geometry, rank, moe.num_local_experts, device),
             apply_topk_in_fc1=apply_topk_in_fc1(moe),
         )
         try:
             adapter.warmup()
 
             topk_ids, topk_weights = _routing(geometry, rank, device)
-            output = adapter(_hidden_states(geometry, device), topk_ids, topk_weights)
+            output = adapter(
+                _hidden_states(geometry, device, sentinel), topk_ids, topk_weights
+            )
             torch.accelerator.synchronize()
 
             expected = _expected_output(geometry, topk_ids, topk_weights)
@@ -289,7 +348,7 @@ def _init_warmup_forward(
 
             if backend == FLASHINFER_MOE_EP_CUTEDSL:
                 _check_expert_views_alias_kernel_memory(
-                    adapter, geometry, rank, moe.num_local_experts, device
+                    adapter, geometry, rank, moe.num_local_experts, device, sentinel
                 )
         finally:
             adapter.destroy()
@@ -313,6 +372,26 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
     distributed_run(_init_warmup_forward, world_size, geometry, backend)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="The block-FP8 FlashInfer MoE-EP megakernel requires SM90",
+)
+@pytest.mark.parametrize(
+    "geometry", BLOCK_FP8_GEOMETRIES, ids=[g.name for g in BLOCK_FP8_GEOMETRIES]
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_block_fp8_init_warmup_forward_is_exact_on_grid_inputs(
+    world_size: int, geometry: Geometry
+):
+    pytest.importorskip("flashinfer.moe_ep")
+    pytest.importorskip("nvshmem.core")
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs")
+    distributed_run(
+        _init_warmup_forward, world_size, geometry, FLASHINFER_MOE_EP_CUTEDSL, True
+    )
+
+
 @pytest.mark.parametrize("backend", BACKENDS, ids=("cutedsl", "deep_gemm"))
 def test_adapter_kwargs_match_installed_flashinfer(
     monkeypatch: pytest.MonkeyPatch, backend: str
@@ -324,35 +403,8 @@ def test_adapter_kwargs_match_installed_flashinfer(
     index and the DeepGEMM import.
     """
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
-    layer_args: list[tuple] = []
-
-    class FakeMegaLayer:
-        def __init__(self, *args) -> None:
-            layer_args.append(args)
-
-        def destroy(self) -> None:
-            pass
-
-    monkeypatch.setattr(moe_ep, "MoEEpMegaLayer", FakeMegaLayer)
-    monkeypatch.setattr(fi_ep, "_expose_deep_gemm_to_flashinfer", lambda: None)
-    monkeypatch.setattr(
-        fi_ep,
-        "get_ep_group",
-        lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=None),
-    )
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-
-    geometry = GEOMETRIES[0]
-    moe = SimpleNamespace(
-        moe_backend=backend,
-        num_experts=geometry.num_experts,
-        experts_per_token=geometry.top_k,
-        hidden_dim=geometry.hidden_size,
-        intermediate_size=geometry.intermediate_size,
-        max_num_tokens=MAX_TOKENS_PER_RANK,
-        swiglu_limit=10.0,
-        routing_method=_routing_method(backend),
-    )
+    layer_args = _fake_mega_layer(monkeypatch, moe_ep)
+    moe = _adapter_moe(backend, GEOMETRIES[0])
     weight = torch.zeros(1, dtype=torch.bfloat16)
     FlashInferMoeEp(
         moe,
@@ -367,3 +419,83 @@ def test_adapter_kwargs_match_installed_flashinfer(
         else moe_ep.DeepGemmMegaMoeConfig
     )
     assert isinstance(mega_config.megakernel, expected)
+
+
+def test_block_fp8_adapter_hands_kernel_ready_weights_to_flashinfer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Block-FP8 weights build the SM90 config and skip FlashInfer's own
+    preprocessing, which would requantize them from bf16."""
+    moe_ep = pytest.importorskip("flashinfer.moe_ep")
+    workspace_capacities: list[int] = []
+    layer_args = _fake_mega_layer(monkeypatch, moe_ep, workspace_capacities)
+    geometry = Geometry("tiny", 256, 128, 4, 2)
+    moe = _adapter_moe(FLASHINFER_MOE_EP_CUTEDSL, geometry)
+    hidden, intermediate = geometry.hidden_size, geometry.intermediate_size
+    w13 = torch.zeros(2, 2 * intermediate, hidden, dtype=torch.float8_e4m3fn)
+    w2 = torch.zeros(2, hidden, intermediate, dtype=torch.float8_e4m3fn)
+    w13_scale = torch.ones(2, 2 * intermediate // 128, hidden // 128)
+    w2_scale = torch.ones(2, hidden // 128, intermediate // 128)
+    FlashInferMoeEp(
+        moe,
+        FlashInferMoeEpWeights(w13, w2, w13_scale, w2_scale),
+        apply_topk_in_fc1=apply_topk_in_fc1(moe),
+    )
+
+    ((_, _, weight_pack, mega_config),) = layer_args
+    assert weight_pack is None and not mega_config.preprocess_weights
+    # Batches up to 64 tokens get their own workspace below the 128 maximum.
+    assert workspace_capacities == [64]
+    megakernel = mega_config.megakernel
+    assert isinstance(megakernel, moe_ep.Sm90PullFp8MegaMoeConfig)
+    assert megakernel.fp8_scale_mode == "blockwise"
+    assert megakernel.gate_up_clamp == moe.swiglu_limit
+    (fc1, fc1_scale, *_), (fc2, fc2_scale, *_) = mega_config.transformed_weights
+    # (E, K, N) views over the layer's storage, K contiguous.
+    assert fc1.shape == (2, hidden, 2 * intermediate) and fc1.stride(1) == 1
+    assert fc2.shape == (2, intermediate, hidden) and fc2.stride(1) == 1
+    assert fc1.data_ptr() == w13.data_ptr() and fc1_scale is w13_scale
+    assert fc2.data_ptr() == w2.data_ptr() and fc2_scale is w2_scale
+
+
+def _fake_mega_layer(
+    monkeypatch: pytest.MonkeyPatch,
+    moe_ep,
+    workspace_capacities: list[int] | None = None,
+) -> list[tuple]:
+    layer_args: list[tuple] = []
+
+    class FakeMegaLayer:
+        def __init__(self, *args) -> None:
+            layer_args.append(args)
+
+        def create_workspace(self, max_tokens_per_rank: int) -> object:
+            assert workspace_capacities is not None
+            workspace_capacities.append(max_tokens_per_rank)
+            return object()
+
+        def destroy(self) -> None:
+            pass
+
+    monkeypatch.setattr(moe_ep, "MoEEpMegaLayer", FakeMegaLayer)
+    monkeypatch.setattr(fi_ep, "_expose_deep_gemm_to_flashinfer", lambda: None)
+    monkeypatch.setattr(
+        fi_ep,
+        "get_ep_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=None),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    return layer_args
+
+
+def _adapter_moe(backend: str, geometry: Geometry) -> SimpleNamespace:
+    return SimpleNamespace(
+        moe_backend=backend,
+        num_experts=geometry.num_experts,
+        experts_per_token=geometry.top_k,
+        hidden_dim=geometry.hidden_size,
+        intermediate_size=geometry.intermediate_size,
+        max_num_tokens=MAX_TOKENS_PER_RANK,
+        swiglu_limit=10.0,
+        routing_method=_routing_method(backend),
+    )
