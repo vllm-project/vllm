@@ -128,7 +128,9 @@ def can_initialize(
             self.model_executor.get_supported_kv_cache_layouts(),
             [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+        self.model_executor.set_kv_cache_layout(
+            layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,

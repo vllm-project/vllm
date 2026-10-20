@@ -3312,8 +3312,9 @@ class VllmConfig:
     ) -> None:
         """Normalize DCP interleave size against block_size for NIXL P/D.
 
-        Called by each worker before profiling (WorkerBase.set_kv_cache_layout), as
-        compiled graphs and CUDA graphs may bake the value in.
+        Called by the engine core on the global KV cache groups before profiling
+        (published to workers via set_kv_cache_layout), as compiled graphs and
+        CUDA graphs may bake the value in.
         """
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:

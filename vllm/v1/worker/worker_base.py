@@ -109,32 +109,15 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Adopt the KV cache layout and CP interleave size resolved by the
+        engine core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
-
-        # Runs before profiling, i.e. before the first forward pass bakes the
-        # DCP interleave size into compiled graphs and CUDA graphs.
-        vllm_config = self.vllm_config
-        kv_transfer_config = vllm_config.kv_transfer_config
-        if (
-            vllm_config.parallel_config.decode_context_parallel_size > 1
-            and kv_transfer_config is not None
-            and kv_transfer_config.is_kv_transfer_instance
-        ):
-            from vllm.v1.core.kv_cache_config_builder import (
-                get_kv_cache_config_builder,
-            )
-            from vllm.v1.core.kv_cache_planning import (
-                get_kv_cache_groups_from_builder,
-            )
-
-            kv_cache_groups = get_kv_cache_groups_from_builder(
-                get_kv_cache_config_builder(vllm_config),
-                vllm_config,
-                dict(self.get_kv_cache_spec()),
-            )
-            vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

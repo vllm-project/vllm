@@ -1458,43 +1458,18 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def get_kv_cache_configs(
+def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
-    available_memory: list[int],
-) -> list[KVCacheConfig]:
-    """Generates the KV cache configurations for a model.
-    Since we use a shared centralized controller for all workers, we need the
-    `kv_cache_config` to be consistent across all workers to make sure
-    the KV cache allocation can be applied to all workers. However, different
-    workers may have different memory available, and different type of layers
-    (when pipeline parallel is enabled). To handle the difference between
-    workers, the current implementation is:
-    1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
-       the whole model.
-    2. Generate the KV cache groups based on the layer ratio of the whole model.
-       This also handles spec unification for hybrid models.
-    3. Handle auto-fit max_model_len and memory checks using per-worker
-       projected groups to account for PP sharding.
-    4. Generate the KV cache configs for each worker based on the KV cache
-       grouping strategy. (This is reasonable because the layer ratio of
-       different PP stages are similar.)
-    5. Change the num_blocks of each worker to the smallest among all workers
-       and shrink tensor sizes proportionally to avoid allocating unused memory.
+    builder: KVCacheConfigBuilder | None = None,
+) -> list[KVCacheGroupSpec]:
+    """Group the layers of the whole model (all workers' specs merged)."""
+    if builder is None:
+        from vllm.v1.core.kv_cache_config_builder import (
+            get_kv_cache_config_builder,
+        )
 
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
-        available_memory: Memory available for KV cache in bytes for each
-            worker.
-
-    Returns:
-        The generated KVCacheConfigs for each worker.
-
-    """
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
-    builder = get_kv_cache_config_builder(vllm_config)
+        builder = get_kv_cache_config_builder(vllm_config)
 
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
@@ -1537,6 +1512,54 @@ def get_kv_cache_configs(
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
+    return global_kv_cache_groups
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+    global_kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+) -> list[KVCacheConfig]:
+    """Generates the KV cache configurations for a model.
+    Since we use a shared centralized controller for all workers, we need the
+    `kv_cache_config` to be consistent across all workers to make sure
+    the KV cache allocation can be applied to all workers. However, different
+    workers may have different memory available, and different type of layers
+    (when pipeline parallel is enabled). To handle the difference between
+    workers, the current implementation is:
+    1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
+       the whole model.
+    2. Generate the KV cache groups based on the layer ratio of the whole model.
+       This also handles spec unification for hybrid models.
+    3. Handle auto-fit max_model_len and memory checks using per-worker
+       projected groups to account for PP sharding.
+    4. Generate the KV cache configs for each worker based on the KV cache
+       grouping strategy. (This is reasonable because the layer ratio of
+       different PP stages are similar.)
+    5. Change the num_blocks of each worker to the smallest among all workers
+       and shrink tensor sizes proportionally to avoid allocating unused memory.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
+        available_memory: Memory available for KV cache in bytes for each
+            worker.
+        global_kv_cache_groups: Groups precomputed by
+            `get_global_kv_cache_groups`; computed here if omitted.
+
+    Returns:
+        The generated KVCacheConfigs for each worker.
+
+    """
+    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+    builder = get_kv_cache_config_builder(vllm_config)
+
+    if global_kv_cache_groups is None:
+        global_kv_cache_groups = get_global_kv_cache_groups(
+            vllm_config, kv_cache_specs, builder
+        )
 
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.

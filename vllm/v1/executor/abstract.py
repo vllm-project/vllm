@@ -163,9 +163,13 @@ class Executor(ABC):
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
-    def set_kv_cache_layout(self, layout_name: str) -> None:
-        """Publish the resolved KV cache layout to the workers."""
-        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+    def set_kv_cache_layout(
+        self, layout_name: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Publish the resolved KV cache layout and CP interleave size."""
+        self.collective_rpc(
+            "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
+        )
 
     @overload
     def collective_rpc(
