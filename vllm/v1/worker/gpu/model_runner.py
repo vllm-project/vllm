@@ -41,6 +41,7 @@ from vllm.distributed.aux_output_connector.worker import (
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layered_prefill import get_layered_decoder
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -232,9 +233,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
 
-        # Size the UVA buffer pools to the max number of concurrent in-flight
-        # steps. Must run before any pooled buffer is constructed
-        set_default_max_concurrency(vllm_config.max_concurrent_batches)
+        # A layered tick can prepare prefill, decode, and merged sampler inputs.
+        max_concurrent_forwards = vllm_config.max_concurrent_batches
+        if self.scheduler_config.num_layer_groups > 1:
+            max_concurrent_forwards *= 3
+        set_default_max_concurrency(max_concurrent_forwards)
 
         # PP broadcast/recv helper. Runs the collective on a side stream.
         self.pp_handler: PPHandler | None = None
@@ -327,9 +330,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
-                max_concurrent_batches=(
-                    1 if self.scheduler_config.num_layer_groups > 1 else None
-                ),
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -397,6 +397,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
+            if self.scheduler_config.num_layer_groups > 1:
+                # Reject unsupported models before profiling or graph capture.
+                get_layered_decoder(self.model)
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
@@ -1725,10 +1728,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
+        advance_pp: bool = True,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
-            self.update_pp_decode_requests()
+            if advance_pp:
+                self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)

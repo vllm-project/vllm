@@ -318,6 +318,10 @@ class SchedulerOutput:
     # have layer_group_idx set and never contain another pipeline plan.
     layered_prefill_outputs: list["SchedulerOutput"] | None = None
     layer_group_idx: int | None = None
+    # Full-depth decode work alongside this iteration's local prefill groups.
+    layered_decode_output: "SchedulerOutput | None" = None
+    # Requests whose full forward completes this iteration and may be sampled.
+    layered_completion_output: "SchedulerOutput | None" = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

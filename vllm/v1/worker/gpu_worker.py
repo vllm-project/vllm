@@ -711,9 +711,12 @@ class Worker(WorkerBase):
         )
         if self.vllm_config.scheduler_config.num_layer_groups > 1:
             # Retained hidden states and residuals outlive a group forward.
-            # All requests in a wave share one max_num_batched_tokens budget.
+            # A group's inputs and outputs coexist; downstream PP ranks also
+            # hold the next batch received while finishing the current one.
+            num_batches = 2 if get_pp_group().is_first_rank else 3
             activation_bytes = (
                 2
+                * num_batches
                 * self.vllm_config.scheduler_config.max_num_batched_tokens
                 * self.model_config.get_hidden_size()
                 * torch.empty((), dtype=self.model_config.dtype).element_size()
@@ -1294,10 +1297,20 @@ class Worker(WorkerBase):
                 self._layered_prefill_runner = LayeredPrefillRunner(
                     self.model_runner,
                     self.vllm_config.scheduler_config.num_layer_groups,
+                    lambda decode: self._execute_model(decode, advance_pp=False),
+                    max_concurrent_batches=self.vllm_config.max_concurrent_batches,
                 )
             with self.annotate_profile(scheduler_output):
                 return self._layered_prefill_runner.execute_model(scheduler_output)
 
+        if self._layered_prefill_runner is not None:
+            self._layered_prefill_runner.remove_requests(scheduler_output)
+        with self.annotate_profile(scheduler_output):
+            return self._execute_model(scheduler_output)
+
+    def _execute_model(
+        self, scheduler_output: "SchedulerOutput", advance_pp: bool = True
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -1313,20 +1326,18 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
-            if (
-                self.use_v2_model_runner
-                and self.model_runner.is_pooling_model
-                and output is None
-            ):
-                output = self.model_runner.pool()  # type: ignore
-            if isinstance(
-                output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
-            ):
-                return output
+        kwargs = {} if advance_pp else {"advance_pp": False}
+        output = self.model_runner.execute_model(
+            scheduler_output, intermediate_tensors, **kwargs
+        )
+        if (
+            self.use_v2_model_runner
+            and self.model_runner.is_pooling_model
+            and output is None
+        ):
+            output = self.model_runner.pool()  # type: ignore
+        if isinstance(output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType):
+            return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config

@@ -9,32 +9,6 @@ import numpy as np
 from vllm.v1.worker.gpu import pp_utils
 
 
-def test_single_inflight_batch_consumes_sampler_feedback_on_the_next_step(monkeypatch):
-    """Draining layered prefill cannot defer feedback for PP-size iterations."""
-    import torch
-
-    group = Mock(is_last_rank=False, last_rank=1, world_size=2)
-    monkeypatch.setattr(pp_utils, "get_pp_group", lambda: group)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_: Mock())
-    monkeypatch.setattr(torch.cuda, "Stream", lambda *_: Mock())
-    handler = pp_utils.PPHandler(4, 0, torch.device("cpu"), max_concurrent_batches=1)
-    tokens = torch.tensor([[7]])
-    handler.queue[-1] = pp_utils.PendingRecv(
-        event=Mock(),
-        sampled_tokens=tokens,
-        num_sampled=torch.ones(1),
-        num_rejected=torch.zeros(1),
-        idx_mapping=torch.tensor([0]),
-        idx_mapping_np=np.array([0]),
-        need_sampled_mask=np.array([True]),
-        gen_at_receive_np=np.array([0]),
-    )
-    output = handler.get_prev_sampled_outputs()
-    assert output is not None
-    assert output["sampled_tokens"] is tokens
-    assert handler.get_prev_sampled_outputs() is None
-
-
 def _batch(
     num_computed,
     prefill_len,

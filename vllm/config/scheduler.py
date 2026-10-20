@@ -141,13 +141,10 @@ class SchedulerConfig:
 
     num_layer_groups: int = Field(default=1, ge=1)
     """Number of prefill layer groups within each pipeline rank. Values above
-    one execute one local group per engine iteration. A request moves to the
-    next pipeline rank only after completing all local groups. Supports Qwen2,
-    Qwen3, Qwen3 MoE and GPT-OSS with TP, PP and TP-based EP, using Model Runner V2
-    and synchronous scheduling. All requests selected within max_num_batched_tokens
-    run together; the token budget is not divided by PP. Admitted batches drain
-    before new admission; decode-only batches use full-depth execution.
-    Defaults to 1 (disabled)."""
+    one enable layered prefill: a prefill batch advances one local layer group
+    per iteration while running requests decode through all layers every
+    iteration. Requires Model Runner V2 and synchronous scheduling. Defaults to
+    1 (disabled)."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""

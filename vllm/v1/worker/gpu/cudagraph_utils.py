@@ -744,6 +744,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     )
                 with (
                     layer_group_context(
+                        model,
                         desc.layer_group_idx,
                         self.vllm_config.scheduler_config.num_layer_groups,
                     ),

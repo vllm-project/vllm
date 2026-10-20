@@ -19,7 +19,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.model_executor.layered_prefill import get_layer_group_range
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -485,7 +484,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.num_layer_groups = vllm_config.scheduler_config.num_layer_groups
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -513,11 +511,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        start_layer, end_layer = self.start_layer, self.end_layer
-        if self.num_layer_groups > 1:
-            start_layer, end_layer = get_layer_group_range(start_layer, end_layer)
-        if get_pp_group().is_first_rank and start_layer == self.start_layer:
+    ) -> torch.Tensor:
+        if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 x = inputs_embeds
             else:
@@ -529,12 +524,14 @@ class GptOssModel(nn.Module, EagleModelMixin):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], start_layer, x, residual)
-        for i in range(start_layer, end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, x, residual
+        )
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             x, residual = layer(x, positions, residual)
             self._maybe_add_hidden_state(aux_hidden_states, i + 1, x, residual)
-        if not get_pp_group().is_last_rank or end_layer < self.end_layer:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": x, "residual": residual})
         x, _ = self.norm(x, residual)
 

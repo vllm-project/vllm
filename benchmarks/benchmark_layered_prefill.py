@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run the explicit Figure 3 configurations from the layered-prefill paper."""
+"""Compare chunked and layered prefill serving under TTFT/TBT SLOs.
+
+    .venv/bin/python benchmarks/benchmark_layered_prefill.py \
+        --benchmark serve --output-dir layered-logs --gpus 0,1
+
+Runs the suite in configs/layered_prefill/pr.json (54 cases). Use --dry-run to
+print commands, --resume to rerun failed or pending cases, and --config
+configs/layered_prefill/figure3.json for the paper's Figure 3 matrix. Results
+are written to <output-dir>/<suite>/summary.csv.
+"""
 
 import argparse
 import contextlib
-import copy
 import csv
 import hashlib
-import importlib.util
 import json
 import os
+import random
 import shlex
 import signal
 import socket
@@ -19,15 +27,18 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from importlib.metadata import version
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "benchmarks/configs/layered_prefill/figure3.json"
+DEFAULT_CONFIG = ROOT / "benchmarks/configs/layered_prefill/pr.json"
+SHAREGPT_LENGTHS = DEFAULT_CONFIG.with_name("sharegpt_lengths.csv")
 CLI = [sys.executable, "-m", "vllm.entrypoints.cli.main"]
 ENV = {
     "VLLM_USE_V2_MODEL_RUNNER": "1",
     "VLLM_USE_FLASHINFER_SAMPLER": "0",
     "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": "120",
 }
 NOTES = [
     "Figure 3 uses H100 80GB x2 with NVLink. Other GPUs are hardware overrides.",
@@ -38,22 +49,29 @@ NOTES = [
         "sizes are powers of two through each mode's token budget, plus the budget."
     ),
     (
-        "Fixed num_layer_groups PER PP RANK (Qwen 16, GPT-OSS 12) comes from the "
-        "reference code. The paper adapts groups to input length and advances "
-        "decode every iteration; this implementation drains a fixed admitted batch. "
+        "Fixed num_layer_groups PER PP RANK comes from the selected config. "
+        "The paper adapts groups to input length. This implementation drains one "
+        "admitted prefill batch, alongside a full decode forward every iteration. "
+        "It does not overlap multiple prefill batches across PP ranks. "
         "Matching Figure 3 workloads does not reproduce that scheduling policy."
     ),
     (
         "Layered execution keeps all requests selected within max_num_batched_tokens "
-        "in one batch across layer groups. PP does not divide this token budget."
+        "in one batch across layer groups. PP divides the layered token budget."
     ),
     (
         "Token chunking stays enabled in BOTH modes: the original layered scheduler "
         "also chunks inputs at its 8192-token budget, below its 32768 context limit."
     ),
     (
-        "Serving imports the original dataset sampler; vLLM's default ShareGPT "
-        "sampler has different prompt lengths. Energy/Zeus measurements are not ported."
+        "Serving uses a port of the original dataset samplers and ShareGPT length "
+        "trace; vLLM's default ShareGPT sampler has different prompt lengths. "
+        "Energy/Zeus measurements are not ported."
+    ),
+    (
+        "Serving uses --custom-output-len -1 to preserve each JSONL output length "
+        "and --temperature 0 for greedy decoding. EOS termination remains enabled, "
+        "as in the reference arXiv/ShareGPT runs."
     ),
     (
         "arXiv requests exceeding max_model_len (prompt plus requested output) are "
@@ -62,6 +80,11 @@ NOTES = [
     ),
     "Latency uses synthetic lengths; Figure 3 SLO curves require --benchmark serve.",
     "GPT-OSS uses a BF16-converted checkpoint to match the paper's weight precision.",
+    (
+        "Server HTTP keep-alive is 120 seconds, above the benchmark client's "
+        "60-second connection reuse timeout. Failed requests remain failures; "
+        "they are not individually retried or excluded from the workload."
+    ),
 ]
 
 
@@ -77,37 +100,44 @@ def write_json(path: Path, value) -> None:
 
 
 def read_config(config: dict) -> list[dict]:
-    """Expand each panel into paired schedules at the published request rates."""
+    """Expand each panel into paired schedules at the configured request rates."""
     defaults = config["benchmark_defaults"]
+    parallelisms = config.get("parallelisms", {"default": {}})
     rows = []
     for panel in config["panels"]:
         model = config["models"][panel["model"]]
-        for schedule, settings in config["schedules"].items():
-            for rate in panel["request_rates"]:
-                if rate <= 0:
-                    raise ValueError("Figure 3 request rates must be positive")
-                rows.append(
-                    {
-                        **config["engine_defaults"],
-                        **settings,
-                        "panel": panel["id"],
-                        "model_key": panel["model"],
-                        "model_name": model["model_name"],
-                        "schedule_mode": schedule,
-                        "num_layer_groups": model["num_layer_groups"]
-                        if schedule == "layered-prefill"
-                        else 1,
-                        "dataset_name": panel["dataset"],
-                        "request_rate": rate,
-                        "burstiness": defaults["burstiness"],
-                        "num_requests": min(
-                            defaults["num_requests"],
-                            int(defaults["max_seconds"] * rate),
-                        ),
-                        "ttft_slo_ms": panel["ttft_slo_ms"],
-                        "tbt_slo_ms": model["tbt_slo_ms"],
-                    }
-                )
+        for parallelism in panel.get("parallelisms", parallelisms):
+            for schedule, settings in config["schedules"].items():
+                mode = settings.get("mode", schedule)
+                if mode not in ("chunked-prefill", "layered-prefill"):
+                    raise ValueError(f"Unknown schedule mode: {mode}")
+                for rate in panel["request_rates"]:
+                    if rate <= 0:
+                        raise ValueError("Benchmark request rates must be positive")
+                    count = defaults["num_requests"]
+                    if "max_seconds" in defaults:
+                        count = min(count, int(defaults["max_seconds"] * rate))
+                    rows.append(
+                        {
+                            **config["engine_defaults"],
+                            **parallelisms[parallelism],
+                            **model,
+                            **settings,
+                            "panel": panel["id"],
+                            "parallelism": parallelism,
+                            "model_key": panel["model"],
+                            "schedule": schedule,
+                            "schedule_mode": mode,
+                            "num_layer_groups": model["num_layer_groups"]
+                            if mode == "layered-prefill"
+                            else 1,
+                            "dataset_name": panel["dataset"],
+                            "request_rate": rate,
+                            "burstiness": defaults["burstiness"],
+                            "num_requests": count,
+                            "ttft_slo_ms": panel["ttft_slo_ms"],
+                        }
+                    )
     return rows
 
 
@@ -140,6 +170,18 @@ def engine_config(row: dict, args: argparse.Namespace) -> dict:
         "enable_chunked_prefill": True,
         "seed": args.seed,
     }
+    if row["schedule_mode"] == "layered-prefill" and "layers_per_group" in row:
+        divisor = config["pipeline_parallel_size"] * row["layers_per_group"]
+        groups, remainder = divmod(row["num_hidden_layers"], divisor)
+        if remainder or groups < 2:
+            raise ValueError(
+                "PP must give each rank at least two complete layer groups"
+            )
+        config["num_layer_groups"] = groups
+    if row["schedule_mode"] == "layered-prefill":
+        # Each rank runs its own retained batch every tick, so split the budget.
+        pp = int(config["pipeline_parallel_size"])
+        config["max_num_batched_tokens"] //= pp
     if not config["enforce_eager"]:
         budget = config["max_num_batched_tokens"]
         sizes = sorted({1 << i for i in range(budget.bit_length())} | {budget})
@@ -199,6 +241,9 @@ def make_cases(
                 "burstiness": row["burstiness"],
                 "ttft_slo_ms": row["ttft_slo_ms"],
                 "tbt_slo_ms": row["tbt_slo_ms"],
+                "custom_output_len": -1,
+                "temperature": 0.0,
+                "ignore_eos": False,
             }
         key = digest({"engine": engine, "workload": workload})
         if key in cases:
@@ -267,6 +312,10 @@ def benchmark_command(
         "custom",
         "--dataset-path",
         str(dataset_file(args.output_dir, case)),
+        "--custom-output-len",
+        str(workload["custom_output_len"]),
+        "--temperature",
+        str(workload["temperature"]),
         "--disable-shuffle",
         "--skip-chat-template",
         "--no-oversample",
@@ -293,30 +342,92 @@ def benchmark_command(
     ]
 
 
+def sharegpt_requests(tokenizer, seed: int):
+    """Port of the reference ShareGPT sampler: repeated text, traced lengths."""
+    import datasets
+
+    data = datasets.load_dataset(
+        "Aeala/ShareGPT_Vicuna_unfiltered",
+        data_files={"valid": "ShareGPT_V4.3_unfiltered_cleaned_split.json"},
+        split="valid",
+    )
+    conversations = [
+        entry["conversations"]
+        for entry in data
+        if "conversations" in entry and len(entry["conversations"]) >= 2
+    ]
+    with SHAREGPT_LENGTHS.open() as file:
+        lengths = [
+            (int(row["num_prefill_tokens"]), int(row["num_decode_tokens"]))
+            for row in csv.DictReader(file)
+        ]
+    lengths = [(i, o) for i, o in lengths if i > 0 and o > 0]
+    random.seed(seed)
+    random.shuffle(conversations)
+    random.shuffle(lengths)
+
+    roles = {"human": "user", "gpt": "assistant"}
+
+    def role(sentence: dict) -> str:
+        return roles[sentence["from"]] if "from" in sentence else sentence["role"]
+
+    key = "value" if "value" in conversations[0][0] else "content"
+    num_special_tokens = tokenizer.num_special_tokens_to_add()
+    index = 0
+    for input_len, output_len in lengths:
+        while True:
+            # The reference sampler skips conversations[0].
+            index += 1
+            entry = conversations[index]
+            if role(entry[0]) != "user":
+                entry = entry[1:]
+            messages = []
+            for _ in range(10):
+                for j, sentence in enumerate(entry):
+                    assert role(sentence) == ("user", "assistant")[j % 2]
+                    # In place, as in the reference: repeats accumulate spaces.
+                    if role(sentence) == "assistant":
+                        sentence[key] = " " + sentence[key]
+                    messages.append({"role": role(sentence), "content": sentence[key]})
+            prompt = tokenizer.apply_chat_template(
+                messages[:-1], tokenize=False, add_generation_prompt=True
+            )
+            token_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            token_ids = token_ids[: input_len - num_special_tokens]
+            if len(token_ids) >= input_len:
+                yield tokenizer.decode(token_ids), output_len
+                break
+
+
+def arxiv_requests(tokenizer):
+    """Port of the reference arXiv sampler, in dataset order from data[0]."""
+    import datasets
+
+    for entry in datasets.load_dataset("ccdv/arxiv-summarization", split="test"):
+        messages = [
+            {
+                "role": "user",
+                "content": entry["article"] + "\n\nSummarize the above article.\n\n",
+            }
+        ]
+        prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        yield prompt, len(tokenizer.encode(entry["abstract"], add_special_tokens=False))
+
+
 def sample_dataset(
-    dataset, tokenizer, name: str, count: int, max_model_len: int
+    candidates, tokenizer, name: str, count: int, max_model_len: int
 ) -> tuple[list[dict], int]:
-    """Select full requests that fit, advancing past oversized arXiv articles."""
-
-    def candidates():
-        if name != "arxiv":
-            yield from dataset.sample(tokenizer, num_requests=count)
-            return
-        # The reference arXiv sampler always starts at data[0].
-        sampler = copy.copy(dataset)
-        for entry in dataset.data:
-            sampler.data = [entry]
-            yield from sampler.sample(tokenizer, num_requests=1)
-
+    """Select full requests that fit, advancing past oversized requests."""
     requests = []
     skipped = 0
-    for request in candidates():
-        length = len(tokenizer(request.prompt).input_ids)
-        output_length = int(request.expected_output_len)
+    for prompt, output_length in candidates:
+        length = len(tokenizer(prompt).input_ids)
         if length + output_length > max_model_len:
             skipped += 1
             continue
-        requests.append({"prompt": request.prompt, "output_tokens": output_length})
+        requests.append({"prompt": prompt, "output_tokens": output_length})
         if len(requests) == count:
             return requests, skipped
     raise ValueError(
@@ -329,15 +440,6 @@ def sample_dataset(
 def prepare_datasets(cases: list[dict], args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
-    filename = args.source_dir / "benchmarks/benchmark_dataset.py"
-    spec = importlib.util.spec_from_file_location(
-        "layered_prefill_source_dataset", filename
-    )
-    if spec is None or spec.loader is None:
-        raise ValueError(f"Cannot load dataset sampler: {filename}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
     grouped = defaultdict(list)
     for case in cases:
         grouped[dataset_file(args.output_dir, case)].append(case)
@@ -346,20 +448,20 @@ def prepare_datasets(cases: list[dict], args: argparse.Namespace) -> None:
             continue
         case = group[0]
         name = case["workload"]["dataset"]
-        dataset_cls = {
-            "arxiv": module.ArxivDataset,
-            "sharegpt": module.ShareGPTDataset,
-        }.get(name)
-        if dataset_cls is None:
+        if name not in ("arxiv", "sharegpt"):
             raise ValueError(f"Unsupported source dataset: {name}")
         tokenizer = AutoTokenizer.from_pretrained(
             case["engine"]["model"], revision=case["engine"].get("revision")
         )
-        dataset = dataset_cls(random_seed=args.seed)
+        candidates = (
+            arxiv_requests(tokenizer)
+            if name == "arxiv"
+            else sharegpt_requests(tokenizer, args.seed)
+        )
         count = max(c["workload"]["num_prompts"] for c in group)
         max_model_len = min(c["engine"]["max_model_len"] for c in group)
         requests, skipped = sample_dataset(
-            dataset, tokenizer, name, count, max_model_len
+            candidates, tokenizer, name, count, max_model_len
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
@@ -518,7 +620,17 @@ def run_case(case: dict, args: argparse.Namespace, env: dict, port: int = 8000) 
             args.benchmark == "serve"
             and result["completed"] != case["workload"]["num_prompts"]
         ):
-            raise RuntimeError(f"Only {result['completed']} requests completed")
+            errors = [
+                f"request[{i}]: {error.strip().splitlines()[-1]}"
+                for i, error in enumerate(result.get("errors", []))
+                if error and error.strip()
+            ]
+            detail = "; ".join(errors[:3]) or "No per-request error recorded"
+            raise RuntimeError(
+                f"Only {result['completed']} requests completed out of "
+                f"{case['workload']['num_prompts']}; {detail}. "
+                f"See {directory / 'result.json'}"
+            )
         if args.benchmark == "serve":
             result.update(paper_slo_metrics(result, case["workload"]))
             write_json(directory / "result.json", result)
@@ -541,6 +653,10 @@ def summarize(cases: list[dict], output: Path) -> None:
         row = {
             "id": case["id"],
             "panels": ",".join(dict.fromkeys(s["panel"] for s in case["sources"])),
+            "parallelism": ",".join(
+                dict.fromkeys(s["parallelism"] for s in case["sources"])
+            ),
+            "schedule": ",".join(dict.fromkeys(s["schedule"] for s in case["sources"])),
             **case["engine"],
             **case["workload"],
             "status": status["status"],
@@ -587,17 +703,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
-        "--source-dir",
-        type=Path,
-        default=ROOT.parent / "layered-prefill",
-        help="Reference repository, used only for serving dataset sampling",
-    )
-    parser.add_argument(
         "--models",
         nargs="+",
         choices=["qwen", "gpt-oss"],
         default=["qwen", "gpt-oss"],
-        help="Figure 3 models to run (both by default)",
+        help="Configured models to run (both by default)",
     )
     parser.add_argument("--benchmark", choices=["serve", "latency"], default="serve")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -627,16 +737,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--continue-on-error",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run remaining cases after failures; still exit with an error at the end",
+    )
     args = parser.parse_args(argv)
     if args.model and len(args.models) != 1:
         parser.error("--model requires one selected model, e.g. --models gpt-oss")
     args.config = args.config.resolve()
     args.experiment_config = json.loads(args.config.read_text())
+    if args.continue_on_error is None:
+        args.continue_on_error = args.experiment_config["benchmark_defaults"].get(
+            "continue_on_error", False
+        )
     for key in ("warmup_seconds", "relax_seconds"):
         if getattr(args, key) is None:
             setattr(args, key, args.experiment_config["benchmark_defaults"][key])
-    args.source_dir = args.source_dir.resolve()
     args.output_dir = args.output_dir.resolve()
+    if subdir := args.experiment_config.get("output_subdir"):
+        if Path(subdir).name != subdir or subdir in (".", ".."):
+            parser.error("Config output_subdir must be a directory name")
+        args.output_dir /= subdir
     for key in ("input_len", "output_len", "batch_size", "num_iters", "timeout"):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
@@ -654,6 +777,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def implementation_version() -> dict:
+    """Prevent resume from silently mixing results across engine changes."""
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True
+    )
+    sources = hashlib.sha256()
+    for path in sorted((ROOT / "vllm").rglob("*.py")):
+        sources.update(str(path.relative_to(ROOT)).encode() + b"\0")
+        sources.update(hashlib.sha256(path.read_bytes()).digest())
+    return {
+        "git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
+        "vllm_python_sha256": sources.hexdigest(),
+        "python": sys.version,
+        "torch": version("torch"),
+        "transformers": version("transformers"),
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     rows = read_config(args.experiment_config)
@@ -661,7 +802,6 @@ def main(argv: list[str] | None = None) -> None:
     env = os.environ | ENV | {"CUDA_VISIBLE_DEVICES": args.gpus}
     manifest = {
         "benchmark": args.benchmark,
-        "source_dir": str(args.source_dir),
         "config": str(args.config),
         "config_sha256": hashlib.sha256(args.config.read_bytes()).hexdigest(),
         "experiment_config": args.experiment_config,
@@ -673,18 +813,10 @@ def main(argv: list[str] | None = None) -> None:
         "warmup_seconds": args.warmup_seconds,
         "relax_seconds": args.relax_seconds,
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "source_sha256": {
-            str(file.relative_to(args.source_dir)): hashlib.sha256(
-                file.read_bytes()
-            ).hexdigest()
-            for file in (
-                args.source_dir / "benchmarks/benchmark_dataset.py",
-                *sorted(
-                    (args.source_dir / "benchmarks/preprocessed_traces").glob("*.csv")
-                ),
-            )
-            if file.exists()
-        },
+        "implementation": implementation_version(),
+        "sharegpt_lengths_sha256": hashlib.sha256(
+            SHAREGPT_LENGTHS.read_bytes()
+        ).hexdigest(),
     }
     path = args.output_dir / "manifest.json"
     if path.exists():
@@ -724,28 +856,60 @@ def main(argv: list[str] | None = None) -> None:
         if args.resume and is_complete(args.output_dir / case["id"]):
             continue
         grouped[digest(case["engine"])].append(case)
+    failures = set()
+
+    def measure(case: dict, port: int = 8000) -> None:
+        try:
+            run_case(case, args, env, port)
+        except Exception as error:
+            if not args.continue_on_error:
+                raise
+            failures.add(case["id"])
+            print(f"Failed {case['id']}: {error}", flush=True)
+        finally:
+            summarize(cases, args.output_dir)
+
     try:
         for engine_id, group in grouped.items():
-            if args.benchmark == "latency":
+            try:
+                if args.benchmark == "latency":
+                    for case in group:
+                        wait_for_gpus(args)
+                        measure(case)
+                    continue
+                wait_for_gpus(args)
+                with socket.socket() as listener:
+                    listener.bind(("127.0.0.1", 0))
+                    port = listener.getsockname()[1]
+                command = server_command(group[0]["engine"], port)
+                log = args.output_dir / f"{engine_id}.server.log"
+                print(shlex.join(command), flush=True)
+                with process(command, log, env) as child:
+                    wait_for_server(child, port, args.timeout)
+                    for case in group:
+                        measure(case, port)
+                        time.sleep(args.relax_seconds)
+            except Exception as error:
+                if not args.continue_on_error:
+                    raise
                 for case in group:
-                    wait_for_gpus(args)
-                    run_case(case, args, env)
-                continue
-            wait_for_gpus(args)
-            with socket.socket() as listener:
-                listener.bind(("127.0.0.1", 0))
-                port = listener.getsockname()[1]
-            command = server_command(group[0]["engine"], port)
-            log = args.output_dir / f"{engine_id}.server.log"
-            print(shlex.join(command), flush=True)
-            with process(command, log, env) as child:
-                wait_for_server(child, port, args.timeout)
-                for case in group:
-                    run_case(case, args, env, port)
-                    summarize(cases, args.output_dir)
-                    time.sleep(args.relax_seconds)
+                    directory = args.output_dir / case["id"]
+                    if is_complete(directory) or case["id"] in failures:
+                        continue
+                    failures.add(case["id"])
+                    write_json(
+                        directory / "status.json",
+                        {"status": "failed", "case": case, "error": str(error)},
+                    )
+                print(f"Failed engine {engine_id}: {error}", flush=True)
     finally:
         summarize(cases, args.output_dir)
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} experiments failed; "
+            f"see {args.output_dir / 'summary.csv'}. "
+            "Use --resume to rerun failed cases."
+        )
 
 
 if __name__ == "__main__":

@@ -55,8 +55,7 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
 class PPHandler:
     """Runs the PP sampled-token broadcast/recv on a side stream so the
     default stream isn't gated by the matching peer call. Step T's recv is
-    consumed after `max_concurrent_batches` steps via `get_prev_sampled_outputs`
-    (PP size by default, one for layered prefill).
+    consumed at step T+pp_size via `get_prev_sampled_outputs`.
 
     Uses a dedicated NCCL communicator (sibling of the PP `device_group`)
     for the broadcast so it does not serialize on the wire with the
@@ -64,11 +63,7 @@ class PPHandler:
     """
 
     def __init__(
-        self,
-        max_num_reqs: int,
-        num_speculative_steps: int,
-        device: torch.device,
-        max_concurrent_batches: int | None = None,
+        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
     ):
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
@@ -79,10 +74,11 @@ class PPHandler:
         self.broadcast_stream = torch.cuda.Stream(device)
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
-        # pushed by `receive` is consumed when that step's slot cycles back.
-        # Pre-seed with None placeholders for steps without a pending broadcast.
+        # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
+        # with pp_size None placeholders so the first pp_size consumes are no-ops.
         # None means no postprocess is pending for that step (broadcast skipped).
-        ring_depth = max_concurrent_batches or get_pp_group().world_size
+        # Only XPU can disable microbatching via VLLM_XPU_PP_MICROBATCH.
+        ring_depth = get_pp_group().world_size
         if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
             ring_depth = 1
         self.queue: deque[PendingRecv | None] = (
@@ -129,7 +125,7 @@ class PPHandler:
     def get_prev_sampled_outputs(
         self, draft_tokens_to_update: torch.Tensor | None = None
     ) -> dict[str, torch.Tensor] | None:
-        """Consume the oldest entry and wait for its recv event,
+        """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
         if not self.queue:

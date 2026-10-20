@@ -34,93 +34,67 @@ DEVICE_TYPE = current_platform.device_type
     ],
 )
 def test_layer_groups_partition_the_local_pipeline_rank(start, end, groups, expected):
-    actual = []
-    for idx in range(groups):
-        with layer_group_context(idx, groups):
-            actual.append(get_layer_group_range(start, end))
-    assert actual == expected
-    assert get_layer_group_range(start, end) == (start, end)
+    assert [
+        get_layer_group_range(start, end, idx, groups) for idx in range(groups)
+    ] == expected
+    with pytest.raises(ValueError, match="nonempty"):
+        get_layer_group_range(start, start + groups - 1, 0, groups)
 
 
 @pytest.mark.cpu_test
-def test_layer_groups_reject_empty_groups_and_restore_context():
-    with pytest.raises(ValueError, match="nonempty"), layer_group_context(0, 3):
-        get_layer_group_range(16, 18)
-    assert get_layer_group_range(16, 18) == (16, 18)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("pp,groups", [(1, 12), (2, 12), (2, 5)])
-def test_gpt_oss_layered_forward_preserves_residuals_and_pp_boundaries(
-    monkeypatch, pp, groups
-):
+@pytest.mark.parametrize("pp,groups", [(1, 3), (2, 3)])
+def test_layer_groups_compose_to_the_full_forward(monkeypatch, pp, groups):
+    """Each group behaves as a PP stage of a model following the PP contract."""
     from types import SimpleNamespace
-    from unittest.mock import Mock
 
-    from vllm.model_executor.models import gpt_oss
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.distributed import get_pp_group
     from vllm.sequence import IntermediateTensors
 
-    # Exercise the model's forward contract without GPU attention/MoE kernels.
-    class Block(torch.nn.Module):
-        def __init__(self, index):
+    class Decoder(torch.nn.Module):
+        def __init__(self, start_layer, end_layer):
             super().__init__()
-            self.index = index
-
-        def forward(self, hidden, positions, residual):
-            visited.append(self.index)
-            residual = hidden if residual is None else hidden + residual
-            return residual / (self.index + 2) + positions[:, None], residual
-
-    visited: list[int] = []
-    models = []
-    inputs = torch.arange(20, dtype=torch.float32).reshape(5, 4)
-    for rank in range(pp):
-        model = gpt_oss.GptOssModel.__new__(gpt_oss.GptOssModel)
-        torch.nn.Module.__init__(model)
-        model.start_layer, model.end_layer = rank * (24 // pp), (rank + 1) * (24 // pp)
-        model.num_layer_groups = groups
-        model.layers = torch.nn.ModuleList(Block(i) for i in range(24))
-        model.embed_input_ids = Mock(return_value=inputs)
-        model.norm = Mock(
-            side_effect=lambda hidden, residual: (hidden + residual, None)
-        )
-        models.append(model)
-
-    def run(split):
-        intermediate = None
-        for rank, model in enumerate(models):
-            monkeypatch.setattr(
-                gpt_oss,
-                "get_pp_group",
-                lambda rank=rank: SimpleNamespace(
-                    is_first_rank=rank == 0, is_last_rank=rank == pp - 1
-                ),
+            self.start_layer, self.end_layer = start_layer, end_layer
+            self.layers = torch.nn.ModuleList(
+                torch.nn.Linear(4, 4, bias=False) for _ in range(8)
             )
-            for group in range(groups) if split else [None]:
-                visited.clear()
-                with layer_group_context(group, groups):
-                    start, end = get_layer_group_range(
-                        model.start_layer, model.end_layer
-                    )
-                    intermediate = model.forward(
-                        torch.arange(5), torch.arange(5), intermediate
-                    )
-                assert visited == list(range(start, end))
-                final = rank == pp - 1 and end == model.end_layer
-                assert isinstance(
-                    intermediate, torch.Tensor if final else IntermediateTensors
-                )
-        return intermediate
 
-    expected = run(False)
-    actual = run(True)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert models[0].embed_input_ids.call_count == 2  # Once for each complete prefill.
-    assert models[-1].norm.call_count == 2
-    for model in models[1:]:
-        model.embed_input_ids.assert_not_called()
-    for model in models[:-1]:
-        model.norm.assert_not_called()
+        def forward(self, input_ids, intermediate_tensors=None):
+            if get_pp_group().is_first_rank:
+                hidden = input_ids
+            else:
+                hidden = intermediate_tensors["hidden_states"]
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                hidden = layer(hidden)
+            if not get_pp_group().is_last_rank:
+                return IntermediateTensors({"hidden_states": hidden})
+            return hidden * 2
+
+    torch.manual_seed(0)
+    inputs = torch.randn(5, 4)
+    full = Decoder(0, 8)
+    stages = [Decoder(r * 8 // pp, (r + 1) * 8 // pp) for r in range(pp)]
+    for stage in stages:
+        stage.load_state_dict(full.state_dict())
+
+    monkeypatch.setattr(
+        parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=True)
+    )
+    expected = full(inputs)
+
+    output = None
+    for rank, stage in enumerate(stages):
+        pp_group = SimpleNamespace(is_first_rank=rank == 0, is_last_rank=rank == pp - 1)
+        monkeypatch.setattr(parallel_state, "_PP", pp_group)
+        for group in range(groups):
+            with layer_group_context(stage, group, groups):
+                output = stage(inputs, output)
+            assert get_pp_group() is pp_group
+            assert (stage.start_layer, stage.end_layer) == (
+                rank * 8 // pp,
+                (rank + 1) * 8 // pp,
+            )
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 class ModuleWithBatchNorm(torch.nn.Module):

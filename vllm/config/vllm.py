@@ -343,6 +343,12 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
+def _uses_layered_prefill(config: "VllmConfig") -> bool:
+    # Partial configs (e.g. in tests) may omit the scheduler config.
+    scheduler_config = getattr(config, "scheduler_config", None)
+    return getattr(scheduler_config, "num_layer_groups", 1) > 1
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -581,9 +587,6 @@ class VllmConfig:
 
     @property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.num_layer_groups > 1:
-            # Settle each local group before advancing the retained batch.
-            return 1
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
         pp_size = self.parallel_config.pipeline_parallel_size
@@ -710,7 +713,7 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.scheduler_config.num_layer_groups > 1:
+        if _uses_layered_prefill(self):
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 raise ValueError("Layered prefill requires Model Runner V2.")
             return True
@@ -807,10 +810,7 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if (
-            self.scheduler_config.num_layer_groups > 1
-            and not model_config.enforce_eager
-        ):
+        if _uses_layered_prefill(self) and not model_config.enforce_eager:
             return True
 
         architectures = set(model_config.architectures)
@@ -1480,18 +1480,10 @@ class VllmConfig:
         model = self.model_config
         if model is None:
             return
-        supported = {
-            "Qwen2ForCausalLM",
-            "Qwen3ForCausalLM",
-            "Qwen3MoeForCausalLM",
-            "GptOssForCausalLM",
-        }
-        if not supported.intersection(model.architectures):
-            raise ValueError(
-                "Layered prefill supports Qwen2, Qwen3, Qwen3 MoE and GPT-OSS."
-            )
         if model.runner_type != "generate" or model.is_multimodal_model:
             raise ValueError("Layered prefill requires text generation.")
+        if model.is_hybrid or model.is_attention_free:
+            raise ValueError("Layered prefill does not yet support recurrent layers.")
         from vllm.distributed.utils import get_pp_indices
 
         for rank in range(parallel.pipeline_parallel_size):

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -582,8 +583,11 @@ def test_wrapper_falls_through_on_runtime_mode_mismatch():
 
 
 @pytest.mark.parametrize("mode_name", ["PIECEWISE", "FULL"])
-def test_layer_groups_replay_distinct_graphs(cuda_capture_stream, mode_name):
+def test_layer_groups_replay_distinct_graphs(
+    cuda_capture_stream, monkeypatch, mode_name
+):
     """Equal batch shapes must replay the selected local group or full depth."""
+    import vllm.distributed.parallel_state as parallel_state
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphWrapper,
         eager_break_during_capture,
@@ -592,10 +596,7 @@ def test_layer_groups_replay_distinct_graphs(cuda_capture_stream, mode_name):
     from vllm.compilation.monitor import set_cudagraph_capturing_enabled
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import BatchDescriptor, set_forward_context
-    from vllm.model_executor.layered_prefill import (
-        get_layer_group_range,
-        layer_group_context,
-    )
+    from vllm.model_executor.layered_prefill import layer_group_context
     from vllm.sequence import IntermediateTensors
 
     @eager_break_during_capture
@@ -604,14 +605,24 @@ def test_layer_groups_replay_distinct_graphs(cuda_capture_stream, mode_name):
 
     forwards = []
 
-    def model(x):
-        start, end = get_layer_group_range(0, 4)
-        forwards.append((start, end))
-        for layer in range(start, end):
-            output = torch.empty_like(x)
-            attention(x + layer + 1, output)
-            x = output
-        return IntermediateTensors({"hidden_states": x})
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.start_layer, self.end_layer = 0, 4
+            self.layers = torch.nn.ModuleList(torch.nn.Identity() for _ in range(4))
+
+        def forward(self, x):
+            forwards.append((self.start_layer, self.end_layer))
+            for layer in range(self.start_layer, self.end_layer):
+                output = torch.empty_like(x)
+                attention(x + layer + 1, output)
+                x = output
+            return IntermediateTensors({"hidden_states": x})
+
+    monkeypatch.setattr(
+        parallel_state, "_PP", SimpleNamespace(is_first_rank=True, is_last_rank=False)
+    )
+    model = Model()
 
     mode = CUDAGraphMode[mode_name]
     config = _mock_vllm_config()
@@ -624,7 +635,7 @@ def test_layer_groups_replay_distinct_graphs(cuda_capture_stream, mode_name):
 
     def run(group):
         with (
-            layer_group_context(group, 2),
+            layer_group_context(model, group, 2),
             set_forward_context(
                 None,
                 config,

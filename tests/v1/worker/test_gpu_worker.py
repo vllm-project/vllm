@@ -3,7 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -18,52 +18,6 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-
-
-def test_layered_prefill_sends_only_after_last_local_group(monkeypatch):
-    from vllm.sequence import IntermediateTensors
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu import layered_prefill
-
-    pp = Mock(rank_in_group=0, is_first_rank=True, is_last_rank=False)
-    pp.isend_tensor_dict.return_value = []
-    monkeypatch.setattr(layered_prefill, "get_pp_group", lambda: pp)
-    monkeypatch.setattr(layered_prefill, "get_tp_group", lambda: None)
-    # Backend order is B, A; scheduler order is A, B. Last row is graph padding.
-    tensor = torch.tensor([[2.0] * 4, [1.0] * 4, [1.0] * 4, [99.0] * 4])
-    model_runner = Mock()
-    model_runner.execute_model_state.input_batch.req_ids = ["b", "a"]
-    model_runner.execute_model.return_value = IntermediateTensors(
-        {"hidden_states": tensor, "residual": tensor}
-    )
-    runner = LayeredPrefillRunner(model_runner, num_groups=2)
-    local = SchedulerOutput.make_empty()
-    local.num_scheduled_tokens = {"a": 2, "b": 1}
-    local.total_num_scheduled_tokens = 3
-    local.layer_group_idx = 0
-    plan = SchedulerOutput.make_empty()
-    plan.layered_prefill_outputs = [local, SchedulerOutput.make_empty()]
-    runner.execute_model(plan)
-    pp.isend_tensor_dict.assert_not_called()
-    tensor.zero_()
-    torch.testing.assert_close(
-        runner.activations["a"]["hidden_states"], torch.ones(2, 4)
-    )
-    torch.testing.assert_close(
-        runner.activations["b"]["hidden_states"], torch.full((1, 4), 2.0)
-    )
-    tensor.copy_(torch.tensor([[4.0] * 4, [3.0] * 4, [3.0] * 4, [99.0] * 4]))
-    local.layer_group_idx = 1
-    runner.execute_model(plan)
-    inputs = model_runner.execute_model.call_args.args[1]
-    torch.testing.assert_close(inputs["a"]["hidden_states"], torch.ones(2, 4))
-    torch.testing.assert_close(inputs["b"]["hidden_states"], torch.full((1, 4), 2.0))
-    pp.isend_tensor_dict.assert_called_once()
-    torch.testing.assert_close(
-        pp.isend_tensor_dict.call_args.args[0]["hidden_states"],
-        torch.tensor([[3.0] * 4, [3.0] * 4, [4.0] * 4]),
-    )
-    assert not runner.activations
 
 
 def test_layered_continuations_reuse_capture_addresses_and_clear_padding():
@@ -91,99 +45,6 @@ def test_layered_continuations_reuse_capture_addresses_and_clear_padding():
             assert buffer.data_ptr() == captured[key].data_ptr()
             torch.testing.assert_close(buffer[: len(expected)], expected)
             assert not buffer[len(expected) :].count_nonzero()
-
-
-@pytest.mark.parametrize("abort_first", [False, True])
-def test_layered_prefill_idle_rank_receives_for_next_iteration(
-    monkeypatch, abort_first
-):
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-    from vllm.v1.worker.gpu import layered_prefill
-
-    pp = Mock(rank_in_group=1, is_first_rank=False, is_last_rank=True)
-    tensor = torch.tensor([[1.0] * 4, [1.0] * 4, [2.0] * 4])
-    tensors = {"hidden_states": tensor, "residual": tensor}
-    pp.irecv_tensor_dict.return_value = (tensors, [], [])
-    monkeypatch.setattr(layered_prefill, "get_pp_group", lambda: pp)
-    monkeypatch.setattr(layered_prefill, "get_tp_group", lambda: None)
-    model_runner = Mock()
-    model_runner.execute_model.side_effect = [
-        EMPTY_MODEL_RUNNER_OUTPUT,
-        EMPTY_MODEL_RUNNER_OUTPUT,
-    ]
-    runner = LayeredPrefillRunner(model_runner, num_groups=2)
-    previous = SchedulerOutput.make_empty()
-    previous.num_scheduled_tokens = {"a": 2, "b": 1}
-    previous.layer_group_idx = 1
-    local = SchedulerOutput.make_empty()
-    plan = SchedulerOutput.make_empty()
-    plan.layered_prefill_outputs = [previous, local]
-    runner.execute_model(plan)
-    assert not model_runner.execute_model.call_args.args[0].num_scheduled_tokens
-    local.num_scheduled_tokens = {"b": 1} if abort_first else {"a": 2, "b": 1}
-    local.total_num_scheduled_tokens = sum(local.num_scheduled_tokens.values())
-    if abort_first:
-        plan.finished_req_ids = {"a"}
-    local.layer_group_idx = 0
-    previous.layer_group_idx = None
-    runner.execute_model(plan)
-    inputs = model_runner.execute_model.call_args.args[1]
-    assert set(inputs) == set(local.num_scheduled_tokens)
-    if not abort_first:
-        torch.testing.assert_close(inputs["a"]["hidden_states"], torch.ones(2, 4))
-    torch.testing.assert_close(inputs["b"]["hidden_states"], torch.full((1, 4), 2.0))
-    assert not runner.activations
-    pp.irecv_tensor_dict.assert_called_once()
-
-
-@pytest.mark.parametrize("cancelled", [False, True])
-def test_layered_prefill_rebuilds_completion_only_after_cancellation(
-    monkeypatch, cancelled
-):
-    """A non-last PP rank must receive exactly the surviving sampler rows."""
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-    from vllm.v1.worker.gpu import layered_prefill
-    from vllm.v1.worker.gpu.model_runner import ExecuteModelState
-
-    pp = SimpleNamespace(rank_in_group=0, is_first_rank=True, is_last_rank=False)
-    monkeypatch.setattr(layered_prefill, "get_pp_group", lambda: pp)
-    model_runner = Mock()
-    model_runner.execute_model.return_value = EMPTY_MODEL_RUNNER_OUTPUT
-    model_runner.execute_model_state = ExecuteModelState(
-        SimpleNamespace(req_ids=["a", "b"]),
-        None,
-        None,
-        None,
-        None,
-        None,
-        set(),
-        None,
-        None,
-        0,
-    )
-    model_runner.gather_batch_req_state.return_value = (object(), None)
-    req_ids = ["b"] if cancelled else ["a", "b"]
-    model_runner.prepare_inputs.return_value = SimpleNamespace(req_ids=req_ids)
-    runner = LayeredPrefillRunner(model_runner, num_groups=2)
-    plan = SchedulerOutput.make_empty()
-    completed = SchedulerOutput.make_empty()
-    completed.layer_group_idx = 0
-    completed.num_scheduled_tokens = dict.fromkeys(req_ids, 1)
-    completed.total_num_scheduled_tokens = len(req_ids)
-    plan.layered_prefill_outputs = [SchedulerOutput.make_empty(), completed]
-    assert runner.execute_model(plan) is EMPTY_MODEL_RUNNER_OUTPUT
-    model_runner.prepare_inputs.assert_not_called()
-    plan.finished_req_ids = {"a"} if cancelled else set()
-    completed.layer_group_idx = 1
-    assert runner.execute_model(plan) is None
-    assert model_runner.execute_model_state.input_batch.req_ids == req_ids
-    if cancelled:
-        model_runner.update_requests.assert_called_once_with(completed)
-    else:
-        model_runner.update_requests.assert_not_called()
-        model_runner.prepare_inputs.assert_not_called()
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
@@ -543,25 +404,32 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         log.append("forward")
         return IntermediateTensors({"hidden_states": torch.zeros(1)})
 
-    worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                pipeline_parallel_size=2, distributed_executor_backend="mp"
-            ),
-        ),
-        use_v2_model_runner=False,
-        model_runner=SimpleNamespace(execute_model=run_model),
-        annotate_profile=lambda scheduler_output: nullcontext(),
-        _pp_send_work=[previous_tensor_send],
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    worker = gpu_worker.Worker.__new__(gpu_worker.Worker)
+    worker.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
+        )
     )
-    scheduler_output = SimpleNamespace(
-        total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
+    worker.use_v2_model_runner = False
+    worker.model_runner = SimpleNamespace(execute_model=run_model)
+    worker.annotate_profile = lambda scheduler_output: nullcontext()
+    worker._pp_send_work = [previous_tensor_send]
+    worker._layered_prefill_runner = LayeredPrefillRunner(worker.model_runner, 2)
+    worker._layered_prefill_runner.activations["cancelled-prefill"] = (
+        IntermediateTensors({"hidden_states": torch.ones(1)})
     )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.finished_req_ids = {"cancelled-prefill"}
+    scheduler_output.total_num_scheduled_tokens = 4
+    scheduler_output.num_scheduled_tokens = {"r0": 4}
 
     assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+    assert not worker._layered_prefill_runner.activations
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(

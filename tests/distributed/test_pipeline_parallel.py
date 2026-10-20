@@ -40,22 +40,26 @@ def _layered_captured_groups(worker):
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
 @pytest.mark.parametrize(
-    "model",
-    ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B", "unsloth/gpt-oss-20b-BF16"],
-)
-@pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize(
-    "tp,pp,ep",
-    [(1, 1, False), (1, 2, False), (2, 1, False), (2, 1, True), (2, 2, True)],
+    "model,tp,pp,ep,enforce_eager",
+    [
+        ("Qwen/Qwen3-0.6B", 1, 1, False, False),
+        ("Qwen/Qwen3-0.6B", 1, 2, False, True),
+        ("Qwen/Qwen3-0.6B", 1, 2, False, False),
+        ("Qwen/Qwen3-0.6B", 2, 1, False, False),
+        ("meta-llama/Llama-3.2-1B-Instruct", 1, 2, False, False),
+        ("deepseek-ai/DeepSeek-V2-Lite", 1, 2, False, False),
+        ("deepseek-ai/DeepSeek-V2-Lite", 2, 1, True, False),
+        ("unsloth/gpt-oss-20b-BF16", 1, 2, False, False),
+        ("Qwen/Qwen3-30B-A3B", 2, 1, True, False),
+        ("Qwen/Qwen3-30B-A3B", 2, 2, True, False),
+    ],
 )
 def test_layered_prefill_matches_full_depth(
     vllm_runner, model, tp, pp, ep, enforce_eager, num_gpus_available, monkeypatch
 ):
-    """Layer boundaries must preserve generation with TP, PP and MoE EP."""
+    """Layer groups must preserve generation across architectures and placements."""
     if num_gpus_available < tp * pp:
         pytest.skip(f"Requires {tp * pp} GPUs")
-    if ep and "A3B" not in model and "gpt-oss" not in model:
-        pytest.skip("EP applies to the MoE model")
     _compare_layered_prefill(vllm_runner, model, tp, pp, ep, enforce_eager, monkeypatch)
 
 
@@ -67,6 +71,8 @@ def _compare_layered_prefill(
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    # collective_rpc sends _layered_captured_groups to the workers.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     prompts = [
         "The capital of France is",
@@ -90,7 +96,7 @@ def _compare_layered_prefill(
             max_num_seqs=4,
             enable_chunked_prefill=True,
             enable_prefix_caching=True,
-            gpu_memory_utilization=0.5 if "A3B" in model or "gpt-oss" in model else 0.1,
+            gpu_memory_utilization=0.1 if model == "Qwen/Qwen3-0.6B" else 0.5,
             kv_cache_memory_bytes=256 * 1024**2,
         ) as runner:
             if groups > 1 and not enforce_eager:

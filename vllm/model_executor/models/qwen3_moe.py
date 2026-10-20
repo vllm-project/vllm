@@ -40,7 +40,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layered_prefill import get_layer_group_range
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -462,7 +461,6 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
         self.config = config
         self.quant_config = quant_config
-        self.num_layer_groups = vllm_config.scheduler_config.num_layer_groups
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -489,10 +487,7 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        start_layer, end_layer = self.start_layer, self.end_layer
-        if self.num_layer_groups > 1:
-            start_layer, end_layer = get_layer_group_range(start_layer, end_layer)
-        if get_pp_group().is_first_rank and start_layer == self.start_layer:
+        if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -507,15 +502,15 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             [], self.start_layer, hidden_states, residual
         )
         for layer_idx, layer in enumerate(
-            islice(self.layers, start_layer, end_layer),
-            start=start_layer,
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
 
-        if not get_pp_group().is_last_rank or end_layer < self.end_layer:
+        if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
