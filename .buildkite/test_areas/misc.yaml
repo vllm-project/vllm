@@ -784,6 +784,7 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_mamba2_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
@@ -826,7 +827,9 @@ steps:
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
     - vllm/model_executor/determinism
+    - vllm/utils/flashinfer.py
     - tests/v1/determinism/
+    - tests/kernels/mamba/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
@@ -837,6 +840,10 @@ steps:
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+    - pytest -v -s v1/determinism/test_nemotron_h_batch_invariance.py
+    - pytest -v -s v1/determinism/test_mamba2_batch_invariance.py
+    # The SSD kernels pin their batch-invariant tiles at import.
+    - VLLM_BATCH_INVARIANT=1 pytest -v -s kernels/mamba/test_mamba2_ssd_batch_invariance.py kernels/mamba/test_mamba2_exact_replay.py
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py

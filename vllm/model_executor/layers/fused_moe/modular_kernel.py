@@ -9,8 +9,8 @@ from typing import Any, final
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.scope import requires_batch_invariant_kernels
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
@@ -604,7 +604,9 @@ class FusedMoEExperts(ABC):
             )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
-        elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
+        elif (
+            requires_batch_invariant_kernels() and not cls._supports_batch_invariance()
+        ):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -804,10 +805,122 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        hf_config = vllm_config.model_config.hf_config
         cls.update_mamba_ssm_cache_dtype(
-            cache_config=vllm_config.cache_config,
-            hf_config=vllm_config.model_config.hf_config,
+            cache_config=vllm_config.cache_config, hf_config=hf_config
         )
+        bf16_activations = getattr(hf_config, "bf16_activations", False)
+        if bf16_activations:
+            cls.verify_bf16_activations(vllm_config)
+        if envs.VLLM_BATCH_INVARIANT:
+            from vllm.platforms import current_platform
+
+            if not (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
+            ):
+                raise ValueError(
+                    "VLLM_BATCH_INVARIANT=1 with Nemotron-H requires an SM10x GPU "
+                    "(B200, GB200, B300): its batch-invariant W4A16 experts and "
+                    "fixed split-KV FA4 attention run only there"
+                )
+            if vllm_config.parallel_config.tensor_parallel_size > 1:
+                raise ValueError(
+                    "VLLM_BATCH_INVARIANT=1 with Nemotron-H currently requires "
+                    "TP=1: the grouped gated norm and the shared-expert kernel "
+                    "match the training replay only at TP=1"
+                )
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
+            if kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
+                raise ValueError(
+                    "VLLM_BATCH_INVARIANT=1 with Nemotron-H runs attention on "
+                    "the fixed split-KV FA4 backend, which needs a BF16 or FP8 "
+                    f"E4M3 KV cache; got --kv-cache-dtype {kv_cache_dtype}"
+                )
+            if not bf16_activations:
+                if kv_cache_dtype == "bfloat16":
+                    # The training replay pairs a BF16 KV cache with BF16
+                    # activations only; otherwise it runs the FP8 KV cache.
+                    raise ValueError(
+                        "VLLM_BATCH_INVARIANT=1 with Nemotron-H serves a BF16 "
+                        "KV cache only with hf_overrides bf16_activations=True"
+                    )
+                cls.use_cuda_fp8_quant(vllm_config)
+
+    @staticmethod
+    def verify_bf16_activations(vllm_config: "VllmConfig") -> None:
+        """Check the mode set with ``hf_overrides={"bf16_activations": True}``.
+
+        The mode keeps every activation in BF16: the checkpoint's per-tensor
+        FP8 linears run as W8A16 (``ModelOptFp8W8A16LinearMethod``) and
+        attention runs a BF16 KV cache with an unquantized query. With no FP8
+        activation left, the FP8 quant op and fusion settings do not matter.
+
+        Raises:
+            ValueError: if the model dtype is not BF16, the KV cache is
+                quantized, or a checkpoint layer quantizes activations in a
+                way the mode does not replace.
+
+        """
+        import torch
+
+        model_config = vllm_config.model_config
+        if model_config.dtype != torch.bfloat16:
+            raise ValueError(
+                "Nemotron-H bf16_activations needs --dtype bfloat16; got "
+                f"{model_config.dtype}"
+            )
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        if kv_cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError(
+                "Nemotron-H bf16_activations needs a BF16 KV cache; pass "
+                f"--kv-cache-dtype bfloat16 instead of {kv_cache_dtype}"
+            )
+        quantization = model_config.quantization
+        if quantization is None:
+            return
+        algos: set[str] = set()
+        if quantization.startswith("modelopt"):
+            hf_quant_config = model_config.hf_config.quantization_config
+            quant_config = hf_quant_config.get("quantization", hf_quant_config)
+            layers = quant_config.get("quantized_layers") or {"": quant_config}
+            algos = {str(info.get("quant_algo")).upper() for info in layers.values()}
+        if not algos or not algos <= {"FP8", "W4A16_NVFP4"}:
+            raise ValueError(
+                "Nemotron-H bf16_activations serves ModelOpt FP8 linears as "
+                "W8A16 and W4A16 NVFP4 as is; got quantization "
+                f"{quantization} with {sorted(algos) or 'no ModelOpt algo'}"
+            )
+        logger.info_once("Nemotron-H bf16_activations: FP8 linears run as W8A16")
+
+    @staticmethod
+    def use_cuda_fp8_quant(vllm_config: "VllmConfig") -> None:
+        """Quantize FP8 activations with the standalone CUDA kernel; the
+        norm/activation + quant fusions and the native op round differently.
+
+        Raises:
+            ValueError: if a quant fusion or ``-quant_fp8`` is requested.
+
+        """
+        compilation_config = vllm_config.compilation_config
+        pass_config = compilation_config.pass_config
+        conflicts = [
+            f"{name}=True"
+            for name in ("fuse_norm_quant", "fuse_act_quant")
+            if getattr(pass_config, name)
+        ]
+        if "-quant_fp8" in compilation_config.custom_ops:
+            conflicts.append("custom_ops -quant_fp8")
+        if conflicts:
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT=1 with Nemotron-H quantizes FP8 "
+                "activations with the standalone CUDA kernel the training "
+                f"replay uses; drop {', '.join(conflicts)}"
+            )
+        pass_config.fuse_norm_quant = False
+        pass_config.fuse_act_quant = False
+        if "+quant_fp8" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+quant_fp8")
 
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):

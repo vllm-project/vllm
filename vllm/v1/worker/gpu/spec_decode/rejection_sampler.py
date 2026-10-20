@@ -152,9 +152,14 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        draft_chunk_size: int | None = None,
     ):
         self.sampler = sampler
         self.watermark_key = watermark_key
+        # Reject every draft at position draft_chunk_size - 1 modulo
+        # draft_chunk_size (batch-invariant Mamba2, see
+        # exact_replay_draft_chunk_size).
+        self.draft_chunk_size = draft_chunk_size
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
         self.num_speculative_steps = spec_config.num_speculative_tokens
@@ -437,6 +442,13 @@ class RejectionSampler:
         # accepted length before it reaches a permissive bitmask row. Only
         # verification sees the copy: `apply_sampling_params` and watermarking
         # keep the real draft ids.
+        if self.draft_chunk_size is not None:
+            chunk_end = (input_batch.expanded_local_pos > 0) & (
+                torch.remainder(pos, self.draft_chunk_size) == self.draft_chunk_size - 1
+            )
+            invalid_drafts = (
+                chunk_end if invalid_drafts is None else invalid_drafts | chunk_end
+            )
         verify_draft_sampled = draft_sampled
         if invalid_drafts is not None:
             verify_draft_sampled = draft_sampled.masked_fill(invalid_drafts, -1)
