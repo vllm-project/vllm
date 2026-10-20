@@ -224,36 +224,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
         return results[0] is not None
 
-    def _release_submission_handles(
-        self,
-        job_id: int,
-        xfer_handle: object | None,
-        obj_handle: object | None,
-        files_desc: object | None,
-    ) -> None:
-        """Release the NIXL handles created for a failed submission.
-
-        Each release is independent: a failing release must not skip the
-        others, or the OBJ registration stays live.
-        """
-        if xfer_handle is not None:
-            try:
-                self._agent.release_xfer_handle(xfer_handle)
-            except Exception as exc:
-                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
-        if obj_handle is not None:
-            try:
-                self._agent.release_dlist_handle(obj_handle)
-            except Exception as exc:
-                logger.warning(
-                    "release_dlist_handle failed for job %d: %s", job_id, exc
-                )
-        if files_desc is not None:
-            try:
-                self._agent.deregister_memory(files_desc)
-            except Exception as exc:
-                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
-
     def _fail_submission(
         self,
         job_id: int,
@@ -261,14 +231,25 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         obj_handle: object | None = None,
         files_desc: object | None = None,
     ) -> None:
-        """Release the handles of a failed submission and report the failure.
+        """Release the handles created so far, then report a failed job.
 
-        The tier never raises on a failed submission: the parent tiering
-        manager only unwinds a job when it sees a ``JobResult`` for it, so a
-        raise here would leave the job registered, the primary chunks pinned
-        and the request unfinalized.
+        The parent tiering manager unwinds a job only after the tier reports a
+        ``JobResult`` for it, so a submission failure must not raise.
         """
-        self._release_submission_handles(job_id, xfer_handle, obj_handle, files_desc)
+        releases = (
+            ("release_xfer_handle", xfer_handle, self._agent.release_xfer_handle),
+            ("release_dlist_handle", obj_handle, self._agent.release_dlist_handle),
+            ("deregister_memory", files_desc, self._agent.deregister_memory),
+        )
+        for name, handle, release in releases:
+            if handle is None:
+                continue
+            try:
+                release(handle)
+            except Exception as exc:
+                # Each release is independent: one failure must not skip the
+                # others, or the OBJ registration stays live.
+                logger.warning("%s failed for job %d: %s", name, job_id, exc)
         self._pending_results.append(JobResult(job_id=job_id, success=False))
 
     def _submit_transfer(
@@ -283,16 +264,17 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         assert block_ids.dtype == np.int32
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
-        files_desc: Any = None
-        obj_handle: Any = None
-        xfer_handle: Any = None
-        try:
-            nixl_files = [
-                (0, self._block_size_bytes, dev_id, key)
-                for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
-            ]
-            self._next_obj_dev_id += len(nixl_files)
+        nixl_files = [
+            (0, self._block_size_bytes, dev_id, key)
+            for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
+        ]
+        self._next_obj_dev_id += len(nixl_files)
 
+        # nixlRegDList has no importable type stub; its trim() is needed below.
+        files_desc: Any = None
+        obj_handle: object | None = None
+        xfer_handle: object | None = None
+        try:
             files_desc = self._agent.register_memory(nixl_files, "OBJ")
             if files_desc is None:
                 logger.warning("register_memory (OBJ) failed for job %d", job_id)

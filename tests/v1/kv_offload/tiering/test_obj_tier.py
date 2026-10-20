@@ -499,21 +499,74 @@ class TestMockObjTierFailures:
         # stale HIT, even though the object itself is still present.
         assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
 
-    def test_raise_releases_the_handles_it_created(self, monkeypatch):
-        # make_prepped_xfer raises after the OBJ registration and the dlist
-        # handle exist: both must be released, or the registration leaks.
+    @pytest.mark.parametrize(
+        ("failing_call", "released"),
+        [
+            ("register_memory", []),
+            ("prep_xfer_dlist", ["files_desc"]),
+            ("make_prepped_xfer", ["obj_handle", "files_desc"]),
+            ("transfer", ["xfer_handle", "obj_handle", "files_desc"]),
+        ],
+    )
+    def test_submission_raise_releases_the_handles_created(
+        self, monkeypatch, failing_call, released
+    ):
+        # Each NIXL call can fail after the previous ones created handles.
+        # Release exactly those, in reverse creation order, and report the job.
+        tier, agent = _make_tier(num_blocks=4)
+        handles = {
+            "files_desc": MagicMock(name="files_desc"),
+            "obj_handle": MagicMock(name="obj_handle"),
+            "xfer_handle": MagicMock(name="xfer_handle"),
+        }
+        handles["files_desc"].trim.return_value = MagicMock()
+        released_handles: list[object] = []
+        monkeypatch.setattr(
+            agent, "register_memory", lambda *a, **k: handles["files_desc"]
+        )
+        monkeypatch.setattr(
+            agent, "prep_xfer_dlist", lambda *a, **k: handles["obj_handle"]
+        )
+        monkeypatch.setattr(
+            agent, "make_prepped_xfer", lambda *a, **k: handles["xfer_handle"]
+        )
+        monkeypatch.setattr(agent, "transfer", lambda *a, **k: "PROC")
+        for release in (
+            "release_xfer_handle",
+            "release_dlist_handle",
+            "deregister_memory",
+        ):
+            monkeypatch.setattr(agent, release, released_handles.append)
+
+        def raise_backend_error(*args, **kwargs):
+            raise RuntimeError("backend error")
+
+        monkeypatch.setattr(agent, failing_call, raise_backend_error)
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        assert released_handles == [handles[name] for name in released]
+        assert tier._transfers == {}
+        assert [(r.job_id, r.success) for r in tier.get_finished_jobs()] == [(1, False)]
+
+    def test_submission_raise_with_failing_release_still_reports_failure(
+        self, monkeypatch
+    ):
+        # A failing release must not skip the remaining ones or the JobResult.
         tier, agent = _make_tier(num_blocks=4)
         deregister = MagicMock()
-        release_dlist = MagicMock()
+        monkeypatch.setattr(
+            agent,
+            "release_dlist_handle",
+            MagicMock(side_effect=RuntimeError("release failed")),
+        )
         monkeypatch.setattr(agent, "deregister_memory", deregister)
-        monkeypatch.setattr(agent, "release_dlist_handle", release_dlist)
         agent.make_prepped_xfer = MagicMock(side_effect=RuntimeError("backend error"))
 
         tier.submit_store(make_job(1, [key(1)], [0]))
 
         assert deregister.call_count == 1
-        assert release_dlist.call_count == 1
-        assert list(tier.get_finished_jobs())[0].success is False
+        assert [(r.job_id, r.success) for r in tier.get_finished_jobs()] == [(1, False)]
 
     def test_raise_does_not_leak_parent_job_or_primary_pin(self):
         # The parent tiering manager only unwinds a job when the tier reports
