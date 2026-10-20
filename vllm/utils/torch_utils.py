@@ -30,6 +30,10 @@ else:
 logger = init_logger(__name__)
 
 
+# NOTE: registration-time-mutable. Platform backends inject custom
+# --kv-cache-dtype entries here via register_kv_cache_dtype(). Never snapshot
+# this dict (no dict(...), .copy(), list(.keys()), etc.) — every consumer must
+# hold a reference to this live object to see later-registered entries.
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
@@ -73,20 +77,15 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-PIN_MEMORY = is_pin_memory_available()
+if TYPE_CHECKING:
+    PIN_MEMORY: bool
 
 
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return (
-        kv_cache_dtype.startswith("fp8")
-        or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype.startswith("nvfp4")
-    )
-
-
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    return kv_cache_dtype.endswith("per_token_head")
+def __getattr__(name: str) -> Any:
+    # Lazy so that importing this module does not resolve current_platform.
+    if name == "PIN_MEMORY":
+        return is_pin_memory_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -718,13 +717,15 @@ def async_tensor_h2d(
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
         t = data
-        if PIN_MEMORY and not t.is_pinned():
+        if is_pin_memory_available() and not t.is_pinned():
             # Stage in pinned, contiguous buffer to ensure fully async copy.
             t = torch.empty(
                 t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
             ).copy_(t)
     else:
-        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
+        t = torch.tensor(
+            data, dtype=dtype, pin_memory=is_pin_memory_available(), device="cpu"
+        )
     assert t.is_cpu
 
     if out is not None:
@@ -736,7 +737,7 @@ def async_tensor_h2d(
 
 def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     t = torch.from_numpy(array)
-    return t.pin_memory() if PIN_MEMORY else t
+    return t.pin_memory() if is_pin_memory_available() else t
 
 
 def make_ndarray_with_pad(
