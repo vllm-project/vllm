@@ -545,6 +545,27 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
+@dataclass
+class _VllmReqContext(ReqContext):
+    _request: Request = field(kw_only=True, repr=False, compare=False)
+
+    @property
+    def num_computed_tokens(self) -> int:
+        return self._request.num_computed_tokens
+
+    @property
+    def num_in_flight_tokens(self) -> int:
+        return self._request.num_in_flight_tokens
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self._request.num_prompt_tokens
+
+    @property
+    def num_tokens(self) -> int:
+        return self._request.num_tokens
+
+
 def _create_req_context(req: Request) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
@@ -552,7 +573,7 @@ def _create_req_context(req: Request) -> ReqContext:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
             load_filter = _parse_tier_filter(raw)
-    return ReqContext(
+    return _VllmReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
