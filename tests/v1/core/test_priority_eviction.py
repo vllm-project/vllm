@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import random
 from dataclasses import asdict
 
 import pytest
@@ -1381,6 +1382,101 @@ class TestStructuralInvariants:
             f"Request.__init__ assigns to {leaks!r}. Read retention from "
             "request.kv_hints at the use site instead."
         )
+
+
+class TestHintFreePath:
+    """Without kv.retain hints the manager must behave like plain LRU and
+    leave no retention state behind, even after eviction has happened."""
+
+    BLOCK_SIZE = 16
+
+    def _run(self):
+        """Grow four sessions that share a system prefix, keeping up to two
+        requests in flight, on a pool too small to hold them all. Mirror the
+        LRU free list in `model` (head = next to evict) and return it."""
+        rnd = random.Random(0)
+        bs = self.BLOCK_SIZE
+        manager = make_kv_cache_manager(
+            make_kv_cache_config(bs, 24),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=bs,
+        )
+        pool = manager.block_pool
+        system = [9000 + i for i in range(2 * bs)]
+        sessions = [list(system) for _ in range(4)]
+        model = [b.block_id for b in pool.blocks if not b.is_null]
+        holders: dict[int, int] = {}
+        in_flight: list = []
+        first = None
+
+        def release(request):
+            blocks = manager.get_blocks(request.request_id).blocks[0]
+            manager.free(request)
+            for block in reversed(blocks):
+                if block.is_null:
+                    continue
+                holders[block.block_id] -= 1
+                if holders[block.block_id] == 0:
+                    if block.block_hash is None:
+                        model.insert(0, block.block_id)
+                    else:
+                        model.append(block.block_id)
+
+        for step in range(120):
+            if in_flight and (len(in_flight) == 2 or rnd.random() < 0.5):
+                release(in_flight.pop(rnd.randrange(len(in_flight))))
+                continue
+            sid = rnd.randrange(len(sessions))
+            sessions[sid] += [sid * 1000 + step] * rnd.randint(bs, 3 * bs)
+            request = make_request(f"r{step}", list(sessions[sid]), bs, sha256)
+            assert request.kv_hints is None
+            computed, num_computed, _ = manager.get_computed_blocks(request)
+            hits = [b.block_id for b in computed.blocks[0]]
+            num_new = request.num_tokens - num_computed
+            if manager.allocate_slots(request, num_new, num_computed, computed) is None:
+                continue
+            blocks = [
+                b.block_id for b in manager.get_blocks(request.request_id).blocks[0]
+            ]
+            new = blocks[len(hits) :]
+            for block_id in hits:
+                if holders.get(block_id, 0) == 0:
+                    model.remove(block_id)
+            assert new == model[: len(new)], "allocation must take the LRU head"
+            del model[: len(new)]
+            for block_id in blocks:
+                holders[block_id] = holders.get(block_id, 0) + 1
+            in_flight.append(request)
+            first = first or request
+        for request in in_flight:
+            release(request)
+        return manager, model, first
+
+    def test_eviction_happens(self):
+        manager, _, first = self._run()
+        computed, num_computed, _ = manager.get_computed_blocks(
+            make_request("again", list(first.prompt_token_ids), 16, sha256)
+        )
+        assert num_computed < (len(first.prompt_token_ids) // 16) * 16
+
+    def test_leaves_no_retention_state(self):
+        manager, _, _ = self._run()
+        pool = manager.block_pool
+        pq = pool.priority_eviction_queue
+        assert not pq.ever_used and not pq.active
+        assert pq.num_blocks == 0 and not pq._meta
+        assert not pool._children and not pool._parent_key
+        assert pool.get_num_free_blocks() == pool.free_block_queue.num_free_blocks
+
+    def test_free_list_matches_reference_lru(self):
+        manager, model, _ = self._run()
+        free_queue = manager.block_pool.free_block_queue
+        order, block = [], free_queue.fake_free_list_head.next_free_block
+        while block is not free_queue.fake_free_list_tail:
+            order.append(block.block_id)
+            block = block.next_free_block
+        assert order == model
 
 
 def test_apply_directives_reports_blocks_it_released():
