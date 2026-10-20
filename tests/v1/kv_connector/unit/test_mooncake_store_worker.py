@@ -4590,7 +4590,7 @@ def test_putting_consumer_queues_decode_save():
     meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
     meta.add_request(req)
 
-    with patch.object(torch.cuda, "Event") as event_cls:
+    with patch.object(torch, "Event") as event_cls:
         event = event_cls.return_value
         w.wait_for_save(meta)
 
