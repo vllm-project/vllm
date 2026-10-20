@@ -183,11 +183,7 @@ async fn resolve_remote_model_files(
         download_if_present(&repo, model_id, &siblings, "video_preprocessor_config.json").await?;
     let processor_config_path =
         download_if_present(&repo, model_id, &siblings, "processor_config.json").await?;
-    let chat_template_name = siblings
-        .contains("chat_template.json")
-        .then_some("chat_template.json")
-        .or_else(|| siblings.contains("chat_template.jinja").then_some("chat_template.jinja"))
-        .or_else(|| siblings.iter().copied().find(|name| name.ends_with(".jinja")));
+    let chat_template_name = remote_chat_template_name(&siblings);
     let chat_template_path = match chat_template_name {
         Some(name) => Some(download_known_file(&repo, model_id, name).await?),
         None => None,
@@ -445,6 +441,22 @@ pub(super) fn is_tiktoken_file(path: &std::path::Path) -> bool {
         .is_some_and(|name| name == "tiktoken.model" || name.ends_with(".tiktoken"))
 }
 
+/// Select a root-level template, keeping auxiliary tokenizer templates separate.
+fn remote_chat_template_name<'a>(
+    siblings: &std::collections::BTreeSet<&'a str>,
+) -> Option<&'a str> {
+    siblings
+        .contains("chat_template.json")
+        .then_some("chat_template.json")
+        .or_else(|| siblings.contains("chat_template.jinja").then_some("chat_template.jinja"))
+        .or_else(|| {
+            siblings
+                .iter()
+                .copied()
+                .find(|name| !name.contains('/') && name.ends_with(".jinja"))
+        })
+}
+
 /// Chat templates are sometimes stored as dedicated .jinja files rather than as
 /// a fixed-name config entry, so we scan the cached model dir.
 fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
@@ -474,6 +486,23 @@ mod tests {
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
     use super::{ResolvedModelFiles, TokenizerSource};
+
+    #[test]
+    fn remote_chat_template_selection_stays_with_main_tokenizer() {
+        let mut siblings = std::collections::BTreeSet::from([
+            "audio_tokenizer/chat_template.jinja",
+            "tokenizer_config.json",
+        ]);
+        assert_eq!(super::remote_chat_template_name(&siblings), None);
+        for name in [
+            "template.jinja",
+            "chat_template.jinja",
+            "chat_template.json",
+        ] {
+            siblings.insert(name);
+            assert_eq!(super::remote_chat_template_name(&siblings), Some(name));
+        }
+    }
 
     #[tokio::test]
     async fn overrides_keep_configs_alive_across_clones_and_isolate_instances() {

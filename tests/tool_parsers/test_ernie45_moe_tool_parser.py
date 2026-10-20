@@ -54,7 +54,7 @@ def test_extract_tool_calls_no_tools(ernie45_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -163,7 +163,7 @@ def test_extract_tool_calls(
 ):
     extracted_tool_calls = ernie45_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)

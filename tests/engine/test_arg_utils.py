@@ -9,7 +9,13 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ModelConfig,
+    config,
+)
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -84,6 +90,26 @@ def test_watermark_config_cli():
     assert config is not None
     assert config.deduplicate_contexts == "none"
     assert config.deduplicate_contexts_max_history == 32
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--device-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+def test_device_memory_utilization_property():
+    config = CacheConfig(gpu_memory_utilization=0.8)
+
+    assert config.device_memory_utilization == 0.8
+
+    config.device_memory_utilization = 0.7
+    assert config.gpu_memory_utilization == 0.7
 
 
 @pytest.mark.parametrize(
@@ -454,6 +480,18 @@ def test_compilation_config():
     )
 
 
+def test_trust_request_mm_kwargs_cli():
+    from vllm.entrypoints.common.cli_args import FrontendArgs
+
+    parser = FrontendArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert not args.trust_request_mm_kwargs
+
+    args = parser.parse_args(["--trust-request-mm-kwargs"])
+    assert args.trust_request_mm_kwargs
+
+
 def test_attention_config():
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -464,6 +502,12 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
+
+    args = parser.parse_args(
+        ["--attention-config", '{"tokenspeed_mla_min_split_kv": 8}']
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.tokenspeed_mla_min_split_kv == 8
 
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
@@ -819,13 +863,14 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
 
 class TestDeviceIds:
-    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+    @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):
         """--device-ids index beyond the CVD set raises ValueError."""
         from vllm.platforms import current_platform
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5")
-        args = EngineArgs(model="m", device_ids=[0, 2])
+        args = EngineArgs(model="m", device_ids=device_ids)
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 
@@ -1009,3 +1054,34 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+@pytest.mark.parametrize(
+    ("name", "mem_gib", "capability", "expected_api_tokens", "expected_api_seqs"),
+    [
+        ("nvidia gb10", 121, (12, 1), 2048, 256),
+        ("nvidia h100", 80, (9, 0), 8192, 1024),
+        ("nvidia rtx pro 6000 blackwell", 96, (12, 0), 8192, 1024),
+    ],
+)
+def test_get_batch_defaults_gb10_stays_on_small_tier(
+    monkeypatch, name, mem_gib, capability, expected_api_tokens, expected_api_seqs
+):
+    """GB10 reports >= 70 GiB (unified memory) but not the compute of a
+    large discrete GPU, so it keeps the small-tier defaults."""
+    from types import SimpleNamespace
+
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils.mem_constants import GiB_bytes
+
+    stub = SimpleNamespace(
+        get_device_total_memory=lambda: mem_gib * GiB_bytes,
+        get_device_name=lambda: name,
+        is_device_capability=lambda cap: cap == capability,
+        is_tpu=lambda: False,
+        is_cpu=lambda: False,
+    )
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", stub)
+    tokens, seqs = EngineArgs.get_batch_defaults(1)
+    assert tokens[UsageContext.OPENAI_API_SERVER] == expected_api_tokens
+    assert seqs[UsageContext.OPENAI_API_SERVER] == expected_api_seqs

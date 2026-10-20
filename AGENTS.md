@@ -31,6 +31,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- Before opening a PR (drafts included) or requesting re-review, run the [`pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill and address its findings.
 
 ### Fail-closed behavior
 
@@ -113,9 +114,6 @@ pre-commit run --all-files
 
 # Run a specific hook:
 pre-commit run ruff-check --all-files
-
-# Run mypy as it is in CI:
-pre-commit run mypy-3.12 --all-files --hook-stage manual
 ```
 
 The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.

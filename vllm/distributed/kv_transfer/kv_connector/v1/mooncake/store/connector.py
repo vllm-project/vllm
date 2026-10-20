@@ -13,11 +13,12 @@ enabling prefix caching via hash-based deduplication.
 
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
@@ -125,6 +126,10 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        return False
 
     @staticmethod
     def _validate_kv_cache_config(
@@ -321,6 +326,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # ============================================================
     # Worker-side methods
     # ============================================================
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a context manager for the custom MemPool, or None.
+
+        Called by the Worker before ``initialize_kv_cache`` so that KV
+        cache is allocated from the Mooncake-managed pool when
+        ``custom_mem_pool`` is set in ``kv_connector_extra_config``.
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_mem_pool_context()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None

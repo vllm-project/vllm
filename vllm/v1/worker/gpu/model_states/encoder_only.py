@@ -105,12 +105,15 @@ class EncoderOnlyModelState(DefaultModelState):
         if pooling_params is None or pooling_params.extra_kwargs is None:
             return
 
-        token_type_start = pooling_params.extra_kwargs.get("compressed_token_type_ids")
-        if token_type_start is not None:
+        token_type_range = pooling_params.extra_kwargs.get("compressed_token_type_ids")
+        if token_type_range is not None:
             assert new_req_data.prompt_token_ids is not None
+            token_type_start, token_type_end = token_type_range
+            positions = torch.arange(
+                len(new_req_data.prompt_token_ids), dtype=torch.int32
+            )
             self.token_type_ids[new_req_data.req_id] = (
-                torch.arange(len(new_req_data.prompt_token_ids), dtype=torch.int32)
-                >= token_type_start
+                (positions >= token_type_start) & (positions < token_type_end)
             ).to(torch.int32)
 
     def remove_request(self, req_id: str) -> None:
@@ -188,10 +191,7 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self,
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-        for_capture: bool,
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
