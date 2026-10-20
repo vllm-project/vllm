@@ -204,7 +204,7 @@ def _reserve(ws, s):
     )
 
 
-def _run(s, backend="persistent", next_n=1):
+def _run(s, backend="persistent", next_n=1, plan=None):
     candidate_paged_score_decode(
         s["q"],
         s["cache"].tensor,
@@ -218,6 +218,7 @@ def _run(s, backend="persistent", next_n=1):
         backend,
         s["topk_indices"],
         HEAD_DIM,
+        plan=plan,
     )
 
 
@@ -737,25 +738,44 @@ def test_candidate_gather_is_bandwidth_efficient(ws):
         seed=23,
     )
     _reserve(ws, s)
-    for _ in range(5):
-        _run(s)
-    torch.cuda.synchronize()
 
-    iters = 20
-    start, end = torch.cuda.Event(True), torch.cuda.Event(True)
-    start.record()
-    for _ in range(iters):
-        _run(s)
-    end.record()
-    torch.cuda.synchronize()
-    micros = start.elapsed_time(end) * 1e3 / iters
+    # Both plan modes must stay vectorized: the shared plan's buffers come
+    # from the builder rather than the workspace arena, and a different
+    # stride/alignment proof would silently slow the gather the same way.
+    for use_plan in (False, True):
+        plan = None
+        if use_plan:
+            plan = (
+                torch.empty(rows, dtype=torch.int32, device=device),
+                torch.empty(rows, dtype=torch.int32, device=device),
+                torch.empty(rows, num_candidates, dtype=torch.int32, device=device),
+                torch.empty(rows, dtype=torch.int32, device=device),
+            )
+            candidate_paged_prepare(
+                s["seq_lens"], s["candidate_blocks"], block_size, 1, rows, out=plan
+            )
+        for _ in range(5):
+            _run(s, plan=plan)
+        torch.cuda.synchronize()
 
-    bytes_moved = rows * num_candidates * block_size * (HEAD_DIM + INDEXER_SCALE_BYTES)
-    gb_per_s = bytes_moved / micros / 1e3
-    assert gb_per_s > 300, (
-        f"candidate gather only reached {gb_per_s:.0f} GB/s ({micros:.0f} us "
-        "for the K stream); the loads are probably no longer vectorized"
-    )
+        iters = 20
+        start, stop = torch.cuda.Event(True), torch.cuda.Event(True)
+        start.record()
+        for _ in range(iters):
+            _run(s, plan=plan)
+        stop.record()
+        torch.cuda.synchronize()
+        micros = start.elapsed_time(stop) * 1e3 / iters
+
+        bytes_moved = (
+            rows * num_candidates * block_size * (HEAD_DIM + INDEXER_SCALE_BYTES)
+        )
+        gb_per_s = bytes_moved / micros / 1e3
+        assert gb_per_s > 300, (
+            f"candidate gather (plan={use_plan}) only reached {gb_per_s:.0f} "
+            f"GB/s ({micros:.0f} us for the K stream); the loads are "
+            "probably no longer vectorized"
+        )
 
 
 @requires_sm90
