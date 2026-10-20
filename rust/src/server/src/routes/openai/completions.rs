@@ -22,7 +22,7 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
-use vllm_text::tokenizer::Tokenizer;
+use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
     TextOutputStreamExt as _, TextRequest,
@@ -113,6 +113,7 @@ pub async fn completions(
 
     if stream {
         let chunk_stream = completion_chunk_stream(
+            tokenizer,
             text_stream,
             prepared.request_id,
             prepared.response_model,
@@ -125,6 +126,7 @@ pub async fn completions(
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
         let response = match collect_completion(
+            tokenizer,
             text_stream,
             prepared.request_id,
             prepared.response_model,
@@ -144,6 +146,7 @@ pub async fn completions(
 }
 
 async fn collect_completion(
+    tokenizer: DynTokenizer,
     stream: impl TextOutputStream,
     request_id: String,
     response_model: String,
@@ -182,12 +185,9 @@ async fn collect_completion(
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some() && prompt_only {
-        let prompt = echo.as_deref().ok_or_else(|| {
-            server_error!("prompt-only completion response missing echoed prompt")
-        })?;
         Some(echoed_prompt_logprobs_to_openai(
+            tokenizer.as_ref(),
             collected.prompt_logprobs.as_ref(),
-            prompt,
             collected.prompt_token_ids.as_ref(),
             return_tokens_as_token_ids,
         )?)
@@ -276,6 +276,7 @@ async fn collect_completion(
 /// Convert one internal decoded-text stream into OpenAI completions chunks.
 #[try_stream]
 async fn completion_chunk_stream(
+    tokenizer: DynTokenizer,
     stream: impl TextOutputStream,
     request_id: String,
     response_model: String,
@@ -352,8 +353,8 @@ async fn completion_chunk_stream(
                     // generated tokens continue from the offsets they report.
                     let logprobs = if requested_logprobs.is_some() {
                         Some(echoed_prompt_logprobs_to_openai(
+                            tokenizer.as_ref(),
                             prompt_logprobs.as_ref(),
-                            prompt,
                             prompt_token_ids.as_ref(),
                             return_tokens_as_token_ids,
                         )?)
@@ -603,8 +604,8 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
 }
 
 fn echoed_prompt_logprobs_to_openai(
+    tokenizer: &dyn Tokenizer,
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
-    prompt: &str,
     prompt_token_ids: &[u32],
     return_tokens_as_token_ids: bool,
 ) -> Result<LogProbs, ApiError> {
@@ -616,7 +617,12 @@ fn echoed_prompt_logprobs_to_openai(
         let token = if return_tokens_as_token_ids {
             format!("token_id:{token_id}")
         } else {
-            prompt.to_string()
+            tokenizer.decode(&[*token_id], false).map_err(|error| {
+                server_error!(
+                    "failed to decode prompt token: {}",
+                    error.to_report_string()
+                )
+            })?
         };
 
         return Ok(LogProbs {
@@ -703,6 +709,7 @@ mod tests {
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedText,
         DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
     };
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::{
         ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
@@ -804,6 +811,7 @@ mod tests {
 
         for enabled in [false, true] {
             let response = collect_completion(
+                Arc::new(TestTokenizer::new()),
                 make_stream(None),
                 "cmpl-1".into(),
                 "model".into(),
@@ -829,6 +837,7 @@ mod tests {
         }
 
         let response = collect_completion(
+            Arc::new(TestTokenizer::new()),
             make_stream(Some(RequestSpecDecodeMetrics {
                 num_spec_tokens: 3,
                 histogram: vec![0, 1, 1, 0],
@@ -938,6 +947,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1095,6 +1105,7 @@ mod tests {
             .collect::<Vec<_>>();
 
             let chunks = completion_chunk_stream(
+                Arc::new(TestTokenizer::new()),
                 stream::iter(events),
                 "cmpl-1".to_string(),
                 "model".to_string(),
@@ -1150,6 +1161,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1213,6 +1225,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1280,6 +1293,7 @@ mod tests {
         ]);
 
         let response = super::collect_completion(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1336,6 +1350,7 @@ mod tests {
         ]);
 
         let response = super::collect_completion(
+            Arc::new(TestTokenizer::new().with_regular_token("Hello", 9707)),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1364,6 +1379,30 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 1);
         assert_eq!(usage.completion_tokens, Some(1));
         assert_eq!(usage.total_tokens, 2);
+    }
+
+    #[test]
+    fn echoed_prompt_logprobs_decode_tokens_without_echo_text() {
+        let tokenizer = TestTokenizer::new().with_regular_token("Hi", 30086);
+        let logprobs = super::echoed_prompt_logprobs_to_openai(&tokenizer, None, &[30086], false)
+            .expect("decode prompt token independently of visible echo text");
+        expect_test::expect![[r#"
+            LogProbs {
+                tokens: [
+                    "Hi",
+                ],
+                token_logprobs: [
+                    None,
+                ],
+                top_logprobs: [
+                    None,
+                ],
+                text_offset: [
+                    0,
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&logprobs);
     }
 
     #[tokio::test]
@@ -1397,6 +1436,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1477,6 +1517,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new().with_regular_token("Hello", 9707)),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1555,6 +1596,7 @@ mod tests {
         ]);
 
         let chunks = completion_chunk_stream(
+            Arc::new(TestTokenizer::new()),
             stream,
             "cmpl-1".to_string(),
             "model".to_string(),
