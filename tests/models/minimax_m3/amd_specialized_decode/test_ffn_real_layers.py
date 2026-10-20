@@ -188,6 +188,50 @@ def test_ffn_launch_matches_native_layers(monkeypatch):
             assert res[0] > 0.99999
 
 
+def _executor(worker):
+    return worker.model_runner.model_state.backbone.specialized_decode.executor
+
+
+def _reset_every(worker, steps):
+    executor = _executor(worker)
+    executor._reset_launches = steps * len(executor._layers)
+    executor._since_reset = 0
+    return executor.resets
+
+
+def _reset_state(worker):
+    executor = _executor(worker)
+    return executor.resets, executor.health().failed
+
+
+def test_epoch_resets_under_full_graphs(monkeypatch):
+    """--monokernel under FULL decode graphs and async scheduling, an epoch
+    reset every 3 sampled steps while batches of 1, 5, 16 and 3 requests
+    alternate graph widths: every rank resets at the same steps, no wait
+    times out (a rank resuming on stale tags would), and every request
+    completes. Bit-exactness across resets: ``test_ffn_tp4_stress.py``."""
+    for name, value in ENV.items():
+        monkeypatch.setenv(name, value)
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(
+        **ENGINE,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        monokernel=True,
+        async_scheduling=True,
+        enable_prefix_caching=False,
+    )
+    params = SamplingParams(max_tokens=48, temperature=0, ignore_eos=True)
+    before = llm.collective_rpc(_reset_every, args=(3,))
+    for n in (1, 5, 16, 3):
+        outputs = llm.generate([f"Request {i}: count upward" for i in range(n)], params)
+        assert all(len(o.outputs[0].token_ids) == 48 for o in outputs)
+    after = llm.collective_rpc(_reset_state)
+    resets = {n - b for (n, _), b in zip(after, before)}
+    assert len(resets) == 1 and resets.pop() >= 4 * 48 // 3 - 4
+    assert not any(failed for _, failed in after)
+
+
 SITE_INJECT = 12
 
 

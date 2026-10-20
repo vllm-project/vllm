@@ -35,7 +35,7 @@ class MiniMaxM3ModelState(DefaultModelState):
         return None if decode is None else decode.executor.fault_word
 
     def describe_fault(self, values: list[int]) -> str:
-        failed, rank, epoch, site = values[:4]
+        _, rank, epoch, site = values[:4]
         return (
             f"MiniMax-M3 FFN launch failed on TP rank {rank} (epoch {epoch}, "
             f"site {site}); this step's tokens are discarded"

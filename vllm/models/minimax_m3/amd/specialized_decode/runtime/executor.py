@@ -20,7 +20,9 @@ from .weights import MonoLayerWeights
 logger = init_logger(__name__)
 
 COVERAGE_LOG_EVERY = 1024
-# a collective reset well before the kernels' 32-bit tag limit (EPOCH_LIMIT)
+# a collective reset well before the kernels' 32-bit tag limit (EPOCH_LIMIT):
+# every 2^30 / 57 sparse layers ~ 18.8M sampled steps, counted per sampled step
+# (stock-routed ones too), so a reset comes early, never late
 RESET_LAUNCHES = 1 << 30
 
 
@@ -171,16 +173,39 @@ class FfnExecutor:
     def reset_epoch(self) -> None:
         """Between steps, on every rank together: no launch in flight, every
         mailbox region and the epoch cleared, so tags restart from one. The
-        sticky error word is kept."""
-        torch.accelerator.synchronize()
-        tp_agree(True)
-        self.peer.bytes[4 * ERROR_WORDS :].zero_()
-        self.runner.reset()
-        torch.accelerator.synchronize()
-        tp_agree(True)
+        sticky error word is kept. Every rank reaches each phase's agreement;
+        a phase that failed anywhere fails the reset on every rank (the
+        failing rank marks all ranks' error words), so no launch resumes on a
+        partly cleared state."""
+        self._reset_phase("drain", torch.accelerator.synchronize)
+        self._reset_phase("clear", self._clear)
         self._since_reset = 0
         self.resets += 1
         logger.info("MiniMax-M3 FFN launch: epoch reset %d", self.resets)
+
+    def _clear(self) -> None:
+        self.peer.bytes[4 * ERROR_WORDS :].zero_()
+        self.runner.reset()
+        torch.accelerator.synchronize()
+
+    def _reset_phase(self, phase: str, run) -> None:
+        failure: Exception | None = None
+        try:
+            run()
+        except Exception as err:
+            failure = err
+        try:
+            agreed = tp_agree(failure is None)
+        except Exception as err:
+            agreed, failure = False, failure or err
+        if agreed:
+            return
+        if failure is not None:
+            self.abort()
+        raise RuntimeError(
+            f"MiniMax-M3 FFN launch epoch reset ({phase}) failed on "
+            f"{'this' if failure else 'another'} TP rank"
+        ) from failure
 
     def close(self) -> None:
         self.peer.close()

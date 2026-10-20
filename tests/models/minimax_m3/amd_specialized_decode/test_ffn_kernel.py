@@ -387,24 +387,65 @@ def test_epoch_limit_is_a_fail_stop_backstop(weights):
     assert _error(runner.peer_bufs[0])[3] == ffn.SITE_WRAP
 
 
-def test_forced_epoch_reset_clears_and_resumes(weights, monkeypatch):
-    """The executor's step hook resets every region and the epoch once the
-    launches since the last reset reach its bound; launches then resume from
-    tag one with the same results, the error word kept."""
+def _reset_executor(runner, monkeypatch, agree):
+    """A TP1 FfnExecutor over ``runner`` that resets every 3 output steps, its
+    TP agreement ``agree``."""
     from vllm.models.minimax_m3.amd.specialized_decode.runtime import executor as ex
 
-    monkeypatch.setattr(ex, "tp_agree", lambda ok: ok)
-    runner = _runner(weights, 2)
-    inputs = _inputs(2)
-    before = runner(*inputs, weights, _slots(2))[0].clone()
+    monkeypatch.setattr(ex, "tp_agree", agree)
     executor = object.__new__(ex.FfnExecutor)
     executor.rank, executor.runner, executor.resets = 0, runner, 0
-    executor.peer = SimpleNamespace(bytes=runner.peer_bufs[0])
+    executor.peer = SimpleNamespace(bytes=runner.peer_bufs[0], addresses=runner.peers)
     executor._layers = dict.fromkeys(range(3, 60))
     executor.outputs, executor._since_reset = 0, 0
     executor._reset_launches = 3 * len(executor._layers)
     executor._epoch_event = None
     executor._epoch_host = torch.zeros(1, dtype=torch.int32)
+    return executor
+
+
+def _broken(*_):
+    raise RuntimeError("injected")
+
+
+@pytest.mark.parametrize(
+    "where, msg, marked",
+    [
+        ("clear", r"\(clear\) failed on this TP rank", True),
+        ("agreement", r"\(drain\) failed on this TP rank", True),
+        ("peer", r"\(drain\) failed on another TP rank", False),
+    ],
+)
+def test_failed_epoch_reset_fails_every_rank(weights, monkeypatch, where, msg, marked):
+    """A reset phase failing here (a clear or an agreement that raises) or on
+    another rank raises on this rank and does not resume; the failing rank
+    marks every rank's error word."""
+    runner = _runner(weights, 1)
+    runner(*_inputs(1), weights, _slots(1))
+    torch.accelerator.synchronize()
+    agree = {"agreement": _broken, "peer": lambda ok: False}.get(where, lambda ok: ok)
+    executor = _reset_executor(runner, monkeypatch, agree)
+    if where == "clear":
+        monkeypatch.setattr(runner, "reset", _broken)
+    epoch = runner.epoch[0].item()
+    executor.output_step()
+    executor.output_step()
+    with pytest.raises(RuntimeError, match=msg):
+        executor.output_step()
+    torch.accelerator.synchronize()
+    assert executor.resets == 0 and executor._since_reset == 3
+    assert runner.epoch[0].item() == epoch
+    assert _error(runner.peer_bufs[0]) == ([1, 0, -1, 0] if marked else [0] * 4)
+
+
+def test_forced_epoch_reset_clears_and_resumes(weights, monkeypatch):
+    """The executor's step hook resets every region and the epoch once the
+    launches since the last reset reach its bound; launches then resume from
+    tag one with the same results, the error word kept."""
+    runner = _runner(weights, 2)
+    inputs = _inputs(2)
+    before = runner(*inputs, weights, _slots(2))[0].clone()
+    executor = _reset_executor(runner, monkeypatch, lambda ok: ok)
     runner.peer_bufs[0][4] = 7  # an error-word field the reset must keep
     for _ in range(3):
         runner(*inputs, weights, _slots(2))
