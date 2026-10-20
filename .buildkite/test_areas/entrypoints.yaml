@@ -34,9 +34,11 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Unit"
@@ -52,6 +54,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
+  automatic_shard: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -66,6 +69,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90

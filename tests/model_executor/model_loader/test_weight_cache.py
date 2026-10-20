@@ -263,12 +263,14 @@ def test_ipc_cache_cold_start_and_warm_restart(
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path, capfd):
+def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
     """Same as above, with expert parallelism enabled at tp=2."""
-    run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path, capfd)
+    # No capfd: a CaptureFixture does not survive the cloudpickle into the
+    # child, and this case never reaches the check_flashinfer_cache branch.
+    run_cold_start_and_warm_restart(vllm_runner, DSV2_EP_CASE, tmp_path)
 
 
-def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd):
+def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd=None):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
@@ -541,7 +543,9 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
         (True, "deepseek_yarn", 10000, 2, 1024, 0, "rope_parameters_hash"),
     ],
 )
-def test_ipc_rope_matching(tmp_path, monkeypatch, fallback, nested, case):
+def test_ipc_rope_matching(
+    tmp_path, monkeypatch, default_vllm_config, fallback, nested, case
+):
     """Reloads accept constructor-normalized RoPE without weakening other checks."""
     import socket
     from concurrent.futures import ThreadPoolExecutor

@@ -237,6 +237,20 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_request_chat_template_maps_to_invalid_request() {
+        let api_error = chat_submit_error(
+            "tokenize failed",
+            vllm_chat::Error::UntrustedRequestChatTemplate,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.message,
+            "Chat template is passed with request, but --trust-request-chat-template is not set. \
+             Refused request with untrusted chat template."
+        );
+    }
+
+    #[test]
     fn chat_template_render_failure_stays_internal() {
         let error = vllm_chat::Error::ChatTemplate(
             "failed to render jinja template: unknown function".to_string(),
@@ -303,17 +317,17 @@ mod tests {
     }
 
     #[test]
-    fn truncate_exceeds_budget_maps_to_invalid_request() {
-        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+    fn truncate_exceeds_max_model_len_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsMaxModelLen {
             value: 8000,
-            budget: 4000,
+            max_model_len: 4000,
         };
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
-        assert!(response.error.message.contains("max_tokens = 4000"));
+        assert!(response.error.message.contains("max_model_len = 4000"));
     }
 
     #[test]
