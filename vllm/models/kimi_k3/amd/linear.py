@@ -812,6 +812,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.routing_observed = (
+            vllm_config.aux_output_config.enable_return_routed_experts
+            or vllm_config.parallel_config.enable_eplb
+        )
 
         self.vocab_size = config.vocab_size
 
@@ -957,6 +961,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             num_tokens,
             has_residual=residual is not None,
             has_aux_layers=bool(self.aux_hidden_state_layers),
+            routing_observed=self.routing_observed,
         )
         if use_sp:
             hidden_states = sp_shard(hidden_states)

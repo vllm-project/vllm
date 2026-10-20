@@ -6,6 +6,8 @@ Each rank ends up holding only its own token rows, so the multi-GPU checks
 compare every rank's shard with the matching rows of the all-reduce result.
 """
 
+from collections.abc import Callable
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +35,7 @@ from vllm.models.kimi_k3.amd import sp
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.linear import (
     KimiDecoderLayer,
+    KimiMLP,
     KimiMoE,
     KimiRoutedOutputTransform,
 )
@@ -217,65 +220,121 @@ def _check_padded_gather_scatter(
             torch.testing.assert_close(got.scale, scale[:expected_rows], atol=0, rtol=0)
 
 
-def _check_shard_routed_moe(device: torch.device, tp_world: int, rank: int) -> None:
-    """A small latent KimiMoE routed on the token shard returns this rank's
-    rows of the unsharded layer, with the gathered top-k replacing routing."""
+MLP_HIDDEN_SIZE = 512
+# At least the 256 per rank that KimiMoE would otherwise pad up to.
+MLP_INTERMEDIATE_PER_RANK = 256
+
+
+def _build_mlp(
+    device: torch.device, tp_world: int, kind: str
+) -> tuple[KimiMLP | KimiMoE, VllmConfig]:
+    """A small dense KimiMLP or latent KimiMoE with the same weights on every
+    rank's view of the full layer.
+
+    ``kind`` is "dense", "moe" (token-shardable tail) or "moe_no_shared"
+    (without shared experts the tail is not token-shardable, so the layer
+    takes the all-gather fallback).
+    """
     init_workspace_manager(device)
-    config = KimiLinearConfig(
-        hidden_size=512,
-        hidden_act="silu",
-        rms_norm_eps=EPS,
-        # At least the 256 per rank that KimiMoE would otherwise pad up to.
-        moe_intermediate_size=256 * tp_world,
-        num_experts=32,
-        num_experts_per_token=4,
-        num_shared_experts=1,
-        routed_expert_hidden_size=256,
-        latent_moe_use_norm=True,
-        use_grouped_topk=True,
-        num_expert_group=1,
-        topk_group=1,
-    )
     vllm_config = VllmConfig()
     vllm_config.compilation_config.static_forward_context = {}
     torch.set_default_dtype(DTYPE)
+    mlp: KimiMLP | KimiMoE
     with set_current_vllm_config(vllm_config), torch.device(device):
-        moe = KimiMoE(config, prefix="model.layers.1.mlp", layer_idx=1)
-    assert moe.experts.token_shardable
+        if kind == "dense":
+            mlp = KimiMLP(
+                MLP_HIDDEN_SIZE,
+                MLP_INTERMEDIATE_PER_RANK * tp_world,
+                "silu",
+                prefix="model.layers.0.mlp",
+            )
+        else:
+            config = KimiLinearConfig(
+                hidden_size=MLP_HIDDEN_SIZE,
+                hidden_act="silu",
+                rms_norm_eps=EPS,
+                moe_intermediate_size=MLP_INTERMEDIATE_PER_RANK * tp_world,
+                num_experts=32,
+                num_experts_per_token=4,
+                num_shared_experts=None if kind == "moe_no_shared" else 1,
+                routed_expert_hidden_size=256,
+                latent_moe_use_norm=True,
+                use_grouped_topk=True,
+                num_expert_group=1,
+                topk_group=1,
+            )
+            mlp = KimiMoE(config, prefix="model.layers.1.mlp", layer_idx=1)
+            assert mlp.experts.token_shardable is (kind == "moe")
 
     # Same seed on every rank: replicated weights match across ranks, and each
     # rank's TP shard is just a slice of some consistent full weight.
     torch.manual_seed(0)
     with torch.no_grad():
-        for param in moe.parameters():
+        for param in mlp.parameters():
             if param.dim() == 1:
                 param.copy_(1 + 0.1 * torch.randn_like(param))
             else:
                 param.copy_(torch.randn_like(param) / param.size(-1) ** 0.5)
-    for module in moe.modules():
+    for module in mlp.modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             quant_method.process_weights_after_loading(module)
+    return mlp, vllm_config
 
+
+def _check_mlp_rows(
+    device: torch.device,
+    tp_world: int,
+    rank: int,
+    kind: str,
+    run_sharded: Callable[[SimpleNamespace, torch.Tensor], torch.Tensor],
+) -> None:
+    """``run_sharded`` on this rank's token shard returns this rank's rows of
+    the unsharded layer. The token count does not divide TP, so the last
+    rank's shard ends in zero padding rows."""
+    mlp, vllm_config = _build_mlp(device, tp_world, kind)
     rows = 6
-    num_tokens = tp_world * rows
+    num_tokens = tp_world * rows - 3
     torch.manual_seed(1)
-    hidden = torch.randn(num_tokens, config.hidden_size, device=device, dtype=DTYPE)
+    hidden = torch.randn(num_tokens, MLP_HIDDEN_SIZE, device=device, dtype=DTYPE)
+    padded = F.pad(hidden, (0, 0, 0, tp_world * rows - num_tokens))
     mine = slice(rank * rows, (rank + 1) * rows)
-    layer = SimpleNamespace(mlp=moe)
+    real = max(0, min(rows, num_tokens - rank * rows))
+    layer = SimpleNamespace(
+        mlp=mlp, _output_unreduced=KimiDecoderLayer._output_unreduced
+    )
     with set_forward_context(None, vllm_config, num_tokens=num_tokens):
-        expected = moe(hidden)
-        actual = KimiDecoderLayer._run_moe_sp_shard_routed(layer, hidden[mine])
+        expected = mlp(hidden)
+        actual = run_sharded(layer, padded[mine])
 
-    assert actual.shape == (rows, config.hidden_size)
-    torch.testing.assert_close(actual, expected[mine], atol=8e-2, rtol=3e-2)
+    assert actual.shape == (rows, MLP_HIDDEN_SIZE)
+    torch.testing.assert_close(
+        actual[:real], expected[mine][:real], atol=8e-2, rtol=3e-2
+    )
 
 
-_CHECKS = {
+def _check_shard_routed_moe(device: torch.device, tp_world: int, rank: int) -> None:
+    """A latent KimiMoE routed on the token shard, with the gathered top-k
+    replacing routing."""
+    _check_mlp_rows(
+        device, tp_world, rank, "moe", KimiDecoderLayer._run_moe_sp_shard_routed
+    )
+
+
+def _check_mlp_sp(device: torch.device, tp_world: int, rank: int, kind: str) -> None:
+    """The decoder layer's sharded MLP step: reduce-scatter of the unreduced
+    down_proj for a dense MLP, all-gather then this rank's rows for an MoE
+    whose tail is not token-shardable."""
+    _check_mlp_rows(device, tp_world, rank, kind, KimiDecoderLayer._run_mlp_sp)
+
+
+_CHECKS: dict[str, Callable[[torch.device, int, int], None]] = {
     "sharded_tail": _check_sharded_tail,
     "routing_gather": _check_routing_gather,
     "padded_gather_scatter": _check_padded_gather_scatter,
     "shard_routed_moe": _check_shard_routed_moe,
+    "mlp_sp_dense": partial(_check_mlp_sp, kind="dense"),
+    "mlp_sp_moe_no_shared": partial(_check_mlp_sp, kind="moe_no_shared"),
 }
 
 
@@ -313,6 +372,11 @@ def test_routing_gather_tp4_is_exact() -> None:
     _run_ranks("routing_gather", 4)
 
 
+@multi_gpu_test(num_gpus=4)
+def test_padded_gather_scatter_tp4() -> None:
+    _run_ranks("padded_gather_scatter", 4)
+
+
 @multi_gpu_test(num_gpus=8)
 def test_padded_gather_scatter_tp8() -> None:
     _run_ranks("padded_gather_scatter", 8)
@@ -340,6 +404,12 @@ def test_shard_routed_moe_tp8_matches_unsharded_rows(
     use_aiter: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _run_shard_routed_moe(8, use_aiter, monkeypatch)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("kind", ["dense", "moe_no_shared"])
+def test_mlp_sp_tp4_matches_unsharded_rows(kind: str) -> None:
+    _run_ranks(f"mlp_sp_{kind}", 4)
 
 
 class _Router(torch.nn.Module):
@@ -380,18 +450,19 @@ def test_pre_routed_keeps_an_instance_override() -> None:
 
 
 @pytest.mark.parametrize(
-    "min_tokens,tp_size,num_tokens,has_residual,has_aux,last_rank,dp_size,expected",
+    "min_tokens,tp_size,num_tokens,has_residual,has_aux,last_rank,dp_size,observed,expected",
     [
-        (1024, 8, 16384, False, False, True, 1, True),
-        (1024, 8, 1024, False, False, True, 1, True),
-        (0, 8, 16384, False, False, True, 1, False),
-        (1024, 1, 16384, False, False, True, 1, False),
-        (1024, 8, 1016, False, False, True, 1, False),
-        (1024, 8, 16381, False, False, True, 1, True),
-        (1024, 8, 16384, True, False, True, 1, False),
-        (1024, 8, 16384, False, True, True, 1, False),
-        (1024, 8, 16384, False, False, False, 1, False),
-        (1024, 8, 16384, False, False, True, 2, False),
+        (1024, 8, 16384, False, False, True, 1, False, True),
+        (1024, 8, 1024, False, False, True, 1, False, True),
+        (0, 8, 16384, False, False, True, 1, False, False),
+        (1024, 1, 16384, False, False, True, 1, False, False),
+        (1024, 8, 1016, False, False, True, 1, False, False),
+        (1024, 8, 16381, False, False, True, 1, False, True),
+        (1024, 8, 16384, True, False, True, 1, False, False),
+        (1024, 8, 16384, False, True, True, 1, False, False),
+        (1024, 8, 16384, False, False, False, 1, False, False),
+        (1024, 8, 16384, False, False, True, 2, False, False),
+        (1024, 8, 16384, False, False, True, 1, True, False),
     ],
 )
 def test_should_shard(
@@ -403,6 +474,7 @@ def test_should_shard(
     has_aux: bool,
     last_rank: bool,
     dp_size: int,
+    observed: bool,
     expected: bool,
 ) -> None:
     monkeypatch.setenv("VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS", str(min_tokens))
@@ -411,4 +483,4 @@ def test_should_shard(
         sp, "get_pp_group", lambda: SimpleNamespace(is_last_rank=last_rank)
     )
     monkeypatch.setattr(sp, "get_dp_group", lambda: SimpleNamespace(world_size=dp_size))
-    assert sp.should_shard(num_tokens, has_residual, has_aux) is expected
+    assert sp.should_shard(num_tokens, has_residual, has_aux, observed) is expected

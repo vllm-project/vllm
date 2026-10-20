@@ -5,13 +5,16 @@
 With TP, every attention / MLP output all-reduce is replaced by a
 reduce-scatter over tokens, and the (per-token) attention-residual mixing runs
 on the local token shard only; the shard is all-gathered right before each
-attention / MLP input. Communication volume is unchanged (AR = RS + AG), while
-attn_res traffic and the block-residual bank shrink by the TP size.
+attention / MLP input. For attention and dense MLPs the communication volume
+is unchanged (AR = RS + AG), while attn_res traffic and the block-residual bank
+shrink by the TP size.
 
 In latent-MoE layers the router gate, latent down-projection and top-k also run
 on the token shard (their outputs are all-gathered instead of being recomputed
 on every rank), and the column-parallel up-projection tail reduce-scatters
-its output instead of all-reducing it.
+its output instead of all-reducing it. The extra all-gathers of the latent and
+the top-k add about 17% bytes per MoE layer at K3's sizes. An MoE whose tail is
+not token-shardable all-gathers its input and all-reduces its output in full.
 
 Enabled by ``VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS``; see :mod:`vllm.envs`.
 """
@@ -36,12 +39,21 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
 
-def should_shard(num_tokens: int, has_residual: bool, has_aux_layers: bool) -> bool:
+def should_shard(
+    num_tokens: int,
+    has_residual: bool,
+    has_aux_layers: bool,
+    routing_observed: bool,
+) -> bool:
     """Whether this forward runs with a token-sharded residual stream.
 
     The residual stream is padded to a multiple of the TP size, so every step
     above the threshold shards; otherwise the unsharded path's larger
     activations would exceed the profiled peak.
+
+    ``routing_observed`` (routed-experts capture or EPLB load recording) keeps
+    it off: routing runs on each rank's token shard only, so those would see
+    just this rank's tokens.
     """
     min_tokens = envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS
     return (
@@ -50,6 +62,7 @@ def should_shard(num_tokens: int, has_residual: bool, has_aux_layers: bool) -> b
         and num_tokens >= min_tokens
         and not has_residual
         and not has_aux_layers
+        and not routing_observed
         and get_pp_group().is_last_rank
         and get_dp_group().world_size == 1
         and not torch.cuda.is_current_stream_capturing()
