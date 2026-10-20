@@ -187,24 +187,33 @@ fi
 rm -f /tmp/changed.file
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
+# main publishes only cu130 precompiled wheels until the first CUDA 13.2 build lands.
+# They run on a 13.2 runtime (CUDA minor-version compatibility). Drop this, and use
+# the image's own CUDA variant, once cu132 wheels are published.
+precompiled_variant=cu130
+
 # ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
 if [[ -n "${rocm_wheel}" ]]; then
     VLLM_PRECOMPILED_WHEEL_LOCATION="${rocm_wheel}" VLLM_USE_PRECOMPILED=1 python3 setup.py develop --no-deps
 elif [[ "${is_rocm}" == "1" ]]; then
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop --no-deps
 elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
-    # Use the CUDA build the image's own torch was installed with, for both the
-    # new venv's torch and the precompiled wheel variant.
+    # Use the CUDA build the image's own torch was installed with for the new
+    # venv's torch.
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
+    # --torch-backend would restrict torch-ecosystem packages to the stable index,
+    # which has neither torch 2.15.0 (a release candidate) nor cu132 torchaudio; the
+    # test channel has the whole stack.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
-        VLLM_PRECOMPILED_WHEEL_VARIANT="${cuda_variant}" \
-        uv pip install -e . --torch-backend="${cuda_variant}"
+        VLLM_PRECOMPILED_WHEEL_VARIANT="${precompiled_variant}" \
+        uv pip install -e . --extra-index-url "https://download.pytorch.org/whl/test/${cuda_variant}"
 else
     # RELEASE-ONLY: torch==2.15.0 is a pre-release that is not on PyPI yet, so pull
     # it from the PyTorch test channel. Drop this once torch 2.15.0 is published to PyPI.
-    VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
+    VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
+        VLLM_PRECOMPILED_WHEEL_VARIANT="${precompiled_variant}" pip3 install -vvv -e . \
         --extra-index-url https://download.pytorch.org/whl/test/cu132
 fi
 # Run the script
