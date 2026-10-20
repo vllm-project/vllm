@@ -387,6 +387,19 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: bool,
 
+    /// Enable the `/tokenizer_info` endpoint. May expose chat
+    /// templates and other tokenizer configuration.
+    ///
+    /// The Rust frontend does not implement `/tokenizer_info` yet, so the
+    /// endpoint returns 501.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_tokenizer_info_endpoint: bool,
+
     /// Send an SSE keep-alive comment line every this many seconds when a
     /// streaming response is idle (queued, prefill, or between tokens), to
     /// prevent reverse proxies/tunnels with read timeouts from closing the
@@ -661,6 +674,7 @@ impl SharedRuntimeArgs {
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
+            enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }
