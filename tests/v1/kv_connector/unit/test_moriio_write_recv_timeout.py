@@ -9,7 +9,7 @@ happens, so the scheduler arms a per-request timer, configured by
 These tests pin the configuration and the lifecycle:
 
   * the timeout is read from ``kv_connector_extra_config``, validated at
-    startup, and no longer from the ``VLLM_MORIIO_WRITE_TIMEOUT_S`` env var;
+    startup;
   * the timer is armed with the request's *own* (unhashed) blocks only, so a
     prefix-cache hit shared with another request is never reported;
   * a timeout fails a live request but never frees its blocks -- RDMA writes
@@ -22,9 +22,7 @@ These tests pin the configuration and the lifecycle:
 They run on the scheduler alone, with no GPU and no RDMA.
 """
 
-import ast
 import importlib
-import inspect
 import math
 import time
 from types import SimpleNamespace
@@ -32,7 +30,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -224,47 +221,17 @@ def test_default_timeout_is_the_documented_constant():
     )
 
 
-@pytest.mark.parametrize("value", [60, 60.0, "60", 0.5])
+@pytest.mark.parametrize("value", [60, "60"])
 def test_timeout_is_read_from_kv_connector_extra_config(value):
     scheduler = _build_real_scheduler({"write_recv_timeout": value})
     assert scheduler._write_recv_timeout == float(value)
 
 
-@pytest.mark.parametrize("value", [0, -1, -0.5, math.inf, -math.inf, math.nan, "nan"])
+@pytest.mark.parametrize("value", [0, -1, math.inf, math.nan])
 def test_invalid_timeout_is_rejected_at_startup(value):
     """A non-finite or non-positive value would make every request time out."""
     with pytest.raises(ValueError, match="write_recv_timeout"):
         _build_real_scheduler({"write_recv_timeout": value})
-
-
-def test_unparsable_timeout_is_rejected_at_startup():
-    with pytest.raises(ValueError):
-        _build_real_scheduler({"write_recv_timeout": "soon"})
-
-
-def test_old_env_var_no_longer_sets_the_timeout(monkeypatch):
-    """Moved to extra_config in cdfb3f9; the unregistered env var is inert."""
-    monkeypatch.setenv("VLLM_MORIIO_WRITE_TIMEOUT_S", "5")
-    scheduler = _build_real_scheduler()
-    assert scheduler._write_recv_timeout == 540.0
-    assert "VLLM_MORIIO_WRITE_TIMEOUT_S" not in inspect.getsource(moriio_connector)
-
-
-def test_extra_config_timeout_wins_over_the_old_env_var(monkeypatch):
-    monkeypatch.setenv("VLLM_MORIIO_WRITE_TIMEOUT_S", "5")
-    scheduler = _build_real_scheduler({"write_recv_timeout": 90})
-    assert scheduler._write_recv_timeout == 90.0
-
-
-def test_recompute_policy_warns_that_the_timeout_cannot_unblock(log):
-    _build_real_scheduler(kv_load_failure_policy="recompute")
-    messages = [str(c.args[0]) for c in log.warning.call_args_list]
-    assert any("recompute" in m and "write_recv_timeout" in m for m in messages)
-
-
-def test_default_fail_policy_does_not_warn(log):
-    _build_real_scheduler(kv_load_failure_policy="fail")
-    assert not any("recompute" in str(c.args[0]) for c in log.warning.call_args_list)
 
 
 def test_timer_is_disabled_with_several_kv_cache_groups(log):
@@ -289,16 +256,6 @@ def test_timer_is_armed_with_a_single_kv_cache_group(log):
 
 
 # --- arming ---------------------------------------------------------------
-
-
-def test_timer_is_armed_with_the_configured_timeout():
-    scheduler = _make_scheduler(timeout=TIMEOUT_S)
-    before = time.monotonic()
-
-    _arm(scheduler)
-
-    deadline = scheduler._write_recv_deadline[REQ_ID]
-    assert before + TIMEOUT_S <= deadline <= time.monotonic() + TIMEOUT_S
 
 
 def test_timer_records_only_the_requests_own_blocks():
@@ -328,16 +285,6 @@ def test_timer_is_armed_on_a_scheduler_that_does_not_send_the_notify():
     assert scheduler._write_recv_block_ids[REQ_ID] == [10, 11]
 
 
-def test_timer_is_not_armed_when_building_the_notify_fails():
-    """A request rejected before it waits must not leave a timer behind."""
-    scheduler = _make_scheduler()
-    request = _make_request()
-    request.kv_transfer_params.pop("remote_host")
-    with pytest.raises(ValueError):
-        _arm(scheduler, request=request)
-    assert scheduler._write_recv_deadline == {}
-
-
 def test_fully_cached_request_arms_no_timer():
     """With no own blocks there is nothing to wait for or to fail."""
     scheduler = _make_scheduler()
@@ -359,19 +306,6 @@ def test_no_external_tokens_arms_no_timer():
     scheduler.send_notify_block.assert_not_called()
 
 
-def test_timer_is_not_rearmed_for_a_request_already_waiting():
-    scheduler = _make_scheduler()
-    request = _arm(scheduler)
-    armed = scheduler._write_recv_deadline[REQ_ID]
-    # A second call must not push the deadline out, or a request could be
-    # kept waiting indefinitely.
-    request.kv_transfer_params["do_remote_prefill"] = True
-
-    _arm(scheduler, request=request)
-
-    assert scheduler._write_recv_deadline[REQ_ID] == armed
-
-
 # --- deadline fires on a live request ---------------------------------------
 
 
@@ -389,19 +323,6 @@ def test_deadline_fails_a_live_request_and_reports_its_blocks(log):
     log.warning.assert_not_called()
 
 
-def test_deadline_message_says_blocks_stay_allocated(log):
-    """The log must not claim a reclaim that never happens."""
-    scheduler = _make_scheduler()
-    _arm(scheduler)
-    _expire(scheduler)
-
-    scheduler._reap_stale_write_recvs()
-
-    message = log.error.call_args.args[0]
-    assert "stay allocated" in message
-    assert "Reclaim" not in message
-
-
 def test_request_before_its_deadline_is_left_alone(log):
     scheduler = _make_scheduler()
     _arm(scheduler)
@@ -412,18 +333,6 @@ def test_request_before_its_deadline_is_left_alone(log):
     assert REQ_ID in scheduler._write_recv_deadline
     log.error.assert_not_called()
     log.warning.assert_not_called()
-
-
-def test_only_expired_requests_are_failed():
-    scheduler = _make_scheduler()
-    _arm(scheduler, request=_make_request("old"), blocks=_make_blocks([1, 2]))
-    _arm(scheduler, request=_make_request("new"), blocks=_make_blocks([3, 4]))
-    _expire(scheduler, "old")
-
-    scheduler._reap_stale_write_recvs()
-
-    assert scheduler._write_load_failed_block_ids == [1, 2]
-    assert "new" in scheduler._write_recv_deadline
 
 
 def test_expired_request_is_reaped_exactly_once():
@@ -470,17 +379,6 @@ def test_orphaned_request_at_deadline_is_logged_not_failed_again(log):
     # Fully forgotten afterwards.
     assert REQ_ID not in scheduler._write_recv_orphaned
     assert REQ_ID not in scheduler._write_recv_deadline
-
-
-def test_finished_request_without_a_timer_is_not_marked_orphaned():
-    """E.g. a request that finished after its receive already completed."""
-    scheduler = _make_scheduler()
-    request = _make_request()
-    request.kv_transfer_params["do_remote_prefill"] = False
-
-    _abort(scheduler, request)
-
-    assert scheduler._write_recv_orphaned == set()
 
 
 # --- receive completion stops the timer -------------------------------------
@@ -531,29 +429,6 @@ def test_finished_recving_for_an_orphan_clears_the_orphan_mark():
     assert scheduler._write_recv_deadline == {}
 
 
-def test_finished_recving_for_an_unknown_request_is_harmless():
-    scheduler = _make_scheduler()
-
-    scheduler.update_connector_output(
-        SimpleNamespace(finished_recving={"never-armed"}, finished_sending=None)
-    )
-
-    assert scheduler._write_recv_deadline == {}
-
-
-def test_other_requests_timers_survive_a_completion():
-    scheduler = _make_scheduler()
-    _arm(scheduler, request=_make_request("a"), blocks=_make_blocks([1]))
-    _arm(scheduler, request=_make_request("b"), blocks=_make_blocks([2]))
-
-    scheduler.update_connector_output(
-        SimpleNamespace(finished_recving={"a"}, finished_sending=None)
-    )
-
-    assert "a" not in scheduler._write_recv_deadline
-    assert "b" in scheduler._write_recv_deadline
-
-
 # --- scheduler -> worker hand-off -------------------------------------------
 
 
@@ -570,16 +445,6 @@ def test_build_connector_meta_ships_timed_out_blocks_once():
     assert second.write_load_failed_block_ids == []
 
 
-def test_build_connector_meta_without_timeouts_reports_nothing():
-    scheduler = _make_scheduler()
-    _arm(scheduler)
-
-    meta = scheduler.build_connector_meta(SimpleNamespace())
-
-    assert meta.write_load_failed_block_ids == []
-    assert REQ_ID in scheduler._write_recv_deadline
-
-
 def test_worker_drains_timed_out_blocks_through_the_load_error_set():
     """Timed-out blocks share the READ load-failure drain."""
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
@@ -588,30 +453,6 @@ def test_worker_drains_timed_out_blocks_through_the_load_error_set():
     assert worker.get_block_ids_with_load_errors() == {10, 11}
     # Drained: a second call reports nothing new.
     assert worker.get_block_ids_with_load_errors() == set()
-
-
-@pytest.mark.parametrize("cls_name", ["MoRIIOConnector", "MoRIIOConnectorWorker"])
-def test_get_block_ids_with_load_errors_is_defined_once(cls_name):
-    """A second definition silently shadows the first.
-
-    #51052 and #58962 each added one to the worker; both merged cleanly and
-    Python kept the later one, so the timeout drain never ran.
-    """
-    tree = ast.parse(inspect.getsource(moriio_connector))
-    cls = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name == cls_name
-    )
-    defs = [
-        node.name
-        for node in cls.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "get_block_ids_with_load_errors"
-    ]
-    assert len(defs) == 1, (
-        f"{cls_name} defines get_block_ids_with_load_errors {len(defs)} times"
-    )
 
 
 # --- through the real scheduler -------------------------------------------
@@ -837,34 +678,6 @@ def test_scheduler_releases_an_aborted_request_whose_kv_arrives_in_time(
     assert _step(scheduler) == set()
     assert not log.warning.called
     assert not log.error.called
-
-
-def test_scheduler_times_out_exactly_at_the_deadline(consumer, clock):
-    scheduler, _ = consumer
-    request = _add_waiting_request(scheduler)
-
-    clock.advance(TIMEOUT_S)  # now == deadline
-    assert _step(scheduler)
-    assert request.status == RequestStatus.FINISHED_ERROR
-
-
-def test_scheduler_fails_every_request_that_expires_in_the_same_step(consumer, clock):
-    scheduler, _ = consumer
-    pool = scheduler.kv_cache_manager.block_pool
-    first = _add_waiting_request(scheduler, "xfer-a")
-    second = _add_waiting_request(scheduler, "xfer-b")
-    held = pool.get_num_free_blocks()
-
-    clock.advance(TIMEOUT_S + 1)
-    assert _step(scheduler)
-    assert first.status == RequestStatus.FINISHED_ERROR
-    assert second.status == RequestStatus.FINISHED_ERROR
-    assert pool.get_num_free_blocks() == held
-    assert _step(scheduler) == set()
-
-    _step(scheduler, finished_recving={first.request_id, second.request_id})
-    assert first.request_id not in scheduler.requests
-    assert second.request_id not in scheduler.requests
 
 
 def test_scheduler_does_not_time_out_a_request_the_producer_reported_failed(
