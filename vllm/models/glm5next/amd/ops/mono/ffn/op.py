@@ -101,8 +101,9 @@ class FlashDsaWeights:
 
 @dataclass
 class FlashDsaCaches:
-    """One sparse-attention layer's caches: the bf16 MLA latent cache
-    [blocks, block_tokens, 512] (block stride may be padded), the uint8 index
+    """One sparse-attention layer's caches: the MLA latent cache, bf16
+    [blocks, block_tokens, 512] or uint8 mxfp4_mla rows [blocks, block_tokens, 272]
+    (block stride may be padded), the uint8 index
     cache [blocks, block_tokens / 4, 132] (pool FP8 values, then f32 scales) and
     the bf16 kpool tail ring [blocks, 2, 4, 128] (k, gate)."""
 
@@ -149,10 +150,11 @@ class FlashFfnRuntime:
         dsa: bool = False,
         max_pools: int = 0,
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
+        kv_mxfp4: bool = False,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
         self.kda, self.dsa, self.max_pools = kda, dsa, max_pools
-        self.dsa_fp8 = dsa_fp8
+        self.dsa_fp8, self.kv_mxfp4 = dsa_fp8, kv_mxfp4
         self.launch, self.sc, self.sy = build_flash_ffn_kernel(
             width,
             rank=rank,
@@ -166,6 +168,7 @@ class FlashFfnRuntime:
             dsa=dsa,
             max_pools=max_pools,
             dsa_fp8=dsa_fp8,
+            kv_mxfp4=kv_mxfp4,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
@@ -261,6 +264,9 @@ class FlashFfnOp:
         d, c = self.dsa, caches
         assert d is not None and self.tab is not None
         kv, idx, tail = c.kv_cache, c.idx_cache, c.tail_cache
+        want = torch.uint8 if self.rt.kv_mxfp4 else torch.bfloat16
+        if kv.dtype != want:
+            raise ValueError(f"MLA cache {kv.dtype} on a {want} KV runtime")
         values = {
             **{
                 name: 0 if getattr(d, name) is None else getattr(d, name).data_ptr()

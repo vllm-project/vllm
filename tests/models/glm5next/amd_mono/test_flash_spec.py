@@ -66,10 +66,46 @@ def test_refusals_are_reported_at_once():
         assert any(w in r for r in reasons), (w, reasons)
 
 
-def test_supported_geometry_has_no_model_reasons():
-    reasons = spec.refuse_config(_flash_config())
+@pytest.mark.parametrize("cache", spec.KV_CACHE_DTYPES)
+def test_supported_geometry_has_no_model_reasons(cache: str):
+    reasons = spec.refuse_config(_flash_config(cache=cache))
     # only the platform may refuse off ROCm / off gfx950
     assert all(r in ("needs ROCm", "needs gfx950") for r in reasons), reasons
+
+
+def _dsa_caches(mla: torch.Tensor) -> dict[str, torch.Tensor]:
+    nb = mla.shape[0]
+    return {
+        "5.mla": mla,
+        "5.icache": torch.zeros(nb, 16, 132, dtype=torch.uint8),
+        "5.tail": torch.zeros(nb, 2, 4, 128, dtype=torch.bfloat16),
+    }
+
+
+@pytest.mark.parametrize(
+    "mxfp4, mla",
+    [
+        (False, torch.zeros(3, 64, 512, dtype=torch.bfloat16)),
+        (True, torch.zeros(3, 64, 272, dtype=torch.uint8)),
+    ],
+)
+def test_mla_cache_binds(mxfp4: bool, mla: torch.Tensor):
+    out, reasons = kernel._bind_dsa(_dsa_caches(mla), mxfp4)
+    assert not reasons, reasons
+    assert out[5].kv_cache is mla
+
+
+def test_mla_cache_must_match_the_kv_dtype():
+    bf16 = torch.zeros(3, 64, 512, dtype=torch.bfloat16)
+    packed = torch.zeros(3, 64, 272, dtype=torch.uint8)
+    _, reasons = kernel._bind_dsa(_dsa_caches(bf16), mxfp4=True)
+    assert any("MLA cache" in r for r in reasons), reasons
+    _, reasons = kernel._bind_dsa(_dsa_caches(packed), mxfp4=False)
+    assert any("MLA cache" in r for r in reasons), reasons
+    # a 512-byte uint8 row is FP8, not mxfp4_mla
+    fp8 = torch.zeros(3, 64, 512, dtype=torch.uint8)
+    _, reasons = kernel._bind_dsa(_dsa_caches(fp8), mxfp4=True)
+    assert any("MLA cache" in r for r in reasons), reasons
 
 
 def test_layer_kinds():

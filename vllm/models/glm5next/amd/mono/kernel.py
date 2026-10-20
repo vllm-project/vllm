@@ -99,11 +99,22 @@ def pack(model: nn.Module, ctx: MonoContext) -> dict[int, Any]:
     return packed
 
 
-def _bind_dsa(caches: Mapping[str, torch.Tensor]) -> tuple[dict, list[str]]:
-    """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512], index
-    cache [blocks, 16 n pools, 132] (16-pool tiles) and kpool tail ring
+def kv_mxfp4(ctx: MonoContext) -> bool:
+    return ctx.vllm_config.cache_config.cache_dtype == "mxfp4_mla"
+
+
+def _bind_dsa(
+    caches: Mapping[str, torch.Tensor], mxfp4: bool
+) -> tuple[dict, list[str]]:
+    """Each sparse-attention layer's MLA latent cache [blocks, tokens, 512] (bf16)
+    or [blocks, tokens, 272] (uint8 mxfp4_mla rows), index cache
+    [blocks, 16 n pools, 132] (16-pool tiles) and kpool tail ring
     [blocks, 2, 4, 128]; the kernel addresses every block with a 64-bit base."""
     from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashDsaCaches
+    from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+
+    width = row_bytes(KV_LORA) if mxfp4 else KV_LORA
+    dtype = torch.uint8 if mxfp4 else torch.bfloat16
 
     reasons, out = [], {}
     for key, kv in caches.items():
@@ -113,8 +124,10 @@ def _bind_dsa(caches: Mapping[str, torch.Tensor]) -> tuple[dict, list[str]]:
         ic, tail = caches[f"{idx}.icache"], caches[f"{idx}.tail"]
         if kv.dim() == 4 and kv.shape[1] == 1:
             kv = kv.squeeze(1)
-        if kv.dim() != 3 or kv.shape[2] != KV_LORA or kv.stride()[1:] != (KV_LORA, 1):
+        if kv.dim() != 3 or kv.shape[2] != width or kv.stride()[1:] != (width, 1):
             reasons.append(f"layer {idx}: MLA cache {tuple(kv.shape)} {kv.stride()}")
+        if kv.dtype != dtype:
+            reasons.append(f"layer {idx}: {kv.dtype} MLA cache (needs {dtype})")
         if (
             ic.dim() != 3
             or ic.shape[2] != INDEX_DIM + 4
@@ -158,7 +171,7 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
         if conv.shape[0] != rec.shape[0]:
             reasons.append(f"layer {idx}: {conv.shape[0]} conv, {rec.shape[0]} slots")
         states[int(idx)] = FlashKdaState(conv, rec)
-    dsa, dsa_reasons = _bind_dsa(caches)
+    dsa, dsa_reasons = _bind_dsa(caches, kv_mxfp4(ctx))
     reasons += dsa_reasons
     if not reasons:
         ctx.state["kda_states"] = states
@@ -316,6 +329,7 @@ def _runtime(ctx: MonoContext, width: int, launches: int, kind: str):
             dsa=kind == "dsa",
             max_pools=max_pools(ctx) if kind == "dsa" else 0,
             dsa_fp8=ctx.state.get("dsa_fp8", (True, True, True)),
+            kv_mxfp4=kind == "dsa" and kv_mxfp4(ctx),
         )
         widths[(width, kind)] = _Width(rt, width, ctx.device)
         if first is None and rt.flags is not None:

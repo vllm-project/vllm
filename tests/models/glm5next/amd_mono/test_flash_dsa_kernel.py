@@ -29,6 +29,7 @@ MAX_LEN = 8192
 # tokens of each row including the new one (0: padding); 4100, 1500, 7000, 64 and
 # 6200 complete a pool, 2050 / 2049 / 3333 keep a 2 / 1 / 1-token tail
 LENS = (4100, 1500, 2050, 7000, 2049, 64, 3333)
+_E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def _bf16(w):
@@ -165,9 +166,11 @@ class _Caches:
     """Random caches for S requests of up to MAX_LEN tokens, the block table, and
     the step's row table."""
 
-    def __init__(self, S: int, device, seed: int) -> None:
+    def __init__(self, S: int, device, seed: int, mxfp4: bool = False) -> None:
         from vllm.models.glm5next.amd.ops.mono.config import INDEX_DIM, KV_LORA
         from vllm.models.glm5next.amd.ops.mono.ffn.layout import ROW_WORDS
+        from vllm.v1.attention.ops.mxfp4_mla import row_bytes
+        from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
 
         g = torch.Generator(device=device).manual_seed(seed)
         per = MAX_LEN // BLOCK
@@ -175,6 +178,13 @@ class _Caches:
         ipb = BLOCK // 4
         self.ipb = ipb
         self.kv = torch.randn(nb, BLOCK, KV_LORA, generator=g, device=device).bfloat16()
+        if mxfp4:
+            bf16 = self.kv.view(-1, KV_LORA)
+            self.kv = torch.zeros(
+                nb, BLOCK, row_bytes(KV_LORA), dtype=torch.uint8, device=device
+            )
+            slots = torch.arange(bf16.shape[0], device=device)
+            store_mxfp4_mla(bf16, slots, self.kv)
         vals = (torch.randn(nb, ipb, INDEX_DIM, generator=g, device=device) * 64).clamp(
             -448, 448
         )
@@ -213,6 +223,20 @@ class _Caches:
 
         return FlashDsaCaches(self.kv, self.idx, self.tail)
 
+    def latent(self, kv=None) -> torch.Tensor:
+        """f32 latent rows [..., 512] of the MLA cache, mxfp4_mla rows dequantized."""
+        from vllm.models.glm5next.amd.ops.mono.config import KV_LORA
+
+        kv = self.kv if kv is None else kv
+        if kv.dtype != torch.uint8:
+            return kv.float()
+        data = kv[..., : KV_LORA // 2]
+        codes = torch.stack([data & 0x0F, data >> 4], -1).flatten(-2)
+        mag = torch.tensor(_E2M1, device=kv.device)[(codes & 0x07).long()]
+        values = torch.where(codes & 0x08 != 0, -mag, mag)
+        scales = torch.exp2(kv[..., KV_LORA // 2 :].float() - 127.0)
+        return values * scales.repeat_interleave(32, -1)
+
     def clone(self):
         c = object.__new__(_Caches)
         c.__dict__.update(self.__dict__)
@@ -235,7 +259,7 @@ def _rms(x, w, eps=1e-5):
     ).bfloat16()
 
 
-def _check(rank: int, tp: int, device, fp8) -> None:
+def _check(rank: int, tp: int, device, fp8, mxfp4: bool = False) -> None:
     import torch.distributed as dist
     import torch.nn.functional as F
 
@@ -260,6 +284,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
     )
     from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnOp, FlashFfnRuntime
     from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
+    from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
 
     lay, dsa = _Layer(rank, tp, device), _Dsa(rank, tp, device, fp8)
     H = dsa.H
@@ -278,6 +303,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
             dsa=True,
             max_pools=max_pools,
             dsa_fp8=fp8,
+            kv_mxfp4=mxfp4,
         )
         op = FlashFfnOp(rt, lay.weights(), 0, dsa=dsa.weights())
         g = lay.g
@@ -287,7 +313,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
         comb = torch.softmax(
             torch.randn(S, HC_MULT, HC_MULT, generator=g, device=device), -1
         )
-        cache = _Caches(S, device, seed=10 + S)
+        cache = _Caches(S, device, seed=10 + S, mxfp4=mxfp4)
         before = cache.clone()
         rows, live = cache.rows, S - 1
         pos = rows[:, 0].long()
@@ -340,11 +366,24 @@ def _check(rank: int, tp: int, device, fp8) -> None:
         q_an = _box(rt, "q_an", S * Q_LORA, packed=True).view(S, Q_LORA)
         assert _rel(q_an, _rms(qa, dsa.g_qa)) < 1e-2, f"S={S}: q_a norm"
         kv_want = _rms(kva, dsa.g_kv)
-        flat_kv = cache.kv.view(-1, KV_LORA)
-        for r in range(live):
-            got_row = flat_kv[int(rows[r, 1])]
-            assert _rel(got_row, kv_want[r]) < 1e-2, f"S={S} row {r}: KV cache row"
-        changed = before.kv.view(-1, KV_LORA).ne(flat_kv).any(-1)
+        flat_kv = cache.kv.view(-1, cache.kv.shape[-1])
+        slots = rows[:live, 1].long()
+        if mxfp4:
+            # vLLM's store on the reference norm, which may differ from the
+            # kernel's in a last bf16 bit and so move a code across a midpoint
+            ref_kv = before.clone()
+            store_mxfp4_mla(kv_want[:live], slots, ref_kv.kv)
+            want_rows = ref_kv.kv.view(-1, flat_kv.shape[-1])[slots]
+            got_rows = flat_kv[slots]
+            off = (got_rows != want_rows).float().mean().item()
+            assert off < 1e-2, f"S={S}: {off:.2%} mxfp4_mla bytes differ"
+            e = _rel(cache.latent(got_rows), cache.latent(want_rows))
+            assert e < 1e-2, f"S={S}: mxfp4_mla rows {e}"
+        else:
+            for r in range(live):
+                got_row = flat_kv[int(rows[r, 1])]
+                assert _rel(got_row, kv_want[r]) < 1e-2, f"S={S} row {r}: KV cache row"
+        changed = before.kv.view(-1, flat_kv.shape[-1]).ne(flat_kv).any(-1)
         assert int(changed.sum()) <= live, f"S={S}: stray MLA cache writes"
 
         # index k LayerNorm + kpool: vLLM's decode kernel on the kernel's inputs
@@ -459,7 +498,7 @@ def _check(rank: int, tp: int, device, fp8) -> None:
                 continue
             toks = torch.arange(L, device=device) if L <= TOPK_TOKENS else sel[r].long()
             blk = cache.bt[r, toks // BLOCK].long()
-            kvr = cache.kv[blk, toks % BLOCK].float()  # [T, 512]
+            kvr = cache.latent(cache.kv[blk, toks % BLOCK])  # [T, 512]
             sc = torch.einsum("hl,tl->ht", q_lat[r].float(), kvr) * MLA_SCALE
             o_lat = (torch.softmax(sc, -1) @ kvr).bfloat16().float()
             want = torch.einsum("hl,hvl->hv", o_lat, dsa.w_uv.float())
@@ -531,3 +570,14 @@ def test_dsa_layer_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch, tp: int, fm
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _worker(_check, FORMATS[fmt]))
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
+@pytest.mark.parametrize("tp, fmt", [(2, "mixed"), (4, "fp8")])
+def test_dsa_layer_mxfp4_kv_cache(monkeypatch: pytest.MonkeyPatch, tp: int, fmt: str):
+    from ....utils import multi_process_parallel
+
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
+    pytest.importorskip("flydsl")
+    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, FORMATS[fmt], True))

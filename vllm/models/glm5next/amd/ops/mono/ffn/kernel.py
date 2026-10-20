@@ -131,6 +131,7 @@ from vllm.models.glm5next.amd.ops.mono.ops import (
 )
 from vllm.models.glm5next.amd.ops.mono.ops import exp as _exp
 from vllm.models.glm5next.amd.ops.mono.ops import fp8_to_bf16x8 as _fp8_to_bf16x8
+from vllm.models.glm5next.amd.ops.mono.ops import mxfp4_to_bf16x8 as _mxfp4_to_bf16x8
 from vllm.models.glm5next.amd.ops.mono.ops import rcp as _rcp
 from vllm.models.glm5next.amd.ops.mono.ops import rsq as _rsq
 from vllm.models.glm5next.amd.ops.mono.ops import rsrc as _rsrc
@@ -159,6 +160,7 @@ def build_flash_ffn_kernel(
     dsa: bool = False,
     max_pools: int = 0,
     dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
+    kv_mxfp4: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher of one rank's FFN layer for S rows; with
     ``kda`` the whole KDA decoder layer (attention-side mHC, projections, short conv,
@@ -167,6 +169,10 @@ def build_flash_ffn_kernel(
     LoRA projections and norms, KV cache write, kpool indexer, sparse MLA, o_proj)
     for rows of at most ``max_pools`` kpool pools. ``dsa_fp8`` says which of q_a | kv_a,
     q_b and o_proj are FP8 with 128 x 128 block scales (else row-major bf16).
+    With ``kv_mxfp4`` the MLA latent cache holds vLLM's ``mxfp4_mla`` rows (256
+    bytes of E2M1 codes, then 16 E8M0 scales, one a 32 values): rows are written
+    as ``store_mxfp4_mla`` writes them and unpacked to bf16 as they are loaded for
+    the split attention.
 
     ``poll_limit`` bounds the re-polls of every mailbox wait. An expired wait
     stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
@@ -189,6 +195,9 @@ def build_flash_ffn_kernel(
     HG = MH // WAVES
     QB_ROWS = MH * NOPE_DIM
     QKV8, QB8, O8 = dsa_fp8
+    # MLA cache element and row bytes: bf16, or an mxfp4_mla row of uint8
+    KV_ELEM = 1 if kv_mxfp4 else 2
+    KV_ROW = KV_LORA // 2 + KV_LORA // 32 if kv_mxfp4 else KV_LORA * 2
     whole = kda or dsa
     FAULT = abi.fault_spec()
     expert_inter = inter
@@ -1621,6 +1630,37 @@ def build_flash_ffn_kernel(
         # tokens' (k, gate) (three from the tail ring, the row's own), the
         # weighted k, bf16, Hadamard, bf16, ue8m0 FP8. Then the row's (k, gate)
         # goes to ring slot pos % 4. ``kv_ready`` releases both caches.
+        def mxfp4_row_store(r_row, x):
+            """``store_mxfp4_mla`` of the block's 512 values, value ``tid`` in thread
+            ``tid``: each 32 lanes share the E8M0 scale ceil_pow2(absmax / 6) (an
+            all-zero group 2^0), codes round to the nearest E2M1 magnitude, ties to
+            the even code as that store and AITER do, so the row is bit-identical."""
+            amax = fmath.absf(x)
+            for sh in range_constexpr(5):
+                amax = _xred(amax, 16 >> sh, fx.max)
+            bits = div(amax, fx.Float32(6.0)).bitcast(fx.Int32)
+            e = ((bits >> 23) & fx.Int32(0xFF)) + (
+                (bits & fx.Int32(0x7FFFFF)) != 0
+            ).select(fx.Int32(1), fx.Int32(0))
+            e = fx.min(fx.max(e, fx.Int32(1)), fx.Int32(254))
+            e = (amax == 0.0).select(fx.Int32(127), e)
+            # a bf16 absmax / 6 is below 2^126, so e <= 253 and 2^(127 - e) is normal
+            y = x * ((fx.Int32(254) - e) << 23).bitcast(fx.Float32)
+            a = fmath.absf(y)
+            code = (y < 0.0).select(fx.Int32(8), fx.Int32(0))
+            # a midpoint above an odd code rounds up, above an even one down
+            for i, mid in enumerate((0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)):
+                up = (a >= mid) if i % 2 else (a > mid)
+                code = code + up.select(fx.Int32(1), fx.Int32(0))
+            # nibbles -> bytes (even lanes) -> dwords (every 8th lane)
+            word = code | (_xshfl(code, 1) << 4)
+            word = word | (_xshfl(word, 2) << 8)
+            word = word | (_xshfl(word, 4) << 16)
+            if lane % 8 == 0:
+                bo.buffer_store(word, r_row, tid // 8)
+            if lane % 32 == 0:
+                bo.buffer_store(e.to(fx.Int8), r_row, KV_LORA // 2 + tid // 32)
+
         def dsa_cache(tv, t32):
             KVB = t32["kv_block_tokens"]
             KVE = tv["kv_block_elems"]
@@ -1651,12 +1691,19 @@ def build_flash_ffn_kernel(
                 )
                 rstd = _rsq(block_sum(kv * kv) * (1.0 / KV_LORA) + EPS)
                 if slot >= 0:
-                    row_addr = tv["kv_cache"] + (
-                        fx.Int64(slot // KVB) * KVE + fx.Int64((slot % KVB) * KV_LORA)
-                    ) * fx.Int64(2)
-                    bo.buffer_store(
-                        fx.Float32(kv * rstd * g).to(fx.BFloat16), _rsrc(row_addr), tid
+                    row_addr = (
+                        tv["kv_cache"]
+                        + fx.Int64(slot // KVB) * KVE * fx.Int64(KV_ELEM)
+                        + fx.Int64((slot % KVB) * KV_ROW)
                     )
+                    if const_expr(kv_mxfp4):
+                        mxfp4_row_store(_rsrc(row_addr), bf16_round(kv * rstd * g))
+                    else:
+                        bo.buffer_store(
+                            fx.Float32(kv * rstd * g).to(fx.BFloat16),
+                            _rsrc(row_addr),
+                            tid,
+                        )
                 mean = block_sum(lk.select(kraw, fx.Float32(0.0))) * (1.0 / INDEX_DIM)
                 cen = lk.select(kraw - mean, fx.Float32(0.0))
                 var = block_sum(cen * cen) * (1.0 / INDEX_DIM)
@@ -2452,12 +2499,32 @@ def build_flash_ffn_kernel(
                         off = _uniform(lds_ld(keys, SPLIT_KEYS + j))
                         r_row = _rsrc(
                             tv["kv_cache"]
-                            + (fx.Int64(blk) * KVE + fx.Int64(off * KV_LORA))
-                            * fx.Int64(2)
+                            + fx.Int64(blk) * KVE * fx.Int64(KV_ELEM)
+                            + fx.Int64(off * KV_ROW)
                         )
-                        raw = fx.Vector(
-                            bo.buffer_load(r_row, lane * 4, vec_width=4, dtype=T.i32)
-                        )
+                        # lane: latent values 8 lane .. 8 lane + 7, as bf16 pairs
+                        if const_expr(kv_mxfp4):
+                            codes = bo.buffer_load(
+                                r_row, lane, vec_width=1, dtype=T.i32
+                            )
+                            scales = fx.Int32(
+                                bo.buffer_load(
+                                    r_row,
+                                    KV_LORA // 8 + lane // 16,
+                                    vec_width=1,
+                                    dtype=T.i32,
+                                )
+                            )
+                            e8 = (scales >> ((lane // 4) % 4 * 8)) & fx.Int32(0xFF)
+                            raw = _mxfp4_to_bf16x8(
+                                codes, (e8 << 23).bitcast(fx.Float32)
+                            )
+                        else:
+                            raw = fx.Vector(
+                                bo.buffer_load(
+                                    r_row, lane * 4, vec_width=4, dtype=T.i32
+                                )
+                            )
                         fx.ptr_store(
                             raw.bitcast(fx.Float32), ktile + (j * QS + lane * 4)
                         )
