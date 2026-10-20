@@ -306,6 +306,7 @@ def test_finish_error_lets_engine_abort_and_drops_session():
 
     assert engine.calls == ["start", "update", "finish", "abort", "reset"]
     assert worker._weight_update_active is False
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.reset_lora_calls == 0
 
 
@@ -410,6 +411,7 @@ def test_reload_weights_rejected_while_weights_asleep():
     worker._asleep_tags = {"weights"}
     with pytest.raises(RuntimeError, match="asleep"):
         Worker.reload_weights(worker)
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.seen_config is None
 
 
