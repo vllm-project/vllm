@@ -974,6 +974,8 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -981,6 +983,14 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else None
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
@@ -1466,6 +1476,28 @@ class Platform:
                     logger.warning(
                         "Unknown vLLM environment variable detected: %s", env
                     )
+
+    @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str:
+        """Resolve the fully-qualified class path of the platform's KV cache
+        config builder.
+
+        .. note::
+            Experimental, like the ``KVCacheConfigBuilder`` interface it selects.
+
+        The builder supplies grouping (``get_kv_cache_groups``) and tensor
+        placement (``get_kv_cache_config_from_groups``). Vendors may override
+        this to return a platform-specific builder. The default builder honors a
+        model implementing
+        :class:`~vllm.model_executor.models.interfaces.SupportsKVCacheGrouping`;
+        a builder that overrides ``get_kv_cache_groups`` owns grouping and
+        bypasses that model hook unless it calls ``super()``.
+
+        Returns:
+            Fully-qualified class path of a ``KVCacheConfigBuilder`` subclass.
+
+        """
+        return "vllm.v1.core.kv_cache_planning.DefaultKVCacheConfigBuilder"
 
 
 class UnspecifiedPlatform(Platform):
