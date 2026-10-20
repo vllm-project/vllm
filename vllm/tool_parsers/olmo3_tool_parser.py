@@ -30,6 +30,62 @@ from vllm.tool_parsers.utils import (
 logger = init_logger(__name__)
 
 
+def escape_ctrl_chars_in_regular_strings(text: str) -> str:
+    """Escape raw control characters inside ``'...'`` and ``"..."`` strings.
+
+    Triple-quoted strings may contain raw newlines, and ``ast.parse`` accepts
+    those, so they are left unchanged. Characters that are already escaped are
+    copied through. Text outside string literals is returned unchanged.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+
+    while index < length:
+        if quote in {'"""', "'''"}:
+            if text.startswith(quote, index):
+                out.append(quote)
+                index += 3
+                quote = None
+                continue
+            out.append(text[index])
+            index += 1
+            continue
+        if quote is not None:
+            char = text[index]
+            if char == "\\" and index + 1 < length:
+                out.append(char)
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                out.append(char)
+                quote = None
+            elif char == "\n":
+                out.append("\\n")
+            elif char == "\r":
+                out.append("\\r")
+            elif char == "\t":
+                out.append("\\t")
+            elif char == "\x00":
+                out.append("\\x00")
+            else:
+                out.append(char)
+            index += 1
+            continue
+        if text.startswith('"""', index) or text.startswith("'''", index):
+            quote = text[index : index + 3]
+            out.append(quote)
+            index += 3
+            continue
+        char = text[index]
+        if char in {"'", '"'}:
+            quote = char
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def join_newline_separated_calls(text: str) -> str:
     """Join top-level calls with commas without rewriting string contents.
 
@@ -38,6 +94,7 @@ def join_newline_separated_calls(text: str) -> str:
     call. Raw control characters inside a non-triple-quoted string are
     escaped so ``ast.parse`` keeps the original value.
     """
+    text = escape_ctrl_chars_in_regular_strings(text)
     parts: list[str] = []
     buf: list[str] = []
     quote: str | None = None
@@ -123,8 +180,10 @@ class Olmo3PythonicToolParser(ToolParser):
     # Neither of these are necessary for e.g. ToolACE, but both would help make
     # Llama3.2 models more reliable.
 
+    # ``\s*`` after ``(`` keeps a call that is pretty-printed across lines.
+    # Without it, that call misses the regex and is returned as plain text.
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        r"\[([a-zA-Z]+\w*\(\s*([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(\s*([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL,
     )
 
@@ -159,15 +218,23 @@ class Olmo3PythonicToolParser(ToolParser):
         model_output = join_newline_separated_calls(model_output)
         model_output = f"[{model_output}]"
 
+        # A regex miss is ordinary prose. Parsing it logs an exception for
+        # every response that does not contain a tool call.
+        is_tool_call_pattern = False
         try:
-            _ = self.TOOL_CALL_REGEX.match(
-                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            is_tool_call_pattern = (
+                self.TOOL_CALL_REGEX.match(
+                    model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                )
+                is not None
             )
         except TimeoutError:
             logger.warning("Regex timeout occurred when matching tool call pattern.")
             logger.debug(
                 "Regex timeout occurred when matching user input: %s", model_output
             )
+
+        if not is_tool_call_pattern:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=original_model_output
             )
@@ -217,6 +284,10 @@ class Olmo3PythonicToolParser(ToolParser):
             if current_text.endswith("</function_calls>"):
                 current_text = current_text[: -len("</function_calls>")]
 
+            # make_valid_python parses the partial text. A raw newline inside
+            # a regular quoted string is a SyntaxError, so streaming would
+            # stop at that character and drop every later call.
+            current_text = escape_ctrl_chars_in_regular_strings(current_text)
             valid_and_added_text = make_valid_python(current_text)
             if valid_and_added_text is None:
                 return None
