@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for DFlash-named self-contained DSpark drafts (#49614).
+"""Tests for DFlash-named self-contained Qwen3 DSpark drafts (#49614).
 
 DeepSeek ships the SAME draft architecture for its DSpark (``markov_rank > 0``)
 and DFlash (``markov_rank == 0``) checkpoints: ``dflash_qwen3_4b_block7`` and
-``dspark_qwen3_4b_block7`` are both ``Qwen3DSparkModel`` (and the gemma4 pair is
-``Gemma4DSparkModel``). ``Qwen3DSparkForCausalLM``/``Gemma4DSparkForCausalLM``
-serve both, so these drafts must take the dspark path. With ``method="dflash"``
--- passed explicitly or inferred from the ``dflash`` model name -- the draft was
-instead EAGLE-renamed to the unregistered ``DFlashQwen3DSparkModel`` and the
-engine failed to start.
+``dspark_qwen3_4b_block7`` are both ``Qwen3DSparkModel``, and
+``Qwen3DSparkForCausalLM`` serves both, so these drafts must take the dspark
+path. With ``method="dflash"`` -- passed explicitly or inferred from the
+``dflash`` model name -- the draft was instead EAGLE-renamed to the unregistered
+``DFlashQwen3DSparkModel`` and the engine failed to start.
 """
 
 import pytest
@@ -18,7 +17,7 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import (
     SpeculativeConfig,
-    _route_self_contained_dspark_draft,
+    _route_self_contained_qwen3_dspark_draft,
 )
 
 # All repos are public; only config/tokenizer-config files are fetched.
@@ -56,12 +55,10 @@ def test_dspark_draft_is_unchanged():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "architecture", ["Qwen3DSparkModel", "Qwen3OmniDSparkModel", "Gemma4DSparkModel"]
-)
-def test_self_contained_dspark_architectures_are_routed(architecture: str):
+@pytest.mark.parametrize("architecture", ["Qwen3DSparkModel", "Qwen3OmniDSparkModel"])
+def test_self_contained_qwen3_dspark_architectures_are_routed(architecture: str):
     assert (
-        _route_self_contained_dspark_draft(
+        _route_self_contained_qwen3_dspark_draft(
             "dflash", [architecture], "some/dflash_model"
         )
         == "dspark"
@@ -73,7 +70,7 @@ def test_self_contained_dspark_architectures_are_routed(architecture: str):
 def test_standalone_dflash_drafts_are_unchanged(architecture: str):
     """A standalone DFlash draft has its own registered architecture."""
     assert (
-        _route_self_contained_dspark_draft(
+        _route_self_contained_qwen3_dspark_draft(
             "dflash", [architecture], "z-lab/Qwen3.5-9B-DFlash"
         )
         == "dflash"
@@ -84,6 +81,8 @@ def test_standalone_dflash_drafts_are_unchanged(architecture: str):
 @pytest.mark.parametrize("method", ["dspark", "eagle3", "mtp", None])
 def test_other_methods_are_unchanged(method: str | None):
     assert (
-        _route_self_contained_dspark_draft(method, ["Qwen3DSparkModel"], "some/model")
+        _route_self_contained_qwen3_dspark_draft(
+            method, ["Qwen3DSparkModel"], "some/model"
+        )
         == method
     )
