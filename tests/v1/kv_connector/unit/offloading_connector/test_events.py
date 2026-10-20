@@ -29,7 +29,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheSpecKind,
+    MambaSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
@@ -48,6 +50,10 @@ from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
     kv_cache_spec_kind=KVCacheSpecKind.FULL_ATTENTION.value,
+    kv_cache_spec_sliding_window=None,
+)
+_MAMBA_EVENT_SPEC = OffloadingEventGroupSpec(
+    kv_cache_spec_kind=KVCacheSpecKind.MAMBA.value,
     kv_cache_spec_sliding_window=None,
 )
 
@@ -89,17 +95,31 @@ def _group_config(
     blocks_per_chunk: int = 1,
     tokens_per_hash: int | None = None,
     sliding_window_size_in_chunks: int | None = None,
+    mamba: bool = False,
 ) -> GroupOffloadConfig:
     if tokens_per_hash is None:
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
-    kv_spec = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
+    kv_spec: KVCacheSpec
+    if mamba:
+        # A recurrent group: one state per chunk, offloaded in align mode.
+        kv_spec = MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        )
+        sliding_window_size_in_chunks = 1
+        event_spec = _MAMBA_EVENT_SPEC
+    else:
+        kv_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+        event_spec = _FULL_ATTENTION_EVENT_SPEC
     manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
     assert manager_cls is not None
     return GroupOffloadConfig(
@@ -110,7 +130,8 @@ def _group_config(
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
         kv_cache_spec=kv_spec,
         manager_cls=manager_cls,
-        kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
+        kv_event_group_spec=event_spec,
+        requires_cow_source=mamba,
     )
 
 
@@ -515,12 +536,63 @@ def test_take_events_opt_out_keeps_placeholders():
     assert len(events[3].block_hashes) == 3
 
 
+def test_mamba_chunk_store_emits_self_describing_event():
+    """A recurrent group's chunk is announced like an attention chunk, with
+    kv_cache_spec_kind "mamba", so a consumer can align it by hash."""
+    tracker = _tracker()
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
+    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+
+    events = list(tracker.take_events([_stored_event(keys[1:])]))
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(3))]
+    assert event.parent_block_hash == _wire_hash(_hash(1))
+    assert event.token_ids == list(range(9, 17))
+    assert event.block_size == 8
+    assert event.group_idx == 1
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+    assert event.kv_cache_spec_sliding_window is None
+
+    [removed] = tracker.take_events([_removed_event(keys[1:])])
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(_hash(3))]
+    assert removed.group_idx == 1
+
+
+@pytest.mark.parametrize(
+    "record_method", ["record_partial_store", "record_partial_lookup"]
+)
+def test_mamba_partial_tail_event_is_self_describing(record_method):
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=16, blocks_per_chunk=1, mamba=True
+    )._replace(hashes_per_chunk=4)
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+
+    getattr(tracker, record_method)(req, group_config, 28, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(i)) for i in range(4, 7)]
+    assert event.parent_block_hash == _wire_hash(_hash(3))
+    assert event.token_ids == list(range(17, 29))
+    assert event.block_size == 4
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+
+
 @pytest.mark.parametrize(
     "sliding_window_size_in_chunks",
     [1, 2],
-    ids=["ssm", "sliding-window"],
+    ids=["one-chunk-window", "sliding-window"],
 )
-def test_event_metadata_skips_non_full_attention_group(
+def test_event_metadata_skips_windowed_attention_group(
     sliding_window_size_in_chunks: int,
 ):
     tracker = _tracker()
