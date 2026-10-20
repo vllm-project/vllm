@@ -2082,6 +2082,24 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         with pytest.raises(RuntimeError, match="multiple of 4"):
             resolve("flashinfer_gvr2", odd_pitch)
         assert resolve("auto", odd_pitch) != "flashinfer_gvr2"
+        # A strided view whose last row ends at its width cannot be read as
+        # [rows, stride]; as_fp32_logits output always can.
+        from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
+
+        def short_tail(dtype):
+            return torch.empty_strided(
+                (64, 131072), (131328, 1), dtype=dtype, device="cuda"
+            )
+
+        with pytest.raises(RuntimeError, match="full stride"):
+            resolve("flashinfer_gvr2", short_tail(torch.float32))
+        assert resolve("auto", short_tail(torch.float32)) != "flashinfer_gvr2"
+        upcast = as_fp32_logits(
+            short_tail(torch.bfloat16),
+            torch.full((64,), 131072, dtype=torch.int32, device="cuda"),
+        )
+        assert upcast.stride(0) == 131328
+        assert resolve("flashinfer_gvr2", upcast) == "flashinfer_gvr2"
         logits = logits[:, :16384]
         unaligned_logits = unaligned_logits[:, :16384]
     else:

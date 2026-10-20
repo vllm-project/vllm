@@ -305,14 +305,18 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
 
     Only columns below ``row_ends`` (int32, one per row) are converted, the
-    span the consumers read; DeepGEMM's aligned row stride is kept.
+    span the consumers read; DeepGEMM's aligned row stride is kept, with
+    storage for whole rows (gvr_2 reads the logits as [rows, stride]).
     """
     if logits.dtype == torch.float32:
         return logits
-    out = torch.empty_strided(
-        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
-    )
     num_rows, width = logits.shape
+    assert logits.stride(1) == 1
+    out = torch.empty(
+        (num_rows, max(logits.stride(0), width)),
+        dtype=torch.float32,
+        device=logits.device,
+    )[:, :width]
     if num_rows == 0 or width == 0:
         return out
     assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32

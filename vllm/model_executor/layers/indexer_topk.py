@@ -350,6 +350,10 @@ class SparseIndexerTopk(torch.nn.Module):
                 f"logits row stride must be a multiple of 4 and at least the "
                 f"row width, got stride(0)={row_pitch}, width={width}"
             )
+        elif num_rows > 1 and logits.untyped_storage().nbytes() < (
+            (logits.storage_offset() + num_rows * row_pitch) * logits.element_size()
+        ):
+            failures.append("logits storage must cover every row's full stride")
         if logits.data_ptr() % 16 != 0:
             failures.append("logits base pointer must be 16-byte aligned")
         return failures
