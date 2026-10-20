@@ -1,0 +1,4 @@
+# Generated at configure time by generate_paged_attn.py.
+attention_paged_attn_*.cu
+attention_paged_attn_entries.inc
+attention_paged_attn_dispatch.inc
