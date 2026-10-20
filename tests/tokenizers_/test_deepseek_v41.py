@@ -48,6 +48,9 @@ def test_reference_encoder_fixtures(case_id):
     thinking_mode = case.get("thinking_mode") or "chat"
     expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
 
+    # The reference encodes a conversation that ends with an assistant message as
+    # closed history, which is add_generation_prompt=False here.
+    final_assistant = messages[-1]["role"] == "assistant"
     if any(m["role"] == "latest_reminder" for m in messages):
         # latest_reminder is not an API role.
         assert case.get("tools") is None
@@ -55,14 +58,21 @@ def test_reference_encoder_fixtures(case_id):
             messages,
             thinking_mode=thinking_mode,
             reasoning_effort=case.get("reasoning_effort"),
+            add_generation_prompt=not final_assistant,
         )
     else:
-        prompt = render(
-            messages,
+        kwargs = dict(
             tools=case.get("tools"),
             thinking=thinking_mode == "thinking",
             reasoning_effort=case.get("reasoning_effort"),
         )
+        prompt = render(messages, add_generation_prompt=not final_assistant, **kwargs)
+        if final_assistant:
+            # By default a new assistant turn follows the final assistant message.
+            opener = "<｜Assistant｜>" + (
+                "<think>" if thinking_mode == "thinking" else "</think>"
+            )
+            assert render(messages, **kwargs) == expected + opener
     assert prompt == expected
 
 
@@ -357,3 +367,74 @@ def test_dropped_developer_only_image_leaves_text_prompt(render_with_media):
     assert "<｜deepseek_image｜>" not in prompt["prompt"]
     assert "multi_modal_data" not in prompt
     assert "multi_modal_uuids" not in prompt
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("final_role", ["user", "developer", "system", "assistant"])
+def test_generation_prompt_only_controls_final_turn(thinking, final_role):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": final_role, "content": "final message"},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    opened = render(messages, thinking=thinking, add_generation_prompt=True)
+    cue = "<｜Assistant｜>" + ("<think>" if thinking else "</think>")
+
+    assert opened == closed + cue
+    assert "first answer<｜end▁of▁sentence｜>" in closed
+    assert "<｜User｜>first question<｜Assistant｜>" in closed
+    assert messages == original
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_continue_final_message_preserves_historical_eos(thinking):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "The answer is "},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    continued = render(
+        messages,
+        thinking=thinking,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    assert closed == continued + "<｜end▁of▁sentence｜>"
+    assert continued.endswith("The answer is ")
+    assert "first answer<｜end▁of▁sentence｜>" in continued
+    assert messages == original
+
+
+def test_continue_final_message_through_chat_request():
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        messages=[
+            {"role": "user", "content": "Finish this sentence."},
+            {"role": "assistant", "content": "The answer is "},
+        ],
+        continue_final_message=True,
+    )
+    kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
+    assert render(request.messages, **kwargs).endswith("The answer is ")
+
+
+def test_continue_final_reasoning_keeps_thinking_open():
+    messages = [
+        {"role": "user", "content": "Explain your answer."},
+        {"role": "assistant", "content": None, "reasoning": "Let me consider "},
+    ]
+    assert render(messages, continue_final_message=True).endswith(
+        "<｜Assistant｜><think>Let me consider "
+    )
+
+
+@pytest.mark.parametrize("messages", [[], [{"role": "user", "content": "hello"}]])
+def test_continue_final_message_requires_assistant(messages):
+    with pytest.raises(ValueError, match="final assistant"):
+        render(messages, continue_final_message=True)
