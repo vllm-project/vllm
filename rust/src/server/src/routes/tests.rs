@@ -28,10 +28,12 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue, MmModality};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, RequestError,
     StopReason, UtilityCallOutput,
@@ -609,6 +611,63 @@ fn qwen_multimodal_model_info_with_limits(
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
+    info
+}
+
+/// Step5-VL reuses Step3-VL's six multimodal special tokens.
+const STEP3_IM_PATCH_ID: u32 = 151680;
+const STEP3_IM_START_ID: u32 = 151681;
+const STEP3_IM_END_ID: u32 = 151682;
+const STEP3_PATCH_START_ID: u32 = 151683;
+const STEP3_PATCH_END_ID: u32 = 151684;
+const STEP3_PATCH_NEWLINE_ID: u32 = 151685;
+
+fn step5_vl_chat_tokenizer() -> TestTokenizer {
+    fake_chat_tokenizer()
+        .with_regular_token("<im_patch>", STEP3_IM_PATCH_ID)
+        .with_regular_token("<im_start>", STEP3_IM_START_ID)
+        .with_regular_token("<im_end>", STEP3_IM_END_ID)
+        .with_regular_token("<patch_start>", STEP3_PATCH_START_ID)
+        .with_regular_token("<patch_end>", STEP3_PATCH_END_ID)
+        .with_regular_token("<patch_newline>", STEP3_PATCH_NEWLINE_ID)
+}
+
+fn step5_vl_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    step5_vl_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn step5_vl_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
+    let config_path = std::env::temp_dir().join(format!(
+        "vllm-server-step5-vl-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let preprocessor_config_path = std::env::temp_dir().join(format!(
+        "vllm-server-step5-vl-preprocessor-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(&config_path, r#"{"model_type":"step5_vl"}"#).expect("write step5_vl test config");
+    fs::write(
+        &preprocessor_config_path,
+        r#"{"image_size":728,"patch_size":504}"#,
+    )
+    .expect("write step5_vl test preprocessor config");
+    let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "step5-vl-test".to_string(),
+        Some("step5_vl".to_string()),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            preprocessor_config: Some(&preprocessor_config_path),
+            ..Default::default()
+        },
+        Arc::new(step5_vl_chat_tokenizer()),
+        limit_mm_per_prompt,
+    )
+    .expect("load multimodal info")
+    .expect("step5_vl multimodal info is registered");
+    let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(preprocessor_config_path);
     info
 }
 
@@ -3225,6 +3284,125 @@ async fn selected_logprobs_invalid_requests_return_client_errors() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            step5_vl_multimodal_model_info(),
+        )),
+        |request| {
+            let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+            // The 1x1 input image yields no sliding-window patches, so the
+            // `<im_patch>` marker expands to the global-view span only:
+            // `<im_start>` + 169 `<im_patch>` embed tokens + `<im_end>`.
+            assert!(prompt_token_ids.contains(&STEP3_IM_PATCH_ID));
+            assert!(prompt_token_ids.contains(&STEP3_IM_START_ID));
+            assert!(prompt_token_ids.contains(&STEP3_IM_END_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_START_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_END_ID));
+            assert!(!prompt_token_ids.contains(&STEP3_PATCH_NEWLINE_ID));
+            assert_eq!(
+                prompt_token_ids.iter().filter(|&&id| id == STEP3_IM_PATCH_ID).count(),
+                169
+            );
+
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features.len(), 1);
+            assert_eq!(features[0].modality, MmModality::Image);
+            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].mm_position.length, 169 + 2);
+
+            let is_embed = features[0].mm_position.is_embed.as_ref().expect("is_embed mask");
+            assert_eq!(is_embed.dtype, TensorDtype::Bool);
+            assert_eq!(is_embed.shape, vec![169 + 2]);
+            let mask = is_embed.data.as_raw_view().expect("inline is_embed mask");
+            assert_eq!(mask.first(), Some(&0));
+            assert_eq!(mask.last(), Some(&0));
+            assert_eq!(mask.iter().filter(|&&bit| bit != 0).count(), 169);
+
+            let data = features[0].data.as_ref().expect("feature data");
+            let tensor = |key: &str| match &data
+                .get(key)
+                .unwrap_or_else(|| panic!("missing `{key}` kwarg"))
+                .data
+            {
+                Some(MmKwargValue::Tensor(tensor)) => tensor,
+                other => panic!("`{key}` should be a tensor, got {other:?}"),
+            };
+
+            // Global view, resized to the configured 728x728 image size.
+            let pixel_values = tensor("pixel_values");
+            assert_eq!(pixel_values.dtype, TensorDtype::F32);
+            assert_eq!(pixel_values.shape, vec![3, 728, 728]);
+            assert!(matches!(data["pixel_values"].field, MmField::Batched(_)));
+
+            // No patches for a 1x1 image: the flat patch tensors are empty
+            // but still carry the step3_vl patch_size layout.
+            let patch_pixel_values = tensor("patch_pixel_values");
+            assert_eq!(patch_pixel_values.dtype, TensorDtype::F32);
+            assert_eq!(patch_pixel_values.shape, vec![0, 3, 504, 504]);
+            assert!(matches!(data["patch_pixel_values"].field, MmField::Flat(_)));
+
+            let patch_newline_mask = tensor("patch_newline_mask");
+            assert_eq!(patch_newline_mask.dtype, TensorDtype::U32);
+            assert_eq!(patch_newline_mask.shape, vec![0]);
+            assert!(matches!(data["patch_newline_mask"].field, MmField::Flat(_)));
+
+            // Batched fields drop the batch axis, leaving the scalar count.
+            let num_patches = tensor("num_patches");
+            assert_eq!(num_patches.dtype, TensorDtype::I64);
+            assert!(num_patches.shape.is_empty());
+            assert_eq!(
+                num_patches.data.as_raw_view().expect("inline num_patches").as_ref(),
+                0_i64.to_ne_bytes()
+            );
+            assert!(matches!(data["num_patches"].field, MmField::Batched(_)));
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    },
+                                    "uuid": "image-1"
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
     for chat_route in [true, false] {
         for stream in [true, false] {
@@ -3350,6 +3528,68 @@ async fn selected_logprobs_reach_engine_and_both_openai_response_modes() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit-step5-vl",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            step5_vl_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(0),
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 0 image(s) may be provided in one prompt."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
