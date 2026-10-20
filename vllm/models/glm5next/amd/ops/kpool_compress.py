@@ -208,9 +208,12 @@ def _kpool_compress_warmup_inputs(
     buf_numel_per_page = kv_cache.stride(0)
     buf_storage_bytes = triton_ptr_range(kv_cache)
     loc_aligned: Any = WarmupChoices(True, False)
+    # With return_compressed=False the compressed outputs alias the cache views.
+    buf_fp8 = TritonWarmupTensor(FP8_DTYPE, storage_bytes=buf_storage_bytes)
+    buf_fp32 = TritonWarmupTensor(torch.float32, storage_bytes=buf_storage_bytes)
     return dict(
-        buf_fp8_ptr=TritonWarmupTensor(FP8_DTYPE, storage_bytes=buf_storage_bytes),
-        buf_fp32_ptr=TritonWarmupTensor(torch.float32, storage_bytes=buf_storage_bytes),
+        buf_fp8_ptr=buf_fp8,
+        buf_fp32_ptr=buf_fp32,
         slot_k_ptr=TritonWarmupTensor(torch.bfloat16, shape=(1, pool_size, head_dim)),
         slot_score_ptr=TritonWarmupTensor(
             torch.bfloat16, shape=(1, pool_size, head_dim)
@@ -218,8 +221,8 @@ def _kpool_compress_warmup_inputs(
         ape_ptr=TritonWarmupTensor(torch.float32, shape=(pool_size, head_dim)),
         loc_ptr=TritonWarmupTensor(torch.int64, aligned=loc_aligned),
         write_mask_ptr=TritonWarmupTensor(torch.bool),
-        compressed_k_ptr=TritonWarmupTensor(FP8_DTYPE),
-        compressed_scale_ptr=TritonWarmupTensor(torch.float32),
+        compressed_k_ptr=buf_fp8,
+        compressed_scale_ptr=buf_fp32,
         page_size=page_size,
         buf_numel_per_page=buf_numel_per_page,
         head_dim=head_dim,
