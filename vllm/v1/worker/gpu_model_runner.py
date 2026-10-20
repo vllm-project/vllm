@@ -5972,7 +5972,7 @@ class GPUModelRunner(
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             draft_probs = None
             if (
-                self.speculative_config.rejection_sample_method == "standard"
+                self.speculative_config.rejection_sample_method in ("standard", "fly")
                 and self.speculative_config.draft_sample_method == "probabilistic"
             ):
                 draft_probs = torch.rand(
@@ -6174,27 +6174,23 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_planning import (
-            get_kv_cache_config_from_groups,
-            get_kv_cache_groups,
-        )
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+        from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
         kv_cache_spec = self.get_kv_cache_spec()
         KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        builder = get_kv_cache_config_builder(self.vllm_config)
+        kv_cache_groups = get_kv_cache_groups_from_builder(
+            builder, self.vllm_config, kv_cache_spec
+        )
         # the minimum number of blocks required is 1 block *per sequence*
         min_blocks = (
             min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
             or 1
         )
-
-        # Temporarily change num_gpu_blocks_override to allocate a minimal KV cache
-        saved_override = self.cache_config.num_gpu_blocks_override
-        self.cache_config.num_gpu_blocks_override = min_blocks
-        minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            self.vllm_config, kv_cache_groups, num_blocks=min_blocks
         )
-        self.cache_config.num_gpu_blocks_override = saved_override
 
         self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
@@ -7144,6 +7140,8 @@ class GPUModelRunner(
                     spec = customize_attention_spec(
                         attn_module.get_attn_backend(), spec
                     )
+                if attn_module.is_draft_layer:
+                    spec = replace(spec, is_draft=True)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
