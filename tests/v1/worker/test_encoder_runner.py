@@ -9,17 +9,98 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 import torch
 
-from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+    PlaceholderRange,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+@pytest.mark.parametrize(
+    "enabled,enforce_eager,supported,expected",
+    [
+        (True, False, True, True),
+        (False, False, True, False),
+        (True, True, True, False),
+        (True, False, False, False),
+    ],
+)
+def test_encoder_graph_configuration(enabled, enforce_eager, supported, expected):
+    """Encoder graph eligibility is independent of decoder graph mode."""
+    config = MagicMock()
+    config.model_config.enforce_eager = enforce_eager
+    config.model_config.dtype = torch.float32
+    config.model_config.get_inputs_embeds_size.return_value = HIDDEN
+    config.scheduler_config.max_num_batched_tokens = 8
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config.compilation_config.cudagraph_mm_encoder = enabled
+    model = MagicMock(spec=SupportsEncoderCudaGraph) if supported else torch.nn.Module()
+    state = _model_state(EncoderCache())
+    with patch("vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager"):
+        ModelState.__init__(state, config, model, state.encoder_cache, state.device)
+    assert state.encoder_runner.has_cudagraph() is expected
+
+
+def test_encoder_graph_unsupported_modality_uses_eager_output():
+    """An image graph must not intercept another modality's encoder output."""
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    runner = _make_runner([], [])
+    output = torch.ones(2, HIDDEN)
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.return_value = [output]
+    manager = MagicMock(spec=EncoderCudaGraphManager)
+    manager.config = SimpleNamespace(modalities=["image"])
+    manager.is_captured.return_value = True
+    manager.supports_modality.side_effect = lambda modality: (
+        EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    runner.cudagraph_manager = manager
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        return_value=[("audio", 1, {"audio_values": torch.zeros(2)})],
+    ):
+        result = runner.execute_mm_encoder([("audio", MagicMock())])
+    assert len(result) == 1
+    assert result[0] is output
+    manager.execute.assert_not_called()
+
+
+def _model_state(cache: EncoderCache) -> MagicMock:
+    """A mock ModelState backed by a real EncoderCache."""
+    state = MagicMock()
+    state.encoder_cache = cache
+    state.device = torch.device("cpu")
+    return state
+
+
+def _embeds_item(embeds: torch.Tensor) -> MultiModalKwargsItem:
+    """A `prompt_embeds` kwargs item, as the HF renderer builds it."""
+    return MultiModalKwargsItem(
+        {
+            "embedding": MultiModalFieldElem(
+                data=embeds, field=MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
 
 
 def _feature(identifier: str, offset: int, length: int) -> MultiModalFeatureSpec:
@@ -52,15 +133,21 @@ def _make_runner(
     )
 
 
-def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, num_computed_tokens=0, prefill_len large.
+def _gather(
+    runner: EncoderRunner,
+    *,
+    num_scheduled: int,
+    draft_lookahead: int,
+    num_computed: int = 0,
+):
+    # Single prefilling request, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        num_computed_tokens=np.array([0]),
+        num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -98,6 +185,31 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
     assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
+
+
+@pytest.mark.parametrize("draft_lookahead", [1, 3])
+@pytest.mark.parametrize("num_computed", [8, 9])
+def test_draft_lookahead_ignores_freed_feature(draft_lookahead, num_computed):
+    """A consumed feature may be freed without removing its request metadata."""
+    freed = _feature("freed", offset=0, length=8)
+    current = _feature("current", offset=8, length=8)
+    runner = _make_runner([freed, current], cached=[freed, current])
+    runner.encoder_cache.free_encoder_cache(freed.identifier)
+
+    mm_embeds, is_mm_embed = _gather(
+        runner,
+        num_scheduled=4,
+        draft_lookahead=draft_lookahead,
+        num_computed=num_computed,
+    )
+
+    start = num_computed + draft_lookahead - current.mm_position.offset
+    expected = runner.encoder_cache.encoder_outputs[current.identifier][
+        start : start + 4
+    ]
+    assert len(mm_embeds) == 1
+    torch.testing.assert_close(mm_embeds[0], expected)
+    assert is_mm_embed.tolist() == [True] * 4
 
 
 def test_draft_lookahead_raises_on_interior_miss():
@@ -181,3 +293,134 @@ def test_gather_preserves_mixed_modalities():
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8
+
+
+def test_execute_mm_encoder_caches_outputs_without_gathering():
+    """An encoder instance encodes and publishes, and must stop there.
+
+    `ModelState.execute_mm_encoder` is the half of `get_mm_embeddings` that an
+    EPD encoder instance needs: it runs no language model, so gathering would
+    build an `inputs_embeds` nobody reads -- and the gather raises
+    `Encoder cache miss` for any scheduled item absent from the local cache,
+    which on a producer takes the whole engine down (the scheduler hands it
+    items the connector already holds, and a producer has no load path).
+    """
+    cache = EncoderCache()
+    state = _model_state(cache)
+    embedding = torch.ones(2, HIDDEN)
+    # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash0"],
+        [("image", MagicMock())],
+    )
+    state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_sorts_by_modality():
+    """Items are encoded sorted by modality; outputs keep the input order."""
+    mm_kwargs = [("video", 0), ("image", 1), ("video", 2), ("image", 3)]
+    runner = _make_runner([], [])
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.side_effect = lambda x: [torch.full((1, 1), x)]
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        side_effect=lambda items, **_: [(m, 1, {"x": x}) for m, x in items],
+    ) as group:
+        outputs = runner.execute_mm_encoder(mm_kwargs)
+    assert group.call_args.args[0] == [mm_kwargs[i] for i in (1, 3, 0, 2)]
+    assert [int(o) for o in outputs] == [0, 1, 2, 3]
+
+
+def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
+    """A step that schedules no encoder input must not touch the encoder."""
+    cache = EncoderCache()
+    state = _model_state(cache)
+    state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
+
+    ModelState.execute_mm_encoder(state, {})
+
+    assert not cache.encoder_outputs
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+
+
+def _pe_feature(identifier: str, embeds: torch.Tensor, offset: int = 0):
+    return MultiModalFeatureSpec(
+        data=_embeds_item(embeds),
+        modality="prompt_embeds",
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=offset, length=embeds.shape[0]),
+    )
+
+
+def test_prepare_mm_inputs_passes_prompt_embeds_through():
+    """`prompt_embeds` is already in embedding space, so no encoder may run.
+
+    The renderer delivers prompt_embeds mixed with real media as an ordinary MM
+    modality. prepare_mm_inputs must cache the tensor directly and keep it out
+    of the encoder batch -- the vision encoder cannot consume it, and a missing
+    cache entry makes the subsequent gather raise "Encoder cache miss".
+    """
+    prompt_embeds = torch.arange(2 * HIDDEN, dtype=torch.float32).view(2, HIDDEN)
+    image_feature = MultiModalFeatureSpec(
+        data=MagicMock(),
+        modality="image",
+        identifier="hash_img",
+        mm_position=PlaceholderRange(offset=2, length=2),
+    )
+    runner = _make_runner(
+        [_pe_feature("hash_pe", prompt_embeds), image_feature], cached=[]
+    )
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0, 1]})
+
+    # Only the image remains for the encoder; the embeds are already cached.
+    assert mm_hashes == ["hash_img"]
+    assert [modality for modality, _ in mm_kwargs] == ["image"]
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_prepare_mm_inputs_skips_cached_prompt_embeds():
+    """A prompt_embeds item already in the cache must not be re-uploaded."""
+    prompt_embeds = torch.ones(3, HIDDEN)
+    feature = _pe_feature("hash_pe", prompt_embeds)
+    runner = _make_runner([feature], cached=[feature])
+    sentinel = runner.encoder_cache.encoder_outputs["hash_pe"]
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0]})
+
+    assert mm_hashes == [] and mm_kwargs == []
+    assert runner.encoder_cache.encoder_outputs["hash_pe"] is sentinel
+
+
+def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
+    """A batch of nothing but prompt_embeds must not invoke the encoder."""
+    prompt_embeds = torch.ones(3, HIDDEN)
+    runner = _make_runner([_pe_feature("hash_pe", prompt_embeds)], cached=[])
+    state = _model_state(runner.encoder_cache)
+    state.encoder_runner.prepare_mm_inputs.side_effect = runner.prepare_mm_inputs
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    state.encoder_runner.execute_mm_encoder.assert_not_called()
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_encoder_timing_stats_registry():
+    runner = _make_runner([], [])
+    runner.enable_timing = True
+
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+
+    stats = runner.get_encoder_timing_stats()
+    assert set(stats) == {"r1"}
+    assert stats["r1"]["num_encoder_calls"] == 2
+    assert stats["r1"]["encoder_forward_secs"] >= 0
+    assert runner.get_encoder_timing_stats() == {}

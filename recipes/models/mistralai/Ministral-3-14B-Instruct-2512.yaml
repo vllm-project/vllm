@@ -1,0 +1,318 @@
+meta:
+  title: "Ministral-3-Instruct"
+  slug: "ministral-3-instruct"
+  provider: "Mistral AI"
+  description: "Ministral 3 Instruct family (3B/8B/14B) with FP8 weights, vision support, and 256K context"
+  date_added: 2025-12-02
+  date_updated: 2026-05-25
+  tasks:
+    - multimodal
+  related_recipes:
+    - mistralai/Ministral-3-8B-Reasoning-2512
+    - mistralai/Mistral-Large-3-675B-Instruct-2512
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "mistralai/Ministral-3-14B-Instruct-2512"
+  min_vllm_version: "0.11.0"
+  architecture: dense
+  parameter_count: "14B"
+  active_parameters: "14B"
+  context_length: 262144
+  base_args:
+    - "--tokenizer_mode"
+    - "mistral"
+    - "--config_format"
+    - "mistral"
+    - "--load_format"
+    - "mistral"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Mistral tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "mistral"
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 17
+    description: "Native FP8 weights (14B), fits on 1x H200"
+
+  "8b":
+    model_id: "mistralai/Ministral-3-8B-Instruct-2512"
+    precision: fp8
+    vram_minimum_gb: 12
+    description: "Smaller 8B variant with independent embedding/output layers"
+
+  "3b":
+    model_id: "mistralai/Ministral-3-3B-Instruct-2512"
+    precision: fp8
+    vram_minimum_gb: 6
+    description: "Smallest 3B variant with tied embeddings"
+  fp8:
+    model_id: "mistralai/Ministral-3-14B-Instruct-2512-FP8"
+    precision: fp8
+    vram_minimum_gb: 17
+    description: "FP8 quantized weights for Hopper/Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Ministral-3-14B-Instruct-2512-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 17
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  nvfp4:
+    model_id: "RedHatAI/Ministral-3-14B-Instruct-2512-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 9
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--config_format"
+      - "mistral"
+      - "--load_format"
+      - "mistral"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Ministral-3 Instruct comes with FP8 weights in 3 different sizes:
+
+  - 3B: tied embeddings (shares embedding and output layers)
+  - 8B and 14B: independent embedding and output layers
+
+  Each variant has vision support and a 256K context length. Smaller models offer faster
+  inference at the cost of lower quality; pick the best trade-off for your use case.
+
+  ## Prerequisites
+
+  - Hardware: 1x H200 (sufficient for all three sizes thanks to FP8 weights);
+    1x MI300X (verified) / MI325X / MI355X
+  - vLLM >= 0.11.0
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Launch command
+
+  ```bash
+  vllm serve mistralai/Ministral-3-14B-Instruct-2512 \
+    --tokenizer_mode mistral --config_format mistral --load_format mistral \
+    --enable-auto-tool-choice --tool-call-parser mistral
+  ```
+
+  For 8B: `mistralai/Ministral-3-8B-Instruct-2512`
+  For 3B: `mistralai/Ministral-3-3B-Instruct-2512`
+
+  - `enable-auto-tool-choice`: required for tool usage
+  - `tool-call-parser mistral`: required for tool usage
+  - `--max-model-len` defaults to `262144`; reduce to save memory
+  - `--max-num-batched-tokens` balances throughput and latency
+
+  ### AMD (MI300X / MI325X / MI355X)
+
+  Verified on an 8-GPU MI300X node with **TP=1** per variant.
+
+  **3B**
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:latest mistralai/Ministral-3-3B-Instruct-2512 \
+      --tokenizer_mode mistral \
+      --tensor-parallel-size 1 \
+      --config_format mistral \
+      --load_format mistral \
+      --enable-auto-tool-choice \
+      --tool-call-parser mistral
+  ```
+
+  **8B**
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:latest mistralai/Ministral-3-8B-Instruct-2512 \
+      --tokenizer_mode mistral \
+      --tensor-parallel-size 1 \
+      --config_format mistral \
+      --load_format mistral \
+      --max-model-len auto \
+      --max-num-batched-tokens 8192 \
+      --enable-auto-tool-choice \
+      --tool-call-parser mistral
+  ```
+
+  **14B**
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri \
+    --security-opt seccomp=unconfined --group-add video \
+    --privileged --ipc=host -p 8000:8000 \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-rocm:latest mistralai/Ministral-3-14B-Instruct-2512 \
+      --tokenizer_mode mistral \
+      --tensor-parallel-size 1 \
+      --config_format mistral \
+      --load_format mistral \
+      --max-num-seqs 256 \
+      --max-model-len auto \
+      --gpu-memory-utilization 0.95 \
+      --max-num-batched-tokens 8192 \
+      --enable-auto-tool-choice \
+      --tool-call-parser mistral
+  ```
+
+  ## Client Usage
+
+  Vision reasoning example:
+
+  ```python
+  from datetime import datetime, timedelta
+  from openai import OpenAI
+  from huggingface_hub import hf_hub_download
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  model = client.models.list().data[0].id
+
+  def load_system_prompt(repo_id, filename):
+      path = hf_hub_download(repo_id=repo_id, filename=filename)
+      with open(path) as f:
+          prompt = f.read()
+      today = datetime.today().strftime("%Y-%m-%d")
+      yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+      return prompt.format(name=repo_id.split("/")[-1], today=today, yesterday=yesterday)
+
+  SYSTEM_PROMPT = load_system_prompt(model, "SYSTEM_PROMPT.txt")
+  image_url = "https://static.wikia.nocookie.net/essentialsdocs/images/7/70/Battle.png/revision/latest?cb=20220523172438"
+
+  response = client.chat.completions.create(
+      model=model,
+      messages=[
+          {"role": "system", "content": SYSTEM_PROMPT},
+          {"role": "user", "content": [
+              {"type": "text", "text": "What action should I take here?"},
+              {"type": "image_url", "image_url": {"url": image_url}},
+          ]},
+      ],
+      temperature=0.15, max_tokens=262144,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  Function calling and text-only examples follow a similar OpenAI-compatible pattern.
+
+  ## Benchmarking (MI300X verification)
+
+  Serving benchmarks used `vllm bench serve` with random 1024-token input/output,
+  `--max-concurrency 32`, and `--num-prompts 100` against each variant above.
+  Accuracy used `lm-eval` GSM8K (5-shot, `flexible-extract` / `strict-match` filters).
+
+  ### Throughput
+
+  | Variant | Output tok/s | Mean TTFT (ms) | Mean TPOT (ms) |
+  |---------|-------------:|---------------:|---------------:|
+  | 3B | 3842 | 288 | 6.42 |
+  | 8B | 2468 | 1117 | 9.48 |
+  | 14B | 1941 | 1229 | 12.22 |
+
+  ### GSM8K (5-shot `exact_match`)
+
+  | Variant | flexible-extract | strict-match |
+  |---------|-----------------:|-------------:|
+  | 3B | 0.7786 ± 0.0114 | 0.7445 ± 0.0120 |
+  | 8B | 0.8560 ± 0.0097 | 0.8491 ± 0.0099 |
+  | 14B | 0.8795 ± 0.0090 | 0.8764 ± 0.0091 |
+
+  **14B** full `vllm bench serve` output (TP=1, MI300X):
+
+  ```shell
+  ============ Serving Benchmark Result ============
+  Successful requests:                     100
+  Failed requests:                         0
+  Maximum request concurrency:             32
+  Benchmark duration (s):                  52.76
+  Total input tokens:                      102400
+  Total generated tokens:                  102400
+  Request throughput (req/s):              1.90
+  Output token throughput (tok/s):         1940.79
+  Peak output token throughput (tok/s):    3126.00
+  Peak concurrent requests:                64.00
+  Total token throughput (tok/s):          3881.58
+  ---------------Time to First Token----------------
+  Mean TTFT (ms):                          1228.72
+  Median TTFT (ms):                        952.25
+  P99 TTFT (ms):                           2925.25
+  -----Time per Output Token (excl. 1st token)------
+  Mean TPOT (ms):                          12.22
+  Median TPOT (ms):                        12.25
+  P99 TPOT (ms):                           12.83
+  ---------------Inter-token Latency----------------
+  Mean ITL (ms):                           12.22
+  Median ITL (ms):                         11.78
+  P99 ITL (ms):                            13.66
+  ==================================================
+  ```
+
+  ## Troubleshooting
+
+  - OOM: lower `--max-model-len` (e.g. 32768) or use the 3B/8B variant.
+
+  ## References
+
+  - [Ministral-3-14B-Instruct](https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512)
+  - [Ministral-3-8B-Instruct](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512)
+  - [Ministral-3-3B-Instruct](https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512)

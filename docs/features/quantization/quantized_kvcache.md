@@ -27,18 +27,9 @@ You can configure how the quantization scales are computed in vLLM using three d
    _Configure with:_  
    ```python
    kv_cache_dtype="fp8"
-   calculate_kv_scales=False
    ```
 
-2. **Random token calibration (on-the-fly):**  
-   Scales are automatically estimated from a single batch of random tokens during warmup and then fixed.  
-   _Configure with:_  
-   ```python
-   kv_cache_dtype="fp8"
-   calculate_kv_scales=True
-   ```
-
-3. **[Recommended] Calibration with a dataset (via llm-compressor):**  
+2. **[Recommended] Calibration with a dataset (via llm-compressor):**  
    Scales are estimated using a curated calibration dataset for maximum accuracy.  
    This requires the [llm-compressor](https://github.com/vllm-project/llm-compressor) library.  
    _See example below!_
@@ -79,7 +70,7 @@ llm = LLM(
 
 ## Examples
 
-### 1. No Calibration (`kv_cache_dtype="fp8"`, `calculate_kv_scales=False`)
+### 1. No Calibration (`kv_cache_dtype="fp8"`)
 
 All quantization scales are set to 1.0.
 
@@ -90,7 +81,6 @@ sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(
     model="meta-llama/Llama-2-7b-chat-hf",
     kv_cache_dtype="fp8",
-    calculate_kv_scales=False,
 )
 prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
@@ -99,27 +89,7 @@ print(out)
 
 ---
 
-### 2. Random Token Calibration (`kv_cache_dtype="fp8"`, `calculate_kv_scales=True`)
-
-Scales are automatically estimated from a single batch of tokens during warmup.
-
-```python
-from vllm import LLM, SamplingParams
-
-sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
-llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf",
-    kv_cache_dtype="fp8",
-    calculate_kv_scales=True,
-)
-prompt = "London is the capital of"
-out = llm.generate(prompt, sampling_params)[0].outputs[0].text
-print(out)
-```
-
----
-
-### 3. **[Recommended] Calibration Using a Dataset (with `llm-compressor`)**
+### 2. **[Recommended] Calibration Using a Dataset (with `llm-compressor`)**
 
 For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization.
 

@@ -1,24 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU contract tests, also runnable without importing the vLLM runtime."""
+"""CPU contract tests for the hidden-state window helpers."""
 
-import runpy
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-# This module has no runtime dependencies; keep that contract testable on Windows.
-contract = runpy.run_path(
-    str(
-        Path(__file__).resolve().parents[4]
-        / "vllm/distributed/kv_transfer/kv_connector/v1/hidden_state_window.py"
-    )
+from vllm.distributed.kv_transfer.kv_connector.v1.hidden_state_window import (
+    HiddenStateWindow,
+    block_window_ranges,
+    extraction_layout,
+    validate_window_request,
 )
-HiddenStateWindow = contract["HiddenStateWindow"]
-block_window_ranges = contract["block_window_ranges"]
-extraction_layout = contract["extraction_layout"]
+
 pytestmark = pytest.mark.cpu_test
+
+
+def _extra_config(enabled=True, **extra):
+    def get(key, default=None):
+        if key == "enable_window_capture":
+            return enabled
+        return extra.get(key, default)
+
+    return get
 
 
 @pytest.mark.parametrize(
@@ -32,6 +36,7 @@ pytestmark = pytest.mark.cpu_test
         {"start": 0, "end": 3, "min_rows": 0},
         {"start": 0, "end": 3, "min_rows": 4},
         {"start": 0, "end": 3, "coordinate": "absolute"},
+        {"start": 0, "end": 2**63},
         [0, 3],
     ],
 )
@@ -110,16 +115,26 @@ def test_absent_window_preserves_legacy_capture():
 
 @pytest.mark.parametrize(
     "problem",
-    ["disabled", "connector", "stop", "n", "resumable", "embeds", "empty", "invalid"],
+    [
+        "disabled",
+        "connector",
+        "stop",
+        "n",
+        "resumable",
+        "embeds",
+        "empty",
+        "invalid",
+        "too_long",
+    ],
 )
 def test_admission_rejects_unsupported_request_before_scheduler(problem):
-    validate = contract["validate_window_request"]
     transfer = SimpleNamespace(
         kv_connector="ExampleHiddenStatesConnector",
-        get_from_extra_config=lambda *args: problem != "disabled",
+        get_from_extra_config=_extra_config(problem != "disabled"),
     )
     config = SimpleNamespace(
-        kv_transfer_config=None if problem == "connector" else transfer
+        kv_transfer_config=None if problem == "connector" else transfer,
+        model_config=SimpleNamespace(max_model_len=4096),
     )
     params = SimpleNamespace(
         n=2 if problem == "n" else 1,
@@ -128,13 +143,13 @@ def test_admission_rejects_unsupported_request_before_scheduler(problem):
             "kv_transfer_params": {
                 "hidden_state_window": {
                     "start": -1 if problem == "invalid" else 0,
-                    "end": 3,
+                    "end": 4097 if problem == "too_long" else 3,
                 }
             }
         },
     )
     with pytest.raises(ValueError):
-        validate(
+        validate_window_request(
             config,
             params,
             [] if problem == "empty" else [1],
@@ -144,7 +159,7 @@ def test_admission_rejects_unsupported_request_before_scheduler(problem):
 
 
 def test_admission_keeps_legacy_and_valid_window_requests():
-    validate = contract["validate_window_request"]
+    validate = validate_window_request
     params = SimpleNamespace(extra_args=None)
     validate(SimpleNamespace(kv_transfer_config=None), params, None, None, True)
     params = SimpleNamespace(
@@ -159,7 +174,8 @@ def test_admission_keeps_legacy_and_valid_window_requests():
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="ExampleHiddenStatesConnector",
-            get_from_extra_config=lambda *args: True,
-        )
+            get_from_extra_config=_extra_config(),
+        ),
+        model_config=SimpleNamespace(max_model_len=4096),
     )
     validate(config, params, [1, 2], None, False)

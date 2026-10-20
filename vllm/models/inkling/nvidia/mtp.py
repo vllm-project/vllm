@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling MTP (Multi-Token Prediction) draft model (NVIDIA).
 
-Implements the first MTP depth from the reference ``mtp_model.py`` shipped with
-the checkpoint. It owns ``hidden_norm`` / ``embed_norm`` RMSNorms, a ``2H -> H``
-input projection, and a full Inkling transformer block with a dense bf16 MLP.
+Mirrors the reference ``mtp_model.py`` shipped with the checkpoint: each MTP
+depth ``i`` owns ``hidden_norm`` / ``embed_norm`` RMSNorms, an ``input_proj``
+(``2H -> H``) and a full Inkling transformer block (dense MLP, with the
+same short convolutions as the backbone; its attention is full or sliding-window
+per depth, selected by ``mtp_config.local_layer_ids``). When enabled, a shared
+``chain_norm`` is applied after every depth; its output is both the logits input
+and the previous hidden state fed to the next depth.
 
 The draft shares the target's token embedding table and LM head
 (``load_eagle_model`` wires those references) and applies the backbone
@@ -24,14 +28,23 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
-from .model import InklingDecoderLayer, InklingReplicatedEmbedding
+from .model import (
+    InklingDecoderLayer,
+    InklingReplicatedEmbedding,
+    _TmlForCausalLMBase,
+)
 from .ops.norm import embed_dual_rmsnorm_cat, embed_rmsnorm
 
 # Checkpoint attention projections (wq_du/wk_dv/wv_dv/wr_du) -> fused qkvr.
@@ -50,10 +63,26 @@ def _mtp_depth_from_name(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _select_mtp_depth_count(n_predict: int, num_spec: int | None) -> int:
+    num_layers = min(n_predict, num_spec) if num_spec else n_predict
+    if num_layers <= 0:
+        raise ValueError(
+            "Inkling MTP requires num_nextn_predict_layers and "
+            "num_speculative_tokens to select at least one depth layer."
+        )
+    return num_layers
+
+
 class InklingMTPDepthLayer(nn.Module):
     """One MTP depth: norm both inputs, fuse (2H->H), run a Inkling block."""
 
-    def __init__(self, config: InklingModelConfig, prefix: str, is_local: bool) -> None:
+    def __init__(
+        self,
+        config: InklingModelConfig,
+        prefix: str,
+        is_local: bool,
+        quant_config: QuantizationConfig | None = None,
+    ) -> None:
         super().__init__()
         self.hidden_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.embed_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -62,16 +91,17 @@ class InklingMTPDepthLayer(nn.Module):
             config.hidden_size,
             bias=False,
             return_bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.input_proj",
         )
-        # A force-dense-MLP bf16 block; ``is_local`` selects sliding-window vs
+        # A force-dense-MLP block; ``is_local`` selects sliding-window vs
         # full attention (the swa_* head config and sliding_window window) to
         # match this depth's checkpoint transformer_block weights.
         self.transformer_block = InklingDecoderLayer(
             config,
             layer_id=0,
             is_local=is_local,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.transformer_block",
             force_dense_mlp=True,
         )
@@ -93,14 +123,33 @@ class InklingMultiTokenPredictor(nn.Module):
             vllm_config.speculative_config.draft_model_config.hf_config
         )
         self.config = config
-        if vllm_config.speculative_config.num_speculative_tokens != 1:
-            raise ValueError(
-                "Inkling MTP currently supports exactly one speculative token"
-            )
+        # The checkpoint ships num_nextn_predict_layers depth blocks, but only
+        # the first ``num_speculative_tokens`` are exercised (step i uses depth
+        # i). Build only those to save memory — each depth is a full Inkling block
+        # with its own (large) full-history sconv caches and KV cache.
+        n_predict = config.num_nextn_predict_layers
+        num_spec = vllm_config.speculative_config.num_speculative_tokens
+        self.num_mtp_layers = _select_mtp_depth_count(n_predict, num_spec)
         self.chain_hidden_post_norm = config.chain_hidden_post_norm
+
+        # Depth blocks whose attention is sliding-window (swa_* head config)
+        # rather than full; keyed by MTP depth via the checkpoint's
+        # mtp_config.local_layer_ids (promoted onto the draft config). Mirrors
+        # InklingModel's local_ids split, but over MTP depths, not backbone
+        # layers.
         local_ids = set(config.local_layer_ids)
+
+        # Keyed by depth index (str) to mirror the checkpoint layout.
         self.layers = nn.ModuleDict(
-            {"0": InklingMTPDepthLayer(config, f"{prefix}.layers.0", 0 in local_ids)}
+            {
+                str(idx): InklingMTPDepthLayer(
+                    config,
+                    f"{prefix}.layers.{idx}",
+                    idx in local_ids,
+                    quant_config=vllm_config.quant_config,
+                )
+                for idx in range(self.num_mtp_layers)
+            }
         )
         self.chain_norm = (
             InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -198,9 +247,8 @@ class InklingMultiTokenPredictor(nn.Module):
         # auto-enumerated as a draft attention layer); its per-token metadata is
         # built by the speculator's build_attn_metadata and read from the
         # forward context, so nothing extra is threaded here.
-        if spec_step_idx != 0:
-            raise ValueError("Inkling MTP only supports spec_step_idx=0")
-        layer = self.layers["0"]
+        depth = spec_step_idx % self.num_mtp_layers
+        layer = self.layers[str(depth)]
         combined = self.fused_input_cat(
             layer, previous_hidden_states, input_ids, inputs_embeds
         )
@@ -210,7 +258,12 @@ class InklingMultiTokenPredictor(nn.Module):
         return hidden
 
 
-class InklingMTP(nn.Module):
+class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
+    hf_to_vllm_mapper = _TmlForCausalLMBase.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"model.mtp.": "model."},
+    )
+    packed_modules_mapping = _TmlForCausalLMBase.packed_modules_mapping
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -290,7 +343,11 @@ class InklingMTP(nn.Module):
             logits = logits[..., : self.logits_processor.org_vocab_size]
         return logits
 
-    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
         """Greedy draft tokens via rank-local argmax + tiny (value, index)
         reduction — no full-vocab logits all-gather. The muP divisor is a
         positive scalar, so the argmax is invariant and the scaling is
@@ -352,8 +409,8 @@ def _load_inkling_mtp_weights(
         # Only consume the MTP weights; everything else belongs to the target.
         if ".mtp." not in name:
             continue
-        # Only the first checkpoint depth is used for MTP=1.
-        if depth is not None and depth != 0:
+        # Skip depth blocks beyond the ones we built (num_speculative_tokens).
+        if depth is not None and depth >= module.model.num_mtp_layers:
             continue
         # model.mtp.chain_norm.weight -> model.chain_norm.weight
         # model.mtp.layers.{i}.X      -> model.layers.{i}.X
@@ -381,9 +438,9 @@ def _load_inkling_mtp_weights(
             continue
 
         # Dense MLP fused gate/up + down.
-        if ".mlp.w13_dn.weight" in name:
+        if ".mlp.w13_dn." in name:
             loaded_weight = _load(name.replace(".w13_dn.", ".gate_up_proj."), weight)
-        elif ".mlp.w2_md.weight" in name:
+        elif ".mlp.w2_md." in name:
             loaded_weight = _load(name.replace(".w2_md.", ".down_proj."), weight)
         else:
             if name.endswith(".bias") and name not in params:
@@ -396,7 +453,7 @@ def _load_inkling_mtp_weights(
         for name in params
         if name.startswith("model.layers.") or name.startswith("model.chain_norm.")
     }
-    if missing := sorted(required - loaded):
+    if (missing := sorted(required - loaded)) and is_mtp_completeness_check_enabled():
         raise ValueError(
             "Inkling MTP checkpoint is missing required parameters: "
             + ", ".join(missing)

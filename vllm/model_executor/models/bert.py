@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Set
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -24,7 +25,6 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingParamsUpdate,
 )
-from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -41,7 +41,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces import SupportsCrossEncoding, SupportsLoRA, SupportsQuant
 from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -97,6 +97,7 @@ class BertPooler(SequencePooler):
     def __init__(self, model_config: ModelConfig):
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
+        assert pooler_config.seq_pooling_type is not None
 
         config: BertConfig = model_config.hf_config
 
@@ -114,11 +115,11 @@ class BertPooler(SequencePooler):
         )
         self.act_fn = nn.Tanh()
 
+        # Keep the model's head layers even when output activation is disabled.
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
-            projector=lambda x: self.dense(x),
-            activation=LambdaPoolerActivation(self.act_fn),
+            projector=lambda x: self.act_fn(self.dense(x)),
         )
 
 
@@ -381,6 +382,7 @@ class BertModel(nn.Module, SupportsQuant):
             ".self.key": (".self.qkv_proj", "k"),
             ".self.value": (".self.qkv_proj", "v"),
         },
+        orig_to_new_prefix={"pooler.": None},
     )
 
     def __init__(
@@ -415,12 +417,15 @@ class BertModel(nn.Module, SupportsQuant):
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
+
+    # Unlike `BertModel`, this model has a pooler to load weights into.
+    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     def __init__(
         self,
@@ -443,7 +448,7 @@ class BertPoolingModel(BertModel):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class BertEmbeddingModel(nn.Module, SupportsQuant):
+class BertEmbeddingModel(nn.Module, SupportsQuant, SupportsLoRA):
     """A model that uses Bert to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -452,13 +457,28 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
+    embedding_class: type[nn.Module] = BertEmbedding
+
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+    # PEFT adapters name modules relative to the HF backbone (optionally under
+    # `bert.`/`roberta.`), while vLLM nests the backbone under `model.`.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "bert.": "model.",
+            "roberta.": "model.",
+            "encoder.": "model.encoder.",
+            "embeddings.": "model.embeddings.",
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        self.config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
@@ -487,16 +507,18 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
 
+        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
         if not has_model_prefix:
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+            orig_to_new_prefix[""] = "model."
+        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(
-            vllm_config=vllm_config, prefix=prefix, embedding_class=BertEmbedding
+            vllm_config=vllm_config, prefix=prefix, embedding_class=self.embedding_class
         )
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
@@ -555,20 +577,17 @@ class BertMLMHead(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.decoder = nn.Linear(hidden_size, vocab_size, bias=True)
 
-    def tie_weights_with_embeddings(self, embeddings_weight: torch.Tensor):
-        self.decoder.weight = embeddings_weight
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def transform(self, hidden_states: torch.Tensor) -> torch.Tensor:
         x = self.dense(hidden_states)
         x = self.activation(x)
-        x = self.layer_norm(x)
-        logits = self.decoder(x)
-        return logits
+        return self.layer_norm(x)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.decoder(self.transform(hidden_states))
 
 
 class SPLADESparsePooler(Pooler):
-    """
-    SPLADE sparse pooling:
+    """SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
             -> log1p(relu(logits))
             -> (max|sum over L)
@@ -614,6 +633,10 @@ class SPLADESparsePooler(Pooler):
         prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
         offset = 0
         pooled_list: list[torch.Tensor] = []
+        projection = self.mlm_head
+        if self.pooling == "max":
+            hidden_states = self.mlm_head.transform(hidden_states)
+            projection = self.mlm_head.decoder
 
         for i in range(B):
             L = int(lens[i])
@@ -640,24 +663,25 @@ class SPLADESparsePooler(Pooler):
                 offset += L
                 continue
 
-            logits_i = self.mlm_head(hs[start_idx:end_idx])
-            scores_i = torch.log1p(torch.relu(logits_i))
-
+            logits_i = projection(hs[start_idx:end_idx])
             if self.pooling == "sum":
-                pooled_i = scores_i.sum(dim=0)
+                pooled_i = torch.log1p(torch.relu(logits_i)).sum(dim=0)
             else:  # "max"
-                pooled_i = scores_i.max(dim=0).values
+                pooled_i = logits_i.amax(dim=0)
 
             pooled_list.append(pooled_i.contiguous())
             offset += L
 
-        return torch.stack(pooled_list, dim=0).contiguous()
+        pooled = torch.stack(pooled_list, dim=0)
+        if self.pooling == "max":
+            # Max commutes with these monotonic activations.
+            pooled.relu_().log1p_()
+        return pooled.contiguous()
 
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
-    """
-    BertEmbeddingModel + SPLADE sparse embedding.
+    """BertEmbeddingModel + SPLADE sparse embedding.
     - Make logits by self.mlm_head
     - pooler: SPLADESparsePooler(mlm_head...)
     """
@@ -771,9 +795,11 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
+    embedding_class: type[nn.Module] = BertEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -783,7 +809,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         self.bert = BertPoolingModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=BertEmbedding,
+            embedding_class=self.embedding_class,
         )
         self.classifier = nn.Linear(
             config.hidden_size,
@@ -833,6 +859,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 @default_pooling_type(tok_pooling_type="ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
+    embedding_class: type[nn.Module] = BertEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -842,7 +869,7 @@ class BertForTokenClassification(nn.Module):
         self.bert = BertModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=BertEmbedding,
+            embedding_class=self.embedding_class,
         )
         self.classifier = nn.Linear(
             config.hidden_size, config.num_labels, dtype=self.head_dtype
@@ -920,13 +947,15 @@ class BertForMaskedLM(nn.Module):
         }
     )
 
+    embedding_class: type[nn.Module] = BertEmbedding
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.bert = BertModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=BertEmbedding,
+            embedding_class=self.embedding_class,
         )
         self.mlm_head = BertMLMHead(
             hidden_size=config.hidden_size,

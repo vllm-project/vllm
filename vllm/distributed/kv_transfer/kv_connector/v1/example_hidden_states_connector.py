@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import fcntl
 import os
+import threading
 import time
 from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
@@ -28,8 +29,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hidden_state_window import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -45,8 +48,10 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    block_size = kv_cache.shape[2]
+    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
+        :num_tokens
+    ]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -61,6 +66,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
 
     Returns:
         Dict with "hidden_states" and "token_ids" tensors.
+
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
@@ -113,21 +119,23 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    Simple debug implementation of a HiddenStatesConnector.
+    """Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
+    def get_finished_count(self) -> int:
+        """Number of ``finished_sending`` notifications expected per request.
+
+        Only TP rank 0 writes hidden states to disk, so each request yields a
+        single notification. The default (``None``) makes ``KVOutputAggregator``
+        wait for every worker in the world size; since ranks 1..N-1 never submit
+        a copy, the request would never be reported as finished and its blocks
+        would be leaked forever (the scheduler then spins on
+        ``has_finished_requests()``).
         """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
-        """
-        # Must be False so that drafter kv cache isn't merged with verifier's
-        return False
+        return 1
 
     @classmethod
     def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
@@ -210,6 +218,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._window_enabled = self._kv_transfer_config.get_from_extra_config(
             "enable_window_capture", False
         )
+        if type(self._window_enabled) is not bool:
+            raise ValueError("enable_window_capture must be a boolean")
+        self._max_window_rows = self._kv_transfer_config.get_from_extra_config(
+            "max_window_rows", vllm_config.model_config.max_model_len
+        )
+        if type(self._max_window_rows) is not int or self._max_window_rows < 1:
+            raise ValueError("max_window_rows must be a positive integer")
         self._export_budget = self._kv_transfer_config.get_from_extra_config(
             "max_inflight_export_bytes", 64 * 1024 * 1024
         )
@@ -234,7 +249,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             copy_wait_seconds=0.0,
             serialization_seconds=0.0,
         )
+        self._metrics_lock = threading.Lock()
         self._worker_filenames: dict[str, str] = {}
+        self._rejected_req_ids: set[str] = set()
         self._request_windows: dict[str, HiddenStateWindow | None] = {}
         self._request_block_counts: dict[str, int] = {}
         self._request_prompt_lengths: dict[str, int] = {}
@@ -335,13 +352,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     def _reserve_export(self, size: int) -> None:
         while self._export_queue and self._export_queue[0][0].done():
-            future, _ = self._export_queue.popleft()
-            future.result()
+            self._export_queue.popleft()
         while self._export_queue and (
             sum(n for _, n in self._export_queue) + size > self._export_budget
         ):
             future, _ = self._export_queue.popleft()
-            future.result()
+            wait([future])
 
     def get_window_capture_metrics(self) -> dict[str, int | float]:
         """Return worker-local counters; call after draining writes for final totals."""
@@ -373,11 +389,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker-side methods
     # ==============================
     def start_load_kv(self, *args, **kwargs: Any) -> None:
-        if not self._window_enabled or not self.has_connector_metadata():
+        if not self.has_connector_metadata():
             return
         meta = self._get_connector_metadata()
         assert isinstance(meta, ExampleHiddenStatesConnectorMetadata)
-        if meta.block_windows and self._is_tp_rank_zero:
+        if self._window_enabled and meta.block_windows and self._is_tp_rank_zero:
             assert self._window_ranges is not None
             updates = torch.tensor(
                 meta.block_windows, dtype=torch.long, device=self._window_ranges.device
@@ -428,8 +444,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             timings = future.result()
             if timings:
-                for key, value in timings.items():
-                    self._capture_metrics[key] += value
+                with self._metrics_lock:
+                    for key, value in timings.items():
+                        self._capture_metrics[key] += value
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         # Delay tp rank0 initialization until after distributed init
@@ -460,10 +477,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
-        if self._block_size != self._kv_cache.shape[1]:
+        # Views are [num_blocks, num_heads, block_size, head_size], matching what
+        # extract_from_kv_cache() indexes.
+        if self._block_size != self._kv_cache.shape[2]:
             raise ValueError(
                 f"Hidden-states block-size mismatch: derived {self._block_size} "
-                f"but buffer block size is {self._kv_cache.shape[1]}; read slots "
+                f"but buffer block size is {self._kv_cache.shape[2]}; read slots "
                 "would be wrong (likely a hybrid block-size resolution bug)."
             )
 
@@ -572,10 +591,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         with torch.cuda.stream(copy_stream):
             # Move the CPU slot_mapping to GPU on the copy stream so the
             # implicit H2D inside fancy indexing doesn't sync the default
-            # stream.
-            slot_mapping_gpu = slot_mapping.to(
-                device=self._kv_cache.device, non_blocking=True
-            )
+            # stream. Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping_gpu = slot_mapping.to(
+                    device=self._kv_cache.device, non_blocking=True
+                )
             if bounded and export_bytes > self._export_budget:
                 # Large windows use bounded staging and pageable final storage.
                 rows = max(1, self._export_budget // row_bytes)
@@ -668,14 +688,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if bounded:
             reserved = min(export_bytes, self._export_budget)
             self._export_queue.append((future, reserved))
-            self._capture_metrics["copied_bytes"] += export_bytes
-            self._capture_metrics["pinned_live_bytes_upper_bound_peak"] = max(
-                self._capture_metrics["pinned_live_bytes_upper_bound_peak"],
-                sum(n for _, n in self._export_queue),
-            )
-            self._capture_metrics["export_submit_seconds"] += (
-                time.perf_counter() - started
-            )
+            with self._metrics_lock:
+                self._capture_metrics["copied_bytes"] += export_bytes
+                self._capture_metrics["pinned_live_bytes_upper_bound_peak"] = max(
+                    self._capture_metrics["pinned_live_bytes_upper_bound_peak"],
+                    sum(n for _, n in self._export_queue),
+                )
+                self._capture_metrics["export_submit_seconds"] += (
+                    time.perf_counter() - started
+                )
 
     # ==============================
     # Scheduler-side methods
@@ -686,8 +707,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -698,27 +718,39 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
-        params = request.kv_transfer_params or {}
-        window = HiddenStateWindow.from_params(params)
-        if window is not None:
-            if not self._window_enabled:
-                raise ValueError("Set enable_window_capture=True on the connector")
-            if (
-                request.prompt_token_ids is None
-                or request.prompt_embeds is not None
-                or request.resumable
-            ):
-                raise ValueError("Window capture requires a non-resumable token prompt")
-            window.absolute_bounds(request.num_prompt_tokens)
-            if request.sampling_params is None:
-                raise ValueError("Window capture requires sampling parameters")
-            if request.sampling_params.stop:
-                raise ValueError(
-                    "Window capture does not yet support stop strings; "
-                    "use stop_token_ids or EOS"
-                )
+        try:
+            self._check_window_request(request)
+        except ValueError as error:
+            logger.warning(
+                "Skipping hidden-state capture for %s: %s", request.request_id, error
+            )
+            self._rejected_req_ids.add(request.request_id)
         return 0, False
+
+    def _check_window_request(self, request: "Request") -> None:
+        window = HiddenStateWindow.from_params(request.kv_transfer_params or {})
+        if window is None:
+            return
+        if not self._window_enabled:
+            raise ValueError("Set enable_window_capture=True on the connector")
+        if (
+            request.prompt_token_ids is None
+            or request.prompt_embeds is not None
+            or request.resumable
+        ):
+            raise ValueError("Window capture requires a non-resumable token prompt")
+        window.absolute_bounds(request.num_prompt_tokens)
+        if window.end > self._max_window_rows:
+            raise ValueError(f"Window end must not exceed {self._max_window_rows}")
+        if request.sampling_params is None:
+            raise ValueError("Window capture requires sampling parameters")
+        if request.sampling_params.stop:
+            raise ValueError(
+                "Window capture does not yet support stop strings; "
+                "use stop_token_ids or EOS"
+            )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -739,6 +771,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleHiddenStatesConnectorMetadata()
         meta.cancelled_req_ids = self._cancelled_req_ids
@@ -772,7 +805,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             self._request_filenames[new_req.req_id] = filename
             meta.new_req_filenames[new_req.req_id] = filename
             if self._window_enabled:
-                window = HiddenStateWindow.from_params(kv_params)
+                window = (
+                    None
+                    if new_req.req_id in self._rejected_req_ids
+                    else HiddenStateWindow.from_params(kv_params)
+                )
                 prompt_len = len(new_req.prompt_token_ids or [])
                 self._request_windows[new_req.req_id] = window
                 self._request_prompt_lengths[new_req.req_id] = prompt_len
@@ -811,8 +848,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
+        """Called exactly once when a request has finished, before its blocks are
         freed.
 
         Returns True to delay block freeing until get_finished extracts
@@ -821,11 +857,20 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         req_id = request.request_id
         filename = self._request_filenames.pop(req_id, None)
         window = self._request_windows.pop(req_id, None)
+        rejected = req_id in self._rejected_req_ids
+        self._rejected_req_ids.discard(req_id)
         self._request_block_counts.pop(req_id, None)
         self._request_prompt_lengths.pop(req_id, None)
-        from vllm.v1.request import RequestStatus
-
-        if filename is None or request.status in (
+        if filename is None:
+            # Request was aborted before it was ever scheduled, so
+            # build_connector_meta never recorded a filename for it. There are
+            # no hidden states to save and no blocks worth delaying.
+            self._pending_saves.pop(req_id, None)
+            return False, None
+        if rejected:
+            self._cancelled_req_ids.add(req_id)
+            return False, {"hidden_state_capture_skip_reason": "invalid_window"}
+        if self._window_enabled and request.status in (
             RequestStatus.FINISHED_ABORTED,
             RequestStatus.FINISHED_ERROR,
             RequestStatus.FINISHED_IGNORED,
@@ -909,13 +954,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                         if self._copy_stream is not None:
                             self._copy_stream.synchronize()
                         fd = self._lock_fds.pop(pending.req_id, None)
-                        if fd is not None:
-                            os.close(fd)
                         try:
                             with open(pending.filename + ".error", "w") as error_file:
                                 error_file.write("Capture or D2H submission failed")
                         except OSError:
                             logger.exception("Could not record capture failure")
+                        finally:
+                            if fd is not None:
+                                os.close(fd)
                         logger.exception(
                             "Hidden-state export failed for %s", pending.req_id
                         )
@@ -933,15 +979,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending: set[str] = set()
         for req_id in list(self._accumulated_finished_req_ids):
             event = self._req_copy_events.get(req_id)
-            if event is None or event.query():
-                self._req_copy_events.pop(req_id, None)
+            if event is not None and not event.query():
+                continue  # DtoH copy still in flight
+            self._req_copy_events.pop(req_id, None)
+            self._accumulated_finished_req_ids.discard(req_id)
+            # Only report requests we actually tracked for sending.
+            if event is not None:
                 done_sending.add(req_id)
-                self._accumulated_finished_req_ids.discard(req_id)
-                # Clean up any leftover lock fds (e.g. aborted requests
-                # that never went through _submit_async_write).
-                lock_fd = self._lock_fds.pop(req_id, None)
-                if lock_fd is not None:
-                    os.close(lock_fd)
+            # Clean up any leftover lock fds (e.g. aborted requests that never
+            # went through _submit_async_write).
+            lock_fd = self._lock_fds.pop(req_id, None)
+            if lock_fd is not None:
+                os.close(lock_fd)
 
         return done_sending or None, None
 
@@ -950,28 +999,32 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if not 0 <= self._cache_kv_group_id < len(block_ids):
+            # No per-group block table (e.g. a request that was never
+            # scheduled); treat as a no-op instead of indexing out of bounds.
+            return False, None
         return self.request_finished(request, block_ids[self._cache_kv_group_id])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-        """
 
+        """
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # NHD means we have (num_tokens, num_heads)
-        # HND means we have (num_heads, num_tokens)
-        # For now, we only support NHD layout since this keeps the
+        # LBNHC means we have (num_tokens, num_heads)
+        # LBHNC means we have (num_heads, num_tokens)
+        # For now, we only support LBNHC layout since this keeps the
         # hidden states for each token together in memory.
-        # HND is primarily used when sharding heads across devices.
-        return "NHD"
+        # LBHNC is primarily used when sharding heads across devices.
+        return "LBNHC"

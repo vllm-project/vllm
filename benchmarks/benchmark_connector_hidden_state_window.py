@@ -94,7 +94,6 @@ async def request(engine, args, index):
         detokenize=False,
         output_kind=RequestOutputKind.DELTA,
     )
-    kwargs = {}
     if args.mode in ("full", "window"):
         transfer = {"include_output_tokens": True}
         if args.mode == "window":
@@ -104,25 +103,13 @@ async def request(engine, args, index):
             }
         params.extra_args = {"kv_transfer_params": transfer}
     request_id = f"bench-{index}"
-    if args.mode == "pr57736":
-        from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
-
-        kwargs["hidden_state_capture"] = HiddenStateCapturePlan.from_window(
-            request_id=request_id,
-            prompt_len=len(prompt),
-            start=args.window_start,
-            end=args.window_start + args.window_size,
-            collection_id=request_id,
-            hidden_layout="final",
-        )
     started = time.perf_counter()
     first = previous = None
     itl = []
     tokens = []
-    capture = None
     final = None
     async for output in engine.generate(
-        {"prompt_token_ids": prompt}, params, request_id, **kwargs
+        {"prompt_token_ids": prompt}, params, request_id
     ):
         now = time.perf_counter()
         new = list(output.outputs[0].token_ids) if output.outputs else []
@@ -133,7 +120,6 @@ async def request(engine, args, index):
                 itl.append((now - previous) * 1000 / len(new))
             previous = now
             tokens.extend(new)
-        capture = getattr(output, "hidden_state_capture", None) or capture
         final = output
     assert first is not None and final.finished
     return dict(
@@ -143,7 +129,6 @@ async def request(engine, args, index):
         tokens=len(tokens),
         token_sha256=hashlib.sha256(json.dumps(tokens).encode()).hexdigest(),
         path=(final.kv_transfer_params or {}).get("hidden_states_path"),
-        capture=capture,
     )
 
 
@@ -175,9 +160,6 @@ def consume(results):
             )
             file_bytes += Path(result["path"]).stat().st_size
             cleanup_hidden_states(result["path"])
-        elif result["capture"] is not None:
-            hs = result["capture"].hidden_states
-            returned += hs.numel() * hs.element_size()
     return dict(returned_hidden_bytes=returned, serialized_file_bytes=file_bytes)
 
 
@@ -260,9 +242,7 @@ async def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument(
-        "--mode", choices=["baseline", "full", "window", "pr57736"], required=True
-    )
+    parser.add_argument("--mode", choices=["baseline", "full", "window"], required=True)
     parser.add_argument("--window-size", type=int, default=32)
     parser.add_argument("--window-start", type=int, default=16)
     parser.add_argument("--input-len", type=int, default=128)
@@ -289,10 +269,6 @@ def main():
         parser.error("concurrency, requests and input-len must be positive")
     if args.window_size < 1 or args.window_start < 0:
         parser.error("window-size must be positive and window-start nonnegative")
-    if args.mode == "pr57736" and args.layout != "final":
-        parser.error(
-            "The PR control currently benchmarks final layout; use --layout final"
-        )
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     result = asyncio.run(run(args))
     args.report.parent.mkdir(parents=True, exist_ok=True)

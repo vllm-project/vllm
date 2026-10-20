@@ -173,9 +173,6 @@ venv.bak/
 
 # mkdocs documentation
 /site
-docs/argparse
-docs/examples/*
-!docs/examples/README.md
 
 # mypy
 .mypy_cache/
@@ -239,9 +236,6 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
-
-# Ignore moe/marlin_moe gen code
-csrc/libtorch_stable/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/

@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Hermes",
     start_marker: "<tool_call>",
+    framed_start_marker: None,
     end_marker: "</tool_call>",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,
@@ -48,8 +49,8 @@ impl ToolParser for HermesToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Hermes)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Hermes.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
+MAX_WINDOW_END = 2**31 - 1
+
+
 @dataclass(frozen=True)
 class HiddenStateWindow:
     start: int
@@ -25,6 +28,8 @@ class HiddenStateWindow:
             raise ValueError("Window bounds and min_rows must be integers")
         if not 0 <= start < end or not 1 <= minimum <= end - start:
             raise ValueError("Require 0 <= start < end and 1 <= min_rows <= end-start")
+        if end > MAX_WINDOW_END:
+            raise ValueError(f"Window end must not exceed {MAX_WINDOW_END}")
         return cls(start, end, minimum)
 
     def absolute_bounds(self, prompt_len: int) -> tuple[int, int]:
@@ -108,3 +113,8 @@ def validate_window_request(
             "Window capture requires one completion and a fixed token prompt"
         )
     window.absolute_bounds(len(prompt_token_ids))
+    max_rows = connector.get_from_extra_config(
+        "max_window_rows", config.model_config.max_model_len
+    )
+    if window.end > max_rows:
+        raise ValueError(f"Window end must not exceed {max_rows}")

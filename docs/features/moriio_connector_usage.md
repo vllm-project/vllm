@@ -136,6 +136,26 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 !!! note
     `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
 
+### Hybrid attention and recurrent state
+
+WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
+
+For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
+
+Hybrid READ keeps its existing single-transferable-attention-group requirement. Plain-attention WRITE retains its existing notification format.
+
+### Different prefill and decode TP sizes
+
+In WRITE mode, the prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. Each prefill rank writes its shard into the decode ranks that hold it:
+
+- With a larger decode TP size, MLA latents and replicated KV heads are copied to every decode rank that needs them, while split KV heads and Mamba/KDA state are sliced so that each decode rank receives its own part.
+- With a larger prefill TP size, the prefill ranks feeding a decode rank write their parts side by side into its blocks. Identical copies (MLA latents, replicated KV heads) are written once.
+
+The number of KV heads must be a multiple or a divisor of each TP size. Blocks are copied as units, so both instances must use the same number of tokens per attention block. Hybrid models size attention blocks to the per-rank recurrent state; with MLA attention (e.g. Kimi-Linear) that size changes with the TP size, so pass the same `--block-size`, at least the larger of the two automatic sizes, to both instances. Mismatched block sizes fail with an error naming the layer. Both instances must advertise their KV head and recurrent-state layouts in the MoRIIO handshake, so they must run a vLLM version with this support; otherwise a transfer between different TP sizes fails with an error naming the layer.
+
+!!! note
+    On a single node with the xGMI backend, a larger decode TP size does not work yet: MoRI cannot open a session from a prefill rank to memory on a decode rank's second or later visible GPU when the prefill rank sees fewer GPUs, and the transfer fails with an error naming the decode rank. A larger prefill TP size works on xGMI, and the RDMA backend is not affected.
+
 ### Transport configuration
 
 MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.
@@ -253,7 +273,7 @@ To run MoRI with RDMA, your environment must have the necessary RDMA userspace l
 
 The official image `vllm/vllm-openai-rocm:nightly` comes pre-installed with userspace libraries for the following NICs and kernel module versions:
 
-- AINIC (AMD Pensando Pollara): version `1.117.3-hydra`, tested with `ioinic-dkms=25.11.1.001`
+- AINIC (AMD Pensando Pollara): version `1.117.5-a-77`, ships `libionic1=54.0-187-1`, tested with `ionic-dkms=26.03.3.001`
 - Thor2 (Broadcom): version `235.2.86.0`, tested with `bnxt-en-dkms=1.10.3.235.2.86.0`, `bnxt-re-dkms=235.2.86.0`
 
 Refer to [Dockerfile.rocm](../../docker/Dockerfile.rocm) for more details. For users with NICs, kernel modules, and/or FW other than those stated above we refer to

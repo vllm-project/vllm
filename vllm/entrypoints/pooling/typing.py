@@ -3,16 +3,17 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
+from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.inputs import DictPrompt
 
 from ...tasks import PoolingTask
@@ -80,6 +81,13 @@ class ChunkedEmbeddingMetadata:
     chunk_index: int
 
 
+@dataclass
+class LateChunkingSlot:
+    """Per-document source ranges shared by frontend rendering and output contexts."""
+
+    metadata: LateChunkingMetadata | None = None
+
+
 @dataclass(kw_only=True)
 class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -88,10 +96,13 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     raw_request: Request | None = None
     model_name: str
     request_id: str
-    pooling_params: PoolingParams | list[PoolingParams]
+    pooling_params: PoolingParams
+    lora_request: LoRARequest | None
+    priorities: int | Sequence[int] | None
+    prompt_extras: dict[str, Any] | None
+
     created_time: int = field(default_factory=lambda: int(time.time()))
-    lora_request: LoRARequest | None = None
-    engine_inputs: Sequence[EngineInput] | None = None
+    engine_inputs: Sequence["PoolingEngineInput"] | None = None
     prompt_request_ids: list[str] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
@@ -100,7 +111,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
     ## for Long Text Embedding with Chunked Processing
-    original_engine_inputs: Sequence[EngineInput] | None = None
+    original_engine_inputs: Sequence["PoolingEngineInput"] | None = None
     chunked_embedding_metadata: list[ChunkedEmbeddingMetadata] | None = None
 
     ## for bi-encoder & late-interaction
@@ -111,6 +122,8 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     ## for flash-late-interaction
     query_final_res_batch: list[PoolingRequestOutput] | None = None
+    late_interaction_query_keys: list[str] | None = None
+    late_interaction_doc_keys: list[str] | None = None
 
 
 @dataclass
@@ -118,7 +131,10 @@ class OfflineInputsContext:
     pooling_task: PoolingTask
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
-    priorities: Sequence[int] | None
+    priorities: int | Sequence[int] | None
+    late_chunking: list[LateChunkingSlot | None] = field(
+        default_factory=list, kw_only=True
+    )
 
 
 @dataclass
@@ -140,7 +156,7 @@ class OfflinePluginInputsContext(OfflineInputsContext):
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
-ALLOfflineInputsContext: TypeAlias = (
+AnyOfflineInputsContext: TypeAlias = (
     OfflineEncodeInputsContext
     | OfflineScoringInputsContext
     | OfflinePluginInputsContext
@@ -153,6 +169,7 @@ class OfflineOutputsContext:
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
+    late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
 
 class RenderParams(TypedDict):
@@ -163,6 +180,7 @@ class RenderParams(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
+    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class EncodeCMPLRenderParams(RenderParams):
@@ -178,6 +196,15 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
+    max_tokens_per_query: int
+    max_tokens_per_doc: int
+
+
+AnyRenderParam: TypeAlias = (
+    EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
+)
+RequestGenerator: TypeAlias = Generator[AnyRenderParam]
+RequestFactory: TypeAlias = Callable[[], RequestGenerator]
 
 
 class PoolingEngineInput(TypedDict):
@@ -185,9 +212,3 @@ class PoolingEngineInput(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
-
-
-RequestGenerator: TypeAlias = Generator[
-    EncodeCMPLRenderParams | EncodeChatRenderParams | ScoringRenderParams
-]
-RequestFactory: TypeAlias = Callable[[], RequestGenerator]

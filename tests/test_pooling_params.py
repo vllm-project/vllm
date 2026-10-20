@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
+import msgspec
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -13,6 +15,7 @@ from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.pooling_params import LateChunkingParams
 
 EMBEDDING_MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
@@ -52,13 +55,19 @@ class MockModelConfig:
 def test_removed_pooling_parameters(parameter: str, value: Any, message: str):
     data = {"input": "hello", parameter: value}
     for request_type in (EmbeddingRequest, ClassificationRequest, PoolingRequest):
-        with pytest.raises(ValidationError, match=message) as exc_info:
+        with pytest.raises(VLLMValidationError, match=message):
             TypeAdapter(request_type).validate_python(data)
-        assert len(exc_info.value.errors()) == 1
 
-    with pytest.raises(ValidationError, match=message) as exc_info:
-        TypeAdapter(PoolerConfig).validate_python({parameter: value})
-    assert len(exc_info.value.errors()) == 1
+    # PoolerConfig still raises bare ValueError for `normalize`
+    # (wrapped to ValidationError by Pydantic), but `check_removed_pooling_task`
+    # raises VLLMValidationError for removed tasks.
+    if parameter == "normalize":
+        with pytest.raises(ValidationError, match=message) as exc_info:
+            TypeAdapter(PoolerConfig).validate_python({parameter: value})
+        assert len(exc_info.value.errors()) == 1
+    else:
+        with pytest.raises(VLLMValidationError, match=message):
+            TypeAdapter(PoolerConfig).validate_python({parameter: value})
 
     if parameter == "task":
         with pytest.raises(VLLMValidationError, match=message):
@@ -80,7 +89,7 @@ def test_embed():
 
     invalid_parameters = classify_parameters + step_pooling_parameters
     for p in set(invalid_parameters) - set(embed_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -100,7 +109,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
     pooling_params = PoolingParams(task=task, dimensions=None)
     pooling_params.verify(model_config)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         pooling_params = PoolingParams(task=task, dimensions=1)
         pooling_params.verify(model_config)
 
@@ -131,7 +140,7 @@ def test_embed_dimensions_matryoshka_without_list_upper_bound():
 
     PoolingParams(task=task, dimensions=16).verify(model_config)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         PoolingParams(task=task, dimensions=64).verify(model_config)
 
 
@@ -150,7 +159,7 @@ def test_classify(task):
 
     invalid_parameters = embed_parameters + step_pooling_parameters
     for p in set(invalid_parameters) - set(classify_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -176,7 +185,7 @@ def test_token_embed(pooling_type: str):
         invalid_parameters = classify_parameters + step_pooling_parameters
 
     for p in set(invalid_parameters) - set(embed_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
 
@@ -202,6 +211,95 @@ def test_token_classify(pooling_type: str):
         invalid_parameters = embed_parameters + step_pooling_parameters
 
     for p in set(invalid_parameters) - set(classify_parameters):
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "2"])
+def test_late_chunk_size_rejects_non_positive_integers(value):
+    with pytest.raises(VLLMValidationError, match="positive integer"):
+        PoolingParams(late_chunking_params=LateChunkingParams(chunk_size=value))
+
+
+def _late_chunking_model_config():
+    return SimpleNamespace(
+        architecture="NomicBertModel",
+        model_impl="auto",
+        is_matryoshka=False,
+        hf_config=SimpleNamespace(),
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+    )
+
+
+def test_late_chunking_params_preserve_defaults_clone_and_wire_format():
+    model_config = _late_chunking_model_config()
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=3)
+    )
+    params.verify(model_config)
+    assert params.skip_reading_prefix_cache is True
+    assert params.use_activation is True
+    # Chunk means must include cached prefixes even when the user opts into reads.
+    explicit_cache_flag = PoolingParams(
+        task="token_embed",
+        late_chunking_params=LateChunkingParams(chunk_size=3),
+        skip_reading_prefix_cache=False,
+    )
+    explicit_cache_flag.verify(model_config)
+    assert explicit_cache_flag.skip_reading_prefix_cache is True
+    clone = params.clone()
+    assert clone.late_chunking_params is not None
+    clone.late_chunking_params.chunk_size = 7
+    assert params.late_chunking_params is not None
+    assert params.late_chunking_params.chunk_size == 3
+    # Workers receive only the fixed chunk size, never source ranges.
+    assert msgspec.msgpack.decode(
+        msgspec.msgpack.encode(params.late_chunking_params)
+    ) == [3]
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(params), type=PoolingParams)
+        == params
+    )
+    # A message written before the appended field still uses the old default.
+    wire = msgspec.msgpack.decode(msgspec.msgpack.encode(PoolingParams()))
+    assert msgspec.convert(wire[:-1], type=PoolingParams).late_chunking_params is None
+
+
+@pytest.mark.parametrize(
+    "task", ["embed", "classify", "token_classify", "plugin", None]
+)
+def test_late_chunking_rejects_other_tasks(task):
+    with pytest.raises(VLLMValidationError, match="requires token_embed"):
+        PoolingParams(
+            task=task, late_chunking_params=LateChunkingParams(chunk_size=2)
+        ).verify(_late_chunking_model_config())
+
+
+def test_late_chunking_uses_existing_dimension_validation():
+    config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(tok_pooling_type="ALL", use_activation=False),
+    )
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2), dimensions=4
+    )
+    params.verify(config)
+    assert params.dimensions == 4
+    assert params.use_activation is False
+    params.dimensions = config.embedding_size + 1
+    with pytest.raises(VLLMValidationError, match="dimensions in range"):
+        params.verify(config)
+
+
+@pytest.mark.parametrize("from_config", [False, True])
+def test_late_chunking_rejects_token_filtering_after_resolving_defaults(from_config):
+    config = MockModelConfig(pooler_config=PoolerConfig(tok_pooling_type="STEP"))
+    params = PoolingParams(
+        task="token_embed", late_chunking_params=LateChunkingParams(2)
+    )
+    if from_config:
+        config.pooler_config.step_tag_id = 42
+    else:
+        params.step_tag_id = 42
+    with pytest.raises(VLLMValidationError, match="all token rows"):
+        params.verify(config)

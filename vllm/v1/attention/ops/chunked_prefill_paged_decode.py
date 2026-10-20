@@ -84,6 +84,7 @@ def kernel_paged_attention_2d(
     query_start_len_ptr,  # [num_seqs+1]
     USE_SINKS: tl.constexpr,  # bool
     USE_FP8: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -156,11 +157,6 @@ def kernel_paged_attention_2d(
         # Supports non-contiguous mapping
         # from logical blocks to physical blocks
         abs_token_idx = start_n + offs_n
-        # Slots >= seq_len are unwritten KV cache and may hold NaN/garbage
-        # (e.g. the tail of the last partial block). They are score-masked
-        # below, but 0 * NaN = NaN would still poison the output, so exclude
-        # them from the K/V loads too.
-        kv_load_mask = abs_token_idx < seq_len
         l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
         # Vectorized loading of physical block IDs
         p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
@@ -175,34 +171,64 @@ def kernel_paged_attention_2d(
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
-        # 4D addressing logic of V (Slot is innermost)
-        v_offset = (
-            p_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_1
-            + offs_d[None, :] * stride_v_cache_2
-            + internal_offsets[:, None] * stride_v_cache_3
-        )
+        # V addressing: standard 4D or interleaved 5D
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + (internal_offsets[:, None] // INTERLEAVED_V_PACK_FACTOR)
+                * HEAD_SIZE
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (internal_offsets[:, None] % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + offs_d[None, :] * stride_v_cache_2
+                + internal_offsets[:, None] * stride_v_cache_3
+            )
 
-        # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & kv_load_mask[None, :],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
+        # Only the final tile can straddle seq_len. Slots >= seq_len are
+        # unwritten KV cache that may hold NaN/garbage; they are score-masked
+        # below, but 0 * NaN = NaN would still poison the output, so mask them
+        # out of the K/V loads too. Earlier tiles are fully written, so they
+        # use the cheaper token-uniform dim_mask (matching the pre-0.25.0 fast
+        # path) and skip the per-token predicate entirely.
+        # K : (HEAD_SIZE, BLOCK_SIZE), V : (BLOCK_SIZE, HEAD_SIZE)
+        if j == num_blocks - 1:
+            kv_load_mask = abs_token_idx < seq_len
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & kv_load_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & kv_load_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+        else:
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
-
-        # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & kv_load_mask[:, None],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -290,6 +316,7 @@ def chunked_prefill_paged_decode(
     # Optional tensor for sinks
     sinks=None,
     is_block_table_ptr: bool = False,
+    use_interleaved_v_cache: bool = False,
     causal: bool = True,
 ):
     if sm_scale is None:
@@ -299,6 +326,10 @@ def chunked_prefill_paged_decode(
 
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
+
+    interleaved_v_pack_factor = (
+        (16 // value_cache.element_size()) if use_interleaved_v_cache else 0
+    )
 
     if max_query_len > 1:
         context_attention_fwd(
@@ -322,6 +353,7 @@ def chunked_prefill_paged_decode(
             skip_decode=True,
             fp8_out_scale=output_scale,
             sinks=sinks,
+            interleaved_v_pack_factor=interleaved_v_pack_factor,
             causal=causal,
         )
 
@@ -414,6 +446,7 @@ def chunked_prefill_paged_decode(
             k_scale=k_scale,
             v_scale=v_scale,
             fp8_out_scale=output_scale,
+            use_interleaved_v_cache=use_interleaved_v_cache,
         )
     else:
         logger.warning_once(
@@ -490,4 +523,5 @@ def chunked_prefill_paged_decode(
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
+            INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         )

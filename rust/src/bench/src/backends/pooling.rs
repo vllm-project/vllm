@@ -8,7 +8,7 @@
 //! - `openai-embeddings`: Standard OpenAI `/v1/embeddings` with text input
 //! - `openai-embeddings-chat`: OpenAI `/v1/embeddings` with chat message format (supports
 //!   multimodal)
-//! - `vllm-pooling`: vLLM `/v1/pooling` endpoint
+//! - `vllm-pooling`: vLLM `/pooling` endpoint
 //! - `vllm-rerank`: vLLM `/v1/rerank` endpoint (query + documents)
 
 use std::time::Instant;
@@ -39,9 +39,22 @@ impl PoolingBackend {
         input: &RequestFuncInput,
         client: &reqwest::Client,
     ) -> Result<RequestFuncOutput> {
+        let payload = self.build_payload(input);
+
         // Preserve client-side prompt_len as fallback if server doesn't report usage.
         let mut output = RequestFuncOutput {
             prompt_len: input.prompt_len,
+            num_input_sequences: match self.kind {
+                BackendKind::OpenaiEmbeddings | BackendKind::VllmPooling => {
+                    input.prompt_list.as_ref().map_or(1, |list| list.len())
+                }
+                BackendKind::OpenaiEmbeddingsChat => 1,
+                BackendKind::VllmRerank => payload
+                    .get("documents")
+                    .and_then(|documents| documents.as_array())
+                    .map_or(0, |documents| documents.len()),
+                _ => unreachable!("PoolingBackend with non-pooling kind"),
+            },
             ..Default::default()
         };
 
@@ -50,8 +63,6 @@ impl PoolingBackend {
             &input.extra_headers,
             &input.request_id,
         );
-
-        let payload = self.build_payload(input);
 
         let mut request = client.post(&input.api_url);
         for (k, v) in &headers {
@@ -158,9 +169,10 @@ impl PoolingBackend {
                 // (mirrors Python async_request_vllm_rerank).
                 if let Some(ref list) = input.prompt_list {
                     if list.len() < 2 {
-                        eprintln!(
-                            "WARNING: vllm-rerank request has no documents \
-                             (prompt_list needs [query, doc, ...])"
+                        tracing::warn!(
+                            backend = "vllm-rerank",
+                            inputs = list.len(),
+                            "rerank request has no documents"
                         );
                     }
                     let query = list.first().map(|s| s.as_ref()).unwrap_or("");
@@ -175,10 +187,10 @@ impl PoolingBackend {
                     // Legacy path: text prompt as query, documents via --extra-body.
                     let query = input.prompt.as_ref();
                     if query.is_empty() && input.prompt_token_ids.is_some() {
-                        eprintln!(
-                            "WARNING: vllm-rerank received empty query (random dataset uses \
-                             token IDs only). Use --dataset-name random-rerank for meaningful \
-                             rerank benchmarks."
+                        tracing::warn!(
+                            backend = "vllm-rerank",
+                            dataset = "random",
+                            "rerank request has an empty query; use the random-rerank dataset"
                         );
                     }
                     serde_json::json!({

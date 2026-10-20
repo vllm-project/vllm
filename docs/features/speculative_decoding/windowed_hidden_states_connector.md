@@ -100,15 +100,25 @@ At request completion the connector selects accepted window slots on CPU, gather
 only those rows on GPU, and copies them to CPU. A CUDA event fences block release;
 `finished_sending` is emitted only when it completes. The writer waits for that
 event, writes a temporary file, atomically replaces the final file, and releases
-the companion flock. Consumers must use the lock-aware loader. Cancellation and
-insufficient rows close/remove unused locks; write failures remove partial files
-and release locks, and the load fails rather than exposing partial tensors.
-Shutdown drains writers and closes remaining descriptors.
+the companion flock. Consumers must use the lock-aware loader. In window mode,
+aborted, errored and insufficient-row requests close/remove unused locks and are
+not exported; non-window requests keep the legacy export path. Write failures
+write an `.error` file before releasing the lock, and the load raises rather than
+exposing partial tensors. Shutdown drains writers and closes remaining
+descriptors.
+
+Requests with a malformed or unsupported `hidden_state_window` (for example when
+`enable_window_capture` is off, or `end` exceeds `max_window_rows`) are not
+captured and return `hidden_state_capture_skip_reason="invalid_window"`.
+`max_window_rows` defaults to `max_model_len` and caps the window length.
 
 `max_inflight_export_bytes` bounds live **window-export** pinned allocations per
 exporting worker, including writer backlog. A window larger than the budget uses
 pageable final storage and a reusable pinned staging buffer, synchronizing each
-chunk before reusing it. This deliberately adds completion-time host waits.
+chunk before reusing it. This deliberately adds completion-time host waits, and
+when the budget is exhausted the engine loop waits for earlier writes to finish
+(a failed earlier write does not fail the waiting request). Size the budget and
+`max_window_rows` for your storage latency.
 It does not cap PyTorch's cached pinned allocator reserve, other vLLM pinned
 buffers, or legacy full-export requests mixed into the same engine.
 

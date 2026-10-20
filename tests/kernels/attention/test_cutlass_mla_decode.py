@@ -11,6 +11,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import num_compute_units
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def cal_diff(
     x: torch.Tensor,
@@ -40,7 +42,7 @@ CUTLASS_MLA_UNSUPPORTED_REASON = (
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(100),
+    not current_platform.is_device_capability_family(100),
     reason=CUTLASS_MLA_UNSUPPORTED_REASON,
 )
 @pytest.mark.parametrize("b", [128])
@@ -215,7 +217,7 @@ def test_cutlass_mla_decode(
 
 
 @pytest.mark.skipif(
-    not current_platform.has_device_capability(100),
+    not current_platform.is_device_capability_family(100),
     reason=CUTLASS_MLA_UNSUPPORTED_REASON,
 )
 @torch.inference_mode()

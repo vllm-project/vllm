@@ -123,7 +123,8 @@ Each request produces a `.safetensors` file containing:
 The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. Use `load_hidden_states()` from the connector module to read the file with proper synchronization.
 
 !!! note
-    Chunked prefill is not compatible with this feature and must be disabled.
+    Chunked prefill is not compatible with full-sequence export and must be disabled.
+    Window capture supports chunked prefill; see below.
 
 ## Experimental response-window capture
 

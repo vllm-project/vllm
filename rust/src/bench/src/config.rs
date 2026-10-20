@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cli::{BackendKind, Cli, DatasetName, LoraAssignment, RampUpStrategy, SpeedBenchConfig};
+use crate::cli::{
+    BackendKind, BenchServeArgs, DatasetName, LoraAssignment, RampUpStrategy, SpeedBenchConfig,
+};
 use crate::datasets::random_mm::{MmBucketKey, MmLimitPerPrompt};
 use crate::error::{BenchError, Result};
 
@@ -143,9 +145,6 @@ pub struct BenchConfig {
     pub prefix_repetition_num_prefixes: usize,
     pub prefix_repetition_output_len: usize,
     pub sharegpt_output_len: Option<usize>,
-    pub sonnet_input_len: usize,
-    pub sonnet_output_len: usize,
-    pub sonnet_prefix_len: usize,
     pub no_oversample: bool,
     pub disable_shuffle: bool,
     pub num_prompts: usize,
@@ -194,10 +193,20 @@ pub struct BenchConfig {
     pub speed_bench_config: SpeedBenchConfig,
     pub speed_bench_category: Option<String>,
     pub speed_bench_max_input_len: Option<usize>,
+    pub speed_bench_output_len: usize,
     pub hf_split: Option<String>,
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
     pub hf_text_column: Option<String>,
+    /// Fire each request at its trace-recorded timestamp instead of a
+    /// synthetic --request-rate schedule. Only timed_trace can set this.
+    pub self_timed: bool,
+    pub timed_trace_chunk_hash_size: usize,
+    pub timed_trace_sec_multiplier: f64,
+    pub timed_trace_label_timestamp: String,
+    pub timed_trace_label_input_length: String,
+    pub timed_trace_label_output_length: String,
+    pub timed_trace_label_hash_ids: String,
     pub reset_prefix_cache: bool,
     pub prompt_token_ids: bool,
     // --- Random multimodal dataset ---
@@ -215,63 +224,63 @@ pub struct BenchConfig {
 }
 
 impl BenchConfig {
-    pub fn from_cli(cli: &Cli) -> Result<Self> {
-        if cli.burstiness <= 0.0 {
+    pub fn from_args(args: &BenchServeArgs) -> Result<Self> {
+        if args.burstiness <= 0.0 {
             return Err(BenchError::Config("Burstiness must be positive".into()));
         }
 
-        if cli.num_prompts == 0 {
+        if args.num_prompts == 0 {
             return Err(BenchError::Config(
                 "--num-prompts must be at least 1".into(),
             ));
         }
 
-        if cli.request_rate <= 0.0 && !cli.request_rate.is_infinite() {
+        if args.request_rate <= 0.0 && !args.request_rate.is_infinite() {
             return Err(BenchError::Config(
                 "--request-rate must be positive (or inf)".into(),
             ));
         }
-        if cli.max_model_len == Some(0) {
+        if args.max_model_len == Some(0) {
             return Err(BenchError::Config(
                 "--max-model-len must be at least 1".into(),
             ));
         }
 
-        let base_url = cli.resolve_base_url();
-        let api_url = cli.resolve_api_url();
+        let base_url = args.resolve_base_url();
+        let api_url = args.resolve_api_url();
 
-        let extra_headers = cli.parse_headers()?;
-        let mut extra_body = cli.parse_extra_body()?;
+        let extra_headers = args.parse_headers()?;
+        let mut extra_body = args.parse_extra_body()?;
 
         // Merge sampling parameters into extra_body (matches Python behavior).
         // Python collects non-None sampling params and merges them UNDER extra_body,
         // meaning extra_body keys take precedence over sampling params.
         {
             let mut sampling_params = serde_json::Map::new();
-            if let Some(v) = cli.top_p {
+            if let Some(v) = args.top_p {
                 sampling_params.insert("top_p".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.top_k {
+            if let Some(v) = args.top_k {
                 sampling_params.insert("top_k".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.min_p {
+            if let Some(v) = args.min_p {
                 sampling_params.insert("min_p".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.temperature {
+            if let Some(v) = args.temperature {
                 sampling_params.insert("temperature".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.frequency_penalty {
+            if let Some(v) = args.frequency_penalty {
                 sampling_params.insert("frequency_penalty".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.presence_penalty {
+            if let Some(v) = args.presence_penalty {
                 sampling_params.insert("presence_penalty".into(), serde_json::json!(v));
             }
-            if let Some(v) = cli.repetition_penalty {
+            if let Some(v) = args.repetition_penalty {
                 sampling_params.insert("repetition_penalty".into(), serde_json::json!(v));
             }
 
             if !sampling_params.is_empty() {
-                if !cli.backend.is_openai_compatible() {
+                if !args.backend.is_openai_compatible() {
                     return Err(BenchError::Config(
                         "Sampling parameters are only supported by openai-compatible backends."
                             .into(),
@@ -286,10 +295,18 @@ impl BenchConfig {
                     }
                     Some(other) => {
                         // extra_body was not an object — just use sampling params
-                        eprintln!(
-                            "Warning: --extra-body is not a JSON object, sampling params may be lost"
+                        let value_type = match &other {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => unreachable!(),
+                        };
+                        tracing::warn!(
+                            value_type,
+                            "sampling parameters may be lost because --extra-body is not a JSON object"
                         );
-                        let _ = other;
                         sampling_params
                     }
                     None => sampling_params,
@@ -298,8 +315,16 @@ impl BenchConfig {
             }
         }
 
+        if uses_server_default_temperature(args.backend, extra_body.as_ref()) {
+            tracing::warn!(
+                "vllm-bench does not set temperature==0 (greedy) in requests by default. \
+                 The default will be determined on the server side and can be \
+                 model/API specific. For greedy decoding, include --temperature=0."
+            );
+        }
+
         // Parse metadata
-        let metadata = match &cli.metadata {
+        let metadata = match &args.metadata {
             None => None,
             Some(items) => {
                 let mut pairs = Vec::new();
@@ -314,24 +339,24 @@ impl BenchConfig {
         };
 
         // Parse goodput SLOs
-        let goodput = parse_goodput(&cli.goodput)?;
+        let goodput = parse_goodput(&args.goodput)?;
 
         // Parse ramp-up config
-        let ramp_up = parse_ramp_up(cli)?;
+        let ramp_up = parse_ramp_up(args)?;
 
         // Default percentile metrics based on backend type
-        let default_percentile_metrics = if cli.backend.is_pooling() {
+        let default_percentile_metrics = if args.backend.is_pooling() {
             "e2el"
         } else {
             "ttft,tpot,itl,e2el"
         };
         let percentile_metrics_str =
-            cli.percentile_metrics.as_deref().unwrap_or(default_percentile_metrics);
+            args.percentile_metrics.as_deref().unwrap_or(default_percentile_metrics);
         let selected_percentile_metrics: Vec<String> =
             percentile_metrics_str.split(',').map(|s| s.trim().to_string()).collect();
 
-        let metric_percentiles = parse_percentiles(&cli.metric_percentiles, false)?;
-        let sweep_summary_percentiles = cli
+        let metric_percentiles = parse_percentiles(&args.metric_percentiles, false)?;
+        let sweep_summary_percentiles = args
             .sweep_summary_percentiles
             .as_deref()
             .map(|raw| parse_percentiles(raw, true))
@@ -344,38 +369,113 @@ impl BenchConfig {
             selected_percentiles.push(90.0);
         }
 
-        let tokenizer_id = if cli.skip_tokenizer_init {
+        let tokenizer_id = if args.skip_tokenizer_init {
             None
         } else {
-            Some(cli.tokenizer.clone().or_else(|| cli.model.clone()).unwrap_or_default())
+            args.tokenizer.clone().or_else(|| args.model.clone())
         };
 
         // Resolve input/output lengths
-        let random_input_len = cli.resolved_random_input_len();
-        let random_output_len = cli.resolved_random_output_len();
-        let per_turn_input_len = cli.resolved_per_turn_input_len();
+        let random_input_len = args.resolved_random_input_len();
+        let random_output_len = args.resolved_random_output_len();
+        let per_turn_input_len = args.resolved_per_turn_input_len();
 
         // Normalized multi-turn turn counts (computed in validation block below, defaults
         // to num_turns if multi-turn mode is not active)
-        let mut multi_turn_min_turns = cli.multi_turn_num_turns;
-        let mut multi_turn_max_turns = cli.multi_turn_num_turns;
+        let mut multi_turn_min_turns = args.multi_turn_num_turns;
+        let mut multi_turn_max_turns = args.multi_turn_num_turns;
+
+        let self_timed = if args.dataset_name == DatasetName::TimedTrace {
+            if !matches!(args.backend, BackendKind::Vllm | BackendKind::Openai) {
+                return Err(BenchError::Config(
+                    "timed_trace passes pre-tokenized prompts (list[int]) and requires \
+                     a completions backend ('vllm' or 'openai')"
+                        .into(),
+                ));
+            }
+            if args.dataset_path.is_none() {
+                return Err(BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                ));
+            }
+            // A zero, negative or non-finite scale turns trace timestamps into
+            // offsets the scheduler cannot sleep on.
+            if !(args.timed_trace_sec_multiplier.is_finite()
+                && args.timed_trace_sec_multiplier > 0.0)
+            {
+                return Err(BenchError::Config(format!(
+                    "--timed-trace-sec-multiplier must be finite and positive, got {}",
+                    args.timed_trace_sec_multiplier
+                )));
+            }
+            let self_timed = !args.no_self_timed;
+            if self_timed {
+                // Flags that shape a synthetic schedule are unreachable once
+                // the trace supplies arrival times. Accepting them silently
+                // would still stamp the result JSON and its filename with a
+                // request rate that never ran.
+                let mut unused: Vec<&str> = Vec::new();
+                if args.request_rate.is_finite() {
+                    unused.push("--request-rate");
+                }
+                if args.burstiness != 1.0 {
+                    unused.push("--burstiness");
+                }
+                if args.ramp_up_strategy.is_some() {
+                    unused.push("--ramp-up-strategy");
+                }
+                if args.sweep_request_rate.is_some() {
+                    unused.push("--sweep-request-rate");
+                }
+                // A per-point num_prompts truncates the trace to a different
+                // number of rows, so each sweep point replays a different span.
+                if args.sweep_max_concurrency.is_some() && args.sweep_num_prompts_factor.is_some() {
+                    return Err(BenchError::Config(
+                        "--sweep-num-prompts-factor truncates the trace to a different \
+                         number of rows per sweep point, so each point replays a \
+                         different span; drop it to sweep concurrency over the whole trace"
+                            .into(),
+                    ));
+                }
+                if !unused.is_empty() {
+                    return Err(BenchError::Config(format!(
+                        "{} {} no effect under trace-driven timing; pass --no-self-timed \
+                         to schedule timed_trace by --request-rate instead",
+                        unused.join(" / "),
+                        if unused.len() == 1 { "has" } else { "have" },
+                    )));
+                }
+            }
+            self_timed
+        } else {
+            if args.self_timed || args.no_self_timed {
+                return Err(BenchError::Config(
+                    "--self-timed/--no-self-timed is only supported with \
+                     --dataset-name timed_trace"
+                        .into(),
+                ));
+            }
+            false
+        };
 
         // For random datasets with openai-compatible backends, default to ignore_eos.
         // Exception: multi-turn mode, where ignore_eos causes unbounded context growth
         // across turns. Multi-turn uses min_tokens instead for output length control.
         // Pooling backends don't generate tokens, so ignore_eos is irrelevant.
-        let ignore_eos = if cli.backend.is_pooling() {
+        let ignore_eos = if args.backend.is_pooling() {
             false
         } else {
-            cli.ignore_eos
-                || ((cli.dataset_name == DatasetName::Random
-                    || cli.dataset_name == DatasetName::RandomMm)
-                    && cli.backend.is_openai_compatible()
-                    && !cli.multi_turn)
+            args.ignore_eos
+                // timed_trace: generation must run to the trace's output_length
+                || args.dataset_name == DatasetName::TimedTrace
+                || ((args.dataset_name == DatasetName::Random
+                    || args.dataset_name == DatasetName::RandomMm)
+                    && args.backend.is_openai_compatible()
+                    && !args.multi_turn)
         };
 
         // Pooling backends don't support multi-turn
-        if cli.backend.is_pooling() && cli.multi_turn {
+        if args.backend.is_pooling() && args.multi_turn {
             return Err(BenchError::Config(
                 "Pooling/embedding backends do not support --multi-turn".into(),
             ));
@@ -383,7 +483,7 @@ impl BenchConfig {
 
         // LoRA validation. Adapter names must be non-empty after trim; pooling
         // backends are out of scope (vLLM LoRA routing is for generative paths).
-        let lora_modules = match cli.lora_modules.as_ref() {
+        let lora_modules = match args.lora_modules.as_ref() {
             None => None,
             Some(names) => {
                 if names.is_empty() {
@@ -391,7 +491,7 @@ impl BenchConfig {
                         "--lora-modules requires at least one adapter name".into(),
                     ));
                 }
-                if cli.backend.is_pooling() {
+                if args.backend.is_pooling() {
                     return Err(BenchError::Config(
                         "--lora-modules is not supported for pooling/embedding backends".into(),
                     ));
@@ -411,39 +511,38 @@ impl BenchConfig {
         };
 
         // Random-MM validation and config parsing
-        let (random_mm_limit, random_mm_buckets) = if cli.dataset_name == DatasetName::RandomMm {
-            if cli.backend != BackendKind::OpenaiChat {
+        let (random_mm_limit, random_mm_buckets) = if args.dataset_name == DatasetName::RandomMm {
+            if args.backend != BackendKind::OpenaiChat {
                 return Err(BenchError::Config(
                     "Multi-modal content (images) is only supported on 'openai-chat' backend."
                         .into(),
                 ));
             }
             let limit = crate::datasets::random_mm::parse_limit_mm_per_prompt(
-                &cli.random_mm_limit_mm_per_prompt,
+                &args.random_mm_limit_mm_per_prompt,
             )?;
             let buckets =
-                crate::datasets::random_mm::parse_bucket_config(&cli.random_mm_bucket_config)?;
+                crate::datasets::random_mm::parse_bucket_config(&args.random_mm_bucket_config)?;
             (limit, buckets)
         } else {
             (MmLimitPerPrompt::default(), Vec::new())
         };
 
-        // Note: --dataset-path is optional for sharegpt (auto-downloads) and
-        // sonnet (uses built-in Shakespeare's sonnets).
+        // --dataset-path is optional for sharegpt (auto-downloads).
 
         // Range ratio (Python semantics: [len*(1-r), len*(1+r)], each r in [0,1))
-        let random_range_ratio = RangeRatio::parse(&cli.random_range_ratio)?;
+        let random_range_ratio = RangeRatio::parse(&args.random_range_ratio)?;
 
         // Batched inputs only make sense for pooling backends (the generation
         // backends send one prompt per request).
-        if cli.random_batch_size == 0 {
+        if args.random_batch_size == 0 {
             return Err(BenchError::Config(
                 "--random-batch-size must be at least 1".into(),
             ));
         }
-        if cli.random_batch_size > 1
-            && !cli.backend.is_pooling()
-            && cli.dataset_name != DatasetName::RandomRerank
+        if args.random_batch_size > 1
+            && !args.backend.is_pooling()
+            && args.dataset_name != DatasetName::RandomRerank
         {
             return Err(BenchError::Config(
                 "--random-batch-size > 1 is only supported with embeddings/pooling backends".into(),
@@ -451,16 +550,16 @@ impl BenchConfig {
         }
 
         // random-rerank validation (mirrors Python RandomDatasetForReranking)
-        let is_reranker = !cli.no_reranker;
-        if cli.dataset_name == DatasetName::RandomRerank {
-            if !cli.backend.is_pooling() {
+        let is_reranker = !args.no_reranker;
+        if args.dataset_name == DatasetName::RandomRerank {
+            if !args.backend.is_pooling() {
                 return Err(BenchError::Config(
                     "--dataset-name random-rerank requires an embeddings/pooling backend \
                      (e.g. --backend vllm-rerank)"
                         .into(),
                 ));
             }
-            if !is_reranker && (cli.num_prompts < 2 || cli.random_batch_size < 2) {
+            if !is_reranker && (args.num_prompts < 2 || args.random_batch_size < 2) {
                 return Err(BenchError::Config(
                     "--no-reranker requires --num-prompts > 1 and --random-batch-size > 1 \
                      (the query is folded into the first batch slot)"
@@ -470,8 +569,8 @@ impl BenchConfig {
         }
 
         // Custom dataset validation
-        if cli.dataset_name == DatasetName::Custom {
-            match cli.dataset_path.as_deref() {
+        if args.dataset_name == DatasetName::Custom {
+            match args.dataset_path.as_deref() {
                 None => {
                     return Err(BenchError::Config(
                         "--dataset-path is required for --dataset-name custom \
@@ -486,38 +585,38 @@ impl BenchConfig {
                 }
                 _ => {}
             }
-            if !cli.skip_chat_template {
-                eprintln!(
-                    "NOTE: client-side chat template rendering is not supported; custom \
-                     dataset prompts are sent raw (equivalent to --skip-chat-template)."
+            if !args.skip_chat_template {
+                tracing::warn!(
+                    dataset = "custom",
+                    "client-side chat template rendering is unsupported; sending prompts raw"
                 );
             }
         }
 
         // Prefix repetition validation
-        if cli.dataset_name == DatasetName::PrefixRepetition {
-            if cli.prefix_repetition_num_prefixes == 0 {
+        if args.dataset_name == DatasetName::PrefixRepetition {
+            if args.prefix_repetition_num_prefixes == 0 {
                 return Err(BenchError::Config(
                     "--prefix-repetition-num-prefixes must be at least 1".into(),
                 ));
             }
-            if cli.num_prompts < cli.prefix_repetition_num_prefixes {
+            if args.num_prompts < args.prefix_repetition_num_prefixes {
                 return Err(BenchError::Config(format!(
                     "--num-prompts ({}) must be >= --prefix-repetition-num-prefixes ({})",
-                    cli.num_prompts, cli.prefix_repetition_num_prefixes
+                    args.num_prompts, args.prefix_repetition_num_prefixes
                 )));
             }
         }
 
         // HF dataset validation
-        if cli.dataset_name == DatasetName::Hf && cli.dataset_path.is_none() {
+        if args.dataset_name == DatasetName::Hf && args.dataset_path.is_none() {
             return Err(BenchError::Config(
                 "--dataset-path is required for --dataset-name hf \
                  (set to a HuggingFace dataset ID, e.g. 'allenai/WildChat-4.8M')"
                     .into(),
             ));
         }
-        if let Some(len) = cli.hf_output_len
+        if let Some(len) = args.hf_output_len
             && len == 0
         {
             return Err(BenchError::Config(
@@ -526,33 +625,35 @@ impl BenchConfig {
         }
 
         // Multi-turn validation
-        if cli.multi_turn {
-            if cli.backend != BackendKind::OpenaiChat {
+        if args.multi_turn {
+            if args.backend != BackendKind::OpenaiChat {
                 return Err(BenchError::Config(
                     "--multi-turn requires --backend openai-chat".into(),
                 ));
             }
-            if cli.multi_turn_num_turns == 0 {
+            if args.multi_turn_num_turns == 0 {
                 return Err(BenchError::Config(
                     "--multi-turn-num-turns must be at least 1".into(),
                 ));
             }
 
-            // Normalize and validate min/max turns. ShareGPT only consumes max_turns
-            // (the loader walks all available turns up to the cap), so the
-            // min/num/max coupling used for synthetic generation does not apply.
-            if cli.dataset_name == DatasetName::ShareGpt {
-                if cli.multi_turn_max_turns == 1 {
+            // Normalize and validate min/max turns. Conversation datasets only
+            // consume max_turns (the loader walks all available turns up to the
+            // cap), so the min/num/max coupling used for synthetic generation
+            // does not apply.
+            if matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf) {
+                if args.multi_turn_max_turns == 1 {
                     return Err(BenchError::Config(
-                        "--multi-turn-max-turns must be at least 2 for ShareGPT multi-turn".into(),
+                        "--multi-turn-max-turns must be at least 2 for ShareGPT-format multi-turn"
+                            .into(),
                     ));
                 }
             } else {
                 (multi_turn_min_turns, multi_turn_max_turns) =
-                    match (cli.multi_turn_min_turns, cli.multi_turn_max_turns) {
-                        (0, 0) => (cli.multi_turn_num_turns, cli.multi_turn_num_turns),
-                        (m, 0) => (m, cli.multi_turn_num_turns),
-                        (0, x) => (cli.multi_turn_num_turns, x),
+                    match (args.multi_turn_min_turns, args.multi_turn_max_turns) {
+                        (0, 0) => (args.multi_turn_num_turns, args.multi_turn_num_turns),
+                        (m, 0) => (m, args.multi_turn_num_turns),
+                        (0, x) => (args.multi_turn_num_turns, x),
                         (m, x) => (m, x),
                     };
                 if multi_turn_min_turns < 1 {
@@ -568,15 +669,16 @@ impl BenchConfig {
             }
 
             if ignore_eos {
-                eprintln!(
-                    "WARNING: --ignore-eos is set with --multi-turn. The server may not \
-                     respect output length limits, causing unbounded context growth."
+                tracing::warn!(
+                    ignore_eos,
+                    multi_turn = true,
+                    "output length limits may be ignored, causing unbounded context growth"
                 );
             }
 
             // Validate prefix sharing ratios
-            let pg = cli.multi_turn_prefix_global_ratio;
-            let pc = cli.multi_turn_prefix_conversation_ratio;
+            let pg = args.multi_turn_prefix_global_ratio;
+            let pc = args.multi_turn_prefix_conversation_ratio;
             if !(0.0..=1.0).contains(&pg) {
                 return Err(BenchError::Config(
                     "--multi-turn-prefix-global-ratio must be in [0.0, 1.0]".into(),
@@ -592,20 +694,20 @@ impl BenchConfig {
                     "--multi-turn-prefix-global-ratio + --multi-turn-prefix-conversation-ratio must be < 1.0 (unique suffix required)".into(),
                 ));
             }
-            if (pg > 0.0 || pc > 0.0) && cli.dataset_name != DatasetName::Random {
+            if (pg > 0.0 || pc > 0.0) && args.dataset_name != DatasetName::Random {
                 return Err(BenchError::Config(
                     "Prefix sharing (--multi-turn-prefix-global-ratio / --multi-turn-prefix-conversation-ratio) only works with --dataset-name random".into(),
                 ));
             }
         }
 
-        if !(cli.steady_state_threshold > 0.0 && cli.steady_state_threshold <= 1.0) {
+        if !(args.steady_state_threshold > 0.0 && args.steady_state_threshold <= 1.0) {
             return Err(BenchError::Config(format!(
                 "--steady-state-threshold must be in (0.0, 1.0], got {}",
-                cli.steady_state_threshold
+                args.steady_state_threshold
             )));
         }
-        if let Some(mw) = cli.steady_state_min_window
+        if let Some(mw) = args.steady_state_min_window
             && mw < 0.0
         {
             return Err(BenchError::Config(format!(
@@ -613,122 +715,136 @@ impl BenchConfig {
             )));
         }
 
-        if cli.profile_batch_threshold.is_some() && !cli.profile {
+        if args.profile_batch_threshold.is_some() && !args.profile {
             return Err(BenchError::Config(
                 "--profile-batch-threshold requires --profile".into(),
             ));
         }
-        if cli.profile_duration <= 0.0 {
+        if args.profile_duration <= 0.0 {
             return Err(BenchError::Config(
                 "--profile-duration must be positive".into(),
             ));
         }
-        if cli.profile_batch_threshold.is_none() && cli.profile_duration != 5.0 {
+        if args.profile_batch_threshold.is_none() && args.profile_duration != 5.0 {
             return Err(BenchError::Config(
                 "--profile-duration requires --profile-batch-threshold".into(),
             ));
         }
 
+        if args.tokenizer_mode != "auto" {
+            tracing::warn!(
+                mode = %args.tokenizer_mode,
+                "--tokenizer-mode is ignored by the Rust client; tokenizer resolution always \
+                 follows the HF tokenizer.json -> tiktoken -> server-side /tokenize fallback \
+                 chain (mistral_common tokenizers are not supported locally)"
+            );
+        }
+
         Ok(BenchConfig {
-            backend: cli.backend,
+            backend: args.backend,
             base_url,
             api_url,
-            model: cli.model.clone(),
-            model_name: cli.served_model_name.clone(),
+            model: args.model.clone(),
+            model_name: args.served_model_name.clone(),
             tokenizer_id,
-            tokenizer_mode: cli.tokenizer_mode.clone(),
-            trust_remote_code: cli.trust_remote_code,
-            skip_tokenizer_init: cli.skip_tokenizer_init,
-            dataset_name: cli.dataset_name,
-            dataset_path: cli.dataset_path.clone(),
-            max_model_len: cli.max_model_len,
+            tokenizer_mode: args.tokenizer_mode.clone(),
+            trust_remote_code: args.trust_remote_code,
+            skip_tokenizer_init: args.skip_tokenizer_init,
+            dataset_name: args.dataset_name,
+            dataset_path: args.dataset_path.clone(),
+            max_model_len: args.max_model_len,
             random_input_len,
             random_output_len,
-            random_prefix_len: cli.random_prefix_len,
+            random_prefix_len: args.random_prefix_len,
             random_range_ratio,
-            random_batch_size: cli.random_batch_size,
+            random_batch_size: args.random_batch_size,
             is_reranker,
-            custom_output_len: cli.output_len.map(|v| v as i64).unwrap_or(cli.custom_output_len),
-            prefix_repetition_prefix_len: cli.prefix_repetition_prefix_len,
-            prefix_repetition_suffix_len: cli.prefix_repetition_suffix_len,
-            prefix_repetition_num_prefixes: cli.prefix_repetition_num_prefixes,
-            prefix_repetition_output_len: cli
+            custom_output_len: args.output_len.map(|v| v as i64).unwrap_or(args.custom_output_len),
+            prefix_repetition_prefix_len: args.prefix_repetition_prefix_len,
+            prefix_repetition_suffix_len: args.prefix_repetition_suffix_len,
+            prefix_repetition_num_prefixes: args.prefix_repetition_num_prefixes,
+            prefix_repetition_output_len: args
                 .output_len
-                .unwrap_or(cli.prefix_repetition_output_len),
-            random_cache_hit_fraction: cli.random_cache_hit_fraction,
-            random_cache_ratio: cli.random_cache_ratio,
-            sharegpt_output_len: cli.sharegpt_output_len,
-            sonnet_input_len: cli.sonnet_input_len,
-            sonnet_output_len: cli.sonnet_output_len,
-            sonnet_prefix_len: cli.sonnet_prefix_len,
-            no_oversample: cli.no_oversample,
-            disable_shuffle: cli.disable_shuffle,
-            num_prompts: cli.num_prompts,
-            request_rate: cli.request_rate,
-            burstiness: cli.burstiness,
-            max_concurrency: cli.max_concurrency,
-            steady_state_threshold: cli.steady_state_threshold,
-            steady_state_min_window: cli.steady_state_min_window,
-            no_steady_state: cli.no_steady_state,
-            disable_tqdm: cli.disable_tqdm,
-            num_warmups: cli.num_warmups,
-            profile: cli.profile,
-            profile_batch_threshold: cli.profile_batch_threshold,
-            profile_duration: cli.profile_duration,
-            save_result: cli.save_result,
-            save_detailed: cli.save_detailed,
-            append_result: cli.append_result,
-            result_dir: cli.result_dir.clone(),
-            result_filename: cli.result_filename.clone(),
-            seed: cli.seed,
+                .unwrap_or(args.prefix_repetition_output_len),
+            random_cache_hit_fraction: args.random_cache_hit_fraction,
+            random_cache_ratio: args.random_cache_ratio,
+            sharegpt_output_len: args.sharegpt_output_len,
+            no_oversample: args.no_oversample,
+            disable_shuffle: args.disable_shuffle,
+            num_prompts: args.num_prompts,
+            request_rate: args.request_rate,
+            burstiness: args.burstiness,
+            max_concurrency: args.max_concurrency,
+            steady_state_threshold: args.steady_state_threshold,
+            steady_state_min_window: args.steady_state_min_window,
+            no_steady_state: args.no_steady_state,
+            disable_tqdm: args.disable_tqdm,
+            num_warmups: args.num_warmups,
+            profile: args.profile,
+            profile_batch_threshold: args.profile_batch_threshold,
+            profile_duration: args.profile_duration,
+            save_result: args.save_result,
+            save_detailed: args.save_detailed,
+            append_result: args.append_result,
+            result_dir: args.result_dir.clone(),
+            result_filename: args.result_filename.clone(),
+            seed: args.seed,
             ignore_eos,
-            insecure: cli.insecure,
+            insecure: args.insecure,
             selected_percentile_metrics,
             selected_percentiles,
             sweep_summary_percentiles,
-            label: cli.label.clone(),
-            logprobs: cli.logprobs,
-            request_id_prefix: cli.get_request_id_prefix(),
-            ready_check_timeout_sec: cli.ready_check_timeout_sec,
+            label: args.label.clone(),
+            logprobs: args.logprobs,
+            request_id_prefix: args.get_request_id_prefix(),
+            ready_check_timeout_sec: args.ready_check_timeout_sec,
             extra_headers,
             extra_body,
             metadata,
-            dry_run: cli.dry_run,
+            dry_run: args.dry_run,
             goodput,
             ramp_up,
-            multi_turn: cli.multi_turn,
-            multi_turn_num_turns: cli.multi_turn_num_turns,
+            multi_turn: args.multi_turn,
+            multi_turn_num_turns: args.multi_turn_num_turns,
             multi_turn_min_turns,
             multi_turn_max_turns,
-            sharegpt_multi_turn_max_turns: if cli.multi_turn
-                && cli.dataset_name == DatasetName::ShareGpt
-                && cli.multi_turn_max_turns != 0
+            sharegpt_multi_turn_max_turns: if args.multi_turn
+                && matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf)
+                && args.multi_turn_max_turns != 0
             {
-                Some(cli.multi_turn_max_turns)
+                Some(args.multi_turn_max_turns)
             } else {
                 None
             },
             per_turn_input_len,
-            multi_turn_concurrency: cli.multi_turn_concurrency,
-            multi_turn_delay_ms: cli.multi_turn_delay_ms,
-            multi_turn_prefix_global_ratio: cli.multi_turn_prefix_global_ratio,
-            multi_turn_prefix_conversation_ratio: cli.multi_turn_prefix_conversation_ratio,
-            speed_bench_config: cli.speed_bench_config,
-            speed_bench_category: cli.speed_bench_category.clone(),
-            speed_bench_max_input_len: cli.speed_bench_max_input_len,
-            hf_split: cli.hf_split.clone(),
-            hf_subset: cli.hf_subset.clone(),
-            hf_output_len: cli.hf_output_len,
-            hf_text_column: cli.hf_text_column.clone(),
-            reset_prefix_cache: cli.reset_prefix_cache,
-            prompt_token_ids: cli.prompt_token_ids,
-            random_mm_base_items_per_request: cli.random_mm_base_items_per_request,
-            random_mm_num_mm_items_range_ratio: cli.random_mm_num_mm_items_range_ratio,
+            multi_turn_concurrency: args.multi_turn_concurrency,
+            multi_turn_delay_ms: args.multi_turn_delay_ms,
+            multi_turn_prefix_global_ratio: args.multi_turn_prefix_global_ratio,
+            multi_turn_prefix_conversation_ratio: args.multi_turn_prefix_conversation_ratio,
+            speed_bench_config: args.speed_bench_config,
+            speed_bench_category: args.speed_bench_category.clone(),
+            speed_bench_max_input_len: args.speed_bench_max_input_len,
+            speed_bench_output_len: args.speed_bench_output_len,
+            hf_split: args.hf_split.clone(),
+            hf_subset: args.hf_subset.clone(),
+            hf_output_len: args.hf_output_len,
+            hf_text_column: args.hf_text_column.clone(),
+            self_timed,
+            timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
+            timed_trace_sec_multiplier: args.timed_trace_sec_multiplier,
+            timed_trace_label_timestamp: args.timed_trace_label_timestamp.clone(),
+            timed_trace_label_input_length: args.timed_trace_label_input_length.clone(),
+            timed_trace_label_output_length: args.timed_trace_label_output_length.clone(),
+            timed_trace_label_hash_ids: args.timed_trace_label_hash_ids.clone(),
+            reset_prefix_cache: args.reset_prefix_cache,
+            prompt_token_ids: args.prompt_token_ids,
+            random_mm_base_items_per_request: args.random_mm_base_items_per_request,
+            random_mm_num_mm_items_range_ratio: args.random_mm_num_mm_items_range_ratio,
             random_mm_limit,
             random_mm_buckets,
-            enable_multimodal_chat: cli.enable_multimodal_chat,
+            enable_multimodal_chat: args.enable_multimodal_chat,
             lora_modules,
-            lora_assignment: cli.lora_assignment,
+            lora_assignment: args.lora_assignment,
         })
     }
 }
@@ -811,17 +927,17 @@ fn parse_goodput(goodput_args: &Option<Vec<String>>) -> Result<GoodputConfig> {
     Ok(config)
 }
 
-fn parse_ramp_up(cli: &Cli) -> Result<Option<RampUpConfig>> {
-    let strategy = match cli.ramp_up_strategy {
+fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
+    let strategy = match args.ramp_up_strategy {
         None => return Ok(None),
         Some(s) => s,
     };
 
-    let start_rps = cli.ramp_up_start_rps.ok_or_else(|| {
+    let start_rps = args.ramp_up_start_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-start-rps is required when --ramp-up-strategy is set".into())
     })?;
 
-    let end_rps = cli.ramp_up_end_rps.ok_or_else(|| {
+    let end_rps = args.ramp_up_end_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-end-rps is required when --ramp-up-strategy is set".into())
     })?;
 
@@ -838,12 +954,133 @@ fn parse_ramp_up(cli: &Cli) -> Result<Option<RampUpConfig>> {
     }))
 }
 
+/// Whether generation requests leave `temperature` to the server-side default.
+///
+/// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
+/// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
+fn uses_server_default_temperature(
+    backend: BackendKind,
+    extra_body: Option<&serde_json::Value>,
+) -> bool {
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::cli::Cli;
+    use crate::cli::BenchServeArgs;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchServeArgs,
+    }
+
+    fn parse_args<I, T>(args: I) -> BenchServeArgs
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        TestCli::parse_from(args).args
+    }
+
+    fn base_timed_trace_args() -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "timed_trace",
+            "--dataset-path",
+            "trace.jsonl",
+        ]
+    }
+
+    #[test]
+    fn test_timed_trace_defaults_to_self_timed() {
+        let config = BenchConfig::from_args(&parse_args(base_timed_trace_args())).unwrap();
+        assert!(config.self_timed);
+        assert!(config.ignore_eos);
+    }
+
+    #[test]
+    fn test_no_self_timed_restores_rate_scheduling() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--no-self-timed", "--request-rate", "10"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert!(!config.self_timed);
+        assert_eq!(config.request_rate, 10.0);
+    }
+
+    /// Rate/burstiness/ramp-up shape a synthetic schedule the trace replaces;
+    /// accepting them would mislabel the result JSON with a rate that never ran.
+    #[test]
+    fn test_self_timed_rejects_synthetic_schedule_flags() {
+        for flag in [
+            vec!["--request-rate", "10"],
+            vec!["--burstiness", "0.5"],
+            vec!["--sweep-request-rate", "1,5,10"],
+        ] {
+            let mut args = base_timed_trace_args();
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("self-timed replay should reject synthetic schedule flags")
+                .to_string();
+            assert!(
+                msg.contains(flag[0]) && msg.contains("--no-self-timed"),
+                "{flag:?}: {msg}"
+            );
+        }
+    }
+
+    /// A per-point num_prompts truncates the trace differently at every sweep
+    /// point, so the replayed span stops being comparable across them.
+    #[test]
+    fn test_self_timed_rejects_sweep_num_prompts_factor() {
+        let mut args = base_timed_trace_args();
+        args.extend([
+            "--sweep-max-concurrency",
+            "8,16",
+            "--sweep-num-prompts-factor",
+            "4",
+        ]);
+        let err = BenchConfig::from_args(&parse_args(args)).expect_err("should reject the factor");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--sweep-num-prompts-factor") && msg.contains("different span"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_self_timed_allows_concurrency_sweep_over_full_trace() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--sweep-max-concurrency", "8,16"]);
+        assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    #[test]
+    fn test_non_positive_sec_multiplier_fails() {
+        // `=` form: clap reads a bare "-0.001" as a flag.
+        for value in [
+            "--timed-trace-sec-multiplier=0",
+            "--timed-trace-sec-multiplier=-0.001",
+            "--timed-trace-sec-multiplier=inf",
+            "--timed-trace-sec-multiplier=nan",
+        ] {
+            let mut args = base_timed_trace_args();
+            args.push(value);
+            let err = BenchConfig::from_args(&parse_args(args))
+                .expect_err("should reject a multiplier that cannot scale timestamps");
+            assert!(err.to_string().contains("--timed-trace-sec-multiplier"));
+        }
+    }
 
     fn base_multi_turn_args() -> Vec<&'static str> {
         vec![
@@ -857,10 +1094,62 @@ mod tests {
     }
 
     #[test]
+    fn test_speed_bench_flags_match_python() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--speed-bench-dataset-subset",
+            "throughput_8k",
+        ]);
+        assert!(matches!(
+            args.speed_bench_config,
+            crate::cli::SpeedBenchConfig::Throughput8k
+        ));
+        assert_eq!(args.speed_bench_output_len, 4096);
+    }
+
+    /// Temperature left unset is flagged, since older Python versions defaulted to greedy.
+    #[test]
+    fn test_uses_server_default_temperature() {
+        let check = |backend, extra: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model", "--backend", backend];
+            argv.extend_from_slice(extra);
+            let config = BenchConfig::from_args(&parse_args(argv)).unwrap();
+            uses_server_default_temperature(config.backend, config.extra_body.as_ref())
+        };
+
+        assert!(check("openai-chat", &[]));
+        assert!(check("vllm", &["--extra-body", r#"{"top_p": 0.9}"#]));
+        assert!(!check("openai-chat", &["--temperature", "0"]));
+        assert!(!check(
+            "openai",
+            &["--extra-body", r#"{"temperature": 0.6}"#]
+        ));
+        assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
+    }
+
+    #[test]
     fn test_prefix_sharing_defaults_to_zero() {
         let args = base_multi_turn_args();
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
         assert_eq!(config.multi_turn_prefix_global_ratio, 0.0);
         assert_eq!(config.multi_turn_prefix_conversation_ratio, 0.0);
     }
@@ -874,8 +1163,8 @@ mod tests {
             "--multi-turn-prefix-conversation-ratio",
             "0.8",
         ]);
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
         assert!((config.multi_turn_prefix_global_ratio - 0.1).abs() < 1e-10);
         assert!((config.multi_turn_prefix_conversation_ratio - 0.8).abs() < 1e-10);
     }
@@ -889,8 +1178,8 @@ mod tests {
             "--multi-turn-prefix-conversation-ratio",
             "0.6",
         ]);
-        let cli = Cli::parse_from(args);
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        let args = parse_args(args);
+        assert!(BenchConfig::from_args(&args).is_err());
     }
 
     #[test]
@@ -902,16 +1191,16 @@ mod tests {
             "--multi-turn-prefix-conversation-ratio",
             "0.5",
         ]);
-        let cli = Cli::parse_from(args);
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        let args = parse_args(args);
+        assert!(BenchConfig::from_args(&args).is_err());
     }
 
     #[test]
     fn test_prefix_sharing_out_of_range_fails() {
         let mut args = base_multi_turn_args();
         args.extend(["--multi-turn-prefix-global-ratio", "1.5"]);
-        let cli = Cli::parse_from(args);
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        let args = parse_args(args);
+        assert!(BenchConfig::from_args(&args).is_err());
     }
 
     #[test]
@@ -928,8 +1217,8 @@ mod tests {
             "--multi-turn-prefix-global-ratio",
             "0.1",
         ];
-        let cli = Cli::parse_from(args);
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        let args = parse_args(args);
+        assert!(BenchConfig::from_args(&args).is_err());
     }
 
     #[test]
@@ -944,8 +1233,8 @@ mod tests {
             "--dataset-name",
             "sharegpt",
         ];
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.multi_turn_max_turns, 3);
         assert_eq!(config.sharegpt_multi_turn_max_turns, None);
@@ -968,8 +1257,8 @@ mod tests {
             "--multi-turn-max-turns",
             "2",
         ];
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
         assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
     }
 
@@ -987,8 +1276,8 @@ mod tests {
             "--multi-turn-max-turns",
             "1",
         ];
-        let cli = Cli::parse_from(args);
-        let err = BenchConfig::from_cli(&cli).unwrap_err().to_string();
+        let args = parse_args(args);
+        let err = BenchConfig::from_args(&args).unwrap_err().to_string();
         assert!(
             err.contains("at least 2 for ShareGPT"),
             "expected ShareGPT-specific error, got: {err}"
@@ -1009,17 +1298,41 @@ mod tests {
             "--multi-turn-max-turns",
             "20",
         ];
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.sharegpt_multi_turn_max_turns, Some(20));
     }
 
     #[test]
+    fn test_hf_multi_turn_uses_conversation_turn_cap() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-chat",
+            "--multi-turn",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "org/sharegpt-dataset",
+            "--hf-subset",
+            "sharegpt",
+            "--multi-turn-max-turns",
+            "2",
+        ];
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
+    }
+
+    #[test]
     fn test_sweep_summary_percentiles_default_empty() {
         let args = base_multi_turn_args();
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
 
         assert!(config.sweep_summary_percentiles.is_empty());
         assert_eq!(config.selected_percentiles, vec![99.0, 90.0]);
@@ -1034,8 +1347,8 @@ mod tests {
             "--sweep-summary-percentiles",
             "90,95,90",
         ]);
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.sweep_summary_percentiles, vec![90.0, 95.0]);
         assert_eq!(config.selected_percentiles, vec![99.0, 95.0, 90.0]);
@@ -1045,8 +1358,8 @@ mod tests {
     fn test_invalid_sweep_summary_percentile_fails() {
         let mut args = base_multi_turn_args();
         args.extend(["--sweep-summary-percentiles", "101"]);
-        let cli = Cli::parse_from(args);
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        let args = parse_args(args);
+        assert!(BenchConfig::from_args(&args).is_err());
     }
 
     #[test]
@@ -1058,10 +1371,18 @@ mod tests {
             "--max-model-len",
             "4096",
         ];
-        let cli = Cli::parse_from(args);
-        let config = BenchConfig::from_cli(&cli).unwrap();
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.max_model_len, Some(4096));
+    }
+
+    #[test]
+    fn test_tokenizer_id_deferred_when_model_is_unspecified() {
+        let args = parse_args(["vllm-bench"]);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.tokenizer_id, None);
     }
 
     #[test]
@@ -1073,9 +1394,9 @@ mod tests {
             "--max-model-len",
             "0",
         ];
-        let cli = Cli::parse_from(args);
+        let args = parse_args(args);
 
-        assert!(BenchConfig::from_cli(&cli).is_err());
+        assert!(BenchConfig::from_args(&args).is_err());
     }
     #[test]
     fn test_range_ratio_parse_float() {

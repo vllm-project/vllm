@@ -4,16 +4,18 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, overload
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
-from typing_extensions import Self
 
 import vllm.envs as envs
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
+from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -36,7 +39,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -45,11 +50,13 @@ All2AllBackend = Literal[
     "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
+    "moonep",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "passthrough",
 ]
 
 
@@ -92,10 +99,23 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
-    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
+    - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
+    - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
+    - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
+      on CUDA, falls back to "torch_gloo")
     """
+
+    enable_migration_batching: bool = False
+    """Schedule expert migrations in batches where each rank communicates with
+    at most one peer. This reduces per-rank network contention at the cost of
+    additional sequential communication steps. This option only applies to
+    async EPLB and is disabled by default."""
+
+    @property
+    def migration_batching_enabled(self) -> bool:
+        """Whether contention-aware batching is active for this configuration."""
+        return self.use_async and self.enable_migration_batching
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -138,8 +158,10 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
+    dp_sync_interval: int = Field(default=16, ge=1)
+    """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -160,8 +182,20 @@ class ParallelConfig:
     --data-parallel-start-rank."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
+    enable_hc_sp: bool = False
+    """Enable sequence parallelism for HyperConnection (HC) computation.
+    Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
+    Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_batch_sharded_sampling: bool | None = None
+    """Use sharded sampling across tensor parallel ranks. Each rank samples
+    a slice of the batch instead of every rank sampling all of it. Currently
+    defaults to False if not set. Enabling it explicitly raises when the config
+    cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
+    least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
+    by implementing `compute_logits_local`."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -191,9 +225,13 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "nixl_ep": Use nixl-ep kernels
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "passthrough": No all2all at all: the MoE backend dispatches and combines
+      itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
+      such MoE backends; not selectable from the CLI."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -203,8 +241,19 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_shm_tensor_arena: bool = False
+    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    engine→worker broadcast through a zero-copy shared-memory arena instead of
+    sending a copy to every reader. **Experimental**: may be reconciled with
+    vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
+    most beneficial for multimodal serving with large images and tensor
+    parallelism. Active only when all queue readers are node-local; reserves
+    slots in ``/dev/shm``."""
+
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+    elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
+    """Maximum data parallel size supported by elastic expert parallelism."""
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
@@ -257,14 +306,14 @@ class ParallelConfig:
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
-    calls."""
+    calls. It may also define `init_worker_extension(self)`, called after
+    device and distributed initialization but before model loading, and
+    `destroy_worker_extension(self)`, called (best-effort) before the worker
+    shuts down."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -349,12 +398,26 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
-    dcp_comm_backend: DCPCommBackend = "ag_rs"
+    dcp_comm_backend: DCPCommBackend | None = None
     """Communication backend for Decode Context Parallel (DCP).
-    - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
+    - "ag_rs": AllGather + ReduceScatter (existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+
+    `None` selects the model default, which is "ag_rs" unless the model
+    overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
+    """
+
+    dcp_q_replicate: bool | None = None
+    """Replicate the MLA query projection within each DCP group so decode can skip the
+    query all-gather.
+
+    With DCP the KV cache is sharded across the group, so the standard MLA decode path
+    all-gathers the query every step. Replicating the (small) query projection at load
+    time lets each rank materialize the full group-local head set and skip that 
+    collective, at the cost of computing the projection redundantly on every rank 
+    in the group.
     """
 
     cp_kv_cache_interleave_size: int = 1
@@ -368,7 +431,14 @@ class ParallelConfig:
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
+
+    When --cp-kv-cache-interleave-size is omitted (None), the interleave size
+    is resolved automatically based on NIXL transfer requirements.
+    Explicit settings take priority.
     """
+
+    _allow_auto_resolve_cp_interleave_size: bool = True
+    """Whether NIXL may select the interleave size automatically."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
@@ -393,7 +463,19 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
+    enable_fault_tolerance: bool = False
+    """Enable fault tolerance for detailed error recovery,
+    such as scaling down fault DPEngineCore.
+    """
+
+    fault_tolerance_config: FaultToleranceConfig = Field(
+        default_factory=FaultToleranceConfig
+    )
+    """The configurations for fault tolerance."""
+
+    @field_validator(
+        "disable_nccl_for_dp_synchronization", "elastic_ep_max_dp_size", mode="wrap"
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -445,6 +527,13 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
+        if self.enable_fault_tolerance and self._api_process_count > 1:
+            raise ValueError(
+                "Fault tolerance requires a single API server process "
+                f"(--api-server-count=1), but got {self._api_process_count}. "
+                "The FT system assumes one AsyncMPClient manages all engines."
+            )
+
         if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
                 "The '%s' all2all backend has been removed. "
@@ -472,10 +561,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "CUDA devices or ROCm devices or XPU devices now."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -505,8 +594,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp > 1 and self.data_parallel_size > 1:
-            raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
@@ -519,17 +606,40 @@ class ParallelConfig:
                 f"{sorted({1, pcp, tp * pcp})}."
             )
 
-        if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
-            raise ValueError(
-                "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
-            )
-
         return self
+
+    def set_dcp_defaults(
+        self,
+        comm_backend: DCPCommBackend = "ag_rs",
+        q_replicate: bool = False,
+    ) -> None:
+        """Fill in the DCP options the user left unset.
+
+        Models can set their preferred DCP settings by calling this from their
+        `verify_and_update_config` hook.
+        """
+        if self.dcp_comm_backend is None:
+            self.dcp_comm_backend = comm_backend
+        if self.dcp_q_replicate is None:
+            self.dcp_q_replicate = q_replicate
 
     @property
     def world_size_across_dp(self) -> int:
         """Process world size across TP, PCP, PP, and DP."""
         return self.world_size * self.data_parallel_size
+
+    @property
+    def pcp_shard_decode_requests(self) -> bool:
+        """Whether PCP can shard decode requests across its ranks.
+
+        PCP-only execution replicates the KV cache, so each decode request can
+        have a single PCP owner. DCP shards the KV cache and therefore requires
+        every decode request to run on every participating DCP rank.
+        """
+        return (
+            self.prefill_context_parallel_size > 1
+            and self.decode_context_parallel_size == 1
+        )
 
     @property
     def use_ubatching(self) -> bool:
@@ -541,15 +651,18 @@ class ParallelConfig:
 
     @property
     def local_engines_only(self) -> bool:
-        """
-        Client manages local+remote EngineCores in pure internal LB case.
+        """Client manages local+remote EngineCores in pure internal LB case.
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
 
+    @property
+    def cpu_distributed_timeout(self) -> timedelta | None:
+        seconds = self.cpu_distributed_timeout_seconds
+        return timedelta(seconds=seconds) if seconds is not None else None
+
     def get_next_dp_init_port(self) -> int:
-        """
-        We might need to initialize process groups in multiple
+        """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
         e.g. both in the worker and in the engine, which
         can live in different processes. To avoid port conflicts, we
@@ -629,6 +742,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    timeout=self.cpu_distributed_timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -658,6 +772,9 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "deepep_v2",
+                "flashinfer_nvlink_one_sided",
+                "passthrough",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",
@@ -665,6 +782,14 @@ class ParallelConfig:
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
+        )
+
+    @property
+    def use_all2all(self) -> bool:
+        return (
+            self.data_parallel_size > 1
+            or self.use_sequence_parallel_moe
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
         )
 
     @property
@@ -685,16 +810,50 @@ class ParallelConfig:
 
     @property
     def nnodes_within_dp(self) -> int:
+        """Number of nodes one DP replica spans.
+
+        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        rounds down to 0 once DP replicas outnumber nodes. A replica that
+        does not span nodes still occupies exactly one.
+        """
         if self.nnodes == 1:
             return 1
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return self.nnodes // data_parallel_node_size
+        nnodes_within_dp = self.nnodes // data_parallel_node_size
+        if self.data_parallel_external_lb:
+            return max(nnodes_within_dp, 1)
+        if self.nnodes % data_parallel_node_size != 0:
+            raise ValueError(
+                "Invalid data parallel configuration: "
+                f"nnodes ({self.nnodes}) must be divisible by the number of "
+                "data parallel node groups "
+                f"({data_parallel_node_size} = data_parallel_size "
+                f"{self.data_parallel_size} / data_parallel_size_local "
+                f"{self.data_parallel_size_local})"
+            )
+        return nnodes_within_dp
 
     @property
     def local_world_size(self) -> int:
         return self.world_size // self.nnodes_within_dp
+
+    def get_local_gpu_index(
+        self, local_rank: int, dp_local_rank: int | None = None
+    ) -> int:
+        """Map a worker's local rank to its host-local logical GPU index."""
+        if (
+            self.distributed_executor_backend not in ("ray", "external_launcher")
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        ):
+            if dp_local_rank is None:
+                dp_local_rank = self.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.data_parallel_index
+            return local_rank + dp_local_rank * self.world_size
+        return local_rank
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
@@ -724,11 +883,12 @@ class ParallelConfig:
 
         Returns:
             (has_unfinished_global, pause_consensus)
+
         """
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(tensor, dp_group)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
@@ -745,8 +905,7 @@ class ParallelConfig:
         return tensor.item()
 
     def compute_hash(self):
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -767,6 +926,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -775,12 +935,12 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",
             "distributed_executor_backend",
             "worker_cls",
-            "sd_worker_cls",
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
@@ -820,11 +980,11 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb:
                 raise NotImplementedError(
-                    "Elastic EP is not compatible with data_parallel_external_lb "
-                    "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
-                    "server and core client to coordinate scale up/down."
+                    "Elastic EP is not compatible with data_parallel_hybrid_lb. "
+                    "Elastic EP supports a single API server/core client path "
+                    "or data_parallel_external_lb, but not hybrid load balancing."
                 )
             if self.eplb_config.use_async:
                 from vllm.distributed.nixl_utils import is_nixl_available
@@ -873,6 +1033,18 @@ class ParallelConfig:
                     "Offline data parallel mode is not supported/useful"
                     " for dense models."
                 )
+
+        max_dp_size = self.elastic_ep_max_dp_size
+        self.elastic_ep_max_dp_size = (
+            max_dp_size
+            if self.enable_elastic_ep and max_dp_size is not None
+            else self.data_parallel_size
+        )
+        if self.elastic_ep_max_dp_size < self.data_parallel_size:
+            raise ValueError(
+                "--elastic-ep-max-dp-size must be greater than or equal to "
+                f"the initial data_parallel_size ({self.data_parallel_size})."
+            )
 
         self.data_parallel_index = self.data_parallel_rank
 
@@ -944,7 +1116,7 @@ class ParallelConfig:
 
         if self.enable_eplb and self.eplb_config.communicator is None:
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP (deferred remote setup).
+            # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
             # torch_gloo for static EP.  torch_nccl is avoided because NCCL
             # is incompatible with async EPLB (multi-stream conflicts) and
@@ -952,7 +1124,10 @@ class ParallelConfig:
             # See https://github.com/pytorch/pytorch/issues/174288
             from vllm.distributed.nixl_utils import is_nixl_available
 
-            if is_nixl_available():
+            if current_platform.is_xpu():
+                # On XPU, use the device-native XCCL P2P backend.
+                self.eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
                 self.eplb_config.communicator = "nixl"
             elif self.enable_elastic_ep:
                 self.eplb_config.communicator = "pynccl"
@@ -970,10 +1145,6 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
-
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
-            self.disable_custom_all_reduce = True
 
         if (
             self.distributed_executor_backend is not None
@@ -1000,14 +1171,31 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
             )
-        if self.nnodes > 1:
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce since we are running on multi-node."
-            )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
 
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
+            )
+
         return self
+
+    def reconfigure_for_independent_dp_rank(self) -> None:
+        """Reconfigure for a single independent non-MoE DP rank."""
+        # Capture these before changing DP fields.
+        nnodes = self.nnodes_within_dp
+        node_rank = self.node_rank_within_dp
+        self.data_parallel_size = 1
+        self.data_parallel_size_local = 1
+        self.data_parallel_rank = 0
+        self.nnodes = nnodes
+        self.node_rank = node_rank

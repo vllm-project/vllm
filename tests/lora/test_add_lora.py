@@ -6,7 +6,7 @@ import time
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.inputs import TextPrompt
@@ -55,8 +55,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
 
 @pytest.mark.asyncio
 async def test_add_lora(chatglm3_lora_files):
-    """
-    The add_lora function is used to preload some LoRA adapters into the
+    """The add_lora function is used to preload some LoRA adapters into the
     engine in anticipation of future requests using these adapters. To test
     this functionality, we use the async engine to process some requests - We
     do it twice, once with add_lora() preloading and once without.
