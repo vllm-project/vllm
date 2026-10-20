@@ -61,6 +61,13 @@ class SpeculativeMethodSpec:
     """KV slots to reserve past the scheduled query. ``None`` means
     ``num_speculative_tokens``, the value EAGLE uses."""
 
+    linear_attn_verify_extension: str | None = None
+    """Lazy ``"package.module:factory"`` of a callable ``(vllm_config) ->
+    LinearAttnVerifyExtension`` (see
+    ``vllm/model_executor/layers/mamba/verify_extension.py``). It lets the
+    method verify non-chain drafts on gated delta net and Mamba2 layers of
+    hybrid models."""
+
     def resolve_speculator_cls(self) -> type:
         return resolve_obj_by_qualname(self.speculator_cls.replace(":", "."))
 
