@@ -29,6 +29,7 @@ It supports page size >= 1.
 """
 
 import logging
+from typing import Any
 
 import torch
 from packaging import version
@@ -1236,8 +1237,7 @@ def _fwd_verify_kernel_stage2(
     )
 
 
-# Default launch config; overridable per call for tuning.
-VERIFY_DEFAULT_CONFIG = dict(
+VERIFY_DEFAULT_CONFIG: dict[str, Any] = dict(
     BLOCK_H=32,
     BLOCK_N=16,
     num_warps=4,
@@ -1266,41 +1266,30 @@ def verify_num_kv_splits(
     block_h: int = VERIFY_DEFAULT_CONFIG["BLOCK_H"],
     occupancy: float = 1.0,
     min_work_per_split: int = 64,
-    pow2: bool = False,
-    tail_aware: bool = True,
     max_splits: int = 8,
-    tail_tol: float = 0.05,
 ) -> int:
     """Static upper bound on KV splits (safe to bake into a cudagraph).
 
     The kernel splits each request's own length into
     max(cdiv(L, splits), MIN_SPLIT_LEN) chunks, so this only caps the split
     count. ``occupancy`` is the number of resident stage-1 programs per CU.
-
-    tail_aware (default): if one split of every request fits in a single
-    dispatch round, use as many splits as fit in that round. Otherwise pick
-    n <= max_splits minimising rounds(n) / n (the idle tail of the last
-    round), taking the fewest splits within ``tail_tol`` of the best.
-    tail_aware=False: about ``occupancy`` programs per CU (ceil; ``pow2``
-    rounds up to a power of two).
+    If one split of every request fits in a single dispatch round, use as many
+    splits as fit in that round; otherwise pick n <= max_splits minimising
+    rounds(n) / n (the idle tail of the last round), preferring fewer splits
+    within 5% of the best.
     """
     programs_per_split = max(1, batch) * verify_row_blocks(qlen, num_heads, block_h)
     ideal = triton.cdiv(max(1, max_seq_len), max(1, min_work_per_split))
     slots = max(1, int(occupancy * sm_count))
-    if tail_aware:
-        if programs_per_split <= slots:
-            n = slots // programs_per_split
-        else:
-            cost = [
-                (triton.cdiv(n * programs_per_split, slots) / n, n)
-                for n in range(1, max(1, min(ideal, max_splits)) + 1)
-            ]
-            best = min(c for c, _ in cost)
-            n = min(n for c, n in cost if c <= best * (1.0 + tail_tol))
+    if programs_per_split <= slots:
+        n = slots // programs_per_split
     else:
-        n = triton.cdiv(slots, programs_per_split)
-        if pow2:
-            n = triton.next_power_of_2(n)
+        cost = [
+            (triton.cdiv(n * programs_per_split, slots) / n, n)
+            for n in range(1, max(1, min(ideal, max_splits)) + 1)
+        ]
+        best = min(c for c, _ in cost)
+        n = min(n for c, n in cost if c <= best * 1.05)
     return max(1, min(ideal, n, sm_count * 2))
 
 
@@ -1319,7 +1308,6 @@ def decode_attention_fwd_verify(
     sm_scale,
     page_size,
     k_scale=None,
-    config=None,
 ):
     """Causal MLA verify over a per-request block table.
 
@@ -1342,13 +1330,9 @@ def decode_attention_fwd_verify(
         sm_scale: softmax scale.
         page_size: tokens per KV cache page.
         k_scale: scalar tensor dequantizing an FP8 cache; ignored for bf16.
-        config: optional launch-config overrides on select_verify_config().
 
     """
-    cfg = select_verify_config(q.shape[0] // qlen, qlen, q.shape[1], page_size)
-    if config:
-        cfg.update(config)
-    cfg["MIN_SPLIT_LEN"] = max(1, cfg["MIN_SPLIT_LEN"])
+    cfg = select_verify_config(q.shape[0] // qlen, qlen, q.shape[1])
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
     assert k_buffer.shape[-2] == 1, "verify path expects a single latent KV head"
@@ -1442,13 +1426,13 @@ def decode_attention_fwd_verify(
     )
 
 
-_VERIFY_SMALL_CONFIG = dict(
+_VERIFY_SMALL_CONFIG: dict[str, Any] = dict(
     BLOCK_H=32, BLOCK_N=32, num_warps=4, kpack=1, MIN_SPLIT_LEN=128, occupancy=2.0
 )
 # 64-row tiles, Q and the QK operand split in two 256-wide halves (QSPLIT,
 # which also enables the K/V prefetch), 32 keys per step on 4 warps. 8 warps
 # cap VGPRs at 256 and spill or idle MFMA rows here.
-_VERIFY_LARGE_CONFIG = dict(
+_VERIFY_LARGE_CONFIG: dict[str, Any] = dict(
     BLOCK_H=64,
     BLOCK_N=32,
     num_warps=4,
@@ -1456,11 +1440,9 @@ _VERIFY_LARGE_CONFIG = dict(
     MIN_SPLIT_LEN=128,
     occupancy=1.0,
 )
-# Many heads use the large config (name kept for callers / tests).
-_VERIFY_WIDE_CONFIG = _VERIFY_LARGE_CONFIG
 
 
-def select_verify_config(batch: int, qlen: int, num_heads: int, page_size: int):
+def select_verify_config(batch: int, qlen: int, num_heads: int) -> dict[str, Any]:
     """Launch config from MI300X (gfx942) sweeps, bf16, page 16.
 
     Few rows (B * qlen * H <= 640): 32-row tiles with more KV splits fill the

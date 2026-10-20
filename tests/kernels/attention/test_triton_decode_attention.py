@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -432,7 +433,7 @@ def test_decode_attention_fwd_verify(num_heads, qlen, batch, page_size, kv_dtype
         decode_attention_fwd_verify,
     )
 
-    torch.manual_seed(0)
+    set_random_seed(0)
     dim, kv_lora_rank = 576, 512
     scale = 1.0 / (192**0.5)
     # Ragged lengths, one shorter than qlen, and a graph padding request.
@@ -458,6 +459,9 @@ def test_decode_attention_fwd_verify(num_heads, qlen, batch, page_size, kv_dtype
         ref_cache = cache
     q = torch.randn(batch * qlen, num_heads, dim, device=DEVICE_TYPE).to(torch.bfloat16)
     paged = cache.unsqueeze(2)
+    # Error bound of the two bf16 roundings: P before the PV dot (at most
+    # 2^-8 * max|V| absolute) and the output (2^-8 relative).
+    atol = 2**-8 * ref_cache[..., :kv_lora_rank].float().abs().max().item()
     num_kv_splits = 4
     for real_seq_lens in (None, (seq_lens - 2).clamp(min=0)):
         o = torch.full(
@@ -491,4 +495,4 @@ def test_decode_attention_fwd_verify(num_heads, qlen, batch, page_size, kv_dtype
         ref = _verify_reference(
             q, ref_cache, block_table, seq_lens, real_seq_lens, qlen, scale
         )
-        torch.testing.assert_close(o.float(), ref, atol=3e-2, rtol=2e-2)
+        torch.testing.assert_close(o.float(), ref, atol=atol, rtol=2**-8)

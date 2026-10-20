@@ -35,7 +35,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -447,7 +447,7 @@ torch.manual_seed(42)
 def _reseed_each_test():
     # Inputs must not depend on which tests ran earlier in the process: CI
     # shards this file, so the preceding tests differ per shard.
-    torch.manual_seed(42)
+    set_random_seed(42)
 
 
 def _convert_dtype_to_torch(dtype):

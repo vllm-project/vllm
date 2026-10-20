@@ -207,7 +207,7 @@ def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) 
         from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
         from aiter.mla import mla_decode_fwd
 
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = torch.device("cuda", torch.accelerator.current_device_index())
         gen = torch.Generator(device=device).manual_seed(0)
         kv_len, head_dim, kv_lora_rank, scale = 64, 576, 512, 576**-0.5
         q_dtype = dtypes.fp8 if q_fp8 else dtypes.bf16
@@ -433,28 +433,18 @@ def _asm_causal_verify_unsupported(
     kv_cache_dtype: str,
     dcp_world_size: int,
 ) -> bool:
-    """Whether causal verify past qlen 4 has no correct asm decode here.
-
-    The bf16 persistent manifest stops at qseqlen 4; gfx950 reaches longer
-    blocks through its (gqa 32, qseqlen 4) fold, which other archs do not ship.
-    There a >=16-head block asks for a missing (gqa 16, ps 1, qseqlen 8) kernel
-    (#55609). The non-persistent entries are no substitute on gfx942: the
-    32-head one is wrong, the 64- and 128-head ones ignore the causal mask
-    (ROCm/aiter#5679), and the 16-head qseqlen-8 one a padded rank runs reads
-    the wrong KV once a page sits past 4 GiB of the cache. An FP8 cache fares
-    no better: its fold also stops at qseqlen 4, and only the native 128-head
-    a8w8 kernel serves longer blocks (the decode query is FP8 for every FP8
-    cache; the builder passes kv_cache_dtype normalized to "fp8").
-    DCP verify uses its row-view or cprr routes and Gluon verify is
-    gfx950-only, so neither reaches this gap.
+    """Whether CDNA3's asm decode has no correct kernel for causal verify past
+    qlen 4: its persistent kernels stop at qseqlen 4 (bf16, and FP8 below 128
+    heads) and its non-persistent entries are not usable here
+    (ROCm/aiter#5679). DCP verify keeps its row-view and cprr routes.
     """
     if dcp_world_size > 1:
         return False
     if mtp_decode_qlen <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN:
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import get_cdna_version
 
-    if on_gfx950():
+    if get_cdna_version() != 3:
         return False
     if is_quantized_kv_cache(kv_cache_dtype):
         return AiterMLAHelper.get_actual_mla_num_heads(decode_num_heads) != 128
@@ -462,12 +452,7 @@ def _asm_causal_verify_unsupported(
 
 
 def _triton_verify_num_kv_splits(
-    max_seq_len: int,
-    num_reqs: int,
-    qlen: int,
-    num_heads: int,
-    page_size: int,
-    sm_count: int,
+    max_seq_len: int, num_reqs: int, qlen: int, num_heads: int, sm_count: int
 ) -> int:
     """KV split cap for the folded verify kernel at this launch shape.
 
@@ -477,7 +462,7 @@ def _triton_verify_num_kv_splits(
     if envs.VLLM_BATCH_INVARIANT:
         return 1
     # Must agree with the launch config decode_attention_fwd_verify selects.
-    cfg = select_verify_config(num_reqs, qlen, num_heads, page_size)
+    cfg = select_verify_config(num_reqs, qlen, num_heads)
     return verify_num_kv_splits(
         max_seq_len,
         num_reqs,
@@ -496,7 +481,6 @@ def _reserve_triton_verify_workspace(
     num_heads: int,
     max_seq_len: int,
     kv_lora_rank: int,
-    page_size: int,
     sm_count: int,
 ) -> None:
     """Reserve the folded verify kernel's split scratch before warmup."""
@@ -505,9 +489,7 @@ def _reserve_triton_verify_workspace(
     # Fewer requests may take more splits, so size for the largest product.
     max_req_splits = max(
         reqs
-        * _triton_verify_num_kv_splits(
-            max_seq_len, reqs, qlen, num_heads, page_size, sm_count
-        )
+        * _triton_verify_num_kv_splits(max_seq_len, reqs, qlen, num_heads, sm_count)
         for reqs in range(1, max_num_reqs + 1)
     )
     current_workspace_manager().get_simultaneous(
@@ -818,14 +800,11 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_decode: bool = False
     # Small-head non-DCP multi-token verify uses Gluon's native MTP entry.
     use_gluon_verify: bool = False
-    # Nonzero when this verify batch takes the folded Triton verify kernel:
-    # the static KV split cap its workspace is sized for.
+    # Nonzero when this batch takes the Triton verify kernel: its KV split cap.
     triton_verify_num_kv_splits: int = 0
-    # Real per-request KV lengths for varlen verify; ``seq_lens`` then holds
-    # the padded kernel lengths.
+    # Real KV lengths for varlen verify (``seq_lens`` holds padded ones).
     triton_verify_real_seq_lens: torch.Tensor | None = None
-    # The FP8 asm kernel for this batch leaves V unscaled
-    # (_aiter_fp8_mla_decode_drops_v_scale); scale the output by k_scale.
+    # The FP8 asm kernel for this batch leaves V unscaled; scale by k_scale.
     fp8_v_scale_fix: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
@@ -1294,8 +1273,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 current_platform.num_compute_units(),
             )
 
-        # FP8 verify lengths whose asm kernel leaves V unscaled; the impl
-        # multiplies the output by k_scale for those batches.
+        # FP8 verify lengths whose asm kernel leaves V unscaled.
         self._fp8_v_scale_fix_qlens: frozenset[int] = frozenset()
         if (
             is_quantized_kv_cache(self._kv_cache_dtype_str)
@@ -1311,16 +1289,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 )
             )
 
-        # Verify blocks past qlen 4 that no asm kernel serves correctly take
-        # the folded Triton verify kernel over the request block table.
+        # Verify past qlen 4 with no correct asm kernel takes the Triton one.
         self._use_triton_verify = _asm_causal_verify_unsupported(
             self._decode_num_heads,
             self._mtp_decode_qlen,
             self._kv_cache_dtype_str,
             self.dcp_world_size,
         )
-        # Static split bound for that kernel: full graphs replay one launch
-        # shape for every batch of the captured size.
+        # Split cap bound; must be static for full CUDA graphs.
         self._triton_verify_max_seq_len = vllm_config.model_config.max_model_len
         self._sm_count = current_platform.num_compute_units()
         if self._use_triton_verify:
@@ -1336,7 +1312,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self._decode_num_heads,
                 self._triton_verify_max_seq_len,
                 self.mla_dims.kv_lora_rank,
-                self.kernel_block_size,
                 self._sm_count,
             )
 
@@ -1828,9 +1803,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 asm_selected=self._asm_dcp_verify,
             )
 
-        # The folded Triton verify reads the request block table directly. It
-        # applies the causal bound per row, and a varlen tail row stays inside
-        # its request's written KV through the real lengths.
         use_triton_verify = (
             self._use_triton_verify
             and causal
@@ -1854,7 +1826,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 num_reqs,
                 int(max_qo_len),
                 self._decode_num_heads,
-                self.kernel_block_size,
                 self._sm_count,
             )
 
@@ -1953,7 +1924,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             and not use_triton_verify
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it on
-            # gfx950, and gfx942 takes the folded Triton verify above. fp8
+            # gfx950, and CDNA3 takes the Triton verify above. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
             # A non-causal block keeps it too: what the fold drops past qlen 4
             # is the block's causal staircase, which a non-causal block does
