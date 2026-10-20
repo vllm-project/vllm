@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -15,9 +16,10 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -90,7 +92,11 @@ class MockVllmConfig:
     parallel_config: MockParallelConfig
 
 
-def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
+def _build_serving_completion(
+    engine: AsyncLLM,
+    request_logger: RequestLogger | None = None,
+    **kwargs: Any,
+) -> OpenAIServingCompletion:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -106,7 +112,8 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine,
         models,
         online_renderer=online_renderer,
-        request_logger=None,
+        request_logger=request_logger,
+        **kwargs,
     )
 
 
@@ -308,6 +315,76 @@ def test_completion_metrics_carries_both_timing_and_spec_decode():
     assert response.metrics.time_to_first_token_ms == pytest.approx(500.0)
     assert response.metrics.speculative_decoding is not None
     assert response.metrics.speculative_decoding.num_spec_steps == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("opt_in", [False, True])
+async def test_completion_weight_versions(stream: bool, opt_in: bool):
+    """Each choice gets its spans on its final output, even with no tokens."""
+    expected = [{"version": "v1", "start": 0, "end": 2}]
+    spans = [WeightVersionSpan(**span) for span in expected]
+
+    def output(index, token_ids, finish_reason=None, weight_versions=None):
+        return CompletionOutput(
+            index=index,
+            text="x" * len(token_ids),
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=finish_reason,
+            weight_versions=weight_versions,
+        )
+
+    # Choice 1 is aborted before its first token.
+    final = [output(1, [], "abort", [])]
+    if stream:
+        steps = [[output(0, [100])], [output(0, [101], "length", spans), *final]]
+    else:
+        steps = [[output(0, [100, 101], "length", spans), *final]]
+
+    async def mock_generate(*args, **kwargs):
+        for i, outputs in enumerate(steps):
+            yield RequestOutput(
+                request_id="test-id",
+                prompt="Test prompt",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=outputs,
+                finished=i == len(steps) - 1,
+            )
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        n=2,
+        stream=stream,
+        return_weight_versions=opt_in,
+    )
+    response = await _build_serving_completion(mock_engine).create_completion(request)
+
+    if stream:
+        finals = {}
+        async for line in response:
+            payload = line.removeprefix("data: ").strip()
+            if payload == "[DONE]":
+                continue
+            for choice in json.loads(payload)["choices"]:
+                if choice.get("finish_reason"):
+                    finals[choice["index"]] = choice
+                else:
+                    assert choice.get("weight_versions") is None
+        got = [finals[i].get("weight_versions") for i in (0, 1)]
+    else:
+        got = [choice["weight_versions"] for choice in response.model_dump()["choices"]]
+    assert got == ([expected, []] if opt_in else [None, None])
 
 
 def _build_online_renderer_for_completion(
@@ -621,6 +698,77 @@ async def test_renderer_only_completion_request_skips_mm_cache():
         ]
         is True
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_completion_logs_outputs_when_enabled(stream: bool):
+    """`--enable-log-outputs` covers /v1/completions like the chat endpoint."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    request_logger = MagicMock(spec=RequestLogger)
+    serving_completion = _build_serving_completion(
+        mock_engine, request_logger=request_logger, enable_log_outputs=True
+    )
+
+    def request_output(
+        request_id: str, text: str, token_ids: list[int], finish_reason: str | None
+    ):
+        return RequestOutput(
+            request_id=request_id,
+            prompt="Test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text=text,
+                    token_ids=token_ids,
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason=finish_reason,
+                )
+            ],
+            finished=finish_reason is not None,
+        )
+
+    async def mock_generate(prompt, params, request_id, **kwargs):
+        if stream:
+            yield request_output(request_id, "Hello", [100], None)
+            yield request_output(request_id, " world", [101], "stop")
+        else:
+            yield request_output(request_id, "Hello world", [100, 101], "stop")
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=stream,
+        request_id="test-req",
+    )
+
+    response = await serving_completion.create_completion(request)
+    if stream:
+        async for _ in response:
+            pass
+
+    logged = [call.kwargs for call in request_logger.log_outputs.call_args_list]
+    assert {log["request_id"] for log in logged} == {"cmpl-test-req"}
+    if stream:
+        assert [(log["outputs"], log["delta"]) for log in logged] == [
+            ("Hello", True),
+            (" world", True),
+            ("Hello world", False),
+        ]
+    else:
+        assert len(logged) == 1
+        assert logged[0]["outputs"] == "Hello world"
+        assert logged[0]["output_token_ids"] == [100, 101]
+        assert logged[0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio

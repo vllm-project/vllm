@@ -206,13 +206,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     blocks from the peer) and server-role (serving blocks to the peer)
     over the same control connection.
 
-    Single-threaded: every public method runs on the scheduler thread, and
-    the engine drives polling via ``get_finished_jobs()`` once per step.
+    Never entered concurrently: every public method runs under the tiering
+    manager's ``lock``, held either by the scheduler thread for the length of
+    a step or by the tier-poll thread for the length of one round. Peers are
+    not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
+    to be serviced from that thread too; without it a peer's lookup or fetch
+    waits for a step boundary, which on a saturated rank can be seconds.
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
+    tolerates_off_thread_polling: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -614,9 +619,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        # Drive one polling sweep on the scheduler thread, then hand off
-        # whatever has accumulated. The engine calls this once per step
-        # (and keeps stepping while has_pending_work() is True).
+        # Drive one polling sweep, then hand off whatever has accumulated. The
+        # engine calls this once per step (and keeps stepping while
+        # has_pending_work() is True); the tier-poll thread calls it between
+        # steps, so a peer is not left waiting for a step boundary.
         self._poll_once()
         result = self._finished_jobs
         self._finished_jobs = []
@@ -930,7 +936,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         Drains the control transport, polls every session, accumulates
         their results into ``_finished_jobs``, and reaps any dead sessions.
-        Runs on the scheduler thread.
+        Runs under the tiering manager's lock, on the scheduler thread or on
+        the tier-poll thread.
         """
         new_connections = self._control.poll()
         if new_connections:

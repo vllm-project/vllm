@@ -80,8 +80,11 @@ from vllm.models.deepseek_v4.amd.mega_moe import (
 )
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.sequence import IntermediateTensors
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import aux_stream
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
@@ -141,6 +144,11 @@ class DeepseekV4MLP(nn.Module):
         # B-preshuffle the gate_up_proj weight in place (single weight).
         if not self._gateup:
             return
+        # aiter's gemm_a8w8_blockscale_bpreshuffle currently disabled on gfx1250.
+        # Leaving _gateup_scale as None -> "not preshuffled"
+        # forward() falls back to the standard gate_up_proj linear
+        if on_gfx1250():
+            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
@@ -156,11 +164,13 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        replace_parameter(
-            self.gate_up_proj,
-            "weight",
-            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-        )
+        # Skip when the linear kernel already B-preshuffled this weight.
+        if not getattr(self.gate_up_proj, "aiter_bpreshuffled", False):
+            replace_parameter(
+                self.gate_up_proj,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
         self._gateup_scale = ws
 
     def forward(self, x):
@@ -570,6 +580,9 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
 
 
 class DeepseekV4MoE(nn.Module):
+    # None: use the padding vLLM added.
+    experts_intermediate_pad: int | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -607,7 +620,10 @@ class DeepseekV4MoE(nn.Module):
         self.image_sentinel_lo = (
             IMAGE_SENTINEL_BASE_ID if getattr(config, "vision_n_layers", 0) > 0 else 0
         )
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        num_hash_layers = getattr(config, "num_hash_layers", None)  # Set by V4.1
+        if num_hash_layers is None:
+            num_hash_layers = config.mlp_layer_types.count("hash_moe")
+        is_hash_moe = extract_layer_index(prefix) < num_hash_layers
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -699,6 +715,18 @@ class DeepseekV4MoE(nn.Module):
                 ),
                 prefix=f"{prefix}.experts",
             )
+            self.shared_experts_stream = (
+                aux_stream()
+                if self.shared_experts is not None
+                and not self.experts.fuse_shared_expert
+                and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+                else None
+            )
+            self.shared_experts_events = (
+                (torch.cuda.Event(), torch.cuda.Event())
+                if self.shared_experts_stream is not None
+                else None
+            )
             return
 
         fuse_shared_into_routed = (
@@ -715,6 +743,7 @@ class DeepseekV4MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            intermediate_pad=self.experts_intermediate_pad,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -763,6 +792,30 @@ class DeepseekV4MoE(nn.Module):
     def _forward_mega_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
     ) -> torch.Tensor:
+        shared_experts = self.shared_experts
+        if shared_experts is None:
+            return self._forward_mega_moe_routed(hidden_states, input_ids)
+        events = self.shared_experts_events
+        if (
+            events is None
+            or hidden_states.shape[0] > envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        ):
+            return self._forward_mega_moe_routed(
+                hidden_states, input_ids
+            ) + shared_experts(hidden_states)
+        # The unfused shared expert overlaps router + MegaMoE in small steps.
+        routed, shared = maybe_execute_in_parallel(
+            fn0=lambda: self._forward_mega_moe_routed(hidden_states, input_ids),
+            fn1=lambda: shared_experts(hidden_states),
+            event0=events[0],
+            event1=events[1],
+            aux_stream=self.shared_experts_stream,
+        )
+        return routed + shared
+
+    def _forward_mega_moe_routed(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> torch.Tensor:
         router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
@@ -777,12 +830,7 @@ class DeepseekV4MoE(nn.Module):
             bias_vl=self.gate.bias_vl,
             image_sentinel_lo=self.image_sentinel_lo,
         )
-        final_hidden_states = self.experts(hidden_states, topk_weights, topk_ids)
-        if self.shared_experts is not None:
-            final_hidden_states = final_hidden_states + self.shared_experts(
-                hidden_states
-            )
-        return final_hidden_states
+        return self.experts(hidden_states, topk_weights, topk_ids)
 
 
 # Hidden sizes supported by AITER mhc_pre_big_fuse_rmsnorm.
@@ -1228,7 +1276,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            # Each DBO ubatch owns a different slice of the batch. Writing
+            # from row 0 in both threads would let one ubatch clobber the
+            # other's rows in the buffer the MTP drafter reads after the step.
+            offset = dbo_current_ubatch_token_offset()
+            self._mtp_hidden_buffer[offset : offset + num_tokens].copy_(
+                hidden_states.flatten(1)
+            )
 
         hidden_states = self.hc_head_op(
             hidden_states,
