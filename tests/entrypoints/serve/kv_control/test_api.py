@@ -128,6 +128,23 @@ def test_gpu_process_audit_uses_the_measured_workload_window(tmp_path, offset, s
     assert result["devices"]["GPU-example"]["max_gap_seconds"] == 5
 
 
+@pytest.mark.parametrize("gap", [1, 5, 10, 11])
+def test_gpu_process_audit_rejects_stalls_without_relaxing_coverage(gap):
+    from benchmarks.programmable_kv_cache.run_rollout_matrix import (
+        require_gpu_process_coverage,
+    )
+
+    audit = {
+        "unexpected_processes": [],
+        "devices": {"gpu": {"samples": 2, "max_gap_seconds": gap}},
+    }
+    if gap <= 10:
+        require_gpu_process_coverage(audit, 1)
+    else:
+        with pytest.raises(RuntimeError, match="coverage incomplete"):
+            require_gpu_process_coverage(audit, 1)
+
+
 @pytest.mark.asyncio
 async def test_rollout_uses_terminal_receipt_but_waits_for_derived_transfer(
     rollout_client,

@@ -72,6 +72,7 @@ PYTHONPATH=../verl \
 | `--quota-aging-seconds` / `--quota-reuse-score-weight` | quota 等待老化时间尺度和缓存复用评分权重，默认 1 秒和 0.5 |
 | `--policy-decode-lookahead-tokens` | quota 估计运行请求后续 KV 需求的 token 上限，默认 512 |
 | `--gpu-memory-utilization 0.5` | 默认主要性能预算，各对照记录实际分配出的 KV 容量 |
+| `--process-sample-interval` | GPU 进程采样间隔，默认 1 秒；GPU 归属审计仍拒绝超过 10 秒的采样空档 |
 | `--cache-gib 2` | 历史人工配额压力诊断；不要当作正常资源主基线 |
 | `--live-after-replay` | 缓存重置后按 trace 的原在线配置运行真实工具循环，结果单列 |
 | `--live-only` / `--live-repeats` | 用已有 trace 提供问题、采样和工具配置，直接重复真实在线循环；每轮重置缓存，记录独立 GPU 归属审计，不计算固定工作量回放的吞吐比 |

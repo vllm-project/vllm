@@ -206,6 +206,15 @@ def gpu_process_window(path, start, finish, owned_pids):
     return {"devices": coverage, "unexpected_processes": list(unexpected.values())}
 
 
+def require_gpu_process_coverage(audit, expected_devices):
+    if audit["unexpected_processes"]:
+        raise RuntimeError(f"GPU sharing invalidates this run: {audit}")
+    if len(audit["devices"]) != expected_devices or any(
+        device["max_gap_seconds"] > 10 for device in audit["devices"].values()
+    ):
+        raise RuntimeError(f"GPU process log coverage incomplete: {audit}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
@@ -230,6 +239,7 @@ def main():
         "--arms", default="native,noop,priority,movement,composed,policy"
     )
     parser.add_argument("--gpus", default="0,3")
+    parser.add_argument("--process-sample-interval", type=int, default=1)
     parser.add_argument("--port", type=int, default=18083)
     parser.add_argument("--store-port", type=int, default=19151)
     parser.add_argument("--store-gib", type=int, default=64)
@@ -257,6 +267,8 @@ def main():
     parser.add_argument("--verl-root", type=Path, default=Path("../verl"))
     args = parser.parse_args()
     install_signal_handlers()
+    if args.process_sample_interval < 1:
+        parser.error("process-sample-interval must be positive")
     if args.live_repeats < 1:
         parser.error("live-repeats must be positive")
     if args.live_only:
@@ -402,7 +414,7 @@ def main():
                     f"--id={args.gpus}",
                     "--query-compute-apps=timestamp,gpu_uuid,pid,process_name,used_memory",
                     "--format=csv,noheader",
-                    "--loop=5",
+                    f"--loop={args.process_sample_interval}",
                 ],
                 env=dict(os.environ, TZ="UTC"),
                 stdout=log,
@@ -767,15 +779,7 @@ def main():
                     record.setdefault("resource_validation", []).append(
                         {"arm": arm, "repeat": repeat, **audit}
                     )
-                    if audit["unexpected_processes"]:
-                        raise RuntimeError(f"GPU sharing invalidates this run: {audit}")
-                    if len(audit["devices"]) != len(args.gpus.split(",")) or any(
-                        device["max_gap_seconds"] > 10
-                        for device in audit["devices"].values()
-                    ):
-                        raise RuntimeError(
-                            f"GPU process log coverage incomplete: {audit}"
-                        )
+                    require_gpu_process_coverage(audit, len(args.gpus.split(",")))
                     if arm == "policy" and policy_mode == "retention":
                         assert any(
                             (r.get("origin") or {}).get("policy_name") == "retention"
@@ -949,15 +953,7 @@ def main():
                     record.setdefault("live_resource_validation", []).append(
                         {"arm": arm, "repeat": live_repeat, **audit}
                     )
-                    if (
-                        audit["unexpected_processes"]
-                        or len(audit["devices"]) != len(args.gpus.split(","))
-                        or any(
-                            device["max_gap_seconds"] > 10
-                            for device in audit["devices"].values()
-                        )
-                    ):
-                        raise RuntimeError(f"Live GPU process audit failed: {audit}")
+                    require_gpu_process_coverage(audit, len(args.gpus.split(",")))
                     record["live_runs"].append(
                         {
                             "arm": arm,
