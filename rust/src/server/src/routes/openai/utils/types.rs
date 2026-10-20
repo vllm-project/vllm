@@ -261,6 +261,20 @@ pub struct StreamOptions {
     pub continuous_usage_stats: Option<bool>,
 }
 
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
+}
+
 // ============================================================================
 // Tools and Function Calling
 // ============================================================================

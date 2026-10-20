@@ -16,13 +16,6 @@ pub(crate) fn validate_request_compat(
         return Err(ApiError::model_not_found(model.clone()));
     }
 
-    if request.stream_options.is_some() && !request.stream {
-        bail_invalid_request!(
-            param = "stream_options",
-            "stream_options are only supported when stream=true."
-        );
-    }
-
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
@@ -127,8 +120,10 @@ mod tests {
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
     }
 
+    /// Python's generate route has no `stream_options` check and ignores the
+    /// options when not streaming.
     #[test]
-    fn validate_request_compat_rejects_stream_options_without_streaming() {
+    fn validate_request_compat_accepts_stream_options_without_streaming() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "token_ids": [11, 22],
@@ -137,7 +132,8 @@ mod tests {
             "sampling_params": {}
         }))
         .expect("parse request");
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("stream_options without streaming should be ignored");
     }
 
     #[test]
