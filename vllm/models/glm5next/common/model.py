@@ -1448,9 +1448,8 @@ def _try_load_fp8_attn_proj(
     The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
     but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
     DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
-    modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
-    normal stacked/direct path loads the FP8 tensor as-is.
+    modules_to_not_convert). Targets with a registered ``weight_scale`` or
+    ``weight_scale_inv`` use the normal stacked/direct loader instead.
     """
     matched = None
     for suffix, info in _FP8_ATTN_PROJS.items():
@@ -1470,12 +1469,19 @@ def _try_load_fp8_attn_proj(
     layer_prefix = name.rsplit(suffix, 1)[0]
     target_w = f"{layer_prefix}.{target_base}.weight"
     target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
+    # Registered scales belong to the normal quantized loader.
+    if target_s in params_dict or (
+        f"{layer_prefix}.{target_base}.weight_scale" in params_dict
+    ):
         return False
 
     entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    if (
+        not is_weight
+        and "weight" in entry
+        and entry["weight"].dtype != torch.float8_e4m3fn
+    ):
+        return False
     entry["weight" if is_weight else "scale"] = tensor
     if "weight" not in entry or "scale" not in entry:
         return True
@@ -1529,9 +1535,8 @@ def _try_load_nvfp4_attn_proj(
 
     NVFP4 checkpoints that quantize the MLA projections store a packed e2m1
     ``weight`` (uint8), e4m3 per-16 ``weight_scale`` and an fp32
-    ``weight_scale_2``. ``fused_qkv_a_proj`` is always BF16, so when the target
-    has no ``weight_scale`` param these are dequantized to BF16; otherwise we
-    return False and the normal path loads the NVFP4 tensors as-is.
+    ``weight_scale_2``. Only BF16 targets without registered weight scales are
+    converted; other destinations use their existing loader.
     Activation ``input_scale`` tensors are unused by BF16 targets.
     """
     matched = None
@@ -1555,18 +1560,25 @@ def _try_load_nvfp4_attn_proj(
 
     layer_prefix = name.rsplit(suffix, 1)[0]
     target_w = f"{layer_prefix}.{target_base}.weight"
-    if target_w not in params_dict or (
-        f"{layer_prefix}.{target_base}.weight_scale" in params_dict
+    if (
+        target_w not in params_dict
+        or params_dict[target_w].dtype != torch.bfloat16
+        or f"{layer_prefix}.{target_base}.weight_scale" in params_dict
+        or f"{layer_prefix}.{target_base}.weight_scale_inv" in params_dict
     ):
         return False
     if part == "input_scale":
         return f"{layer_prefix}.{target_base}.input_scale" not in params_dict
-    entry = buf.setdefault(layer_prefix, {}).setdefault(f"nvfp4_{key}", {})
+    # E4M3 scales are ambiguous until the weight dtype is known. Share the
+    # pending entry so the FP8 helper can finish a scale-first FP8 stream.
+    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    if "weight" in entry and entry["weight"].dtype != torch.uint8:
+        return False
     entry[part] = tensor
     if not all(p in entry for p in ("weight", "scale", "weight_scale_2")):
         return True
 
-    buf[layer_prefix].pop(f"nvfp4_{key}", None)
+    buf[layer_prefix].pop(key, None)
     weight_bf16 = dequantize_to_dtype(
         entry["weight"],
         entry["scale"],

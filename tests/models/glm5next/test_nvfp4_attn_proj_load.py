@@ -5,7 +5,10 @@
 import pytest
 import torch
 
-from vllm.models.glm5next.common.model import _try_load_nvfp4_attn_proj
+from vllm.models.glm5next.common.model import (
+    _try_load_fp8_attn_proj,
+    _try_load_nvfp4_attn_proj,
+)
 
 E2M1 = torch.tensor(
     [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
@@ -15,7 +18,8 @@ PREFIX = "model.layers.3.self_attn"
 
 
 class _RecordingParam:
-    def __init__(self):
+    def __init__(self, dtype=torch.bfloat16):
+        self.dtype = dtype
         self.calls: list = []
 
     def weight_loader(self, param, weight, shard_id=None):
@@ -114,3 +118,65 @@ def test_fp8_and_bf16_tensors_are_left_alone():
         assert not _try_load_nvfp4_attn_proj(
             f"{PREFIX}.q_a_proj.weight", t, {}, params, set(), 0
         )
+
+
+@pytest.mark.parametrize("scale_first", [False, True])
+@pytest.mark.parametrize(
+    "scale_name,scale_dtype",
+    [("weight_scale", torch.float8_e4m3fn), ("weight_scale_inv", torch.float32)],
+)
+def test_fp8_scales_work_through_both_helpers(scale_first, scale_name, scale_dtype):
+    param = _RecordingParam()
+    target = f"{PREFIX}.q_b_proj.weight"
+    params = {target: param}
+    weight = (
+        torch.arange(64 * 128).reshape(64, 128).remainder(8).to(torch.float8_e4m3fn)
+    )
+    scale = torch.tensor([[0.5, 2.0]], dtype=scale_dtype)
+    expected = (weight.float() * scale.float().repeat_interleave(64, dim=1)).to(
+        torch.bfloat16
+    )
+    tensors = [("weight", weight), (scale_name, scale)]
+    if scale_first:
+        tensors.reverse()
+    buf: dict = {}
+    loaded: set[str] = set()
+    for suffix, tensor in tensors:
+        args = (f"{PREFIX}.q_b_proj.{suffix}", tensor, buf, params, loaded, 0)
+        assert _try_load_nvfp4_attn_proj(*args) or _try_load_fp8_attn_proj(*args)
+    ((actual, shard_id),) = param.calls
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert shard_id is None
+    assert loaded == {target}
+    assert not any(buf.values())
+
+
+@pytest.mark.parametrize("scale_name", ["weight_scale", "weight_scale_inv"])
+def test_both_helpers_decline_registered_quantization_scales(scale_name):
+    params = {
+        f"{PREFIX}.q_b_proj.weight": _RecordingParam(),
+        f"{PREFIX}.q_b_proj.{scale_name}": _RecordingParam(),
+    }
+    buf: dict = {}
+    loaded: set[str] = set()
+    args = (
+        f"{PREFIX}.q_b_proj.weight_scale",
+        torch.ones(1, 2, dtype=torch.float8_e4m3fn),
+        buf,
+        params,
+        loaded,
+        0,
+    )
+    assert not _try_load_nvfp4_attn_proj(*args)
+    assert not _try_load_fp8_attn_proj(*args)
+    assert not buf
+
+
+def test_nvfp4_helper_declines_non_bf16_targets():
+    params = {f"{PREFIX}.q_b_proj.weight": _RecordingParam(torch.float16)}
+    packed, _, _, _ = _nvfp4(64, 128, seed=4)
+    buf: dict = {}
+    assert not _try_load_nvfp4_attn_proj(
+        f"{PREFIX}.q_b_proj.weight", packed, buf, params, set(), 0
+    )
+    assert not buf
