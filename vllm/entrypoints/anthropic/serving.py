@@ -34,6 +34,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicTool,
     AnthropicToolChangeDefinition,
     AnthropicUsage,
+    translate_error_type,
 )
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
@@ -61,8 +62,9 @@ logger = init_logger(__name__)
 
 
 class _StreamError(Exception):
-    """Carries an ErrorResponse error payload through the stream converter so
-    the SSE ``error`` event keeps the original HTTP status code."""
+    """Carries the ErrorInfo from an upstream ErrorResponse through the stream
+    converter so the SSE ``error`` event can reuse its status code to pick the
+    Anthropic error type."""
 
     def __init__(self, error_info: ErrorInfo) -> None:
         super().__init__(error_info.message)
@@ -1210,17 +1212,14 @@ class AnthropicServingMessages(OpenAIServingChat):
             for event in stop_active_block():
                 yield event
             if isinstance(e, _StreamError):
-                # Preserve the HTTP status carried by ErrorResponse so the
-                # SSE error event uses the same Anthropic vocabulary as the
-                # non-streaming path (e.g. overloaded_error, not_found_error).
-                # Local import: api_router imports this module, so a
-                # module-level import would be circular.
-                from vllm.entrypoints.anthropic.api_router import translate_error_type
-
-                error_type = translate_error_type(ErrorResponse(error=e.error_info))
-                message = sanitize_message(e.error_info.message)
+                # Reuse the ErrorResponse status code so the SSE error event
+                # uses the same Anthropic vocabulary as the non-streaming
+                # path (e.g. overloaded_error, not_found_error). The message
+                # was already sanitized by create_error_response upstream.
+                error_type = translate_error_type(e.error_info.code)
+                message = e.error_info.message
             else:
-                error_type = "internal_error"
+                error_type = "api_error"
                 message = sanitize_message(str(e))
             error_response = AnthropicStreamEvent(
                 type="error",

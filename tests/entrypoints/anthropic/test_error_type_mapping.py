@@ -65,7 +65,7 @@ async def test_stream_error_event_uses_translated_type(
     status_code: int, expected_type: str
 ):
     """The SSE error path must translate ``error.type`` the same way as the
-    non-streaming path, preserving the HTTP status from ErrorResponse."""
+    non-streaming path, reusing the ErrorResponse status code."""
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 
     async def fake_generator():
@@ -77,6 +77,8 @@ async def test_stream_error_event_uses_translated_type(
             )
         )
 
+    # The converter's error path does not touch instance attributes, so
+    # __new__ bypasses __init__ safely here.
     converter = AnthropicServingMessages.__new__(AnthropicServingMessages)
     events = [e async for e in converter.message_stream_converter(fake_generator())]
     error_events = [e for e in events if e.startswith("event: error")]
@@ -88,3 +90,27 @@ async def test_stream_error_event_uses_translated_type(
     assert payload["type"] == "error"
     assert payload["error"]["type"] == expected_type
     assert payload["error"]["message"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_stream_mid_stream_exception_maps_to_api_error():
+    """An exception raised mid-stream (not an ErrorResponse) surfaces as
+    ``api_error`` in the SSE error event."""
+    from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+
+    async def failing_generator():
+        raise RuntimeError("kaboom")
+        yield  # pragma: no cover - make this an async generator
+
+    converter = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    events = [
+        e async for e in converter.message_stream_converter(failing_generator())
+    ]
+    error_events = [e for e in events if e.startswith("event: error")]
+    assert len(error_events) == 1
+    payload_line = [
+        line for line in error_events[0].splitlines() if line.startswith("data: ")
+    ][0]
+    payload = json.loads(payload_line[len("data: "):])
+    assert payload["error"]["type"] == "api_error"
+    assert payload["error"]["message"] == "kaboom"
