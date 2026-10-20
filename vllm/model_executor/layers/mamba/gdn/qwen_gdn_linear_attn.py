@@ -1094,22 +1094,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return output
 
     @functools.cached_property
+    def _use_rocm_qwen_mtp_gdn(self) -> bool:
+        return (
+            envs.VLLM_ROCM_QWEN_MTP_GDN
+            and current_platform.is_rocm()
+            and not self.gqa_interleaved_layout
+        )
+
+    @functools.cached_property
     def _rocm_qwen_mtp_layer_reasons(self) -> list[str]:
         reasons = []
         if self.tp_size != 1:
             reasons.append(f"tp_size={self.tp_size}, supported value is 1")
-        if self.conv1d.bias is not None:
-            reasons.append("conv bias is not supported")
         if self.activation not in ("silu", "swish"):
             reasons.append(f"activation={self.activation}")
-        if self.norm.activation not in ("silu", "swish", "sigmoid"):
-            reasons.append(f"norm activation={self.norm.activation}")
-        if self.norm.group_size is not None or not self.norm.norm_before_gate:
-            reasons.append("norm must be full-row and norm-before-gate")
         return reasons
 
     def _try_rocm_qwen_mtp_gdn(
         self,
+        attn_metadata: object,
         mixed_qkv: torch.Tensor,
         b: torch.Tensor,
         a: torch.Tensor,
@@ -1118,15 +1121,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         """Write normed MTP output into ``core_attn_out``. False when this
         step is not MTP-only."""
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        attn_metadata = None
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.prefix)
-        if not isinstance(attn_metadata, GDNAttentionMetadata):
-            return False
         if (
-            attn_metadata.spec_sequence_masks is None
+            not isinstance(attn_metadata, GDNAttentionMetadata)
+            or attn_metadata.spec_sequence_masks is None
             or attn_metadata.num_prefills != 0
             or attn_metadata.num_decodes != 0
         ):
@@ -1143,7 +1140,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         uniform = attn_metadata.uniform_spec_sequence_length
         cu_seqlens = attn_metadata.spec_query_start_loc
         assert indices is not None and accepted is not None and cu_seqlens is not None
-        max_len = uniform or indices.size(1)
         conv_state = (
             self.kv_cache[0]
             if is_conv_state_dim_first()
@@ -1167,7 +1163,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b[:tokens],
             self.A_log,
             self.dt_bias,
-            indices[:n_seq, :max_len],
+            indices[:n_seq],
             accepted[:n_seq],
             self.kv_cache[1],
             out,
@@ -1190,11 +1186,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
-        """Fused path is already normed. The stock path norms here, once.
-
-        ``core_attn_out`` arrives zeroed; the fused path leaves padded rows
-        untouched."""
-        if self._try_rocm_qwen_mtp_gdn(mixed_qkv, b, a, z, core_attn_out):
+        """Write normed output into ``core_attn_out``, which arrives zeroed;
+        the fused path leaves padded rows untouched."""
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata = None
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if self._try_rocm_qwen_mtp_gdn(
+            attn_metadata, mixed_qkv, b, a, z, core_attn_out
+        ):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
@@ -1202,7 +1203,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             a=a.contiguous(),
             core_attn_out=core_attn_out,
         )
-        self._rms_norm_gated_cuda(core_attn_out, z, core_attn_out)
+        if attn_metadata is None:
+            return
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        self._rms_norm_gated_cuda(
+            core_attn_out[:num_actual_tokens],
+            z[:num_actual_tokens],
+            core_attn_out[:num_actual_tokens],
+        )
 
     def forward_hip(
         self,
@@ -1210,10 +1219,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        use_qwen_mtp_gdn = (
-            envs.VLLM_ROCM_QWEN_MTP_GDN and not self.gqa_interleaved_layout
-        )
-        if GDN_AITER_TRITON_AVAILABLE and not use_qwen_mtp_gdn:
+        if GDN_AITER_TRITON_AVAILABLE and not self._use_rocm_qwen_mtp_gdn:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -1296,7 +1302,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self.split_ba(ba)
 
-        if envs.VLLM_ROCM_QWEN_MTP_GDN and not self.gqa_interleaved_layout:
+        if self._use_rocm_qwen_mtp_gdn:
             core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,

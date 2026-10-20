@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Width-1..4 conv plus gated delta for Qwen GDN MTP verify.
+"""Width-4 conv plus gated delta over 1..4 tokens for Qwen GDN MTP verify.
 
 Tap products and SiLU are rounded to the input dtype, matching
 ``causal_conv1d_update``. History is read at ``num_accepted_tokens - 1``.
@@ -39,7 +39,7 @@ def _conv_channels(
     w3 = tl.load(w_base + 3 * stride_w_w, mask=mask, other=0).to(tl.float32)
     base = (
         conv_ptr
-        + slot.to(tl.int64) * stride_conv_slot.to(tl.int64)
+        + slot * stride_conv_slot.to(tl.int64)
         + chan.to(tl.int64) * stride_conv_dim
     )
     c0 = tl.load(base + offset * stride_conv_tok, mask=mask, other=0).to(tl.float32)

@@ -49,6 +49,9 @@ CASES = [
     pytest.param(4, 1, id="t4-accept1"),
     pytest.param(4, 2, id="t4-accept2"),
     pytest.param(4, 4, id="t4-accept4"),
+    # A step where no request drafted still accepts up to num_spec + 1.
+    pytest.param(1, 3, id="t1-accept3"),
+    pytest.param(2, 4, id="t2-accept4"),
 ]
 
 
@@ -58,15 +61,17 @@ def _make_inputs(
     seed: int,
     shape: tuple[int, int, int, int] = SHAPE,
     dtype: torch.dtype = torch.bfloat16,
+    activation: str = "silu",
 ):
     torch.manual_seed(seed)
     device = "cuda"
     h, hv, k, v = shape
     dim = 2 * h * k + hv * v
+    width = max(tokens, accepted)
     mixed = 0.1 * torch.randn(tokens, dim, dtype=dtype, device=device)
     weight = 0.1 * torch.randn(dim, 4, dtype=dtype, device=device)
     conv_row = 0.1 * torch.randn(dim, CONV_LEN, dtype=dtype, device=device)
-    ssm_rows = 0.01 * torch.randn(tokens, hv, v, k, dtype=torch.float32, device=device)
+    ssm_rows = 0.01 * torch.randn(width, hv, v, k, dtype=torch.float32, device=device)
     # chunk leaves a and b non-contiguous, as split_ba does on the model path.
     ba = 0.1 * torch.randn(tokens, 2 * hv, dtype=dtype, device=device)
     b, a = ba.chunk(2, dim=-1)
@@ -82,7 +87,7 @@ def _make_inputs(
         eps=EPS,
         group_size=None,
         norm_before_gate=True,
-        activation="silu",
+        activation=activation,
         device=device,
         dtype=torch.float32,
     )
@@ -95,11 +100,17 @@ def _pool(
     n_slots: int,
     shape: tuple[int, int, int, int] = SHAPE,
     dtype: torch.dtype = torch.bfloat16,
+    token_major: bool = False,
 ):
     device = "cuda"
     h, hv, k, v = shape
     dim = 2 * h * k + hv * v
-    conv = torch.empty(n_slots, dim, CONV_LEN, dtype=dtype, device=device)
+    if token_major:
+        conv = torch.empty(
+            n_slots, CONV_LEN, dim, dtype=dtype, device=device
+        ).transpose(1, 2)
+    else:
+        conv = torch.empty(n_slots, dim, CONV_LEN, dtype=dtype, device=device)
     ssm = torch.empty(n_slots, hv, v, k, dtype=torch.float32, device=device)
     return conv, ssm
 
@@ -202,14 +213,14 @@ def _run_fused(
         norm.weight,
         EPS,
         out,
-        gate_sigmoid=False,
+        gate_sigmoid=norm.activation == "sigmoid",
     )
 
 
-def _snapshot(conv, ssm, block: int, tokens: int):
+def _snapshot(conv, ssm, block: int, rows: int):
     return (
         conv[block].clone(),
-        ssm[block : block + tokens].clone(),
+        ssm[block : block + rows].clone(),
     )
 
 
@@ -227,7 +238,8 @@ def _assert_close(actual, expected, conv_a, conv_e, ssm_a, ssm_e, where: str) ->
 def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]:
     mixed, weight, conv_row, ssm_rows, a, b, a_log, dt_bias, z, norm, accepted = inputs
     tokens = mixed.shape[0]
-    indices = _indices(block, tokens)
+    width = ssm_rows.shape[0]
+    indices = _indices(block, width)
     _plant(conv, ssm, block, conv_row, ssm_rows)
 
     fused_out = torch.empty_like(z)
@@ -246,7 +258,7 @@ def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]
         norm,
         fused_out,
     )
-    fused_conv, fused_ssm = _snapshot(conv, ssm, block, tokens)
+    fused_conv, fused_ssm = _snapshot(conv, ssm, block, width)
 
     _plant(conv, ssm, block, conv_row, ssm_rows)
     stock_out = torch.empty_like(fused_out)
@@ -265,7 +277,7 @@ def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]
         norm,
         stock_out,
     )
-    stock_conv, stock_ssm = _snapshot(conv, ssm, block, tokens)
+    stock_conv, stock_ssm = _snapshot(conv, ssm, block, width)
     where = f"block {block} T={tokens} accepted={int(accepted.item())}"
     _assert_close(
         fused_out, stock_out, fused_conv, stock_conv, fused_ssm, stock_ssm, where
@@ -278,7 +290,7 @@ def _compare_at_block(inputs, conv, ssm, block: int) -> tuple[torch.Tensor, ...]
 def test_matches_stock_ops(tokens, accepted, default_vllm_config):
     del default_vllm_config
     inputs = _make_inputs(tokens, accepted, seed=100 + 10 * tokens + accepted)
-    conv, ssm = _pool(tokens + 2)
+    conv, ssm = _pool(max(tokens, accepted) + 2)
     _compare_at_block(inputs, conv, ssm, block=1)
 
 
@@ -287,7 +299,7 @@ def test_matches_stock_ops(tokens, accepted, default_vllm_config):
 def test_high_block_id_matches_block_one(tokens, accepted, default_vllm_config):
     del default_vllm_config
     inputs = _make_inputs(tokens, accepted, seed=200 + 10 * tokens + accepted)
-    conv, ssm = _pool(HIGH_BLOCK + tokens)
+    conv, ssm = _pool(HIGH_BLOCK + max(tokens, accepted))
     low = _compare_at_block(inputs, conv, ssm, block=1)
     high = _compare_at_block(inputs, conv, ssm, block=HIGH_BLOCK)
     where = f"T={tokens} accepted={accepted}"
@@ -317,11 +329,40 @@ def test_other_shapes_match_stock_ops(
     _compare_at_block(inputs, conv, ssm, block=1)
 
 
+@pytest.mark.parametrize("tokens,accepted", [(1, 1), (4, 2)])
+@torch.inference_mode()
+def test_sigmoid_gate_matches_stock_ops(tokens, accepted, default_vllm_config):
+    del default_vllm_config
+    inputs = _make_inputs(tokens, accepted, seed=500 + tokens, activation="sigmoid")
+    conv, ssm = _pool(tokens + 2)
+    _compare_at_block(inputs, conv, ssm, block=1)
+
+
+@pytest.mark.parametrize("tokens,accepted", [(1, 1), (4, 2)])
+@torch.inference_mode()
+def test_token_major_conv_state_matches_stock_ops(
+    tokens, accepted, default_vllm_config
+):
+    """Conv state viewed as ``[slots, dim, len]`` over a ``[slots, len, dim]``
+    allocation, as when conv state is not dim-first."""
+    del default_vllm_config
+    inputs = _make_inputs(tokens, accepted, seed=600 + tokens)
+    conv, ssm = _pool(tokens + 2, token_major=True)
+    _compare_at_block(inputs, conv, ssm, block=1)
+
+
 def _compare_packed(
-    batch: int, lengths: list[int], accepted: int, block0: int, pad: int = 0
+    batch: int,
+    lengths: list[int],
+    accepted: int,
+    block0: int,
+    pad: int = 0,
+    null_seqs: int = 0,
 ) -> None:
     """``pad`` trailing rows sit outside every sequence, like graph padding;
-    the varlen path must leave them untouched."""
+    the varlen path must leave them untouched. The last ``null_seqs``
+    sequences point at NULL_BLOCK_ID 0, like padded requests, and must
+    produce zero output without touching slot 0."""
     torch.manual_seed(300 + batch * 17 + block0 + sum(lengths))
     device = "cuda"
     total = sum(lengths)
@@ -346,11 +387,16 @@ def _compare_packed(
     )
     norm.weight = torch.nn.Parameter(norm_w, requires_grad=False)
     accepted_t = torch.full((batch,), accepted, dtype=torch.int32, device=device)
+    real = batch - null_seqs
     rows = []
     cursor = block0
-    for length in lengths:
+    for length in lengths[:real]:
         rows.append(torch.arange(cursor, cursor + length, device=device))
         cursor += length
+    rows += [
+        torch.zeros(length, dtype=torch.long, device=device)
+        for length in lengths[real:]
+    ]
     indices = torch.stack(
         [torch.nn.functional.pad(row, (0, width - row.numel())) for row in rows]
     ).to(torch.int32)
@@ -364,7 +410,9 @@ def _compare_packed(
     ]
 
     def plant(conv, ssm) -> None:
-        for seq, length in enumerate(lengths):
+        conv[0].zero_()
+        ssm[0].zero_()
+        for seq, length in enumerate(lengths[:real]):
             block = int(indices[seq, 0])
             conv[block].copy_(conv_row[seq])
             ssm[block : block + length].copy_(ssm_rows[seq])
@@ -401,9 +449,12 @@ def _compare_packed(
         cu_seqlens=cu_seqlens,
     )
     assert not fused_out[total:].any(), "rows outside every sequence were written"
+    real_rows = sum(lengths[:real])
+    assert not fused_out[real_rows:].any(), "NULL_BLOCK_ID sequences wrote output"
+    assert not conv_f[0].any() and not ssm_f[0].any(), "NULL_BLOCK_ID was written"
 
     offset = 0
-    for seq, length in enumerate(lengths):
+    for seq, length in enumerate(lengths[:real]):
         block = int(indices[seq, 0])
         stock_out = torch.empty(length, HV, V, dtype=torch.bfloat16, device=device)
         _run_stock(
@@ -459,3 +510,10 @@ def test_mixed_widths_match_stock_ops(default_vllm_config):
 def test_mixed_widths_leave_padding_rows(default_vllm_config):
     del default_vllm_config
     _compare_packed(4, [2, 4, 1, 3], accepted=1, block0=HIGH_BLOCK, pad=5)
+
+
+@pytest.mark.parametrize("lengths", [[4] * 6, [2, 4, 1, 3, 2, 2]])
+@torch.inference_mode()
+def test_null_block_sequences_are_skipped(lengths, default_vllm_config):
+    del default_vllm_config
+    _compare_packed(len(lengths), lengths, accepted=1, block0=1, null_seqs=2)

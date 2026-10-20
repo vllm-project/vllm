@@ -136,8 +136,10 @@ def launch_conv_gdn_norm(
     ``normed_out`` may alias ``core_out``.
 
     ``ssm_state`` is ``[slots, HV, V, K]``. ``mixed`` is
-    ``[tokens, 2 * H * K + HV * V]``. ``indices`` is ``[n_seq, T]``.
-    ``num_accepted`` is ``[n_seq]``. Without ``cu_seqlens`` every sequence
+    ``[tokens, 2 * H * K + HV * V]``. ``indices`` is ``[n_seq, >= T]``;
+    column ``t`` is the slot written after token ``t``, and the incoming
+    state is read at column ``num_accepted - 1`` (``num_accepted`` is
+    ``[n_seq]``, each in ``1..indices.shape[1]``). Without ``cu_seqlens`` every sequence
     has ``T = tokens // n_seq`` rows. With ``cu_seqlens`` (``[n_seq + 1]``,
     on device), sequence ``i`` is rows ``cu_seqlens[i]:cu_seqlens[i + 1]``,
     at most ``indices.shape[1]``; other rows are left untouched.
@@ -149,14 +151,16 @@ def launch_conv_gdn_norm(
     num_k_heads = max(qk_dim // (2 * head_k), 1)
     if cu_seqlens is None and tokens != n_seq * seq_tokens:
         raise ValueError(f"tokens={tokens} is not divisible by n_seq={n_seq}")
-    if not 1 <= seq_tokens <= 4 or conv_state.shape[-1] < seq_tokens + 2:
-        raise ValueError(
-            f"T={seq_tokens} must be 1..4 with conv state length >= T + 2, "
-            f"got {conv_state.shape[-1]}"
-        )
+    if not 1 <= seq_tokens <= 4:
+        raise ValueError(f"T={seq_tokens} must be 1..4")
     if indices.shape[0] < n_seq or indices.shape[1] < seq_tokens:
         raise ValueError(
             f"indices {tuple(indices.shape)} for n_seq={n_seq} T={seq_tokens}"
+        )
+    if conv_state.shape[-1] < indices.shape[1] + 2:
+        raise ValueError(
+            f"conv state length {conv_state.shape[-1]} < indices width "
+            f"{indices.shape[1]} + 2"
         )
     if num_accepted.shape[0] < n_seq:
         raise ValueError(f"num_accepted {tuple(num_accepted.shape)} for n_seq={n_seq}")
