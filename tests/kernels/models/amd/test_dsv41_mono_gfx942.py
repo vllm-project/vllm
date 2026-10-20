@@ -47,9 +47,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo  # noqa: E402
 from flydsl.expr import const_expr, gpu, range_constexpr  # noqa: E402
 from flydsl.expr.typing import Int64, T  # noqa: E402
 
-from vllm.models.deepseek_v41.amd.mono.attention import (  # noqa: E402
-    gemv as G,
-)
+from vllm.models.deepseek_v41.amd.mono.attention import gemv as G  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.attention.device import (  # noqa: E402
     THREADS,
     WAVES,
@@ -61,12 +59,8 @@ from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (  # noqa: E402
     mfma_bf16_k32,
     ocp_to_fnuz,
 )
-from vllm.models.deepseek_v41.amd.mono.stages import (  # noqa: E402
-    gemv as SG,
-)
-from vllm.models.deepseek_v41.amd.mono.stages import (  # noqa: E402
-    moe as M,
-)
+from vllm.models.deepseek_v41.amd.mono.stages import gemv as SG  # noqa: E402
+from vllm.models.deepseek_v41.amd.mono.stages import moe as M  # noqa: E402
 from vllm.models.deepseek_v41.amd.mono.weights942 import (  # noqa: E402
     EVEN_ODD,
     codes_tile_rounds,
@@ -100,10 +94,7 @@ def _rel_err(got: torch.Tensor, ref: torch.Tensor) -> float:
 
 
 def _keylist_reference(slot, pos, swa_idx, swa_lens, t2r, ratio, topk, bt, cb):
-    from vllm.models.deepseek_v41.amd.mono.attention.plan import (
-        KEYS,
-        TOPK,
-    )
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import KEYS, TOPK
 
     S = slot.shape[0]
     kt = torch.full((S, KEYS), -1, dtype=torch.int64)
@@ -127,11 +118,7 @@ def _keylist_reference(slot, pos, swa_idx, swa_lens, t2r, ratio, topk, bt, cb):
 @pytest.mark.parametrize("ratio", [0, 1, 2, 4])
 def test_keylist_matches_torch_reference(ratio):
     from vllm.models.deepseek_v41.amd.mono import keylist
-    from vllm.models.deepseek_v41.amd.mono.attention.plan import (
-        KEYS,
-        TOPK,
-        WINDOW,
-    )
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import KEYS, TOPK, WINDOW
 
     g = torch.Generator().manual_seed(ratio)
     S, reqs, cb, blocks = 6, 2, 64, 3000
@@ -619,9 +606,7 @@ def test_contrib_942_is_bf16_of_product(routing):
     every pick of a 42-row step, with w the pick's route weight from the route
     table (RouteShape.pick_w). down_combine rounds this same f32 product on
     gfx950, so the gfx942 combine adds the same values."""
-    from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import (
-        RouteShape,
-    )
+    from vllm.models.deepseek_v41.amd.mono.stages.moe_shape import RouteShape
 
     experts, topk = routing
     rs = RouteShape(experts, topk, 42, 4)

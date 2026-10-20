@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The specialized decode conformance kit (RFC #60904): what a model's own
-``DecodeSpec`` must satisfy.
-
-The library's behaviour is tested once, in
-``tests/models/common/specialized_decode/test_specialized_decode.py``. Only what
-a model answers for itself belongs here, so a model pays for it in CI.
-"""
+"""What a model's ``DecodeSpec`` must satisfy."""
 
 import subprocess
 import sys

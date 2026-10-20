@@ -310,9 +310,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.common.ops import fused_q_kv_rmsnorm
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
-    from vllm.models.deepseek_v41.amd.mono.layer import (
-        scratch_layout,
-    )
+    from vllm.models.deepseek_v41.amd.mono.layer import scratch_layout
     from vllm.models.deepseek_v41.amd.mono.runner import (
         AttnWeights,
         DSV41MonoLayer,
@@ -612,9 +610,7 @@ def _replay_942(rank: int, tp: int, device) -> None:
         DSV41MonoLayer,
         MonoLayerWeights,
     )
-    from vllm.models.deepseek_v41.amd.mono.weights942 import (
-        linear_copy,
-    )
+    from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
     from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
     from vllm.utils.torch_utils import set_default_torch_dtype
 

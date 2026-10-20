@@ -51,8 +51,8 @@ RATIO = 1
 def gfx942_step(monkeypatch):
     """Turns on AITER and the gfx942 decode launches for one test, and makes
     the workspace that vLLM's logits call takes its output from. The model
-    records --specialized-decode when it is created, and this test has no model, so it
-    sets the recorded flag itself."""
+    records --specialized-decode when it is created, and this test has no
+    model, so it sets the recorded flag itself."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.deepseek_v41.amd import ops
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import paged_mqa_logits_module

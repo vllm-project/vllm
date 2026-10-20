@@ -41,8 +41,8 @@ STEP_IDS = ["1x6", "3x6", "8x1"]
 @pytest.fixture
 def gfx942_decode(monkeypatch):
     """Turns on the gfx942 decode helpers for one test. The model records
-    --specialized-decode when it is created, and this test has no model, so it sets
-    the recorded flag itself."""
+    --specialized-decode when it is created, and this test has no model, so it
+    sets the recorded flag itself."""
     from vllm.models.deepseek_v41.amd import ops
 
     monkeypatch.setattr(ops, "_specialized_decode", True)

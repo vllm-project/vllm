@@ -35,8 +35,8 @@ VOCAB, RANK, N_SPEC, MAX_REQS = 129280, 256, 5, 4
 def _set_gate(monkeypatch, on: bool):
     from vllm.models.deepseek_v41.amd import ops
 
-    # The model records --specialized-decode when it is created. These tests have no
-    # model, so they set the recorded flag themselves.
+    # The model records --specialized-decode when it is created. These tests
+    # have no model, so they set the recorded flag themselves.
     monkeypatch.setattr(ops, "_specialized_decode", on)
     ops.enabled.cache_clear()
 
