@@ -132,7 +132,7 @@ def test_scaled_mm(
     not current_platform.is_cuda() or not current_platform.supports_fp8(),
     reason="Block FP8 Triton requires CUDA with FP8 support.",
 )
-@pytest.mark.parametrize("M", [1, 8, 32, 33])
+@pytest.mark.parametrize("M", [1, 8, 16, 17, 20, 21, 32, 33])
 @pytest.mark.parametrize(
     "N,K",
     [(14336, 5120), (16384, 5120), (34816, 5120), (5120, 17408), (5120, 6144)],
