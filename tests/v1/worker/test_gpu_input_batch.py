@@ -233,7 +233,6 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
     reqs: list[CachedRequestState] = []
@@ -327,7 +326,6 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
     ref_input_batch: InputBatch = InputBatch(
@@ -337,7 +335,6 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         device=torch.device(device),
         vocab_size=1024,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
 
@@ -373,6 +370,61 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_condense_clears_stale_allowed_token_ids_mask(device: str):
+    """condense() must clear the mask row a constrained request is moved out
+    of. Otherwise a later request that reuses that row without
+    allowed_token_ids inherits the stale whitelist.
+    See https://github.com/vllm-project/vllm/issues/43894.
+    """
+    batch_size = 4
+    allowed_token_id = 13
+    input_batch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        max_num_blocks_per_req=[1024],
+    )
+
+    def _make_req(suffix: int, allowed_token_ids=None) -> CachedRequestState:
+        return CachedRequestState(
+            req_id=f"req_id_{suffix}",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(allowed_token_ids=allowed_token_ids),
+            pooling_params=None,
+            mm_features=[],
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=0,
+            output_token_ids=[],
+        )
+
+    # Only req_id_2 is constrained, and it lands on the highest row.
+    assert input_batch.add_request(_make_req(0)) == 0
+    assert input_batch.add_request(_make_req(1)) == 1
+    assert input_batch.add_request(_make_req(2, [allowed_token_id])) == 2
+
+    mask = input_batch.allowed_token_ids_mask_cpu_tensor
+    assert mask is not None
+    # The constrained row masks every token except the single allowed id.
+    assert not mask[2][allowed_token_id].item()
+    assert int(mask[2].sum().item()) == VOCAB_SIZE - 1
+
+    # Free row 0, then condense: req_id_2 slides from row 2 down into row 0.
+    input_batch.remove_request("req_id_0")
+    input_batch.condense()
+    assert input_batch.req_id_to_index["req_id_2"] == 0
+    assert int(mask[2].sum().item()) == 0
+
+    # A new unrestricted request reuses row 2 and must stay unconstrained.
+    assert input_batch.add_request(_make_req(3)) == 2
+    assert "req_id_3" not in input_batch.has_allowed_token_ids
+    assert int(mask[2].sum().item()) == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_swap_states_preserves_allowed_token_ids_mask(device: str):
     """swap_states() must exchange the two allowed_token_ids_mask rows.
 
@@ -390,7 +442,6 @@ def test_swap_states_preserves_allowed_token_ids_mask(device: str):
         device=torch.device(device),
         vocab_size=VOCAB_SIZE,
         block_sizes=[1],
-        kernel_block_sizes=[1],
         max_num_blocks_per_req=[1024],
     )
 
@@ -460,7 +511,6 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         device=torch.device(device),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
@@ -496,7 +546,6 @@ def test_placeholder_spec_token_ids_written_verbatim():
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[1],
     )
     req = CachedRequestState(
@@ -543,7 +592,6 @@ def test_pooling_metadata_token_id_buffers(
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
@@ -574,7 +622,6 @@ def _make_input_batch(is_pooling_model: bool = False) -> InputBatch:
         device=torch.device("cpu"),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
-        kernel_block_sizes=[16],
         max_num_blocks_per_req=[64],
         is_pooling_model=is_pooling_model,
     )

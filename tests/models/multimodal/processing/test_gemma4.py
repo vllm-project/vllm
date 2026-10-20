@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.worker.encoder_cudagraph_defs import ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
@@ -202,19 +204,19 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
-@pytest.mark.parametrize("kwargs_on_init", [False, True])
 @pytest.mark.parametrize(
     "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
 )
 @pytest.mark.parametrize("video_uuid", [None, "same-video"])
 def test_video_cache_is_independent_of_image_kwargs(
     model_id: str,
-    kwargs_on_init: bool,
     image_kwargs: dict[str, object],
     video_uuid: str | None,
 ):
-    """Image overrides must not change video frames or depend on cache warmth."""
-    kwargs = {"images_kwargs": image_kwargs}
+    """Request image overrides must not change video frames or make results
+    depend on cache warmth.
+    """
+    request_kwargs = {"images_kwargs": image_kwargs}
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 1, "video": 1},
@@ -239,18 +241,11 @@ def test_video_cache_is_independent_of_image_kwargs(
             cache=cache,
         )
 
-    baseline = process({}, cache=None)
-    if kwargs_on_init:
-        ctx = build_model_context(
-            model_id,
-            mm_processor_kwargs=kwargs,
-            limit_mm_per_prompt={"image": 1, "video": 1},
-            mm_processor_cache_gb=1,
-        )
-        cache = MultiModalProcessorOnlyCache(ctx.model_config)
-        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    request_kwargs = {} if kwargs_on_init else kwargs
-    process(request_kwargs, cache=cache)
+    # Populate the video cache without image overrides, then change only
+    # images_kwargs on the next request. Since images_kwargs are excluded from
+    # the video hash, and must not affect the processed video, the cached result
+    # must match a fresh recomputation.
+    baseline = process({}, cache=cache)
     cached = process(request_kwargs, cache=cache)
     cache.clear_cache()
     fresh = process(request_kwargs, cache=cache)
@@ -355,3 +350,56 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
         )
         == 1
     )
+
+
+def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
+    model = object.__new__(Gemma4ForConditionalGeneration)
+    vision_config = SimpleNamespace(
+        patch_size=16, pooling_kernel_size=3, default_output_length=280
+    )
+    model.vision_tower = SimpleNamespace(config=vision_config)
+    model.config = SimpleNamespace(vision_config=vision_config)
+    return model
+
+
+@pytest.mark.parametrize(
+    ("token_budget", "row_tokens"), [(4096, 70), (4096, 280), (70, 280)]
+)
+def test_encoder_cudagraph_capture_rows_fit_token_budget(
+    token_budget: int, row_tokens: int
+):
+    # Regression for #61045: rows were max_frames_per_batch (58 * 32) at
+    # 280 tokens each, so the 4096-token buffer alone was 6.69 GiB.
+    model = _gemma4_for_encoder_cudagraph()
+    inputs = model.prepare_encoder_cudagraph_capture_inputs(
+        token_budget=token_budget,
+        max_batch_size=58,
+        max_frames_per_batch=58 * 32,
+        device="meta",
+        dtype=torch.bfloat16,
+        axis_keys=(row_tokens,),
+    )
+
+    num_rows, row_patches, _ = inputs.values["pixel_values"].shape
+    assert row_patches == row_tokens * 9
+    assert num_rows == max(1, token_budget // row_tokens)
+
+
+def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
+    model = _gemma4_for_encoder_cudagraph()
+    mm_kwargs = {
+        "pixel_values": [torch.zeros(2520, 768), torch.zeros(630, 768)],
+        "pixel_position_ids": [
+            torch.zeros(2520, 2, dtype=torch.long),
+            torch.zeros(630, 2, dtype=torch.long),
+        ],
+    }
+
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    assert [spec.output_tokens for spec in specs] == [280, 70]
+    assert [spec.get_path_output_tokens("default") for spec in specs] == [280, 280]
+
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
+    selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
+    assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)

@@ -105,17 +105,20 @@ def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
     new_tensor: torch.Tensor | None,
-    prefer_copy: bool = False,
 ):
     """Replace a parameter of a layer while maintaining the ability to reload the
     weight. Called within implementations of the `process_weights_after_loading` method.
 
-    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
-    ``is_shuffled``) are carried over to the replacement parameter, except
-    ``weight_loader``, which is always taken from the existing parameter.
+    The existing parameter object is kept (and so its class and loader attributes
+    for weight reloading): ``new_tensor`` is copied into it when shape, stride,
+    dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
+    otherwise the parameter's ``.data`` is rebound to ``new_tensor``. A new
+    parameter is registered only if none exists under ``param_name``, or if the
+    existing one is an online requantization source (released after conversion).
 
-    Attributes of the existing parameter are otherwise dropped when a new
-    parameter is registered, but kept when ``prefer_copy`` reuses it in place.
+    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
+    ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
+    which is always taken from the existing parameter.
 
     This function should not be called on weights which are tied/shared
 
@@ -124,12 +127,6 @@ def replace_parameter(
         param_name: Name of parameter to replace
         new_tensor: New data of the new parameter, or None to set the parameter
             to None
-        prefer_copy: If True and the existing parameter is compatible with
-            ``new_tensor`` (same shape, dtype, and device), copy ``new_tensor``
-            into the existing parameter in place rather than re-registering
-            a new parameter. This preserves the parameter's storage address
-            (``data_ptr``), which is required for captured CUDA graphs to
-            remain valid across weight updates (e.g. in RL training loops).
 
     """
     # should not be used on a tied/shared param
@@ -153,14 +150,22 @@ def replace_parameter(
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
 
+    # Keep the object, except online requantization sources (released later)
+    # and meta params (no storage; `.data` cannot be rebound to a real tensor).
     if (
-        prefer_copy
-        and old_param is not None
-        and old_param.shape == new_tensor.shape
-        and old_param.dtype == new_tensor.dtype
-        and old_param.device == new_tensor.device
+        isinstance(old_param, torch.nn.Parameter)
+        and not getattr(old_param, "requantization_source", False)
+        and not (old_param.is_meta and not new_tensor.is_meta)
     ):
-        old_param.copy_(new_tensor)
+        if (
+            old_param.shape == new_tensor.shape
+            and old_param.stride() == new_tensor.stride()
+            and old_param.dtype == new_tensor.dtype
+            and old_param.device == new_tensor.device
+        ):
+            old_param.data.copy_(new_tensor)
+        else:
+            old_param.data = new_tensor
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return

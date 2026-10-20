@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
 from abc import ABC, abstractmethod
+from bisect import bisect_left
 
-import tokenizers
 import tokenizers.decoders
-from packaging import version
 from tokenizers import Tokenizer
 from transformers import TokenizersBackend
 
@@ -20,12 +19,13 @@ from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
-# Only tokenizers >= 0.22.0 supports DecodeStream with native prefill
-# (ids parameter) used for FastIncrementalDetokenizer.
-USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0.22.0")
-
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
+
+
+def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
+    """Whether the engine detokenizes with `FastIncrementalDetokenizer`."""
+    return isinstance(tokenizer, TokenizersBackend)
 
 
 class IncrementalDetokenizer:
@@ -58,7 +58,7 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
+        if uses_fast_detokenizer(tokenizer):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
@@ -113,21 +113,27 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        stop_check_offset = len(self.output_text)
+        num_prev_tokens = self.num_output_tokens()
+        first_new_token_index = len(self.token_ids)
+        # Output text offsets at the boundaries of the new tokens.
+        token_offsets = [len(self.output_text)] if self.stop else None
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
-            # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
-            if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
-                stop_check_offset = len(self.output_text)
+            if token_offsets is not None:
+                token_offsets.append(len(self.output_text))
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
+            if token_offsets is not None:
+                token_offsets.append(len(self.output_text))
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop and self.num_output_tokens() > self.min_tokens:
+        if token_offsets is not None and self.num_output_tokens() > self.min_tokens:
+            # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
+            stop_check_offset = token_offsets[max(self.min_tokens - num_prev_tokens, 0)]
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
@@ -136,6 +142,13 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             )
             if stop is not None:
                 stop_string, truncate_to = stop
+                stop_end = len(self.output_text) if truncate_to == -1 else truncate_to
+                if not self.include_stop_str_in_output:
+                    stop_end += len(stop_string)
+                # Drop tokens generated after the one completing the stop string
+                # (possible when multiple tokens are appended in one step).
+                num_kept = bisect_left(token_offsets, stop_end, lo=1)
+                del self.token_ids[first_new_token_index + num_kept :]
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
 

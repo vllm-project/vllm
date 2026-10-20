@@ -5,16 +5,15 @@ from transformers import GraniteConfig
 
 from vllm.model_executor.models.granite import granite_layer_attn_params
 
-from ...utils import check_logprobs_close, check_transformers_version
+from ...utils import check_logprobs_close
 
-# model -> minimum transformers version, or None if unconstrained
-MODELS = {
+MODELS = [
     # TODO(sang): Sliding window should be tested separately.
-    "ibm/PowerLM-3b": None,
-    "ibm/PowerMoE-3b": None,
-    "ibm-granite/granite-swash-2b": "5.15.1",
-    "ibm-granite/granite-swash-3b-a600m": "5.15.1",
-}
+    "ibm/PowerLM-3b",
+    "ibm/PowerMoE-3b",
+    "ibm-granite/granite-swash-2b",
+    "ibm-granite/granite-swash-3b-a600m",
+]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -31,8 +30,6 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    check_transformers_version(model, min_transformers_version=MODELS[model])
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
