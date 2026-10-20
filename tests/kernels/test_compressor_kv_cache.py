@@ -244,8 +244,13 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
         eps=1e-20,
         head_dim=512,
     )
+    # metadata is a SimpleNamespace stub of the attention metadata.
     DeepseekV4Attention._fused_qnorm_rope_kv_insert(
-        attention, q, local_kv, local_positions, {"swa": metadata}
+        attention,
+        q,
+        local_kv,
+        local_positions,
+        {"swa": metadata},  # type: ignore[dict-item]
     )
 
     torch.testing.assert_close(
@@ -1390,6 +1395,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypat
                 lengths, starts, np.array(prefilling), query_start
             )
             width = max(counts)
+            assert manager._padded_gather_idx is not None
             local_indices = manager._padded_gather_idx[
                 rank * width : (rank + 1) * width
             ]
@@ -2761,7 +2767,7 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_full_pipeline():
+def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     """_forward_csa2_full: one fork, then K write and q-side after the join.
 
     The default chain must run first on the current stream, the compressor
@@ -2807,8 +2813,8 @@ def test_v41_rocm_csa2_full_pipeline():
         streams["insert_cache"] = torch.cuda.current_stream()
         main_cache.fill_(5)
 
-    compressor.forward = compressor_forward
-    compressor.insert_cache = compressor_insert
+    monkeypatch.setattr(compressor, "forward", compressor_forward)
+    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")

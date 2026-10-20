@@ -66,6 +66,7 @@ def _mxfp4_aiter_weights(w1, w2, start, end):
 def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
         AiterFp8ChannelExperts,
         AiterMxfp4Experts,
         AiterUnquantizedExperts,
@@ -133,11 +134,12 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     assert prepare.use_fp8_dispatch == fp8
     assert prepare.use_fp4_dispatch == mxfp4
     assert prepare.num_dispatchers() == 2
-    experts_cls = {
+    experts_cls_by_scheme: dict[str, type[AiterExperts]] = {
         "bf16": AiterUnquantizedExperts,
         "fp8_token_channel": AiterFp8ChannelExperts,
         "mxfp4": AiterMxfp4Experts,
-    }[scheme]
+    }
+    experts_cls = experts_cls_by_scheme[scheme]
     experts = experts_cls(config, quant)
     assert not experts.expects_unquantized_inputs
     kernel = FusedMoEKernel(prepare, experts)

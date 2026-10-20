@@ -646,7 +646,9 @@ def test_aiter_moe_padding_env_var(
         ("SITU", False, 1, (40, 96), (40, 96)),
     ],
 )
-def test_aiter_moe_pads(activation, use_mxfp4_w4a4, tp_size, pads, expected):
+def test_aiter_moe_pads(
+    activation, use_mxfp4_w4a4, tp_size, pads: tuple[int, int], expected
+):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         aiter_moe_pads,

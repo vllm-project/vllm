@@ -33,7 +33,9 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
     def get_name() -> str:
         return "CUSTOM"
 
-    def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+    def run_prefill_new_tokens(
+        self, q, k, v, return_softmax_lse, out=None, output_scale=None
+    ):
         raise NotImplementedError
 
     def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
@@ -153,7 +155,9 @@ def test_register_custom_backend_as_decorator():
         def get_name() -> str:
             return "DECORATED"
 
-        def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+        def run_prefill_new_tokens(
+            self, q, k, v, return_softmax_lse, out=None, output_scale=None
+        ):
             raise NotImplementedError
 
         def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
@@ -219,7 +223,8 @@ def test_register_dynamic_member_duplicate_raises():
     MLAPrefillBackendEnum.register("DUP_TEST", path)
     with pytest.raises(ValueError, match="already exists"):
         MLAPrefillBackendEnum.register("DUP_TEST", "other.module.OtherClass")
-    _remove_dynamic_member(MLAPrefillBackendEnum, MLAPrefillBackendEnum.DUP_TEST)
+    # member added at runtime by register()
+    _remove_dynamic_member(MLAPrefillBackendEnum, MLAPrefillBackendEnum.DUP_TEST)  # type: ignore[attr-defined]
 
 
 class StringDecoratorMLAPrefillBackend(MLAPrefillBackend):
@@ -233,10 +238,12 @@ class StringDecoratorMLAPrefillBackend(MLAPrefillBackend):
     def get_name() -> str:
         return "DECORATED"
 
-    def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+    def run_prefill_new_tokens(
+        self, q, k, v, return_softmax_lse, out=None, output_scale=None
+    ):
         raise NotImplementedError
 
-    def run_prefill_context_chunk(self, chunk_idx, q, k, v):
+    def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
         raise NotImplementedError
 
 
@@ -245,7 +252,8 @@ def test_register_mla_prefill_backend_with_string_name_direct():
         "STRING_DIRECT",
         "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
     )
-    member = MLAPrefillBackendEnum.STRING_DIRECT
+    # member added at runtime by register()
+    member = MLAPrefillBackendEnum.STRING_DIRECT  # type: ignore[attr-defined]
     assert member.is_overridden()
     assert member.get_class().get_name() == "CUSTOM"
 
@@ -262,7 +270,8 @@ def test_register_mla_prefill_backend_with_string_name_decorator():
     result = register_mla_prefill_backend("STRING_DECORATOR")(decorated_cls)
     assert result is decorated_cls
 
-    member = MLAPrefillBackendEnum.STRING_DECORATOR
+    # member added at runtime by register()
+    member = MLAPrefillBackendEnum.STRING_DECORATOR  # type: ignore[attr-defined]
     assert member.is_overridden()
     assert member.get_path() == (
         f"{decorated_cls.__module__}.{decorated_cls.__qualname__}"

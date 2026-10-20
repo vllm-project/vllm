@@ -394,6 +394,7 @@ def test_extract_tool_calls_streaming_incremental_arguments(
             request,
         )
         if delta and delta.tool_calls:
+            assert delta.tool_calls[0].function is not None
             arg_delta = delta.tool_calls[0].function.arguments
             if arg_delta:
                 arguments += arg_delta

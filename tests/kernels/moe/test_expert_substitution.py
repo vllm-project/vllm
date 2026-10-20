@@ -82,13 +82,16 @@ def test_parse_approximate_experts():
     assert get_expert_substitution_spec(None) is None
     assert get_expert_substitution_spec(_model_config(None)) is None
     spec = get_expert_substitution_spec(_model_config({"1": [3, 1], "2": [], 5: (0,)}))
+    assert spec is not None
     assert spec.experts == {1: (1, 3), 5: (0,)}
     assert spec.value_names == {}
     text_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(approximate_experts={"0": [2]}),
         hf_config=SimpleNamespace(),
     )
-    assert get_expert_substitution_spec(text_config).experts == {0: (2,)}
+    text_spec = get_expert_substitution_spec(text_config)
+    assert text_spec is not None
+    assert text_spec.experts == {0: (2,)}
 
 
 @pytest.mark.parametrize(
@@ -111,6 +114,7 @@ def test_parse_expert_substitution_with_explicit_value_names():
             )
         )
     )
+    assert spec is not None
     assert spec.experts == {1: (1, 3), 2: (0,)}
     assert spec.value_names == {
         "shared": ((1, 3), (2, 0)),

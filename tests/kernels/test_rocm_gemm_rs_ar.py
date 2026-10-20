@@ -17,6 +17,7 @@ from tests.kernels.test_gemm_rs_ar import _N, _SHAPES
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import (
     graph_capture,
     init_distributed_environment,
@@ -115,7 +116,11 @@ def _run_mode(
             from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
                 RocmDotScaledMxfp8LinearKernel,
             )
+            from vllm.model_executor.layers.quantization.online.mxfp8 import (
+                Mxfp8OnlineLinearMethod,
+            )
 
+            assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
             assert isinstance(layer.quant_method.kernel, RocmDotScaledMxfp8LinearKernel)
             assert layer.weight.dtype == torch.float8_e4m3fn
         layers[K] = layer
@@ -128,6 +133,7 @@ def _run_mode(
 
     comm = group.device_communicator
     assert comm is not None
+    assert isinstance(comm, CudaCommunicator)
     assert comm.use_aiter_allreduce
     assert comm.aiter_ar_comm is not None and not comm.aiter_ar_comm.disabled
     assert comm.qr_comm is None or comm.qr_comm.disabled
