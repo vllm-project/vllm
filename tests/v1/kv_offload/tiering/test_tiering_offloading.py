@@ -1489,9 +1489,11 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(keys, writer_ctx, success=True)
         self._simulate_on_schedule_end()
 
+        submit_store = self.secondary_tier1.submit_store
+        assert isinstance(submit_store, MagicMock)
         assert any(
             call.args[0].req_context is old_ctx and set(call.args[0].keys) == set(keys)
-            for call in self.secondary_tier1.submit_store.call_args_list
+            for call in submit_store.call_args_list
         )
         assert id(old_ctx) not in self.manager._live_req_states
         assert id(new_ctx) in self.manager._live_req_states
