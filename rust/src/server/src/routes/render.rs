@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -9,6 +10,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
@@ -89,7 +91,10 @@ fn lower_render_request(
         .prepare(text_request)
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
-    let text_request = prepared.text_request;
+    let mut text_request = prepared.text_request;
+    let xargs = &mut text_request.sampling_params.vllm_xargs;
+    let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
+    let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");
 
     let request = GenerateRequest {
         request_id: Some(text_request.request_id),
@@ -106,8 +111,8 @@ fn lower_render_request(
         stream_options,
         cache_salt: text_request.cache_salt,
         priority: text_request.priority,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
+        kv_transfer_params,
+        ec_transfer_params,
         content_parts: None,
         return_token_ids: None,
         output_mode: None,
@@ -121,6 +126,30 @@ fn lower_render_request(
     };
     validate_generate_request(&request, &state.served_model_names)?;
     Ok(request)
+}
+
+/// Move KV/EC transfer params out of `vllm_xargs`.
+///
+/// Render emits them only as top-level `GenerateRequest` fields, like Python.
+/// Generate merges them back into `vllm_xargs` for the engine.
+fn hoist_transfer_params(
+    xargs: &mut Option<HashMap<String, Value>>,
+    key: &str,
+) -> Option<HashMap<String, Value>> {
+    let map = xargs.as_mut()?;
+    let params = match map.remove(key)? {
+        Value::Object(params) => params.into_iter().collect(),
+        // Only an object fits the top-level field; keep anything else where
+        // the request put it.
+        other => {
+            map.insert(key.to_owned(), other);
+            return None;
+        }
+    };
+    if map.is_empty() {
+        *xargs = None;
+    }
+    Some(params)
 }
 
 async fn render_chat(
