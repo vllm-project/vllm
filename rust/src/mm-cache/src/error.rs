@@ -12,6 +12,6 @@ pub enum Error {
     #[error("shm object storage error")]
     ShmStorage(#[from] vllm_shm_object_storage::Error),
 
-    #[error("failed to serialize multimodal item for shm cache: {0}")]
-    Serialize(#[from] vllm_engine_core_client::Error),
+    #[error("failed to serialize multimodal item for shm cache: {message}")]
+    SerializeMsgpack { message: String },
 }

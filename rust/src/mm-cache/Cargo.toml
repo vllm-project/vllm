@@ -9,6 +9,7 @@ test-util = ["vllm-shm-object-storage/test-util"]
 
 [dependencies]
 parking_lot.workspace = true
+rmp-serde.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 tracing.workspace = true

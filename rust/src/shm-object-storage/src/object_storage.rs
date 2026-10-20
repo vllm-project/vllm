@@ -176,14 +176,33 @@ impl SingleWriterShmObjectStorage {
     /// `super::serde::serialize_mm_item`: the 0x01 format marker followed by
     /// the msgpack body.
     pub fn put(&mut self, key: &str, body: &[u8]) -> Result<(usize, u32), PutFailure> {
+        match self.put_with::<std::convert::Infallible>(key, body.len(), |buf| {
+            buf.copy_from_slice(body);
+            Ok(())
+        }) {
+            Ok(result) => result,
+        }
+    }
+
+    /// Store a key-value pair, serializing the payload into the chunk in
+    /// place through `write` instead of copying a pre-built buffer.
+    ///
+    /// On a `write` error the chunk is left unrecorded — it has no
+    /// writer-flag entry, so the next eviction pass reclaims it immediately.
+    pub fn put_with<E>(
+        &mut self,
+        key: &str,
+        payload_len: usize,
+        write: impl FnOnce(&mut [u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Result<(usize, u32), PutFailure>, E> {
         if self.key_index.contains_key(key) {
-            return Err(PutFailure::DuplicateKey);
+            return Ok(Err(PutFailure::DuplicateKey));
         }
 
-        let buffer_size = FLAG_BYTES + body.len();
+        let buffer_size = FLAG_BYTES + payload_len;
         // Sanity checks
         if buffer_size > self.max_object_size {
-            return Err(PutFailure::Oversize);
+            return Ok(Err(PutFailure::Oversize));
         }
 
         // Allocate new buffer, freeing unused chunks on first failure.
@@ -192,13 +211,16 @@ impl SingleWriterShmObjectStorage {
             Err(_) => {
                 self.free_unused();
                 // try again after freeing up space
-                self.ring_buffer.allocate_buf(buffer_size).map_err(|_| PutFailure::BufferFull)?
+                match self.ring_buffer.allocate_buf(buffer_size) {
+                    Ok(allocated) => allocated,
+                    Err(_) => return Ok(Err(PutFailure::BufferFull)),
+                }
             }
         };
 
-        // Write data to buffer: `[reader_count = 0][0x01 marker][msgpack body]`.
+        // Write data to buffer: `[reader_count = 0][payload]`.
         self.ring_buffer.write_payload(address, 0, &0_i32.to_le_bytes());
-        self.ring_buffer.write_payload(address, FLAG_BYTES, body);
+        self.ring_buffer.write_payload_with(address, FLAG_BYTES, payload_len, write)?;
         self.increment_writer_flag(monotonic_id);
 
         // Update key index
@@ -210,7 +232,7 @@ impl SingleWriterShmObjectStorage {
             },
         );
         self.id_index.insert(monotonic_id, key.to_string());
-        Ok((address, monotonic_id))
+        Ok(Ok((address, monotonic_id)))
     }
 
     /// Set the in-use flag for the writer.

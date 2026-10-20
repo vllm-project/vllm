@@ -219,12 +219,29 @@ impl SingleWriterShmRingBuffer {
     /// Write `data` at `payload_offset` bytes into the payload of the chunk at
     /// the logical `address`.
     pub fn write_payload(&mut self, address: usize, payload_offset: usize, data: &[u8]) {
+        let result = self.write_payload_with(address, payload_offset, data.len(), |buf| {
+            buf.copy_from_slice(data);
+            Ok::<(), std::convert::Infallible>(())
+        });
+        let Ok(()) = result;
+    }
+
+    /// Write `len` payload bytes at `payload_offset` through `write`, which
+    /// receives the mutable chunk slice, instead of copying a pre-built
+    /// buffer.
+    pub fn write_payload_with<E>(
+        &mut self,
+        address: usize,
+        payload_offset: usize,
+        len: usize,
+        write: impl FnOnce(&mut [u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         let offset = self.chunk_offset(address) + MD_SIZE + payload_offset;
         assert!(
-            offset + data.len() <= self.segment_size(),
+            offset + len <= self.segment_size(),
             "payload write out of bounds"
         );
-        self.write_bytes(offset, data);
+        write(&mut self.map[offset..offset + len])
     }
 
     /// Free buffers in FIFO order while `is_free_fn` accepts them, reclaiming

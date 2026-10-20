@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, warn};
 
-use super::serde::serialize_mm_item;
+use super::serde::{serialize_mm_item_into, serialized_mm_item_len};
 use crate::Result;
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue, MmKwargsItem,
@@ -149,8 +149,10 @@ impl MmProcessorShmCache {
         if self.n_readers() == 0 {
             return item;
         }
-        let payload = match serialize_mm_item(&item) {
-            Ok(payload) => payload,
+        // Size the chunk with a counting write pass, then serialize directly
+        // into the shm chunk: tensor bytes are copied exactly once.
+        let payload_len = match serialized_mm_item_len(&item) {
+            Ok(len) => len,
             Err(error) => {
                 warn!(
                     hash,
@@ -162,16 +164,24 @@ impl MmProcessorShmCache {
         };
 
         let mut inner = self.inner.lock();
-        match inner.put(hash, &payload) {
-            Ok((address, monotonic_id)) => {
+        match inner.put_with(hash, payload_len, |buf| serialize_mm_item_into(&item, buf)) {
+            Ok(Ok((address, monotonic_id))) => {
                 let signature = inner.get_signature(hash).expect("put just inserted the key");
                 address_as_item(address, monotonic_id, signature)
+            }
+            Err(error) => {
+                warn!(
+                    hash,
+                    error = %error.to_report_string(),
+                    "mm_input failed to serialize for shm cache; sending inline"
+                );
+                item
             }
             // The duplicate-key case (concurrent insert) is benign, so we only
             // warn on the oversize case. Subsequent UUID-only requests for an
             // oversize item will fail with a cache miss.
-            Err(PutFailure::DuplicateKey) => item,
-            Err(PutFailure::Oversize) => {
+            Ok(Err(PutFailure::DuplicateKey)) => item,
+            Ok(Err(PutFailure::Oversize)) => {
                 if !self.warned_oversize.swap(true, Ordering::Relaxed) {
                     warn!(
                         hash,
@@ -181,7 +191,7 @@ impl MmProcessorShmCache {
                 }
                 item
             }
-            Err(PutFailure::BufferFull) => {
+            Ok(Err(PutFailure::BufferFull)) => {
                 // Cache full and protected items prevent eviction.
                 debug!(
                     hash,

@@ -10,8 +10,7 @@
 //! `MsgpackDecoder(MultiModalKwargsItem, share_mem=False)`; only the serialize
 //! direction is needed here.
 
-use crate::error::Result;
-use vllm_engine_core_client::protocol::encode_msgpack;
+use crate::error::{Error, Result, serialize_msgpack};
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 
 /// Format marker prefixing the msgpack body, detected by
@@ -19,14 +18,45 @@ use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
 /// `\x80` (PROTO), so 0x01 is unambiguous against the legacy format.
 pub(crate) const MM_ITEM_FORMAT_MARKER: u8 = 0x01;
 
-/// Serialize an item as `[0x01][msgpack body]`. Unlike the ZMQ client path,
-/// tensors always stay inline in the body, so no auxiliary frames are needed.
-pub(crate) fn serialize_mm_item(item: &MmKwargsItem) -> Result<Vec<u8>> {
-    let body = encode_msgpack(item)?;
-    let mut payload = Vec::with_capacity(1 + body.len());
-    payload.push(MM_ITEM_FORMAT_MARKER);
-    payload.extend_from_slice(&body);
-    Ok(payload)
+/// An `io::Write` that only counts bytes, used to size a shm chunk before
+/// serializing into it (no allocation or copying of tensor bytes).
+struct CountWriter(usize);
+
+impl std::io::Write for CountWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.0 += buf.len();
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Exact serialized length of `[0x01][msgpack body]`, computed by a counting
+/// write pass. Unlike the ZMQ client path, tensors always stay inline in the
+/// body, so no auxiliary frames are needed.
+pub(crate) fn serialized_mm_item_len(item: &MmKwargsItem) -> Result<usize> {
+    let mut counter = CountWriter(0);
+    rmp_serde::encode::write_named(&mut counter, item)
+        .map_err(|error| serialize_msgpack!("{error}"))?;
+    Ok(1 + counter.0)
+}
+
+/// Serialize an item as `[0x01][msgpack body]` into `buf`, which must be
+/// exactly `serialized_mm_item_len(item)` bytes.
+pub(crate) fn serialize_mm_item_into(item: &MmKwargsItem, buf: &mut [u8]) -> Result<()> {
+    buf[0] = MM_ITEM_FORMAT_MARKER;
+    let mut writer: &mut [u8] = &mut buf[1..];
+    rmp_serde::encode::write_named(&mut writer, item)
+        .map_err(|error| serialize_msgpack!("{error}"))?;
+    debug_assert!(writer.is_empty(), "counting pass sized the buffer exactly");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -73,7 +103,8 @@ mod tests {
             ),
         ]);
 
-        let payload = serialize_mm_item(&item).unwrap();
+        let mut payload = vec![0u8; serialized_mm_item_len(&item).unwrap()];
+        serialize_mm_item_into(&item, &mut payload).unwrap();
         assert_eq!(payload[0], MM_ITEM_FORMAT_MARKER);
 
         // Both tensors stay inline as raw-view exts regardless of size.

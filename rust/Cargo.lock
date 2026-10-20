@@ -5919,6 +5919,7 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "parking_lot",
+ "rmp-serde",
  "rmpv",
  "thiserror 2.0.18",
  "thiserror-ext",
