@@ -4,7 +4,7 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -15,6 +15,9 @@ from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
     override_forward_context,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
 )
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
@@ -63,6 +66,8 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 1
+    cfg.aux_output_config.enable_return_routed_experts = False
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
@@ -172,6 +177,31 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and context.is_padding is None
 
 
+def test_replay_context_restores_tp_routing_rows(state):
+    """Capture uses the compact replay batch's size, not the outer batch's."""
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, _ = _prepare(state, batch, CUDAGraphMode.NONE)
+    context = replay.forward_context
+    assert context.is_padding is None and context.dp_metadata is None
+    count = len(REPLAY_ROWS)
+    assert context.batch_descriptor.num_tokens == count
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank, capturer.tp_size = 0, 2
+    capturer.device_buffer = torch.full((401, 1, 2), -1, device=DEVICE)
+    expected = torch.tensor(REPLAY_ROWS, device=DEVICE)[:, None].expand(-1, 2)
+    gathered = torch.cat((expected, torch.full((1, 2), -1, device=DEVICE)))
+    with (
+        override_forward_context(context),
+        patch(
+            "vllm.model_executor.layers.fused_moe.routed_experts_capturer.get_tp_group"
+        ) as group,
+    ):
+        group.return_value.all_gather.return_value = gathered
+        capturer.capture(0, gathered[: (count + 1) // 2])
+    torch.testing.assert_close(capturer.device_buffer[:count, 0], expected)
+    assert (capturer.device_buffer[count:] == -1).all()
+
+
 def test_replay_batch_keeps_device_decode_boundaries(state):
     """Adaptive verification resizes decodes on the GPU (CPU [2, 2], device
     [1, 3]): their rows stay and the boundaries shift only by trimmed rows."""
@@ -193,6 +223,27 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, *range(1, 301), *range(601 - WINDOW, 601)]
     assert build.batch.max_query_len == 300
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_aux_output_requests_keep_every_routing_row(state, cg_mode):
+    """R3 needs every prefill row even when final logits only need the window."""
+    state.vllm_config.aux_output_config.enable_return_routed_experts = True
+    for index in range(3):
+        state.add_request(
+            index,
+            SimpleNamespace(
+                replay_start=0,
+                sampling_params=SimpleNamespace(prompt_logprobs=None),
+            ),
+        )
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    state.decoder_replay_layers.trim_threshold = WINDOW + 1
+    replay, _ = _prepare(state, batch, cg_mode)
+    if cg_mode == CUDAGraphMode.NONE:
+        assert replay is None
+    else:
+        torch.testing.assert_close(replay.rows, torch.arange(401, device=DEVICE))
 
 
 def test_replay_batch_keeps_adaptive_verification_query_bound(state):
@@ -324,6 +375,7 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.scheduler_config.max_num_seqs = 16
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
+    cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
     layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
