@@ -56,20 +56,6 @@ class FakeHfTokenizer:
     def get_vocab(self):
         return dict(_SPECIAL_VOCAB)
 
-    def encode(self, text, add_special_tokens=False):
-        # Like a real HF tokenizer, matches added tokens inside the text
-        assert not add_special_tokens
-        ids = []
-        while text:
-            special = next((t for t in _SPECIAL_VOCAB if text.startswith(t)), None)
-            if special is not None:
-                ids.append(_SPECIAL_VOCAB[special])
-                text = text[len(special) :]
-            else:
-                ids.append(ord(text[0]))
-                text = text[1:]
-        return ids
-
     def _encode_without_added_tokens(self, text):
         return [ord(ch) for ch in text]
 

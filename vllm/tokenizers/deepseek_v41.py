@@ -8,6 +8,7 @@ from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
+from .control_tokens import encode_marked_prompt, mark_chat_control_tokens
 from .deepseek_v41_encoding import (
     IMAGE_PLACEHOLDER,
     REASONING_EFFORT_MAPPINGS,
@@ -76,6 +77,11 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             image_order: list[int] | None = None,
             **kwargs,
         ) -> str | list[int]:
+            # Mark before normalizing, which inserts the trusted image tokens
+            sanitize = kwargs.get("sanitize_control_tokens", False)
+            if sanitize:
+                messages = mark_chat_control_tokens(self, messages)
+                tools = mark_chat_control_tokens(self, tools)
             # The generic renderer's conversation has already flattened text
             # parts with '\n'. V4.1 encodes the original messages with '\n\n'.
             conversation = _normalize_messages(messages)
@@ -111,6 +117,8 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 reasoning_effort=effort,
                 image_order=image_order,
             )
+            if sanitize:
+                return encode_marked_prompt(self, prompt)
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {
                     key: kwargs[key]

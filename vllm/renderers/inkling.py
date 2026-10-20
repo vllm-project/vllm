@@ -91,8 +91,6 @@ class _HfBackedTmlTokenizer:
 
 
 class InklingRenderer(BaseRenderer[HfTokenizer]):
-    supports_sanitize_control_tokens = True
-
     def __init__(
         self,
         config: VllmConfig,

@@ -419,8 +419,7 @@ class ModelConfig:
     """Encode control tokens (special tokens, and added tokens used by the
     chat template) that appear in chat messages, tools and documents as plain
     text, so that only the chat template can emit them. Applies to every chat
-    request and cannot be disabled per request. Requires a renderer that
-    supports it, such as the default Hugging Face chat template renderer."""
+    request and cannot be disabled per request."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None

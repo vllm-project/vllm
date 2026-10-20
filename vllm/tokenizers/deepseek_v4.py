@@ -7,6 +7,7 @@ from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
+from .control_tokens import encode_marked_prompt, mark_chat_control_tokens
 from .deepseek_v4_encoding import encode_messages
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
@@ -67,7 +68,12 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 reasoning_effort=reasoning_effort,
             )
 
+            sanitize = kwargs.get("sanitize_control_tokens", False)
+            if sanitize:
+                messages = mark_chat_control_tokens(self, messages)
             prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+            if sanitize:
+                return encode_marked_prompt(self, prompt_str)
 
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {

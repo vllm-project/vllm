@@ -9,7 +9,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, overload
+from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -103,8 +103,6 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
-    supports_sanitize_control_tokens: ClassVar[bool] = False
-
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
@@ -117,15 +115,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self._finalizer = weakref.finalize(self, self._resources.close)
 
         self.tokenizer = tokenizer
-
-        # `is True` skips mock configs
-        self.sanitize_control_tokens = (
-            getattr(self.model_config, "sanitize_control_tokens", False) is True
-        )
-        if self.sanitize_control_tokens and not self.supports_sanitize_control_tokens:
-            raise ValueError(
-                f"{type(self).__name__} does not support `--sanitize-control-tokens`."
-            )
 
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while
@@ -1304,22 +1293,15 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     def _apply_sanitize_control_tokens(self, chat_params: ChatParams) -> ChatParams:
-        if self.sanitize_control_tokens:
-            chat_params = replace(
-                chat_params,
-                chat_template_kwargs={
-                    **chat_params.chat_template_kwargs,
-                    "sanitize_control_tokens": True,
-                },
-            )
-        if (
-            chat_params.chat_template_kwargs.get("sanitize_control_tokens")
-            and not self.supports_sanitize_control_tokens
-        ):
-            raise VLLMValidationError(
-                f"{type(self).__name__} does not support `sanitize_control_tokens`."
-            )
-        return chat_params
+        if not getattr(self.model_config, "sanitize_control_tokens", False):
+            return chat_params
+        return replace(
+            chat_params,
+            chat_template_kwargs={
+                **chat_params.chat_template_kwargs,
+                "sanitize_control_tokens": True,
+            },
+        )
 
     def render_chat(
         self,

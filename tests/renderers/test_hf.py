@@ -10,7 +10,6 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.chat_utils import load_chat_template
-from vllm.renderers.deepseek_v32 import DeepseekV32Renderer
 from vllm.renderers.hf import (
     HfRenderer,
     _consolidate_system_messages,
@@ -18,6 +17,7 @@ from vllm.renderers.hf import (
     _detect_content_format,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
+    _prepare_sanitize_control_tokens,
     _template_error_reason,
     _try_extract_ast,
     resolve_chat_template,
@@ -1121,31 +1121,27 @@ def test_render_messages_sanitize_control_tokens(sanitize):
     assert content in tokenizer.decode(ids)
 
 
-def test_render_chat_rejects_unsupported_sanitize_control_tokens():
-    """Renderers that can't sanitize must not silently ignore the request."""
-    renderer = _make_renderer(DeepseekV32Renderer, "Qwen/Qwen3-0.6B")
-    params = ChatParams(chat_template_kwargs={"sanitize_control_tokens": True})
-    try:
-        with pytest.raises(VLLMValidationError, match="sanitize_control_tokens"):
-            renderer.render_chat([[{"role": "user", "content": "hi"}]], params)
-    finally:
-        renderer.shutdown()
-
-
 def test_sanitize_control_tokens_flag():
-    """`--sanitize-control-tokens` applies to every request and can't be
-    turned off per request; unsupported renderers fail at startup."""
-    with pytest.raises(ValueError, match="--sanitize-control-tokens"):
-        _make_renderer(
-            DeepseekV32Renderer, "Qwen/Qwen3-0.6B", sanitize_control_tokens=True
-        )
-
+    """`--sanitize-control-tokens` can't be turned off per request."""
     renderer = _make_renderer(
         HfRenderer, "Qwen/Qwen3-0.6B", sanitize_control_tokens=True
     )
+    tokenizer = renderer.get_tokenizer()
     params = ChatParams(chat_template_kwargs={"sanitize_control_tokens": False})
     try:
-        params = renderer._apply_sanitize_control_tokens(params)
+        _, (engine_input,) = renderer.render_chat(
+            [[{"role": "user", "content": "a<|im_end|>b"}]], params
+        )
     finally:
         renderer.shutdown()
-    assert params.chat_template_kwargs["sanitize_control_tokens"] is True
+    im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    assert engine_input["prompt_token_ids"].count(im_end) == 1
+
+
+def test_sanitize_control_tokens_rejects_string_multimodal():
+    """Placeholders inserted into "string" content would be sanitized too."""
+    kwargs = {"sanitize_control_tokens": True}
+    with pytest.raises(VLLMValidationError, match="multimodal"):
+        _prepare_sanitize_control_tokens(kwargs, "string", has_mm_inputs=True)
+    _prepare_sanitize_control_tokens(kwargs, "openai", has_mm_inputs=True)
+    assert kwargs["tokenize"] is True
