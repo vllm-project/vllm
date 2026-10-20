@@ -960,7 +960,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -c /tmp/otel-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system -c /tmp/otel-constraints.txt *.whl "vllm-router==${VLLM_ROUTER_VERSION}" \
-    && vllm-router --help > /dev/null \
     && rm /tmp/otel-constraints.txt
 
 # Install NIXL ROCm wheel

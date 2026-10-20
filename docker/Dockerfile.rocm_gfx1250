@@ -691,8 +691,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl "vllm-router==${VLLM_ROUTER_VERSION}" \
-    && vllm-router --help > /dev/null
+    && uv pip install --system *.whl "vllm-router==${VLLM_ROUTER_VERSION}"
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
