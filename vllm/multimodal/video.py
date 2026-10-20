@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from typing import Any, ClassVar, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -17,13 +17,10 @@ from vllm.multimodal.video_decoders import (
     decode_video,
     resolve_video_backend_kwargs,
 )
-from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.registry import ExtensionManager
 
-try:
+if TYPE_CHECKING:
     import cv2
-except ImportError:
-    cv2 = PlaceholderModule("cv2")
 
 
 logger = init_logger(__name__)
@@ -98,6 +95,8 @@ def get_video_loader_backend_for_processor(
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
+    import cv2
+
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
     resized_frames = np.empty(
@@ -1020,6 +1019,8 @@ class Glm5NextVideoBackend(VideoBackend):
         *,
         frame_recovery: bool = False,
     ) -> tuple[npt.NDArray, list[int]]:
+        import cv2
+
         if frame_recovery:
             return super().read_frames(
                 cap, frame_idx, total_frames_num, frame_recovery=frame_recovery
