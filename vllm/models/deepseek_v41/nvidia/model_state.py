@@ -466,10 +466,7 @@ class DeepseekV41ModelState(DefaultModelState):
 
         num_reqs = input_batch.num_reqs
         query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])
-        # On ROCm an unfinished prefill keeps 1 replay row. The chunk that
-        # finishes the prompt, decode, and prompt-logprobs keep the window.
-        # Capture stays on the full window: a captured graph must match the
-        # batch it will replay, and the 1-row path is a runtime eager trim.
+        # is_prefilling stays true on the finishing chunk. Capture keeps the window.
         row_limit: int | np.ndarray = layers.window
         if (
             current_platform.is_rocm()
