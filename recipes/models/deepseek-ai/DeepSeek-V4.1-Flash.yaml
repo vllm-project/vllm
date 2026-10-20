@@ -616,7 +616,8 @@ guide: |
   fronted by `vllm-router --vllm-pd-disaggregation`. Both pools disable FlashInfer
   autotune plus JIT and CuTeDSL warmup via `--kernel-config`, skip the DeepGEMM warmup
   (`VLLM_DEEP_GEMM_WARMUP=skip`), and cap `--max-num-seqs` at 32. On 8-GPU nodes the
-  same layout becomes TP8 per role.
+  same layout becomes TP8 per role. The tuned B300 and GB300 AgentX lanes use DEP for both
+  roles instead; see **Dynamo disaggregated serving on B300 and GB300**.
 
   With **Speculative decoding** on, DSpark runs in both pools so the transferred KV
   stays compatible.
@@ -982,7 +983,13 @@ guide: |
 
   On B300, set `--cpu-distributed-timeout-seconds 7200` for the Engram load. NIXL's
   LIBFABRIC plugin also needs libfabric and rdma-core from the AWS EFA installer and the
-  CUDA 12 runtime (`nvidia-cuda-runtime-cu12`), which the image lacks.
+  CUDA 12 runtime (`nvidia-cuda-runtime-cu12`), which the image lacks. The lane installs the
+  rdma-core and libfabric packages from
+  [aws-efa-installer 1.50.0](https://efa-installer.amazonaws.com/aws-efa-installer-1.50.0.tar.gz)
+  (Ubuntu 24.04 debs, plus `libhwloc15`) inside the container. Check the plugin with
+  `ldd $(find / -name libplugin_LIBFABRIC.so 2>/dev/null | head -1) | grep "not found"`,
+  which should print nothing, and expose the host's EFA devices (`/dev/infiniband`) to the
+  container.
 
   Prefill runs `--data-parallel-size 2` per GPU pair with `--max-num-seqs 64`,
   `--long-prefill-token-threshold 8192` and `--prefix-cache-retention-interval 32768`. Its
@@ -997,16 +1004,31 @@ guide: |
   Prefill graphs:
   `{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}`.
 
+  On B300, up to four prefill engines share a node, so give each engine its own GPUs, NIXL
+  side channel, KV-event port and DP RPC port, and set the side-channel host to the node's
+  address (it defaults to localhost, which breaks cross-node transfers):
+
+  | Engine on the node | `CUDA_VISIBLE_DEVICES` | `VLLM_NIXL_SIDE_CHANNEL_PORT` | KV events (`--kv-events-config` endpoint and the sidecar's `DYN_VLLM_KV_EVENT_PORT`) | `--data-parallel-rpc-port` |
+  |---|---|---|---|---|
+  | Prefill 0 | `0,1` | 5400 | 5200 | 8400 |
+  | Prefill 1 | `2,3` | 5402 | 5202 | 8401 |
+  | Prefill 2 | `4,5` | 5404 | 5204 | 8402 |
+  | Prefill 3 | `6,7` | 5406 | 5206 | 8403 |
+  | Decode (DEP8) | `0,1,2,3,4,5,6,7` | next free (5408) | none | 8400 |
+
+  Set `VLLM_NIXL_SIDE_CHANNEL_HOST=<node IP>` on every engine. Side-channel ports step by at
+  least the DP size, since each DP rank uses its own port.
+
   Decode uses the `NixlConnector` entry alone with `"kv_role":"kv_consumer"` and
   `--no-enable-prefix-caching`. It sets `--max-num-batched-tokens` to ten times
   `--max-num-seqs` and captures FULL decode-only graphs in steps of 6 up to six times
-  `--max-num-seqs`. It balances experts with `--enable-eplb` and
+  `--max-num-seqs` (the B300 c2048 point steps by 24 above 480, ending at 792). It balances experts with `--enable-eplb` and
   `--eplb-config '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true}'`.
 
   Launch the sidecars as in **Dynamo sidecar serving**, with
   `--grpc-startup-deadline-secs 3600`. Start the frontend so that every request prefills
   on a prefill engine and each session stays on one prefill engine's prefix and host KV
-  cache. On GB300, also set `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT=10000000`.
+  cache. Send the conversation ID in the `X-Dynamo-Session-Id` request header. On GB300, also set `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT=10000000`.
 
   ```bash
   export DYN_ROUTER_TEMPERATURE=0 DYN_ROUTER_QUEUE_THRESHOLD=None DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600
