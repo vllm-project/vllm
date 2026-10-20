@@ -263,9 +263,8 @@ def mxfp4_moe_ep_weights(
 # [pair, {gate, up}, _SM90_GATE_UP_INTERLEAVE].
 _SM90_GATE_UP_INTERLEAVE = 8
 _FP8_BLOCK = 128
-# The SM90 FP8 megakernel always runs its whole token buffer, with a launch
-# geometry picked for that buffer size, so smaller batches get smaller
-# buffers of their own.
+# The SM90 FP8 megakernel runs its whole token buffer, with a launch geometry
+# picked for that size, so small batches get small buffers of their own.
 _SM90_WORKSPACE_CAPACITIES = (64, 256, 1024)
 
 
@@ -516,18 +515,20 @@ class FlashInferMoeEp:
             self._mega_layer, "supports_output_view", False
         ):
             return self._mega_layer.forward(tensors, return_workspace_view=True)
-        return self._mega_layer.forward(
-            tensors, workspace=self._workspace_for(hidden_states.shape[0])
-        )
+        return self._mega_layer.forward(tensors, workspace=self._workspace())
 
-    def _workspace_for(self, num_tokens: int) -> Any | None:
-        """The smallest workspace that fits the batch on every EP rank."""
-        if not self._workspaces:
+    def _workspace(self) -> Any | None:
+        """The smallest workspace that fits the batch on every EP rank.
+
+        All ranks must use the same buffer, so without the DP-wide token
+        counts this falls back to the default workspace.
+        """
+        if not self._workspaces or not is_forward_context_available():
             return None
-        if is_forward_context_available():
-            dp_metadata = get_forward_context().dp_metadata
-            if dp_metadata is not None:
-                num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return None
+        num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
         for capacity, workspace in self._workspaces:
             if num_tokens <= capacity:
                 return workspace
@@ -564,8 +565,9 @@ class FlashInferMoeEp:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Kernel-resident fc1 weight, fc1 scales, fc2 weight, fc2 scales.
 
-        Contiguous per-expert byte tensors that alias the memory the megakernel
-        reads, so a caller may permute experts in place (EPLB).
+        Contiguous per-expert tensors that alias the memory the megakernel
+        reads, so a caller may permute experts in place (EPLB). One-byte FP4
+        data and scales come back as uint8; block-FP8 weights keep FP8.
         """
         if self._mega_layer is None:
             raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
@@ -573,8 +575,8 @@ class FlashInferMoeEp:
         (fc1_weight, fc1_sf, *_), (fc2_weight, fc2_sf, *_) = (
             self._mega_layer._transformed
         )
-        # Block-FP8 weights keep their dtype, so the layer stays a valid
-        # FP8 checkpoint that the kernel can be rebuilt from.
+        # Block-FP8 weights keep their dtype, so the layer holds the kernel's
+        # FP8 runtime layout that preprocessed-weight loading rebuilds from.
         as_bytes = not self._block_fp8
         return (
             _expert_major_bytes(fc1_weight, as_bytes),

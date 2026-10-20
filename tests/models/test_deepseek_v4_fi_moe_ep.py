@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
-    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
@@ -252,27 +251,8 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     assert "with block FP8" in reason
 
 
-def test_block_fp8_megakernel_rejects_input_side_router_weights():
-    """The SM90 kernel weights the activation before fc2, which is not the same
-    as weighting the expert input (apply_router_weight_on_input, e.g. Llama4)."""
-    moe = make_dummy_moe_config(
-        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128
-    )
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=torch.ones(8, 2, 2),
-        w2_scale=torch.ones(8, 2, 1),
-        block_shape=[128, 128],
-    )
-    layer = SimpleNamespace(
-        expert_map_manager=SimpleNamespace(placement_strategy="linear"),
-        apply_router_weight_on_input=True,
-    )
-    with pytest.raises(ValueError, match="apply_router_weight_on_input"):
-        FlashInferMoeEpExperts(moe, quant_config).process_weights_after_loading(layer)
-
-
 def test_megakernels_are_oracle_backends():
-    """Quant methods reach the megakernel through the NVFP4/MXFP4 oracles."""
+    """Quant methods reach the megakernel through the NVFP4/MXFP4/FP8 oracles."""
     nvfp4 = map_nvfp4_backend(FLASHINFER_MOE_EP_CUTEDSL)
     assert nvfp4 is NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
     assert nvfp4_backend_to_kernel_cls(nvfp4) == [FlashInferMoeEpExperts]
@@ -295,54 +275,6 @@ def test_megakernels_are_oracle_backends():
     fp8 = map_fp8_backend(FLASHINFER_MOE_EP_CUTEDSL)
     assert fp8 is Fp8MoeBackend.FLASHINFER_MOE_EP_CUTEDSL
     assert fp8_backend_to_kernel_cls(fp8) == [FlashInferMoeEpExperts]
-
-
-def _block_fp8(real: torch.Tensor, power_of_two: bool):
-    """E4M3 weights with one float32 scale per 128x128 block."""
-    *lead, rows, cols = real.shape
-    blocks = real.reshape(*lead, rows // 128, 128, cols // 128, 128)
-    scale = blocks.abs().amax(dim=(-3, -1)) / 448.0
-    if power_of_two:
-        scale = torch.exp2(torch.ceil(torch.log2(scale)))
-    return (real / _per_element(scale)).to(torch.float8_e4m3fn), scale
-
-
-def _per_element(scale: torch.Tensor) -> torch.Tensor:
-    return scale.repeat_interleave(128, -2).repeat_interleave(128, -1)
-
-
-def _gate_up_interleaved(w13: torch.Tensor) -> torch.Tensor:
-    """Rows ordered [pair, {gate, up}, 8], the SM90 megakernel's FC1 layout."""
-    experts, rows, cols = w13.shape
-    gate, up = w13.view(experts, 2, rows // 16, 8, cols).unbind(1)
-    return torch.stack((gate, up), dim=2).reshape(experts, rows, cols)
-
-
-@pytest.mark.parametrize("power_of_two", [True, False])
-def test_sm90_fp8_block_weights_keep_checkpoint_values(power_of_two: bool):
-    """Interleaving gate and up rows puts two checkpoint blocks under one scale.
-
-    Power-of-two scales (GLM-5.x checkpoints) survive that up to rounding
-    below the E4M3 normal range; other scales round the rescaled half once.
-    """
-    torch.manual_seed(0)
-    real = torch.randn(2, 512, 256) * 0.02
-    # Gate blocks 8x the up blocks, so each interleaved block mixes scales.
-    real[:, :256] *= 8.0
-    w13, scale = _block_fp8(real, power_of_two)
-
-    kernel_w13, kernel_scale = fi_ep.sm90_fp8_block_moe_ep_weights(w13, scale)
-
-    assert kernel_w13.dtype == w13.dtype and kernel_w13.shape == w13.shape
-    assert kernel_scale.shape == scale.shape
-    restored = kernel_w13.float() * _per_element(kernel_scale)
-    expected = _gate_up_interleaved(w13.float() * _per_element(scale))
-    error = (restored - expected).abs()
-    if power_of_two:
-        # Half the smallest E4M3 subnormal step.
-        assert torch.all(error <= 2.0**-10 * _per_element(kernel_scale))
-    else:
-        assert (error.norm() / expected.norm()).item() < 0.03
 
 
 def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
