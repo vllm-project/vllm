@@ -3116,11 +3116,12 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
 def test_sleep_unregisters_and_restores_kv_caches(dist_init):
     """Sleep drops everything built on the KV cache registration; wake-up
     registers the same memory again and publishes the new agent metadata."""
-    vllm_config = create_vllm_config()
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(block_size=block_size)
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+        block_size=block_size, num_kv_heads=4, head_size=16, dtype=torch.float16
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
