@@ -160,8 +160,13 @@ def launch_conv_gdn_norm(
         )
     if num_accepted.shape[0] < n_seq:
         raise ValueError(f"num_accepted {tuple(num_accepted.shape)} for n_seq={n_seq}")
-    if mixed.dtype not in (torch.bfloat16, torch.float16):
-        raise ValueError(f"mixed dtype {mixed.dtype}, expected bf16 or fp16")
+    if (
+        mixed.dtype not in (torch.bfloat16, torch.float16)
+        or ssm_state.dtype != torch.float32
+    ):
+        raise ValueError(
+            f"mixed {mixed.dtype} needs bf16/fp16, ssm_state {ssm_state.dtype} fp32"
+        )
     if weight.shape[1] != _CONV_WIDTH:
         raise ValueError(f"conv width {weight.shape[1]}, expected {_CONV_WIDTH}")
     if qk_dim != 2 * num_k_heads * head_k or num_v_heads % num_k_heads != 0:
