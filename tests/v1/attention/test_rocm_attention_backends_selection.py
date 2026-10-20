@@ -495,38 +495,44 @@ _AUTO_KV = dict(
 
 
 @pytest.mark.parametrize(
-    "arch, selector_kwargs, expected_backend",
+    "arch, selector_kwargs, selected_backend, expected_backend",
     [
-        # gfx1201: TRITON_ATTN, including where ROCM_ATTN would use its HIP
-        # paged-attention decode kernel (head 128, block 16, bf16, `auto` KV).
-        ("gfx1201", {}, AttentionBackendEnum.TRITON_ATTN),
-        ("gfx1201", {"head_size": 256}, AttentionBackendEnum.TRITON_ATTN),
-        ("gfx1201", {"kv_cache_dtype": "fp8"}, AttentionBackendEnum.TRITON_ATTN),
-        # An fp8_e5m2 cache keeps ROCM_ATTN (see get_valid_backends()).
+        # gfx1201 and gfx1100: TRITON_ATTN, including where ROCM_ATTN would use its
+        # HIP paged-attention decode kernel (head 128, block 16, bf16, `auto` KV).
+        ("gfx1201", {}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("gfx1100", {}, None, AttentionBackendEnum.TRITON_ATTN),
+        # An fp8 cache is swapped too; fp8_e5m2 keeps ROCM_ATTN (see
+        # get_valid_backends()).
+        ("gfx1201", {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.TRITON_ATTN),
+        ("gfx1100", {"kv_cache_dtype": "fp8"}, None, AttentionBackendEnum.TRITON_ATTN),
         (
             "gfx1201",
             {"kv_cache_dtype": "fp8_e5m2"},
+            None,
             AttentionBackendEnum.ROCM_ATTN,
         ),
-        # gfx1100: the same swap.
-        ("gfx1100", {}, AttentionBackendEnum.TRITON_ATTN),
-        ("gfx1100", {"head_size": 64}, AttentionBackendEnum.TRITON_ATTN),
-        ("gfx1100", {"head_size": 256}, AttentionBackendEnum.TRITON_ATTN),
-        ("gfx1100", {"kv_cache_dtype": "fp8"}, AttentionBackendEnum.TRITON_ATTN),
         (
             "gfx1100",
             {"kv_cache_dtype": "fp8_e5m2"},
+            None,
             AttentionBackendEnum.ROCM_ATTN,
         ),
-        # Other archs keep vLLM's default order (ROCM_ATTN first).
-        ("gfx1200", {}, AttentionBackendEnum.ROCM_ATTN),
-        ("gfx1101", {}, AttentionBackendEnum.ROCM_ATTN),
-        ("other", {}, AttentionBackendEnum.ROCM_ATTN),
+        # An explicitly selected backend is unchanged.
+        (
+            "gfx1201",
+            {},
+            AttentionBackendEnum.ROCM_ATTN,
+            AttentionBackendEnum.ROCM_ATTN,
+        ),
+        # Other RDNA archs keep vLLM's default order (ROCM_ATTN first).
+        ("gfx1200", {}, None, AttentionBackendEnum.ROCM_ATTN),
+        ("gfx1101", {}, None, AttentionBackendEnum.ROCM_ATTN),
     ],
 )
 def test_rdna_prefers_triton_attn(
     arch,
     selector_kwargs,
+    selected_backend,
     expected_backend,
     mock_get_cdna_version,
     cleared_attention_selector_cache,
@@ -539,7 +545,7 @@ def test_rdna_prefers_triton_attn(
     monkeypatch.setattr(rocm, "on_rdna4", lambda: arch in ("gfx1200", "gfx1201"))
     config = AttentionSelectorConfig(**{**_AUTO_KV, **selector_kwargs})
     backend_path = rocm.RocmPlatform.get_attn_backend_cls(
-        selected_backend=None, attn_selector_config=config
+        selected_backend=selected_backend, attn_selector_config=config
     )
     assert backend_path == expected_backend.get_path()
 
