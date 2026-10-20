@@ -147,6 +147,9 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// `None` returns routing for the whole prompt.
+    pub routed_experts_prompt_start: Option<u32>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -190,6 +193,7 @@ impl Default for SamplingParams {
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: None,
             stream_interval: None,
         }
