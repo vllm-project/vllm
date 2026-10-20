@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -224,36 +225,150 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
 
 @pytest.mark.parametrize(
     "batch_kind",
-    ["short", "force_mqa", "mla_decode", "capture", "full", "disabled", "dummy"],
+    [
+        "short",
+        "mixed",
+        "masked_mha",
+        "force_mqa",
+        "capture",
+        "full",
+        "disabled",
+        "dummy",
+    ],
 )
-def test_rocm_short_prefill_skips_indexer_scoring(
+def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     monkeypatch: pytest.MonkeyPatch,
     batch_kind: str,
 ) -> None:
-    from vllm.models.deepseek_v32.amd.rocm import DeepseekV32MLAAttention
+    from vllm.models.deepseek_v32.amd import rocm
 
-    layer = SimpleNamespace(
-        _dense_mha_metadata_layer_name="" if batch_kind == "disabled" else MLA_LAYER
+    num_tokens, num_heads, nope_dim, rope_dim = 3, 2, 4, 2
+    should_skip = batch_kind == "short"
+    mla_metadata = make_mla_metadata(
+        use_dense_mha=batch_kind != "masked_mha",
+        num_decode_tokens=int(batch_kind == "mixed"),
     )
-    mla_metadata = (
-        None
-        if batch_kind == "dummy"
-        else make_mla_metadata(
-            use_dense_mha=batch_kind != "force_mqa",
-            num_decode_tokens=int(batch_kind == "mla_decode"),
-        )
-    )
+    mla_metadata.num_actual_tokens = num_tokens
     runtime_mode = CUDAGraphMode.FULL if batch_kind == "full" else CUDAGraphMode.NONE
+    monkeypatch.setattr(
+        rocm,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={MLA_LAYER: None if batch_kind == "dummy" else mla_metadata},
+            slot_mapping={MLA_LAYER: torch.zeros(num_tokens, dtype=torch.long)},
+            cudagraph_runtime_mode=runtime_mode,
+        ),
+    )
     monkeypatch.setattr(
         torch.cuda,
         "is_current_stream_capturing",
         lambda: batch_kind == "capture",
     )
 
-    skip = DeepseekV32MLAAttention._skip_indexer_scoring(
-        layer, mla_metadata, runtime_mode
+    observed: dict[str, dict] = {}
+
+    def record(name, fn, result):
+        signature = inspect.signature(fn)
+
+        def wrapper(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            observed[name] = bound.arguments
+            return result(bound.arguments)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        rocm,
+        "fused_norm_rope",
+        record("norm_rope", rocm.fused_norm_rope, lambda a: a["q_c"]),
     )
-    assert skip == (batch_kind == "short")
+    monkeypatch.setattr(
+        rocm,
+        "fused_q",
+        record(
+            "fused_q", rocm.fused_q, lambda a: (None, None, torch.zeros_like(a["q_pe"]))
+        ),
+    )
+
+    calls: list[str] = []
+
+    def call(name, result=None):
+        def fn(*args):
+            calls.append(name)
+            return result
+
+        return fn
+
+    k_cache = torch.empty(1)
+    layer = SimpleNamespace(
+        layer_name=MLA_LAYER,
+        indexer=SimpleNamespace(
+            k_norm=SimpleNamespace(weight=None, bias=None, eps=1e-6),
+            k_cache=SimpleNamespace(kv_cache=k_cache, uses_shuffled_layout=False),
+            softmax_scale=1.0,
+            n_head=2,
+            head_dim=4,
+            wq_b=call("wq_b", (torch.zeros(num_tokens, 8),)),
+        ),
+        skip_topk=False,
+        _dense_mha_metadata_layer_name="" if batch_kind == "disabled" else MLA_LAYER,
+        _use_sparse_mha=lambda _: batch_kind != "force_mqa",
+        indexer_rope_emb=SimpleNamespace(cos_sin_cache=None),
+        rotary_emb=SimpleNamespace(cos_sin_cache=None),
+        q_a_layernorm=SimpleNamespace(weight=None, variance_epsilon=1e-6),
+        kv_a_layernorm=SimpleNamespace(weight=None, variance_epsilon=1e-6),
+        topk_indices_buffer=None,
+        kv_cache=torch.empty(1),
+        kv_cache_dtype="fp8",
+        _k_scale=None,
+        _k_scale_float=1.0,
+        _q_scale=None,
+        _fp8_kv=True,
+        _fp8_kv_needs_view=False,
+        _index_rope_interleave=False,
+        num_local_heads=num_heads,
+        qk_head_dim=nope_dim + rope_dim,
+        qk_nope_head_dim=nope_dim,
+        qk_rope_head_dim=rope_dim,
+        q_b_proj=call(
+            "q_b_proj", (torch.zeros(num_tokens, num_heads * (nope_dim + rope_dim)),)
+        ),
+        _compute_ql_nope=call(
+            "ql_nope",
+            (
+                torch.zeros(num_tokens, num_heads, nope_dim),
+                torch.zeros(num_tokens, num_heads, rope_dim),
+            ),
+        ),
+        _run_indexer=call("run_indexer"),
+        forward_impl=call("dense_mha"),
+        _build_q_for_attn=call("build_q"),
+        impl=SimpleNamespace(forward_mqa=call("sparse_mqa", (None, None))),
+        _compute_uv_out=call("uv_out"),
+    )
+
+    index_k = torch.zeros(num_tokens, 4)
+    rocm.DeepseekV32MLAAttention._fused_attention(
+        layer,
+        torch.arange(num_tokens),
+        torch.zeros(num_tokens, 8),
+        torch.zeros(num_tokens, 4),
+        torch.zeros(num_tokens, rope_dim),
+        index_k,
+        torch.zeros(num_tokens, 2),
+        torch.zeros(num_tokens, num_heads * nope_dim),
+    )
+
+    # The indexer K cache is written whether or not this batch is scored.
+    norm_rope = observed["norm_rope"]
+    assert norm_rope["has_indexer"]
+    assert norm_rope["index_k"] is index_k
+    assert norm_rope["indexer_k_cache"] is (None if batch_kind == "dummy" else k_cache)
+
+    assert observed["fused_q"]["has_indexer"] is not should_skip
+    assert (observed["fused_q"]["index_q"] is None) is should_skip
+    assert calls.count("wq_b") == calls.count("run_indexer") == int(not should_skip)
 
 
 def test_skipped_k_cache_insert_accepts_no_k(

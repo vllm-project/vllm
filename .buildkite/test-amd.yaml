@@ -1765,6 +1765,7 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/models/deepseek_v32
   - tests/model_executor
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - vllm/_aiter_ops.py
