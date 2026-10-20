@@ -24,6 +24,7 @@ from vllm.v1.kv_offload.cpu.common import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
@@ -236,6 +237,15 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_fills_the_config_info_keys_of_the_spec():
+    """A name the declaration misses becomes a dropped label at runtime."""
+    manager = make_cpu_manager(num_chunks=4)
+
+    (info,) = manager.config_info()
+    assert tuple(info) == CPUOffloadingSpec.config_info_keys({})
+    assert info["cpu_num_chunks"] == 4
 
 
 def test_cpu_manager_reports_cache_usage_gauge():

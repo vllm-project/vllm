@@ -124,6 +124,31 @@ def test_generate_request_rejects_placeholder_outside_prompt():
         )
 
 
+def test_reasoning_parser_kwargs_rejects_unknown_keys():
+    """The engine splats these into its reasoning parser's constructor, so a
+    client must not be able to pass arbitrary keyword arguments."""
+    payload = {**_base_payload(), "reasoning_parser_kwargs": {"tokenizer": None}}
+    with pytest.raises(ValidationError, match="tokenizer"):
+        GenerateRequest.model_validate(payload)
+
+
+def test_rust_render_sampling_params_without_nulls_validate():
+    """Rust render omits unset sampling fields; Python generate rejects nulls."""
+    sampling_params = {"max_tokens": 64, "watermarking": True}
+    request = GenerateRequest.model_validate(
+        {"token_ids": [1, 2, 3], "sampling_params": sampling_params}
+    )
+    assert request.sampling_params.max_tokens == 64
+
+    with pytest.raises(ValidationError, match="temperature"):
+        GenerateRequest.model_validate(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_params": {**sampling_params, "temperature": None},
+            }
+        )
+
+
 def test_output_mode_defaults_to_tokens():
     assert GenerateRequest.model_validate(_base_payload()).output_mode == "tokens"
 

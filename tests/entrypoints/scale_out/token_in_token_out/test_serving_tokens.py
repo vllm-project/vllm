@@ -14,7 +14,6 @@ from transformers import AutoTokenizer
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
-from vllm.config.utils import getattr_iter
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -183,7 +182,7 @@ async def test_generate_sampling_mask(client):
         assert token_id in support
         # processed_logprobs: exactly the support carries finite probability.
         for top in entry["top_logprobs"]:
-            in_support = int(top["token"].removeprefix("token_id:")) in support
+            in_support = top["token_id"] in support
             assert in_support == (top["logprob"] > -9999.0)
 
 
@@ -402,14 +401,7 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             # Post-EOS generation is undefined and may differ
             eos_tokens = {
                 tokenizer.eos_token_id,
-                *getattr_iter(
-                    tokenizer,
-                    [
-                        "extra_special_tokens_ids",  # Transformers v5
-                        "additional_special_tokens_ids",  # Transformers v4
-                    ],
-                    [],
-                ),
+                *tokenizer.extra_special_tokens_ids,
             }
             # Find first EOS in generated tokens
             eos_pos = None
@@ -587,6 +579,83 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+def _structured_chat_body(messages, **overrides) -> dict:
+    return {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": True},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                },
+            },
+        },
+        **overrides,
+    }
+
+
+async def _render_then_generate(client, body) -> tuple[dict, list[int]]:
+    render_resp = await client.post("/v1/chat/completions/render", json=body)
+    render_resp.raise_for_status()
+    generate_request = render_resp.json()
+    generate_resp = await client.post(GEN_ENDPOINT, json=generate_request)
+    generate_resp.raise_for_status()
+    return generate_request, generate_resp.json()["choices"][0]["token_ids"]
+
+
+# deepseek_v3 reads `enable_thinking` from the template kwargs and uses Qwen3's
+# <think> tokens, so the engine gates structured outputs differently when
+# either reasoning field is dropped between render and generate.
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_parser_kwargs(client, messages):
+    """With thinking on, structured outputs must wait for the reasoning to
+    end on generate, the same as on chat."""
+    body = _structured_chat_body(messages, return_token_ids=True)
+    chat_resp = await client.post("/v1/chat/completions", json=body)
+    chat_resp.raise_for_status()
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is False
+    assert token_ids == chat_resp.json()["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_ended(
+    client, tokenizer, messages
+):
+    """`include_reasoning=false` constrains from the first token on chat, so
+    generate must too, even though the engine's parser expects thinking."""
+    body = _structured_chat_body(messages, include_reasoning=False)
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is True
+    output = json.loads(tokenizer.decode(token_ids, skip_special_tokens=True))
+    assert isinstance(output["count"], int)
 
 
 def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:

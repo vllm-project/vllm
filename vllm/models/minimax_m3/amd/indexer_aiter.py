@@ -67,6 +67,8 @@ MSA_TOPK_BLOCKS = 16
 MSA_SCORE_TYPE = "max"
 MSA_SPARSE_BLOCK_SIZE = 128
 MSA_INDEX_HEAD_DIM = 128
+# Index head counts the score kernels are instantiated for.
+MSA_NUM_INDEX_HEADS = (1, 2)
 # Wave width the top-k is written against: it gives one lane per output slot and
 # reads the score row in wave-wide strips.
 WAVE_SIZE = 64
@@ -131,7 +133,7 @@ def aiter_indexer_unsupported_reason(
     sparse_block_size: int,
     num_index_heads: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     max_model_len: int,
     max_decode_query_len: int = 1,
     score_type: str = "max",
@@ -181,8 +183,11 @@ def aiter_indexer_unsupported_reason(
             f"needs index_head_dim={MSA_INDEX_HEAD_DIM}, "
             f"got index_head_dim={index_head_dim}"
         )
-    if num_index_heads > MFMA_COLS:
-        return f"num_index_heads={num_index_heads} exceeds the {MFMA_COLS} MFMA columns"
+    if num_index_heads not in MSA_NUM_INDEX_HEADS:
+        return (
+            f"needs num_index_heads in {MSA_NUM_INDEX_HEADS}, "
+            f"got num_index_heads={num_index_heads}"
+        )
     # A decode row's whole query shares one MFMA tile, one column per (token,
     # head) pair, so spec decode trades columns against the head count.
     if num_index_heads * max_decode_query_len > MFMA_COLS:
@@ -567,7 +572,7 @@ def select_aiter_indexer_impl_cls(
     sparse_block_size: int,
     num_index_heads: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     score_type: str = "max",
 ) -> type[MiniMaxM3IndexerAiterImpl] | None:
     """The AITER indexer impl if this config can use it, else None.

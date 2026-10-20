@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -33,7 +34,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP, SupportsQuant
 from .nemotron_h import (
@@ -426,6 +426,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         )
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Only MTP, embedding and LM head weights are loaded."""
+        name = name.removeprefix("language_model.")
+        return not name.startswith(("mtp.", "lm_head.")) and "embeddings" not in name
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
         stacked_params_mapping = [
@@ -456,17 +461,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
+            if self.is_unused_checkpoint_weight(name):
+                continue
             is_lm_head_weight = name.startswith("lm_head.")
             if is_lm_head_weight:
                 self.has_own_lm_head = True
-            # Only process MTP and LM head weights -
-            # skip all non-MTP and non-LM head weights
-            if (
-                not name.startswith("mtp.")
-                and "embeddings" not in name
-                and not is_lm_head_weight
-            ):
-                continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
                 continue
