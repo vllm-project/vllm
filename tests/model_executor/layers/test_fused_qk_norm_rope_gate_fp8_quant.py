@@ -329,27 +329,6 @@ def test_fused_qk_norm_rope_gate_fp8_quant_custom_op_meta_shapes():
     assert outputs[6].shape == (256, NUM_KV_HEADS)
 
 
-@pytest.mark.parametrize(
-    ("hidden_size", "num_hidden_layers", "num_heads", "num_kv_heads", "expected"),
-    [(8192, 92, 64, 4, True), (4096, 60, 32, 2, False)],
-    ids=["qwen3.8-2.4t-a95b", "qwen3.5-397b-a17b"],
-)
-def test_prequantized_qkv_is_scoped_to_qwen38_2p4t(
-    hidden_size, num_hidden_layers, num_heads, num_kv_heads, expected
-):
-    config: Any = SimpleNamespace(
-        model_type="qwen3_5_moe_text",
-        hidden_size=hidden_size,
-        num_hidden_layers=num_hidden_layers,
-        num_attention_heads=num_heads,
-        num_key_value_heads=num_kv_heads,
-        head_dim=256,
-        num_experts=512,
-    )
-
-    assert qwen3_next_model._is_qwen38_2p4t_a95b(config) is expected
-
-
 def test_qwen3_next_model_builds_prequantized_bundle(monkeypatch):
     inputs = _make_inputs()
     expected_outputs = _make_outputs(inputs)

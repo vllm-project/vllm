@@ -284,24 +284,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
-def _is_qwen38_2p4t_a95b(config: Qwen3NextConfig) -> bool:
-    """Prequantized FP8 Q/K/V attention is validated on Qwen3.8-2.4T-A95B only.
-
-    Qwen3.8 checkpoints load through the Qwen3.5 classes, and Qwen3.8-27B has
-    the same attention geometry as Qwen3.5-27B, so the architecture name does
-    not identify the model. Match the validated text config exactly.
-    """
-    return (
-        config.model_type == "qwen3_5_moe_text"
-        and config.hidden_size == 8192
-        and config.num_hidden_layers == 92
-        and config.num_attention_heads == 64
-        and config.num_key_value_heads == 4
-        and getattr(config, "head_dim", None) == 256
-        and getattr(config, "num_experts", None) == 512
-    )
-
-
 class Qwen3NextAttention(nn.Module):
     def __init__(
         self,
@@ -419,8 +401,7 @@ class Qwen3NextAttention(nn.Module):
             and (text_only or supports_mrope)
         )
         self.use_prequantized_qkv = (
-            _is_qwen38_2p4t_a95b(config)
-            and self.attn_output_gate
+            self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
             and current_platform.is_rocm()
