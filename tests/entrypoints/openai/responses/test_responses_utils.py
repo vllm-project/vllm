@@ -991,3 +991,28 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestBuildResponseOutputItemsStatus:
+    """Item ``status`` must follow the finish reason of the generation
+    (#57998): a ``length`` cut marks the item that was cut ``incomplete``."""
+
+    _CALLS = [
+        FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),
+        FunctionCall(name="get_weather", arguments='{"city": "Tok'),
+    ]
+
+    def test_length_marks_truncated_message_incomplete(self):
+        (item,) = build_response_output_items(
+            reasoning=None, content="cut mid sen", tool_calls=[], finish_reason="length"
+        )
+        assert item.type == "message"
+        assert item.status == "incomplete"
+
+    def test_length_marks_only_last_tool_call_incomplete(self):
+        message, first, last = build_response_output_items(
+            reasoning=None, content="hi", tool_calls=self._CALLS, finish_reason="length"
+        )
+        assert message.status == "completed"
+        assert first.status == "completed"
+        assert last.status == "incomplete"

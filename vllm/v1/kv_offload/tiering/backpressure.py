@@ -73,14 +73,20 @@ class ThrottledDropPolicy(DropAccountingPolicy):
     keeps secondary tiers populated under moderate pressure, reducing
     cache misses (and therefore recomputation / ITL regression) while
     still protecting TTFT under severe congestion.
+
+    Accumulate ``drop_rate`` across store decisions. When the accumulator
+    reaches one, drop the store and subtract one from the accumulator,
+    carrying the remaining fraction into the next decision.
     """
 
     def __init__(self, ramp_factor: float = 2.0):
+        """Initialize the drop accumulator and severity ramp."""
         super().__init__()
-        self._call_count: int = 0
+        self._drop_accumulator: float = 0.0
         self._ramp_factor = ramp_factor
 
     def should_store(self, detector: BackpressureDetector) -> bool:
+        """Return whether to allow the store."""
         # Proportional throttling needs the EMA and high watermark, which
         # only the EMA detector exposes.
         assert isinstance(detector, EMABackpressureDetector), (
@@ -98,13 +104,16 @@ class ThrottledDropPolicy(DropAccountingPolicy):
             return True
         if drop_rate >= 1.0:
             return False
-        self._call_count += 1
-        period = max(2, round(1.0 / drop_rate))
-        return (self._call_count % period) != 0
+        self._drop_accumulator += drop_rate
+        if self._drop_accumulator >= 1.0:
+            self._drop_accumulator -= 1.0
+            return False
+        return True
 
     def reset(self) -> None:
+        """Clear the drop accumulator and dropped store and block counts."""
         super().reset()
-        self._call_count = 0
+        self._drop_accumulator = 0.0
 
 
 class BackpressureDetector(ABC):

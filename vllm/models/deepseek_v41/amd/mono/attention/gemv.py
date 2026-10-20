@@ -18,6 +18,8 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
+from ..common.arch import GFX942
+from ..common.gfx942 import mfma_fp8_scaled, pair_i64, pin_acc
 from .device import THREADS, WAVES, mfma_scaled, rsrc, tile_map, traced
 
 # a token's LDS row of MXFP8 words / E8M0 codes, padded by 16 B so 16 rows read
@@ -59,6 +61,8 @@ def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
     lane = c["lane"]
     j = lane // 16
     row = row0 + lane % 16
+    if const_expr(GFX942):
+        return _step_load_942(r_w, r_ws, k, row0, lane, st)
     base = row * k + 128 * st + 16 * j
     lo = fx.Vector(bo.buffer_load(r_w, base // 4, vec_width=4, dtype=T.i32))
     hi = fx.Vector(bo.buffer_load(r_w, (base + 64) // 4, vec_width=4, dtype=T.i32))
@@ -66,6 +70,24 @@ def _step_load(c, r_w, r_ws, k, row0, st, pred=None):
     wsi = (row0 // 32) * kg + st * 4 + j
     word = fx.Int32(bo.buffer_load(r_ws, wsi // 4, vec_width=1, dtype=T.i32))
     return lo, hi, (word >> (wsi % 4 * 8)) & 0xFF
+
+
+def _step_load_942(r_w, r_ws, k, row0, lane, st):
+    """gfx942: step ``st`` of rows row0 .. + 16 of the runner's tile-major FP8
+    copy of the weight (``weights942.dense_copy``). Lane 16 j + r takes row
+    r's four 8-byte chunks of lane group j (K 32 b + 8 j .. + 8 for blocks
+    b = 0 .. 3) with two 16-byte loads, blocks 0 and 1, then blocks 2 and 3.
+    Each load of the wave reads 1 KB that is contiguous. The scale codes are
+    the FNUZ codes (e8m0 + 1) in 32 x 32 blocks. The step's four codes are
+    one dword, as K / 32 is a multiple of 4."""
+    # A step of the 16 rows is 2 KB, the first halves of the lanes and then
+    # the second halves.
+    base = (row0 * k + 2048 * st) // 4 + 4 * lane
+    lo = fx.Vector(bo.buffer_load(r_w, base, vec_width=4, dtype=T.i32))
+    hi = fx.Vector(bo.buffer_load(r_w, base + 256, vec_width=4, dtype=T.i32))
+    wsi = (row0 // 32) * (k // 32) + st * 4
+    word = fx.Int32(bo.buffer_load(r_ws, wsi // 4, vec_width=1, dtype=T.i32))
+    return lo, hi, word
 
 
 def gemv_loads(
@@ -105,6 +127,8 @@ def _step_mfma(c, nsteps, xl, xsl, st, ops, acc, live, rows):
     col = fx.min(lane % 16, rows - 1)
     if const_expr(live is not None):
         st = fx.min(st, nsteps - 1)
+    if const_expr(GFX942):
+        return _step_mfma_942(xl, xsl, x_row, s_row, st, col, j, ops, acc, live)
     av = fx.Vector.from_elements(
         [lo[d] for d in range(4)] + [hi[d] for d in range(4)], fx.Int32
     )
@@ -132,6 +156,38 @@ def _step_mfma(c, nsteps, xl, xsl, st, ops, acc, live, rows):
         sa = live.select(sa, fx.Int32(127))
         sb = live.select(sb, fx.Int32(127))
     return mfma_scaled(av, xv, acc, sa, sb)
+
+
+def _step_mfma_942(xl, xsl, x_row, s_row, st, col, j, ops, acc, live):
+    """gfx942: one K step as four FP8 MFMAs, one a 32-wide scale block, each
+    added to ``acc`` times its block's scale factor. Block b takes the lane's
+    weight chunk b (``_step_load_942``) and the activation bytes K 32 b + 8 j
+    .. + 8 of its token, read from the natural LDS row. A step past the end
+    (``live`` false) gets the code sum 127, whose factor is 0."""
+    lo, hi, sw = ops
+    xw = [
+        fx.Vector(
+            fx.ptr_load(
+                xl + (col * x_row + st * 32 + 8 * b + 2 * j),
+                result_type=fx.Vector.make_type(2, fx.Int32),
+            )
+        )
+        for b in range(4)
+    ]
+    sx = fx.Vector(
+        fx.ptr_load(
+            xsl + (col * s_row + st * 4),
+            result_type=fx.Vector.make_type(4, fx.Int32),
+        )
+    )
+    for b in range_constexpr(4):
+        w = lo if b < 2 else hi
+        a = pair_i64(w[2 * (b % 2)], w[2 * (b % 2) + 1])
+        code = ((sw >> (8 * b)) & 0xFF) + sx[b]
+        if const_expr(live is not None):
+            code = live.select(code, fx.Int32(127))
+        acc = mfma_fp8_scaled(acc, a, pair_i64(xw[b][0], xw[b][1]), code)
+    return pin_acc(acc)
 
 
 def gemv_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=16, nsteps=None):

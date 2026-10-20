@@ -508,7 +508,7 @@ class EngineArgs:
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
-    kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
+    kv_cache_dtype: CacheDType | str = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
     cudagraph_capture_sizes: list[int] | None = (
@@ -861,7 +861,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -1932,7 +1932,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -3245,7 +3245,9 @@ class AsyncEngineArgs(EngineArgs):
             help="Enable logging request information, dependent on log level:\n"
             "- INFO: Request ID, parameters and LoRA request.\n"
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
-            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
+            "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
+            "You can also set a separate log level for request JSON body "
+            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
         )
         current_platform.pre_register_and_update(parser)
         return parser
