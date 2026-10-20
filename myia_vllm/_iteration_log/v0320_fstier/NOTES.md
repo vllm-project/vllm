@@ -52,6 +52,11 @@ replay gold exact ; metrics offload).
   `kv_load_failure_policy='fail'` (vu dans le dump non-default args) ⇒ un load
   raté fait **échouer la requête**, il ne recompute pas.
 - Pas d'`eviction_policy` posée au tier primaire dans cette fenêtre (défaut).
+- **Layout disque observé** (utile pour le futur pruneur) :
+  `<root>/<modèle>_<hash>_r<rang TP>/<3 hex>/<bloc>` — ex.
+  `/kv-tier-fs/ukisai_Swift-1.5-Qwen3.8-27b-W4A16-AWQ_d0d49213ab3a/…_r0/943/…`,
+  fichiers de **26 247 168 B** (≈ 25 MB, ~900 tokens/bloc, nvfp4 packé ≈ 22,6 KB/token).
+  Un pruneur itère donc `*_r*/**/` par mtime/budget ; le répertoire racine reste.
 
 ## Déroulé + mesures
 
