@@ -767,7 +767,7 @@ def msa_indexer_unsupported_reason(
     topk_blocks: int,
     sparse_block_size: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     max_model_len: int,
     score_type: str = "max",
     cp_world: int = 1,
@@ -899,7 +899,7 @@ def select_msa_indexer_impl_cls(
     topk_blocks: int,
     sparse_block_size: int,
     index_head_dim: int,
-    indexer_kv_dtype: IndexerKVDType,
+    indexer_kv_dtype: IndexerKVDType | str,
     score_type: str = "max",
 ) -> type[MiniMaxM3IndexerMSAImpl] | None:
     """The MSA indexer impl if this config can use it, else None.

@@ -606,7 +606,6 @@ numpy==2.2.6
     #   bitsandbytes
     #   bm25s
     #   contourpy
-    #   cupy-cuda12x
     #   datasets
     #   decord
     #   einx
@@ -1282,7 +1281,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.19.0
+transformers==5.20.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1439,7 +1438,6 @@ zipp==3.23.0
 # cuda-bindings
 # cuda-pathfinder
 # cuda-toolkit
-# cupy-cuda12x
 # nvidia-cublas
 # nvidia-cuda-cupti
 # nvidia-cuda-nvrtc
