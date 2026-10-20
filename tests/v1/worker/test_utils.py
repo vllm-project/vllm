@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
+import vllm.v1.hisparse.backend as hisparse_backend_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
@@ -66,6 +67,98 @@ def test_hisparse_cuda_lru_init_keeps_int16_allocation(monkeypatch):
 
     assert CUDAHiSparseBackend().create_lru_init(16, device) is arange.return_value
     arange.assert_called_once_with(16, dtype=torch.int16, device=device)
+
+
+@pytest.mark.parametrize("packed_bytes", [False, True])
+def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
+    # Include a gap between physical pages and select reordered/repeated rows.
+    backing = torch.arange(24, dtype=torch.float32)
+    source = backing.as_strided((2, 2, 4), (12, 4, 1))
+    expected = torch.stack([backing[16:20], backing[0:4], backing[12:16], backing[0:4]])
+    if packed_bytes:
+        source = source.view(torch.uint8)
+    destination = torch.empty((4, 4), dtype=torch.float32)
+
+    CUDAHiSparseBackend().gather_resident_rows(
+        source, destination, torch.tensor([3, 0, 2, -1])
+    )
+
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_host_writer", [False, True])
+def test_hisparse_host_events_use_selected_backend(monkeypatch, is_host_writer):
+    backend = MagicMock()
+    group = MagicMock()
+    group.broadcast_object.side_effect = lambda handles, src: handles or ("a", "b")
+    monkeypatch.setattr(hisparse_worker_module, "get_hisparse_backend", lambda: backend)
+    monkeypatch.setattr(hisparse_worker_module, "get_tp_group", lambda: group)
+    device = torch.device("cpu")
+
+    events = hisparse_worker_module._create_hisparse_host_events(
+        object(), is_host_writer, device
+    )
+
+    group.broadcast_object.assert_called_once()
+    if is_host_writer:
+        assert backend.create_event.call_args_list == [
+            call(interprocess=True),
+            call(interprocess=True),
+        ]
+        assert backend.export_event.call_count == 2
+        backend.import_event.assert_not_called()
+    else:
+        backend.create_event.assert_not_called()
+        assert backend.import_event.call_args_list == [
+            call(device, "a"),
+            call(device, "b"),
+        ]
+    assert len(events) == 2
+
+
+def test_hisparse_runtime_delegates_resident_payload(monkeypatch):
+    runtime = object.__new__(hisparse_runtime_module.HiSparseRuntime)
+    runtime.backend = MagicMock()
+    runtime.cache_ops = MagicMock()
+    runtime.backend.gather_resident_rows.side_effect = (
+        lambda source, destination, rows: destination.fill_(17)
+    )
+    source = torch.zeros((2, 2, 3))
+    plan = SimpleNamespace(
+        block_size=2,
+        row_ids=torch.zeros((1, 4), dtype=torch.int32),
+        gpu_row_ids=torch.tensor([[2, 0, 3, -1]]),
+        block_table=torch.zeros((1, 2), dtype=torch.int32),
+        dst_rows=torch.zeros((1, 4), dtype=torch.int32),
+        miss_mask=torch.zeros((1, 4), dtype=torch.bool),
+    )
+
+    staged = runtime.gather_prefill_cache(source, plan, source)
+
+    runtime.backend.gather_resident_rows.assert_called_once()
+    assert runtime.backend.gather_resident_rows.call_args.args[0] is source
+    assert torch.all(staged == 17)
+
+
+def test_hisparse_backend_cache_is_scoped_to_platform_class(monkeypatch):
+    factory = MagicMock(side_effect=lambda name: MagicMock())
+    get_class = MagicMock(return_value="backend.one")
+    monkeypatch.setattr(
+        hisparse_backend_module.current_platform, "get_hisparse_backend_cls", get_class
+    )
+    monkeypatch.setattr(hisparse_backend_module, "resolve_obj_by_qualname", factory)
+    hisparse_backend_module._get_hisparse_backend.cache_clear()
+    try:
+        first = hisparse_backend_module.get_hisparse_backend()
+        assert hisparse_backend_module.get_hisparse_backend() is first
+        get_class.return_value = "backend.two"
+        assert hisparse_backend_module.get_hisparse_backend() is not first
+        assert factory.call_count == 2
+        get_class.return_value = None
+        with pytest.raises(RuntimeError, match="does not support HiSparse"):
+            hisparse_backend_module.get_hisparse_backend()
+    finally:
+        hisparse_backend_module._get_hisparse_backend.cache_clear()
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:

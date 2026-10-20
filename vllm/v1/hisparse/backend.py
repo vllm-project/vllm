@@ -54,7 +54,34 @@ class HiSparseBackend:
     def create_lru_init(self, size: int, device: torch.device) -> torch.Tensor:
         return torch.arange(size, dtype=torch.int16, device=device)
 
-    def create_event(self) -> Any:
+    def create_event(self, *, interprocess: bool = False) -> Any:
+        raise NotImplementedError
+
+    def export_event(self, event: Any) -> Any:
+        raise NotImplementedError
+
+    def import_event(self, device: torch.device, handle: Any) -> Any:
+        raise NotImplementedError
+
+    def gather_resident_rows(
+        self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
+    ) -> None:
+        """Copy resident rows into staging without changing their payload format."""
+        raise NotImplementedError
+
+    def gather_fp8_prefill(
+        self,
+        source: torch.Tensor,
+        destination: torch.Tensor,
+        block_table: torch.Tensor,
+        workspace_starts: torch.Tensor,
+        batch_size: int,
+        *,
+        host_cache: torch.Tensor,
+        host_row_ids: torch.Tensor,
+        device_row_ids: torch.Tensor,
+    ) -> None:
+        """Gather packed device/host FP8 rows into the backend's prefill format."""
         raise NotImplementedError
 
     def current_stream(self) -> Any:
@@ -112,8 +139,51 @@ class CUDAHiSparseBackend(HiSparseBackend):
             return torch.Stream(device=device)
         return torch.cuda.Stream(device=device)
 
-    def create_event(self) -> Any:
+    def create_event(self, *, interprocess: bool = False) -> Any:
+        if interprocess:
+            return torch.cuda.Event(interprocess=True)
         return torch.Event()
+
+    def export_event(self, event: Any) -> Any:
+        return event.ipc_handle()
+
+    def import_event(self, device: torch.device, handle: Any) -> Any:
+        return torch.cuda.Event.from_ipc_handle(device, handle)
+
+    def gather_resident_rows(
+        self, source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor
+    ) -> None:
+        rows = row_ids.to(torch.long).clamp_min(0)
+        block_size = source.shape[1]
+        payload = source[rows // block_size, rows % block_size]
+        if payload.dtype != destination.dtype:
+            payload = payload.contiguous().view(destination.dtype)
+        destination.copy_(payload)
+
+    def gather_fp8_prefill(
+        self,
+        source: torch.Tensor,
+        destination: torch.Tensor,
+        block_table: torch.Tensor,
+        workspace_starts: torch.Tensor,
+        batch_size: int,
+        *,
+        host_cache: torch.Tensor,
+        host_row_ids: torch.Tensor,
+        device_row_ids: torch.Tensor,
+    ) -> None:
+        from vllm import _custom_ops as ops
+
+        ops.cp_gather_and_upconvert_fp8_kv_cache(
+            source,
+            destination,
+            block_table,
+            workspace_starts,
+            batch_size,
+            host_cache=host_cache,
+            host_row_ids=host_row_ids,
+            device_row_ids=device_row_ids,
+        )
 
     def current_stream(self) -> Any:
         from vllm.utils.torch_utils import current_stream

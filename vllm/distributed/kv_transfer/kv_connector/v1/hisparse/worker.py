@@ -163,26 +163,26 @@ def _create_hisparse_host_events(
     is_host_writer: bool,
     device: torch.device,
 ) -> tuple[torch.Event, torch.Event]:
+    backend = get_hisparse_backend()
     if shared_host_region is None:
-        backend = get_hisparse_backend()
         return backend.create_event(), backend.create_event()
 
     events: tuple[torch.Event, torch.Event] | None = None
     ipc_handles = None
     if is_host_writer:
         events = (
-            torch.cuda.Event(interprocess=True),
-            torch.cuda.Event(interprocess=True),
+            backend.create_event(interprocess=True),
+            backend.create_event(interprocess=True),
         )
-        stream = get_hisparse_backend().current_stream()
+        stream = backend.current_stream()
         for event in events:
             event.record(stream)
-        ipc_handles = tuple(event.ipc_handle() for event in events)
+        ipc_handles = tuple(backend.export_event(event) for event in events)
     ipc_handles = get_tp_group().broadcast_object(ipc_handles, src=0)
     if events is None:
         events = (
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[0]),
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[1]),
+            backend.import_event(device, ipc_handles[0]),
+            backend.import_event(device, ipc_handles[1]),
         )
     return events
 

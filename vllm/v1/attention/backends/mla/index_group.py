@@ -345,7 +345,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         block_table = plan.block_table[request_start : request_start + batch_size]
         prefill_stream.wait_stream(current_stream())
         with _stream_context(prefill_stream):
-            ops.cp_gather_and_upconvert_fp8_kv_cache(
+            cache.runtime.backend.gather_fp8_prefill(
                 cache.view.cache,
                 dst,
                 block_table,

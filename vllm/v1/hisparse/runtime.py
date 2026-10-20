@@ -860,13 +860,9 @@ class HiSparseRuntime:
             device=plan.block_table.device,
         )
         if plan.gpu_row_ids is not None and resident_cache is not None:
-            gpu_rows = plan.gpu_row_ids[0].to(torch.long)
-            src = gpu_rows.clamp_min(0)
-            resident_block_size = resident_cache.shape[1]
-            rows = resident_cache[src // resident_block_size, src % resident_block_size]
-            if rows.dtype != staged.dtype:
-                rows = rows.contiguous().view(staged.dtype)
-            staged.view(-1, row_width).copy_(rows)
+            self.backend.gather_resident_rows(
+                resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
+            )
         self.cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
