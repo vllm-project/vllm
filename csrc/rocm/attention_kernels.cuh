@@ -16,9 +16,16 @@
 
 #pragma once
 
-#include <torch/all.h>
+// Only the ATen/c10 surface is needed here (at::Tensor, the CUDA stream/guard
+// helpers and TORCH_CHECK). <torch/all.h> also drags in autograd, nn and jit,
+// which is ~7 s of the ~9.5 s frontend of every attention translation unit.
+#include <ATen/DeviceGuard.h>
+#include <ATen/core/Tensor.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/util/Exception.h>
+
+#include <optional>
 #include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
 #include "core/cuda_compat.h"
@@ -3430,13 +3437,13 @@ template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher(
-    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, const int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale) {
+    at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
+    at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
+    at::Tensor& value_cache, const int num_kv_heads, float scale,
+    at::Tensor& block_tables, at::Tensor& seq_lens,
+    const std::optional<at::Tensor>& query_start_loc, int max_seq_len,
+    const std::optional<at::Tensor>& alibi_slopes, at::Tensor& k_scale,
+    at::Tensor& v_scale, const std::optional<at::Tensor>& fp8_out_scale) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3586,13 +3593,13 @@ template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE, bool USE_INTERLEAVED_V_CACHE>
 void paged_attention_custom_launcher_navi(
-    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, const int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale) {
+    at::Tensor& out, at::Tensor& exp_sums, at::Tensor& max_logits,
+    at::Tensor& tmp_out, at::Tensor& query, at::Tensor& key_cache,
+    at::Tensor& value_cache, const int num_kv_heads, float scale,
+    at::Tensor& block_tables, at::Tensor& seq_lens,
+    const std::optional<at::Tensor>& query_start_loc, int max_seq_len,
+    const std::optional<at::Tensor>& alibi_slopes, at::Tensor& k_scale,
+    at::Tensor& v_scale) {
   int num_seqs = block_tables.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -3882,15 +3889,14 @@ void paged_attention_custom_launcher_navi(
 // instantiates the kernels of one block size and paged_attention() switches on
 // it.
 #define ATTN_PARAMS                                                            \
-  torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,      \
-      torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,  \
-      torch::Tensor &value_cache, int64_t num_kv_heads, double scale,          \
-      torch::Tensor &block_tables, torch::Tensor &seq_lens,                    \
-      const std::optional<torch::Tensor>&query_start_loc, int64_t max_seq_len, \
-      const std::optional<torch::Tensor>&alibi_slopes, torch::Tensor &k_scale, \
-      torch::Tensor &v_scale,                                                  \
-      const std::optional<torch::Tensor>&fp8_out_scale, bool is_navi,          \
-      bool use_interleaved_v_cache
+  at::Tensor &out, at::Tensor &exp_sums, at::Tensor &max_logits,               \
+      at::Tensor &tmp_out, at::Tensor &query, at::Tensor &key_cache,           \
+      at::Tensor &value_cache, int64_t num_kv_heads, double scale,             \
+      at::Tensor &block_tables, at::Tensor &seq_lens,                          \
+      const std::optional<at::Tensor>&query_start_loc, int64_t max_seq_len,    \
+      const std::optional<at::Tensor>&alibi_slopes, at::Tensor &k_scale,       \
+      at::Tensor &v_scale, const std::optional<at::Tensor>&fp8_out_scale,      \
+      bool is_navi, bool use_interleaved_v_cache
 
 #define ATTN_FWD                                                              \
   out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,          \

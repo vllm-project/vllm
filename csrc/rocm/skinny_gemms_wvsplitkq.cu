@@ -8,6 +8,9 @@
 // core).
 #include "skinny_gemms.cuh"
 
+#include "dispatch_utils.h"                 // VLLM_DISPATCH_FP8_TYPES
+#include "quantization/w8a8/fp8/common.cuh"  // is_fp8_ocp()
+
 void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,

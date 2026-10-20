@@ -1,6 +1,16 @@
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#pragma once
+
+// Kernels and shared helpers of the "skinny" (wave-split-K) GEMMs. The host
+// launchers live in one translation unit per kernel family
+// (skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu) so that ninja can
+// generate their device code in parallel: kept together they took ~58 s of
+// AMDGPU codegen on a single core.
+
+// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit, which
+// is several seconds of frontend for every skinny GEMM translation unit.
+#include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
+#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
+#include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -12,17 +22,7 @@
 #include <mutex>
 #include <utility>
 
-#pragma once
-
-// Kernels and shared helpers of the "skinny" (wave-split-K) GEMMs. The host
-// launchers live in one translation unit per kernel family
-// (skinny_gemms_{llmm1,wvsplitk,wvsplitkrc,wvsplitkq}.cu) so that ninja can
-// generate their device code in parallel: kept together they took ~58 s of
-// AMDGPU codegen on a single core.
-
 #include "core/cuda_compat.h"
-#include "dispatch_utils.h"
-#include "quantization/w8a8/fp8/common.cuh"
 #include "core/utils.hpp"
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
