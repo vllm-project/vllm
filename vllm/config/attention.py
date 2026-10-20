@@ -90,7 +90,7 @@ class AttentionConfig:
     CuTe DSL requires FP8 queries for head dimension 192 and does not support
     head dimension 256. New-token prefill always uses TRTLLM."""
 
-    indexer_kv_dtype: IndexerKVDType = "auto"
+    indexer_kv_dtype: IndexerKVDType | str = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
@@ -169,7 +169,9 @@ class AttentionConfig:
             # layers still use the platform's normal automatic backend.
             self.backend = None
 
-    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+    def resolve_indexer_kv_dtype(
+        self, default: IndexerKVDType | str
+    ) -> IndexerKVDType | str:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
         if self.indexer_kv_dtype == "auto":
             return default

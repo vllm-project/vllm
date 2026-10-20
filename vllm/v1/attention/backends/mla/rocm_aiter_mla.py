@@ -2269,7 +2269,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
         # KV cache is FP8. Head counts that are not a multiple of 16 are
         # replicate-padded up to one (see _mla_fp8_prefill_attn).
-        from vllm.utils.torch_utils import is_quantized_kv_cache
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)

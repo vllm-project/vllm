@@ -15,10 +15,10 @@ from vllm._custom_ops import (
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    is_quantized_kv_cache,
     set_random_seed,
 )
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 # Enable AMX tile data registers so isolated runs don't rely on other operations
 # to trigger oneDNN's _init_amx() first (which can cause hangs otherwise).

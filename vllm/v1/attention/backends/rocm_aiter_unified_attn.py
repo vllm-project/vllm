@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms.rocm import on_gfx1250
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -34,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)

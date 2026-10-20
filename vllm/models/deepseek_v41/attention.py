@@ -140,10 +140,10 @@ def _use_v41_mxfp8_kv_record() -> bool:
 
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
-    kv_cache_dtype: CacheDType,
+    kv_cache_dtype: CacheDType | str,
     cache_config: CacheConfig | None,
-    packed_kv_cache_dtype: CacheDType = "fp8_ds_mla",
-) -> tuple[CacheDType, torch.dtype]:
+    packed_kv_cache_dtype: CacheDType | str = "fp8_ds_mla",
+) -> tuple[CacheDType | str, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The

@@ -130,7 +130,7 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
         return super().load_weights(remap_shards())
 
 
-def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType:
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType | str:
     """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
     if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
         return "auto"
