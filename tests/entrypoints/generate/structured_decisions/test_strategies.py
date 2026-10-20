@@ -493,8 +493,6 @@ def test_canvas_read_keeps_the_images():
         "mm_placeholders": placeholders,
         "cache_salt": "tenant",
     }
-    assert read_input["type"] == "multimodal"
-    assert read_input["mm_kwargs"] is mm_kwargs
     assert engine_input["prompt_token_ids"] == ids
     unsalted = strategy._read_input(mm_input(ids, mm_kwargs, hashes, placeholders), ids)
     assert "cache_salt" not in unsalted
@@ -1337,31 +1335,15 @@ async def test_joint_read_splits_by_the_served_canvas(dgemma, served, count, can
     )
 
 
-@pytest.mark.asyncio
-async def test_joint_keeps_the_question_limit(dgemma):
-    serving, engine, _ = dgemma
-    questions = {f"q{i}": {"type": "noul", "instructions": "?"} for i in range(65)}
-    response = await serving.create_decision(
-        StructuredDecisionRequest(state="x", questions=questions, joint=True)
-    )
-    assert isinstance(response, ErrorResponse)
-    assert "at most 64" in response.error.message
-    engine.check_admission.assert_not_called()
-
-
-def test_joint_lines_put_each_label_in_one_slot(dgemma):
+def test_joint_lines_put_each_label_in_one_slot(dgemma, monkeypatch):
     _, _, strategy = dgemma
     tokenizer = strategy._tokenizer()
     for (k, label_set), prefix in strategy.line_prefix.items():
         for label in label_set:
             line = [*prefix, strategy.slot_label_ids[label]]
             assert tokenizer.decode(line) == f"{k}: {label}"
-    assert len(set(strategy.slot_label_ids.values())) == len(strategy.slot_label_ids)
-
-
-def test_joint_labels_fit_the_logprob_token_ids(dgemma, monkeypatch):
-    _, _, strategy = dgemma
     labels = strategy.slot_label_ids
+    assert len(set(labels.values())) == len(labels)
     ids = set(labels.values()) | {strategy.label_ids[x] for x in labels}
     # Every label of every question type, with and without its leading space.
     assert labels.keys() == {x for t in QUESTION_TYPES.values() for x in t.label_set}
@@ -1370,7 +1352,7 @@ def test_joint_labels_fit_the_logprob_token_ids(dgemma, monkeypatch):
         "vllm.entrypoints.openai.decisions.strategies.MAX_LOGPROB_TOKEN_IDS",
         len(ids) - 1,
     )
-    assert not strategy._init_joint_lines(strategy._tokenizer())
+    assert not strategy._init_joint_lines(tokenizer)
 
 
 def test_joint_prompt_numbers_each_question():

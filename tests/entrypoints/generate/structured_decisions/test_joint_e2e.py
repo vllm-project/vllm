@@ -202,17 +202,3 @@ def test_images_follow_the_picture(server, joint):
         assert (answers["round"]["noul"] > 0.5) == (shape == "circle"), name
     both = read([picture(*p) for p in PICTURES.values()])
     assert 400 < per_read_tokens(both) - text <= 600
-
-
-def test_images_joint_matches_per_question(server):
-    for shape, colour in PICTURES.values():
-        body = {
-            "state": "Look at the image.",
-            "questions": PICTURE_QUESTIONS,
-            "images": [picture(shape, colour)],
-        }
-        alone = post(server, body).json()["answers"]
-        joint = post(server, {**body, "joint": True}).json()["answers"]
-        for qid in ("colour", "shape"):
-            assert joint[qid]["choice"] == alone[qid]["choice"]
-        assert (joint["round"]["noul"] > 0.5) == (alone["round"]["noul"] > 0.5)

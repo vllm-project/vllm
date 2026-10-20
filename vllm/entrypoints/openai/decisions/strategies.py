@@ -585,11 +585,7 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
                 self.line_prefix[(k, label_set)] = prefix
         # A canvas asks for the ids of every label on it, however many
         # questions it holds, so the union of all labels' ids bounds a request.
-        ids = {
-            i
-            for x, slot_id in self.slot_label_ids.items()
-            for i in (slot_id, self.label_ids[x])
-        }
+        ids = {*self.slot_label_ids.values(), *self.label_ids.values()}
         if len(ids) > MAX_LOGPROB_TOKEN_IDS:
             logger.warning(
                 "Joint decision reads are off: the labels have %d token ids, "
@@ -747,17 +743,14 @@ class DiffusionGemmaCanvasStrategy(NextTokenStrategy):
                 f"{extra}, more than max_model_len={self.max_model_len}"
             )
         salt = engine_input.get("cache_salt")
-        salt = salt if isinstance(salt, str) else None
         # The thought block _must_ appear outside of the canvas (far worse results
         # otherwise)
         ids = prompt_ids + self.thought
         if engine_input["type"] != "multimodal":
-            return tokens_input(ids, cache_salt=salt)
+            return tokens_input(ids, cache_salt=salt if isinstance(salt, str) else None)
         # The images' placeholders come before the thought, so their ranges hold.
         read_input: MultiModalInput = {**engine_input, "prompt_token_ids": ids}
         read_input.pop("prompt", None)
-        if salt is None:
-            read_input.pop("cache_salt", None)
         return read_input
 
 

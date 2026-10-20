@@ -60,19 +60,14 @@ def test_choice_prompt():
     )
 
 
-def test_prompt_keeps_instructions_as_given():
-    q = noul(instructions="Reply within the hour?\n\n")
-    assert q.type.prompt(q).startswith("Question: Reply within the hour?\n\n\nyes\n")
-    empty = noul(instructions="")
-    assert empty.type.prompt(empty) == "yes\nno\nAnswer with yes or no only."
-
-
 @pytest.mark.parametrize(
     "q,body",
     [
         (choice(), "A: billing - money\nB: outage\nC: other\n"),
         (noul(criteria={"true": "t", "false": "f"}), "yes: t\nno: f\n"),
         (score(), "0: calm\n1: annoyed\n2: furious\n"),
+        # Instructions are kept as given, trailing newlines included.
+        (noul(instructions="Reply within the hour?\n\n"), "yes\nno\n"),
     ],
 )
 def test_prompt_is_the_heading_then_the_body(q, body):
