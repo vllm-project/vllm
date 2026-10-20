@@ -239,6 +239,7 @@ steps:
 # test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -272,6 +273,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Miscellaneous Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       timeout_in_minutes: 55
