@@ -1,5 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Launcher for the Rust frontend process.
+
+Shutdown ordering
+-----------------
+All teardown goes through a shared ``contextlib.ExitStack``. ``ExitStack``
+runs callbacks in **LIFO** order (last registered, first executed), so the
+callbacks are registered in the *reverse* of the desired execution order.
+The desired execution order is::
+
+    set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
+                -> grpc_sock cleanup -> sock cleanup
+
+which requires registering them as::
+
+    sock cleanup -> grpc_sock cleanup -> _coord_shutdown -> _engine_shutdown
+                -> _api_shutdown -> set_timeout
+
+The reasoning behind the desired order:
+
+* ``set_timeout`` runs first so every later shutdown hook can compute its
+  remaining budget via ``to_timeout(signal_utils.shutdown_by)``.
+* ``_api_shutdown`` runs next: stop the frontend from accepting new requests.
+* ``_engine_shutdown`` then stops the engines feeding that frontend.
+* ``_coord_shutdown`` then stops the DP coordinator.
+* The ``grpc_sock`` / ``sock`` cleanups run last: the listening sockets are
+  used for the entire lifetime of the process and are only released once
+  every user of them is gone.
+"""
+
 import argparse
 import contextlib
 
@@ -33,21 +63,26 @@ logger = init_logger(__name__)
 def _run_rust_frontend(
     rust_frontend_path: str,
     args: argparse.Namespace,
-    vllm_config: VllmConfig,
     num_api_servers: int,
+    shutdown_timeout_ref: list[float | None],
     exit_stack: contextlib.ExitStack,
 ) -> None:
     set_signal_handler()
 
+    # Bind the HTTP and gRPC listen sockets before create_engine_config().
+    # Otherwise get_open_ports_list() (DP>1) may pick --port / --grpc-port
+    # as the DP master port while they are still unbound, and the DP
+    # process-group init then fails with EADDRINUSE. This preserves the
+    # "bind before the engine starts" ordering required by #8204.
     listen_address, sock = setup_server(
         args,
         reuse_port=num_api_servers > 1,
     )
     exit_stack.callback(cleanup_listen_socket, sock, args.uds or None)
 
-    # `--grpc-port` is only accepted for the Rust frontend, which inherits this
-    # listener like the HTTP one. gRPC follows the HTTP TCP host, or IPv4
-    # loopback when HTTP uses a Unix socket.
+    # `--grpc-port` is only accepted for the Rust frontend, which inherits
+    # this listener like the HTTP one. gRPC follows the HTTP TCP host, or
+    # IPv4 loopback when HTTP uses a Unix socket.
     grpc_sock = None
     if args.grpc_port is not None:
         grpc_host = "127.0.0.1" if args.uds else (args.host or "")
@@ -55,6 +90,15 @@ def _run_rust_frontend(
             host=grpc_host, port=args.grpc_port, reuse_port=False
         )
         exit_stack.callback(cleanup_listen_socket, grpc_sock)
+
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    propagate_flash_late_interaction(args, engine_args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    shutdown_timeout_ref[0] = vllm_config.shutdown_timeout
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not args.disable_log_stats
@@ -109,9 +153,6 @@ def _run_rust_frontend(
     # code.
     engine_stack.close()
 
-    # Register callbacks in reverse of the desired LIFO execution order:
-    #   set_timeout -> _api_shutdown -> _engine_shutdown -> _coord_shutdown
-    #   -> grpc_sock cleanup -> sock cleanup
     if coordinator is not None:
         exit_stack.callback(_coord_shutdown, coordinator)
     if local_engine_manager is not None:
@@ -158,21 +199,15 @@ def run_rust_frontend(args: argparse.Namespace) -> None:
         )
         num_api_servers = 1
 
-    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
-    propagate_flash_late_interaction(args, engine_args)
-    engine_args._api_process_count = num_api_servers
-    engine_args._api_process_rank = -1
-
-    usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    shutdown_timeout_ref: list[float | None] = [None]
 
     with contextlib.ExitStack() as exit_stack:
         try:
             _run_rust_frontend(
                 rust_frontend_path,
                 args,
-                vllm_config,
                 num_api_servers,
+                shutdown_timeout_ref,
                 exit_stack,
             )
         except KeyboardInterrupt:
@@ -181,4 +216,4 @@ def run_rust_frontend(args: argparse.Namespace) -> None:
             logger.exception("[shutdown] API server: unexpected error during shutdown")
             raise
         finally:
-            exit_stack.callback(set_timeout, vllm_config)
+            exit_stack.callback(set_timeout, shutdown_timeout_ref[0])

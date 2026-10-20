@@ -3,7 +3,6 @@
 import signal
 import time
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -35,9 +34,11 @@ def set_signal_handler() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
 
-def set_timeout(vllm_config: VllmConfig) -> None:
+def set_timeout(shutdown_timeout: float | None) -> None:
+    if shutdown_timeout is None:
+        return
+
     global timeout, shutdown_by
     if shutdown_requested:
-        timeout = vllm_config.shutdown_timeout
-        shutdown_by = time.monotonic() + timeout
+        shutdown_by = time.monotonic() + shutdown_timeout
         logger.info("Waiting up to %d seconds for processes to exit", timeout)
