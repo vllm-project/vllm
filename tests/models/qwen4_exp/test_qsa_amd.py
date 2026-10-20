@@ -392,6 +392,63 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
     assert topk_call["topk_tokens"] == block_topk
 
 
+def _qsa_mqa_paged_reference(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    visible_lengths: torch.Tensor,
+) -> torch.Tensor:
+    pages = page_table.index_select(0, token_to_req.long()).long()
+    keys = k_cache[pages, :, 0, :].flatten(1, 2)
+    scores = torch.einsum("rhd,rnd->rnh", q.float(), keys.float())
+    logits = torch.relu(scores).sum(dim=-1) / math.sqrt(q.shape[-1])
+    positions = torch.arange(keys.shape[1], device=q.device).unsqueeze(0)
+    return logits.masked_fill(positions >= visible_lengths.unsqueeze(1), -torch.inf)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+def test_qsa_mqa_paged_matches_reference_on_visible_columns(
+    dtype: torch.dtype,
+) -> None:
+    # A prefill chunk, a decode request, and rows with nothing visible, so one
+    # row block spans three requests. Top-k reads only [0, visible_blocks).
+    torch.manual_seed(0)
+    page_size, compress_ratio, table_width, num_pages = 16, 4, 24, 80
+    positions = [range(1160, 1203), range(159, 162), range(3)]
+    lengths = torch.tensor([1203, 162, 3], device="cuda", dtype=torch.int32)
+    token_to_req = torch.tensor(
+        [r for r, p in enumerate(positions) for _ in p],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    query_positions = torch.tensor(
+        [i for p in positions for i in p], device="cuda", dtype=torch.int64
+    )
+    q = torch.randn(token_to_req.numel(), 2, 32, device="cuda", dtype=dtype)
+    k_cache = torch.randn(num_pages, page_size, 1, 32, device="cuda", dtype=dtype)
+    page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32)[
+        : 3 * table_width
+    ].view(3, table_width)
+
+    logits, visible_blocks = qsa_ops.qsa_mqa_paged(
+        q, k_cache, page_table, token_to_req, query_positions, lengths, compress_ratio
+    )
+
+    expected_visible = torch.minimum(
+        (query_positions + 1) // compress_ratio,
+        lengths[token_to_req.long()] // compress_ratio,
+    ).to(torch.int32)
+    torch.testing.assert_close(visible_blocks, expected_visible, rtol=0, atol=0)
+    columns = torch.arange(logits.shape[1], device="cuda")
+    logits = logits.masked_fill(columns >= expected_visible[:, None], -torch.inf)
+    expected = _qsa_mqa_paged_reference(
+        q, k_cache, page_table, token_to_req, expected_visible
+    )
+    torch.testing.assert_close(logits, expected, rtol=1e-4, atol=1e-5)
+
+
 @requires_qsa_kernels
 @pytest.mark.parametrize(
     ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
