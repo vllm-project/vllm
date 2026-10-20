@@ -1412,6 +1412,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens
                 )
+            elif "verify_budget" in self.speculator_hooks:
+                assert self.speculator is not None
+                verified = self.speculator.verify_budget(req_ids, num_draft_tokens_np)
+                if verified is not num_draft_tokens_np:
+                    # Unverified drafts leave the batch; they count as rejected.
+                    num_toks -= int(num_scheduled_tokens.sum())
+                    num_scheduled_tokens, num_draft_tokens_np = trim_draft_tokens(
+                        num_scheduled_tokens, num_draft_tokens_np, verified
+                    )
+                    num_toks += int(num_scheduled_tokens.sum())
+                    max_query_len = int(num_scheduled_tokens.max())
 
         prefill_runs_as_decode_np = None
         decode_graph_eligible = not has_prefill
@@ -2572,6 +2583,28 @@ class BatchReqState(NamedTuple):
     has_prefill: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
     decode_graph_eligible: bool
+
+
+def trim_draft_tokens(
+    num_scheduled_tokens: np.ndarray,
+    num_draft_tokens: np.ndarray,
+    num_verified_drafts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep each request's first ``num_verified_drafts`` scheduled drafts.
+
+    Returns the per-request token and draft counts of the trimmed batch.
+    """
+    num_verified_drafts = np.asarray(num_verified_drafts, dtype=num_draft_tokens.dtype)
+    in_range = num_verified_drafts.shape == num_draft_tokens.shape and bool(
+        ((num_verified_drafts >= 0) & (num_verified_drafts <= num_draft_tokens)).all()
+    )
+    if not in_range:
+        raise ValueError(
+            "verify_budget must return, for each request, between 0 and its "
+            f"scheduled drafts; got {num_verified_drafts} for {num_draft_tokens}."
+        )
+    num_trimmed = num_draft_tokens - num_verified_drafts
+    return num_scheduled_tokens - num_trimmed, num_verified_drafts
 
 
 def sort_batch_req_ids(

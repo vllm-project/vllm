@@ -7,8 +7,10 @@ the behavior vLLM had before the hook existed.
 """
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -506,3 +508,106 @@ def test_only_overridden_hooks_are_called():
     }
     # A runner built without a speculator calls none.
     assert GPUModelRunner.__new__(GPUModelRunner).speculator_hooks == set()
+
+
+# --- verify_budget ------------------------------------------------------------
+
+
+def test_trim_draft_tokens_keeps_the_first_verified_drafts():
+    from vllm.v1.worker.gpu.model_runner import trim_draft_tokens
+
+    tokens, drafts = trim_draft_tokens(
+        np.array([4, 4, 9], dtype=np.int32),
+        np.array([3, 3, 0], dtype=np.int32),
+        np.array([1, 3, 0]),
+    )
+    assert tokens.tolist() == [2, 4, 9]
+    assert drafts.tolist() == [1, 3, 0]
+    assert drafts.dtype == np.int32
+    for bad in ([4, 3, 0], [-1, 3, 0], [1, 3]):
+        with pytest.raises(ValueError, match="verify_budget must return"):
+            trim_draft_tokens(
+                np.array([4, 4, 9], dtype=np.int32),
+                np.array([3, 3, 0], dtype=np.int32),
+                np.array(bad),
+            )
+
+
+class _BudgetSpeculator(_MinimalSpeculator):
+    def __init__(self, width: int):
+        self.width = width
+        self.calls: list[tuple[list[str], list[int]]] = []
+
+    def verify_budget(self, req_ids, num_draft_tokens):
+        self.calls.append((list(req_ids), num_draft_tokens.tolist()))
+        return np.minimum(num_draft_tokens, self.width)
+
+
+def _budget_runner(speculator, adaptive=None) -> GPUModelRunner:
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.decode_query_len = 4
+    runner.adaptive_verification = adaptive
+    runner.speculator = speculator
+    runner.speculator_hooks = speculator.overridden_hooks()
+    runner.pcp_manager = None
+    runner.use_pp = False
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"a": 0, "b": 1, "p": 2},
+        num_computed_prefill_tokens=np.array([16, 16, 8], dtype=np.int32),
+        prefill_len=SimpleNamespace(np=np.array([16, 16, 40], dtype=np.int32)),
+    )
+    return runner
+
+
+def _decode_batch(with_prefill: bool = False) -> SimpleNamespace:
+    tokens = {"a": 4, "b": 4}
+    if with_prefill:
+        tokens["p"] = 6
+    return SimpleNamespace(
+        num_scheduled_tokens=tokens,
+        total_num_scheduled_tokens=sum(tokens.values()),
+        scheduled_spec_decode_tokens={"a": [7, 8, 9], "b": [5, 6, 7]},
+    )
+
+
+def _gather(runner: GPUModelRunner, batch: Any) -> tuple[Any, int | None]:
+    state, uniform_tok_count = runner.gather_batch_req_state(batch, False)
+    assert state is not None
+    return state, uniform_tok_count
+
+
+def test_verify_budget_trims_the_batch_before_it_is_dispatched():
+    speculator = _BudgetSpeculator(width=1)
+    state, uniform_tok_count = _gather(_budget_runner(speculator), _decode_batch())
+    assert speculator.calls == [(["a", "b"], [3, 3])]
+    assert state.num_draft_tokens_np is not None
+    assert state.num_draft_tokens_np.tolist() == [1, 1]
+    assert state.num_scheduled_tokens.tolist() == [2, 2]
+    assert state.num_tokens == 4
+    # A uniform trim is a uniform decode batch of the narrower width.
+    assert uniform_tok_count == 2
+
+
+def test_verify_budget_keeps_prefill_rows_and_the_batch_when_unchanged():
+    speculator = _BudgetSpeculator(width=3)
+    state, uniform_tok_count = _gather(_budget_runner(speculator), _decode_batch())
+    assert state.num_tokens == 8 and uniform_tok_count == 4
+    speculator = _BudgetSpeculator(width=2)
+    state, _ = _gather(_budget_runner(speculator), _decode_batch(with_prefill=True))
+    assert dict(zip(state.req_ids, state.num_scheduled_tokens.tolist())) == {
+        "a": 3,
+        "b": 3,
+        "p": 6,
+    }
+    assert state.num_tokens == 12
+
+
+def test_verify_budget_is_not_asked_without_drafts_or_with_adaptive_verification():
+    speculator = _BudgetSpeculator(width=1)
+    batch = _decode_batch()
+    batch.scheduled_spec_decode_tokens = {}
+    _gather(_budget_runner(speculator), batch)
+    adaptive = SimpleNamespace(get_num_tokens=lambda tokens, drafts: 6)
+    state, _ = _gather(_budget_runner(speculator, adaptive), _decode_batch())
+    assert speculator.calls == []
+    assert state.num_tokens == 6
