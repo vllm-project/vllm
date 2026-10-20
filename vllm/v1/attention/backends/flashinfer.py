@@ -1145,11 +1145,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Conditional device-ragged XQA for adaptive verification.
         # Mode and width are resolved later by _finalize_adaptive_decode(),
         # called from init_attn_backend with the runner-resolved decode
-        # width; the group's model role comes from the layers'
-        # construction-time tags (the transient compilation model_tag global
-        # is restored to "backbone" before builders are created, so it must
-        # never be read here). Until finalized, the mode is inert (legacy
-        # behavior everywhere).
+        # width and the group's target-layer role (is_target, derived from
+        # the runner's target layer names — all KV-cache attention layers
+        # minus the speculator's draft layers). Until finalized, the mode is
+        # inert (legacy behavior everywhere).
         self.adaptive_xqa_mismatch_mode = False
         self.adaptive_max_decode_width = 0
         self._adaptive_mask_buffer: torch.Tensor | None = None
@@ -1336,14 +1335,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return None
         # The kernel selector asserts off the trtllm-capable architectures, so
         # call it only past the gate, as get_cudagraph_support does.
-        if not cls._uses_trtllm_gen_varlen_decode(
+        if cls._uses_trtllm_gen_varlen_decode(
             vllm_config,
             cls._get_flashinfer_trtllm_api_decode_kernel(),
             use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
         ):
-            return None
-        # Longer requests are split off as prefills.
-        return max_decode_query_len(vllm_config)
+            # SM100 trtllm-gen varlen decode (merged #52157).
+            return max_decode_query_len(vllm_config)
+        # SM120/121 XQA adaptive mismatch (this PR): the dedicated XQA kernel
+        # dereferences q_cu_seq_lens on device, so the varlen decode gate must
+        # agree with _adaptive_xqa_mismatch_safe or the manager hard-errors on
+        # a None bound.
+        if _adaptive_xqa_mismatch_safe(vllm_config):
+            return max_decode_query_len(vllm_config)
+        return None
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
@@ -3127,19 +3132,6 @@ class FlashInferImpl(AttentionImpl):
                     q_len_per_req = 1
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
-
-                if decode_with_xqa and q_len_per_req is not None and q_len_per_req > 1:
-                    raise NotImplementedError(
-                        "FlashInfer XQA speculative decode is not wired in vLLM yet."
-                    )
-
-                # XQA decode can use model-dtype Q with FP8 KV, so only include
-                # q_scale when the decode query is actually FP8.
-                bmm1_scale = (
-                    self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
-                    if decode_with_xqa
-                    else self.bmm1_scale
-                )
 
                 lse = None
                 if use_dcp:

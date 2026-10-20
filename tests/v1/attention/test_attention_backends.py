@@ -1168,7 +1168,7 @@ def test_flashinfer_avoids_seq_lens_copy_without_spec_tokens(
         (None, "TRTLLM_GEN", 1, None),
         (False, "TRTLLM_GEN", 1, None),
         (True, "TRTLLM_GEN", 1, 8),
-        (True, "XQA", 1, None),
+        (True, "XQA", 1, 8),
         (True, "TRTLLM_GEN", 2, None),
     ],
 )
@@ -1183,7 +1183,10 @@ def test_flashinfer_varlen_cudagraph_capability(
     from vllm.v1.attention.backends import flashinfer as fi
 
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(use_non_causal=False),
+        attention_config=SimpleNamespace(
+            use_non_causal=False,
+            use_trtllm_attention=True,
+        ),
         speculative_config=SimpleNamespace(
             enable_adaptive_verification=adaptive,
             num_speculative_tokens=7,
@@ -1192,10 +1195,20 @@ def test_flashinfer_varlen_cudagraph_capability(
         if adaptive is not None
         else None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
-        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 32,
+            get_num_kv_heads=lambda _: 4,
+        ),
         use_v2_model_runner=True,
     )
     monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    # Force the SM120/121 capability check so the XQA predicate is platform-
+    # independent in this unit test.
+    monkeypatch.setattr(
+        fi.current_platform,
+        "is_device_capability_family",
+        lambda fam: fam == 120,
+    )
     monkeypatch.setattr(
         fi.FlashInferMetadataBuilder,
         "_get_flashinfer_trtllm_api_decode_kernel",
