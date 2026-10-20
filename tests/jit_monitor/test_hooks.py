@@ -100,8 +100,16 @@ def _fake_flydsl_import_modules():
             cls.compiled.append(func_name)
             return f"compiled:{func_name}"
 
+    def _fake_infer_kernel_names_from_asm(asm):
+        return [
+            line.split("gpu.func @", 1)[1].split("(", 1)[0].strip()
+            for line in asm.splitlines()
+            if "gpu.func @" in line and " kernel" in line
+        ]
+
     fake_jit_function = cast(Any, ModuleType("flydsl.compiler.jit_function"))
     fake_jit_function.MlirCompiler = FakeMlirCompiler
+    fake_jit_function._infer_kernel_names_from_asm = _fake_infer_kernel_names_from_asm
 
     fake_compiler = cast(Any, ModuleType("flydsl.compiler"))
     fake_compiler.__path__ = []
@@ -356,6 +364,12 @@ def test_cutedsl_subscripted_compile_is_monitored():
 # ------------------------------------------------------------------
 
 
+_KERNEL_IR = (
+    "  gpu.module @kernels {{\n"
+    "    gpu.func @gdn_h_s{width}(%arg0: memref<f32>) kernel {{\n"
+)
+
+
 def test_flydsl_compile_logs_warning_and_passes_through():
     with _patch_jit_modules(_make_fake_knobs()):
         from flydsl.compiler.jit_function import MlirCompiler
@@ -363,15 +377,49 @@ def test_flydsl_compile_logs_warning_and_passes_through():
         jit_monitor.activate()
         with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
             result = MlirCompiler.compile(
-                "module", arch="gfx950", func_name="fly_decode_kernel"
+                _KERNEL_IR.format(width=4096), arch="gfx950", func_name="launch"
             )
 
-    assert result == "compiled:fly_decode_kernel"
-    assert MlirCompiler.compiled == ["fly_decode_kernel"]
+    assert result == "compiled:launch"
+    assert MlirCompiler.compiled == ["launch"]
     warning_once.assert_called_once()
     msg = warning_once.call_args[0][0] % warning_once.call_args[0][1:]
     assert "FlyDSL JIT compilation during inference" in msg
-    assert "fly_decode_kernel" in msg
+    assert "gdn_h_s4096" in msg
+
+
+def test_flydsl_reports_each_width_sharing_a_launcher_name():
+    """Launchers often share the name ``launch``, so the width carries it."""
+    with _patch_jit_modules(_make_fake_knobs()):
+        from flydsl.compiler.jit_function import MlirCompiler
+
+        jit_monitor.activate()
+        with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+            for width in (4096, 8192):
+                MlirCompiler.compile(_KERNEL_IR.format(width=width), func_name="launch")
+
+    details = [call[0][-1] for call in warning_once.call_args_list]
+    assert details == [
+        " (kernels=gdn_h_s4096)",
+        " (kernels=gdn_h_s8192)",
+    ]
+
+
+def test_flydsl_unreadable_module_costs_the_detail_not_the_compile():
+    class _ExplodingModule:
+        def __str__(self):
+            raise ValueError("unreadable IR")
+
+    with _patch_jit_modules(_make_fake_knobs()):
+        from flydsl.compiler.jit_function import MlirCompiler
+
+        jit_monitor.activate()
+        with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+            result = MlirCompiler.compile(_ExplodingModule(), func_name="launch")
+
+    assert result == "compiled:launch"
+    warning_once.assert_called_once()
+    assert warning_once.call_args[0][-1] == ""
 
 
 def test_flydsl_error_mode_raises():
