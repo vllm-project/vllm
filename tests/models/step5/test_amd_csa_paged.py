@@ -175,21 +175,39 @@ def test_select_regions_breaks_ties_by_region_id():
             assert sorted(gg[gg >= 0].tolist()) == sorted(ww[ww >= 0].tolist())
 
 
+FP8_KV = [None, torch.float8_e4m3fn, torch.float8_e4m3fnuz]
+
+
+def _quant_kv(k, v, kv_dtype):
+    """KV as stored (FP8 with per-tensor scales, or BF16) and as the reference
+    sees it."""
+    if kv_dtype is None:
+        return k, v, k, v, None, None
+    k_s, v_s = 0.5, 2.0
+    fmax = torch.finfo(kv_dtype).max
+    kq = (k.float() / k_s).clamp(-fmax, fmax).to(kv_dtype)
+    vq = (v.float() / v_s).clamp(-fmax, fmax).to(kv_dtype)
+    scales = [torch.tensor([x], dtype=torch.float32, device=DEVICE) for x in (k_s, v_s)]
+    return kq, vq, kq.float() * k_s, vq.float() * v_s, *scales
+
+
+@pytest.mark.parametrize("kv_dtype", FP8_KV)
 @pytest.mark.parametrize("topk", [6, 512])
-def test_sparse_attention_paged(topk: int):
+def test_sparse_attention_paged(topk: int, kv_dtype):
     """topk=512 covers the whole history, so it also checks dense equivalence."""
     torch.manual_seed(0)
     seq_len, heads, groups, dim = 203, 16, 4, 192
     shape = (2, seq_len, groups, dim)
     k = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
     v = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    kq, vq, k, v, k_scale, v_scale = _quant_kv(k, v, kv_dtype)
     pos = torch.cat([torch.arange(seq_len), torch.tensor([202])]).int().to(DEVICE)
     req = torch.tensor([0] * seq_len + [1], dtype=torch.int32, device=DEVICE)
     q = torch.randn(len(pos), heads, dim, dtype=torch.bfloat16, device=DEVICE)
     scores = torch.randn(len(pos), groups, seq_len // REGION + 1, device=DEVICE)
     regions = ref_select(scores, pos, topk).to(DEVICE)
 
-    kv_cache, bt = _paged([torch.stack([k[r], v[r]], 1) for r in range(2)], 64)
+    kv_cache, bt = _paged([torch.stack([kq[r], vq[r]], 1) for r in range(2)], 64)
     got = torch.empty_like(q)
     sparse_attention_paged(
         q,
@@ -202,25 +220,29 @@ def test_sparse_attention_paged(topk: int):
         got,
         region_size=REGION,
         scale=dim**-0.5,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
     want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
     torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)
 
 
-def test_sparse_decode_attention():
+@pytest.mark.parametrize("kv_dtype", FP8_KV)
+def test_sparse_decode_attention(kv_dtype):
     """One decode row per request through the split-K kernel the model uses."""
     torch.manual_seed(0)
     seq_len, heads, groups, dim, topk = 203, 16, 4, 192, 6
     shape = (2, seq_len, groups, dim)
     k = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
     v = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    kq, vq, k, v, k_scale, v_scale = _quant_kv(k, v, kv_dtype)
     pos = torch.tensor([seq_len - 1, seq_len - 9], dtype=torch.int32, device=DEVICE)
     req = torch.arange(2, dtype=torch.int32, device=DEVICE)
     q = torch.randn(2, heads, dim, dtype=torch.bfloat16, device=DEVICE)
     scores = torch.randn(2, groups, seq_len // REGION + 1, device=DEVICE)
     regions = ref_select(scores, pos, topk).to(DEVICE)
 
-    kv_cache, bt = _paged([torch.cat([k[r], v[r]], -1) for r in range(2)], 16)
+    kv_cache, bt = _paged([torch.cat([kq[r], vq[r]], -1) for r in range(2)], 16)
     got = torch.empty_like(q)
     sparse_decode_attention(
         q.view(2 * groups, -1, dim),
@@ -232,6 +254,8 @@ def test_sparse_decode_attention():
         got.view(2 * groups, -1, dim),
         scale=dim**-0.5,
         splits=4,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
     want = ref_attention(q, k, v, regions, req, pos, dim**-0.5)
     torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)

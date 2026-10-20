@@ -285,10 +285,11 @@ def sparse_decode_attention(
     assert dim == 192 and cache.shape[-1] == 384 and heads <= 16
     assert query.stride(2) == output.stride(2) == cache.stride(3) == 1
     assert regions.stride(1) == 1 and rows == regions.shape[0]
-    fp8 = cache.dtype in (torch.uint8, torch.float8_e4m3fn)
+    fp8 = cache.dtype in (torch.uint8, torch.float8_e4m3fn, torch.float8_e4m3fnuz)
     if fp8:
         assert k_scale is not None and v_scale is not None
-        cache = cache.view(torch.float8_e4m3fn)
+        if cache.dtype == torch.uint8:
+            cache = cache.view(current_platform.fp8_dtype())
     if not rows:
         return
     partial = torch.empty(

@@ -25,6 +25,7 @@ from vllm.models.step5.nvidia.ops.sparse_indexer import (
     select_all_regions,
     select_regions,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
     _resolve_layer_name,
@@ -142,11 +143,16 @@ def step5_csa_attention(
                 indexer.topk_backend,
             )
             del scores
+    kv_cache = layer.attn.kv_cache
+    k_scale = v_scale = None
+    if kv_cache.dtype == torch.uint8:
+        kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        k_scale, v_scale = layer.attn._k_scale, layer.attn._v_scale
     if n == index_md.num_reqs * index_md.max_query_len:
         # Decode or uniform MTP verify: requests own consecutive rows.
         sparse_decode_attention(
             query[:n].reshape(rows, -1, layer.head_dim),
-            layer.attn.kv_cache,
+            kv_cache,
             regions,
             main_md.block_table,
             pos.long().repeat_interleave(groups) if groups > 1 else pos.long(),
@@ -155,13 +161,13 @@ def step5_csa_attention(
             scale=layer.scaling,
             query_len=index_md.max_query_len,
             splits=sparse_decode_splits(rows),
+            k_scale=k_scale,
+            v_scale=v_scale,
             gate=None if gate is None else gate[:n],
         )
         return
     regions = regions.view(n, groups, -1)
-    key_cache, value_cache = layer.attn.kv_cache.transpose(1, 2).split(
-        layer.head_dim, dim=-1
-    )
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(layer.head_dim, dim=-1)
     sparse_attention_paged(
         query[:n],
         key_cache,
@@ -173,6 +179,8 @@ def step5_csa_attention(
         output[:n],
         region_size=region_size,
         scale=layer.scaling,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
     if gate is not None:
         output[:n] *= gate[:n].unsqueeze(-1).sigmoid().to(output.dtype)

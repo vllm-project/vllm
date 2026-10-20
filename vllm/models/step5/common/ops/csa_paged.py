@@ -233,6 +233,8 @@ def _attention_paged_kernel(
     req_ptr,
     pos_ptr,
     out_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
     scale,
     stride_q_token,
     stride_q_head,
@@ -255,11 +257,14 @@ def _attention_paged_kernel(
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_S: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     token = tl.program_id(0)
     group = tl.program_id(1)
     req = tl.load(req_ptr + token).to(tl.int64)
     position = tl.load(pos_ptr + token)
+    if FP8:
+        scale = scale * tl.load(k_scale_ptr)
 
     heads = tl.arange(0, BLOCK_H)
     dims = tl.arange(0, BLOCK_D)
@@ -321,6 +326,9 @@ def _attention_paged_kernel(
             mask=kv_mask,
             other=0.0,
         )
+        if FP8:
+            k = k.to(q.dtype)
+            v = v.to(q.dtype)
         s = tl.dot(q, tl.trans(k), out_dtype=tl.float32) * scale
         s = tl.where(live[None, :], s, float("-inf"))
         tile_max = tl.maximum(row_max, tl.max(s, axis=1))
@@ -332,6 +340,8 @@ def _attention_paged_kernel(
         acc = acc * rescale[:, None] + tl.dot(p.to(v.dtype), v, out_dtype=tl.float32)
         row_max = tile_max
 
+    if FP8:
+        acc = acc * tl.load(v_scale_ptr)
     out = tl.where(row_sum[:, None] > 0, acc / row_sum[:, None], 0.0)
     tl.store(
         out_ptr
@@ -355,6 +365,8 @@ def sparse_attention_paged(
     *,
     region_size: int,
     scale: float,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> None:
     """Attention over each query's selected regions of the paged K/V, into
     ``output``. ``key_cache``/``value_cache`` are ``[pages, page_tokens, kv_heads,
@@ -364,6 +376,9 @@ def sparse_attention_paged(
         return
     groups = key_cache.shape[2]
     heads_per_group = heads // groups
+    fp8 = key_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+    assert value_cache.dtype == key_cache.dtype
+    assert not fp8 or (k_scale is not None and v_scale is not None)
     _attention_paged_kernel[(tokens, groups)](
         query,
         key_cache,
@@ -373,6 +388,8 @@ def sparse_attention_paged(
         token_req,
         positions,
         output,
+        k_scale,
+        v_scale,
         scale,
         query.stride(0),
         query.stride(1),
@@ -397,4 +414,5 @@ def sparse_attention_paged(
         # 8 regions x 8 tokens x 256 padded dims fits gfx942's 64 KiB LDS.
         BLOCK_S=8,
         num_stages=1,
+        FP8=fp8,
     )

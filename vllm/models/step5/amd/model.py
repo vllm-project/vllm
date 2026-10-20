@@ -196,12 +196,15 @@ class Step5Attention(Step3p5Attention):
         self.indexer = None
         if not _is_sparse_layer(config, self.layer_idx):
             return
-        cache_dtype = kv_cache_dtype_str_to_dtype(
-            vllm_config.cache_config.cache_dtype, vllm_config.model_config
-        )
-        if cache_dtype != torch.bfloat16:
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if (
+            cache_dtype not in ("fp8", "fp8_e4m3")
+            and kv_cache_dtype_str_to_dtype(cache_dtype, vllm_config.model_config)
+            != torch.bfloat16
+        ):
             raise NotImplementedError(
-                f"Step-5 sparse attention reads a BF16 KV cache; got {cache_dtype}"
+                "Step-5 sparse attention reads a BF16 or FP8 E4M3 KV cache; "
+                f"got {cache_dtype}"
             )
         if not self.use_rope:
             raise NotImplementedError("Step-5 sparse layers require RoPE")
