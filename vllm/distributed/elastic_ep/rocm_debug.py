@@ -464,6 +464,48 @@ def _ipc_probe_plain(size: int) -> str:
     return out
 
 
+def ipc_health(size: int = 6 << 20) -> str:
+    """Say whether this process can still export an IPC handle at all.
+
+    Deliberately outside the switch that silences the rest of this file. The
+    passes that matter run with it on, because every other probe here exports
+    enough to be suspected of causing what it measures, and this one exports
+    two buffers and frees them again.
+
+    What it is for: the refusal is process wide rather than about one call.
+    Standby groups are built 22 times out of 22 for the first reconfiguration
+    a process performs and refused 10 times out of 10 for the second, and a
+    probe immediately before a failure exports fine while the same probe
+    immediately after refuses everything, including buffers on a different
+    card. So something between those two moments switches IPC off for the
+    process. Called after every step that has a name, this says which step it
+    was. Both flavours are here because the two sizes that get refused in CI
+    come from different allocation calls: 6 MiB with uncached flags from
+    hipExtMallocWithFlags, and plain allocations from hipMalloc.
+    """
+    hip = _lib()
+    parts = []
+
+    ptr = ctypes.c_void_p()
+    rc = hip.hipExtMallocWithFlags(
+        ctypes.byref(ptr),
+        ctypes.c_size_t(size),
+        ctypes.c_uint(_MALLOC_FLAGS["uncached"]),
+    )
+    if rc != 0:
+        hip.hipGetLastError()
+        parts.append(f"uncached malloc failed {_err(rc)}")
+    else:
+        handle = ctypes.create_string_buffer(_HANDLE_BYTES)
+        rc = hip.hipIpcGetMemHandle(handle, ptr)
+        parts.append("uncached ok" if rc == 0 else f"uncached refused {_err(rc)}")
+        hip.hipGetLastError()
+        hip.hipFree(ptr)
+
+    parts.append(f"plain {_ipc_probe_plain(size)}")
+    return ", ".join(parts)
+
+
 def _ipc_probe_burst(size: int, count: int) -> str:
     """Exports many handles at once without freeing, to see whether the export
     path has a per-process limit. Everything is released before returning."""

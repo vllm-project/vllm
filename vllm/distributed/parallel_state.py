@@ -63,6 +63,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -1544,6 +1545,7 @@ def _init_stateless_group(
     coord_store: Store,
     use_device_communicator: bool = True,
     use_all2all: bool = False,
+    shrink_from: "tuple[PyNcclCommunicator, list[int]] | None" = None,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1560,6 +1562,7 @@ def _init_stateless_group(
         global_rank=world.rank,
         global_world_size=world.world_size,
         use_all2all=use_all2all,
+        shrink_from=shrink_from,
     )
 
 

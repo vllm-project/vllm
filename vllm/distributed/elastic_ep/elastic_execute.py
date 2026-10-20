@@ -323,6 +323,31 @@ class ElasticEPScalingExecutor:
                 label,
                 time.perf_counter() - started,
             )
+            self._probe_ipc_health(label)
+
+    def _probe_ipc_health(self, label: str) -> None:
+        """Ask after each step whether IPC still works in this process.
+
+        The refusal belongs to the process and not to the call that trips over
+        it: standby groups are built 22 times out of 22 for the first
+        reconfiguration a process performs and refused 10 times out of 10 for
+        the second, and a probe immediately before a failure exports fine while
+        the same probe immediately after refuses everything, including a buffer
+        on a different card. Something between those two moments switches IPC
+        off, and every step in between already has a name, so asking after each
+        of them turns an interval into a step. That is worth more than another
+        measurement of the failure itself, because an operation we can name is
+        an operation we can try not to perform.
+
+        Diagnostic only, and separate from VLLM_EEP_DEBUG_OFF on purpose: the
+        passes that need this are exactly the ones that silence the probes
+        which export enough to be suspected of causing the failure.
+        """
+        if os.getenv("VLLM_EEP_DEBUG_POISON_POINT") != "1":
+            return
+        from vllm.distributed.elastic_ep import rocm_debug
+
+        logger.warning("[EEP-DEBUG] ipc after %s: %s", label, rocm_debug.ipc_health())
 
     def _retire_groups(self, groups: tuple[GroupCoordinator | None, ...]) -> None:
         """Destroy the groups the reconfiguration replaced.
