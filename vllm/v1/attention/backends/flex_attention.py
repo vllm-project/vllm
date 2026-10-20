@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
-    is_quantized_kv_cache,
     is_torch_equal_or_newer,
 )
 from vllm.v1.attention.backend import (
@@ -47,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheLayout,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
