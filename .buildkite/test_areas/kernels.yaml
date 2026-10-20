@@ -742,7 +742,7 @@ steps:
       commands:
       - pytest -v -s tests/kernels/test_rocm_fp32_router_gemm.py tests/kernels/test_gate_linear_rocm_dispatch.py tests/kernels/test_bf16x3_router_gemm_rocm.py
 
-- label: ":nvidia: (DGX) Spark [Nightly] b12x Linear Kernels"
+- label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
   key: b12x-linear-kernels-dgx-spark-nightly
   timeout_in_minutes: 60
   device: dgx-spark

@@ -1247,7 +1247,7 @@ steps:
       - uv pip install --system 'evalscope==1.10.0'
       - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-rocm.txt
 
-- label: ":nvidia: (DGX) Spark [Nightly] GPQA Eval (GPT-OSS)"
+- label: ":nvidia: (DGX Spark) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-spark
   timeout_in_minutes: 35
   device: dgx-spark
