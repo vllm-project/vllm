@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention for gfx1150..gfx1153 (opt-in).
+"""Attention for gfx1150..gfx1153 and RDNA4 (opt-in).
 
 Decodes of up to MAX_M query tokens per sequence run
 csrc/rocm/rdna_decode_attn.cu, other batches
@@ -57,12 +57,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _on_gfx115x() -> bool:
+def _on_supported_gpu() -> bool:
+    """gfx1150..gfx1153, or RDNA4 (opt-in only there)."""
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx115x
+    from vllm.platforms.rocm import on_gfx115x, on_rdna4
 
-    return on_gfx115x()
+    return on_gfx115x() or on_rdna4()
 
 
 # A kernel and its scratch buffers.
@@ -242,7 +243,7 @@ class RocmRdnaMetadataBuilder(TritonAttentionMetadataBuilder):
 
 
 class RocmRdnaAttentionBackend(TritonAttentionBackend):
-    """TRITON_ATTN with the RDNA3.5 kernels."""
+    """TRITON_ATTN with the RDNA kernels."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -306,7 +307,7 @@ class RocmRdnaAttentionBackend(TritonAttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
-        return _on_gfx115x()
+        return _on_supported_gpu()
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -315,7 +316,7 @@ class RocmRdnaAttentionBackend(TritonAttentionBackend):
 
 
 class RocmRdnaAttentionImpl(TritonAttentionImpl):
-    """Runs the RDNA3.5 kernels when they support the call, else Triton."""
+    """Runs the RDNA kernels when they support the call, else Triton."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

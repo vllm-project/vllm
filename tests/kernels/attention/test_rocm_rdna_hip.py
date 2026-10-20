@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RDNA3.5 decode and prefill attention: accuracy against a reference, and
+"""RDNA decode and prefill attention: accuracy against a reference, and
 fallback to Triton for unsupported calls."""
 
 import functools
@@ -24,16 +24,17 @@ TOL = {torch.float16: 1e-3, torch.bfloat16: 8e-3}
 DTYPES = list(TOL)
 
 
-def _on_gfx115x() -> bool:
+def _on_gfx115x_or_rdna4() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx115x
+    from vllm.platforms.rocm import on_gfx115x, on_rdna4
 
-    return on_gfx115x()
+    return on_gfx115x() or on_rdna4()
 
 
-requires_gfx115x = pytest.mark.skipif(
-    not _on_gfx115x(), reason="kernels are built for gfx1150..gfx1153"
+requires_gfx115x_or_rdna4 = pytest.mark.skipif(
+    not _on_gfx115x_or_rdna4(),
+    reason="kernels are built for gfx1150..gfx1153 and RDNA4",
 )
 
 _CONFIG_ENTRY = re.compile(r"^\s*\{([\w:, ]+)\},$")
@@ -123,9 +124,25 @@ def _reference(q, kv, seq_len, window=0, mm_ranges=()):
     return torch.bmm(torch.softmax(scores, -1), vf).permute(1, 0, 2)
 
 
-def _max_rel(got, ref) -> float:
-    """Relative error with a floor."""
-    return ((got - ref).abs() / ref.abs().clamp_min(1e-3)).max().item()
+def _rounds_p(v) -> bool:
+    """On RDNA4, fp16 WMMA decode builds with more than 8 rows per workgroup
+    take P rounded to fp16 into P@V, as Triton does."""
+    from vllm.platforms.rocm import on_rdna4
+
+    if not isinstance(v, hip.KernelVariant):
+        return False
+    gqa = v.num_q_heads // v.num_kv_heads
+    rows = gqa * v.max_query_len // v.row_groups
+    return on_rdna4() and v.dtype == torch.float16 and not v.dot_product and rows > 8
+
+
+def _max_rel(got, ref, v=None) -> float:
+    """Relative error with a floor. With P rounded to fp16 every term errs by
+    up to 2^-11, so outputs near zero are judged against the largest one."""
+    floor = 1e-3
+    if v is not None and _rounds_p(v):
+        floor = max(floor, ref.abs().max().item())
+    return ((got - ref).abs() / ref.abs().clamp_min(floor)).max().item()
 
 
 def _launch(module, q, kv, block_table, out, scratch, seq_len):
@@ -143,7 +160,7 @@ def _check_one(v, module, lens):
         torch.accelerator.synchronize()
         ref = _reference(q, kv, seq_len, v.window)
         got = out.float().nan_to_num(1e9)
-        assert _max_rel(got, ref) <= TOL[v.dtype], f"{v.name}, S={seq_len}"
+        assert _max_rel(got, ref, v) <= TOL[v.dtype], f"{v.name}, S={seq_len}"
 
 
 def _batch_inputs(v, lens):
@@ -177,7 +194,7 @@ def _check_batch(v, module, lens):
             assert (rows == 7.0).all(), f"{v.name}: a padded sequence was written"
             continue
         ref = _reference(parts[i][0], parts[i][1], s, v.window)
-        assert _max_rel(rows, ref) <= TOL[v.dtype], f"{v.name}: sequence {i}, S={s}"
+        assert _max_rel(rows, ref, v) <= TOL[v.dtype], f"{v.name}: sequence {i}, S={s}"
 
 
 def _unit(v):
@@ -191,7 +208,7 @@ def test_decode_configs_are_well_formed():
     M in both dtypes, for one sequence and a batch."""
     variants = hip.variants()
     if not variants:
-        pytest.skip("_rocm_C carries no RDNA3.5 variants")
+        pytest.skip("_rocm_C carries no RDNA variants")
     assert len({hip._lookup_key(v) for v in variants}) == len(variants), (
         "two builds share a shape"
     )
@@ -209,7 +226,7 @@ def test_decode_configs_are_well_formed():
             assert not (batch and v.dot_product), v.name
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_every_listed_variant_is_built_in():
     # Raises if a build has no instantiation unit.
     assert torch.ops._rocm_C.rdna_decode_configs()
@@ -218,7 +235,7 @@ def test_every_listed_variant_is_built_in():
     assert not missing, f"{len(missing)} variants not in _rocm_C, e.g. {missing[0]}"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("unit", sorted({_unit(v) for v in hip.variants()}))
 def test_built_in_variants_match_reference(unit):
     """Every built decode variant matches the reference."""
@@ -239,14 +256,14 @@ def test_built_in_variants_match_reference(unit):
         buf = _decode_mm_buf(ranges, q.device)
         got = _decode_mm(module, v, q, kv, block_table, s, buf)
         ref = _reference(q, kv, s, v.window, ranges)
-        assert _max_rel(got, ref) <= TOL[v.dtype], f"{v.name}, image"
+        assert _max_rel(got, ref, v) <= TOL[v.dtype], f"{v.name}, image"
         # At M=1 the image ends at the only query token, so nothing changes.
         if m > 1:
             causal = _reference(q, kv, s, v.window)
             assert _max_rel(causal, ref) > 10 * TOL[v.dtype], f"{v.name}, image"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "want",
     [
@@ -278,10 +295,10 @@ def test_sliding_window_never_reads_freed_pages(want):
     _launch(module, q, kv, block_table, out, hip.make_scratch(v, q.device), seq_len)
     torch.accelerator.synchronize()
     assert torch.isfinite(out).all()
-    assert _max_rel(out.float(), ref) <= TOL[v.dtype]
+    assert _max_rel(out.float(), ref, v) <= TOL[v.dtype]
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_graph_replay_follows_seq_lens():
     """A captured graph follows the sequence length on the device."""
     v, module = _built(
@@ -310,10 +327,10 @@ def test_graph_replay_follows_seq_lens():
         graph.replay()
         torch.accelerator.synchronize()
         ref = _reference(q, kv, s)
-        assert _max_rel(out.float(), ref) <= TOL[v.dtype], f"S={s}"
+        assert _max_rel(out.float(), ref, v) <= TOL[v.dtype], f"S={s}"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_other_dtype_is_refused_not_miscomputed(dtype):
     """A build refuses the other 16-bit dtype."""
@@ -566,7 +583,7 @@ def test_prefill_configs_are_well_formed():
     """No two prefill builds share a shape and step, every decode configuration
     has prefill builds, and the build of the largest step reached runs."""
     if not _prefill_rows():
-        pytest.skip("_rocm_C carries no RDNA3.5 variants")
+        pytest.skip("_rocm_C carries no RDNA variants")
     keys = {
         (v.num_q_heads, v.num_kv_heads, v.head_size, v.page_size, v.window)
         + (v.dtype, v.min_query_len)
@@ -593,7 +610,7 @@ def test_prefill_configs_are_well_formed():
     assert hip.prefill_variant_for(*args, 1 << 20) == steps[-1]
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_every_listed_prefill_variant_is_built_in():
     # Raises if a build has no instantiation unit.
     assert torch.ops._rocm_C.rdna_prefill_configs()
@@ -601,7 +618,7 @@ def test_every_listed_prefill_variant_is_built_in():
     assert not missing, f"{len(missing)} prefill variants not in _rocm_C"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("unit", sorted({_prefill_unit(v) for v in _prefill_rows()}))
 def test_built_in_prefill_variants_match_reference(unit):
     """Every built prefill variant matches the reference, with and without a
@@ -640,7 +657,7 @@ def test_built_in_prefill_variants_match_reference(unit):
             )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_prefill_past_the_last_step():
     """M past the last step runs the last row."""
     v = next(
@@ -667,7 +684,7 @@ def test_prefill_past_the_last_step():
         )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_prefill_window_never_reads_freed_pages():
     """Freed pages before the window do not reach the output."""
     v = next(v for v in _prefill_rows() if v.window and v.dtype == torch.float16)
@@ -718,7 +735,7 @@ def _steps(v, m, s, window):
     return out
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("window", [0, 512])
 @pytest.mark.parametrize("batch", [*_BATCHES, "at the bound"])
 def test_prefill_plan_covers_every_tile_once(batch, window):
@@ -841,7 +858,7 @@ def _serve_batch(
     return md
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "shape",
     [(32, 16, 256, 1024, torch.float16), (32, 4, 512, 0, torch.bfloat16)],
@@ -871,7 +888,7 @@ def test_prefill_batch_mm_prefix_matches_reference(shape):
         )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "unit", sorted({_prefill_unit(v) for v in _prefill_rows() if v.page_size == 16})
 )
@@ -899,7 +916,7 @@ def test_prefill_batch_matches_reference(unit):
             )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "unit",
     sorted(
@@ -936,7 +953,7 @@ def test_mixed_batch_matches_reference(unit):
             )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_mixed_batch_mm_prefix_matches_reference():
     """Decodes with their own images on the decode kernel, reading rows
     0..nd-1 of the builder's buffer, beside a prefill chunk with more images
@@ -990,7 +1007,7 @@ def test_prefill_batch_configs_are_well_formed():
     divides its kv heads; each shape has the first cell."""
     table = hip._prefill_batch_table()
     if not table:
-        pytest.skip("_rocm_C carries no RDNA3.5 variants")
+        pytest.skip("_rocm_C carries no RDNA variants")
     seen = set()
     for (hq, hkv, d, page, window), cells in table.items():
         for mean_m, keys, min_query_len, head_group in cells:
@@ -1034,7 +1051,7 @@ def test_prefill_batch_features():
     )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_prefill_batch_needs_this_steps_host_copy():
     """A batch without this step's host query starts goes to Triton."""
     import types
@@ -1068,7 +1085,7 @@ def test_prefill_batch_needs_this_steps_host_copy():
         assert "host's query starts" in impl._rejected
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "shape",
     [(32, 16, 256, 1024, torch.float16), (32, 4, 512, 0, torch.float16)]
@@ -1117,7 +1134,7 @@ def test_prefill_mm_prefix_matches_reference(shape, m, prefix, mm_ranges):
     )
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("bad", ["batch", "triples", "cpu"])
 def test_prefill_refuses_malformed_mm_ranges(bad):
     """Only one sequence's (ranges, 2) on the device reaches the kernel: the
@@ -1159,7 +1176,7 @@ def _decode_mm(module, v, q, kv, block_table, seq_len, buf):
     return out.float().nan_to_num(1e9)
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize(
     "want, min_m",
     [
@@ -1232,7 +1249,7 @@ def test_decode_mm_prefix_matches_reference(want, min_m, image, dtype):
         module, v, q, kv, block_table, seq_len, _decode_mm_buf(ranges, q.device)
     )
     ref = _reference(q, kv, seq_len, v.window, ranges)
-    assert _max_rel(got, ref) <= TOL[v.dtype], v.name
+    assert _max_rel(got, ref, v) <= TOL[v.dtype], v.name
     causal = _reference(q, kv, seq_len, v.window)
     assert _max_rel(causal, ref) > 10 * TOL[v.dtype], "the image changed nothing"
     # With several images over the query tokens, each one shows.
@@ -1243,7 +1260,7 @@ def test_decode_mm_prefix_matches_reference(want, min_m, image, dtype):
         assert _max_rel(without, ref) > 10 * TOL[v.dtype], f"{r} changed nothing"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("case", ["zero", "over_capacity"])
 def test_decode_mm_ranges_stop_at_count_and_capacity(case):
     """The kernel reads min(count, capacity) ranges: those it reads apply, and
@@ -1268,7 +1285,7 @@ def test_decode_mm_ranges_stop_at_count_and_capacity(case):
     buf = torch.tensor(flat, dtype=torch.int32, device=q.device)[:size]
     got = _decode_mm(module, v, q, kv, block_table, seq_len, buf)
     ref = _reference(q, kv, seq_len, 0, ranges)
-    assert _max_rel(got, ref) <= TOL[v.dtype], v.name
+    assert _max_rel(got, ref, v) <= TOL[v.dtype], v.name
     # Reading the trap, or ignoring the ranges that fit, must show.
     for wrong in (ranges + [trap], []):
         if wrong != ranges:
@@ -1276,7 +1293,7 @@ def test_decode_mm_ranges_stop_at_count_and_capacity(case):
             assert _max_rel(wrong_ref, ref) > 10 * TOL[v.dtype], wrong
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_graph_replay_follows_mm_ranges():
     """A captured graph reads the ranges the builder rewrites in place each
     step, and none are left over when they go back to empty."""
@@ -1310,10 +1327,10 @@ def test_graph_replay_follows_mm_ranges():
         graph.replay()
         torch.accelerator.synchronize()
         ref = _reference(q, kv, seq_len, 0, ranges)
-        assert _max_rel(out.float(), ref) <= TOL[v.dtype], f"ranges={ranges}"
+        assert _max_rel(out.float(), ref, v) <= TOL[v.dtype], f"ranges={ranges}"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 def test_batched_decode_follows_mm_ranges_per_sequence():
     """A batched build reads each sequence's row of ranges, eagerly and when a
     captured graph replays after the rows and lengths are rewritten. A padding
@@ -1364,13 +1381,13 @@ def test_batched_decode_follows_mm_ranges_per_sequence():
                     assert (got == 7.0).all(), f"{lens}: padding {i} was written"
                     continue
                 ref = _reference(parts[i][0], parts[i][1], s, v.window, ranges)
-                assert _max_rel(got, ref) <= TOL[v.dtype], f"{step}, sequence {i}"
+                assert _max_rel(got, ref, v) <= TOL[v.dtype], f"{step}, sequence {i}"
                 if ranges:
                     causal = _reference(parts[i][0], parts[i][1], s, v.window)
                     assert _max_rel(causal, ref) > 10 * TOL[v.dtype], "no change"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("bad", ["even", "int64", "cpu", "no_rows"])
 def test_decode_refuses_malformed_mm_ranges(bad):
     """Only an odd-length int32 [count, start0, end0, ...], or a row of it per
@@ -1517,7 +1534,7 @@ def test_mm_ranges_decode_buffer_rows():
     assert out is buf
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("overshoot", [False, True], ids=["exact", "async_spec"])
 def test_mm_ranges_decode_builder_feeds_kernel(overshoot):
     """The builder's buffer gives the kernel the mask of all the request's
@@ -1551,12 +1568,12 @@ def test_mm_ranges_decode_builder_feeds_kernel(overshoot):
     assert buf is not None
     got = _decode_mm(module, v, q, kv, block_table, seq_len, buf)
     ref = _reference(q, kv, seq_len, 0, ranges)
-    assert _max_rel(got, ref) <= TOL[v.dtype], v.name
+    assert _max_rel(got, ref, v) <= TOL[v.dtype], v.name
     causal = _reference(q, kv, seq_len)
     assert _max_rel(causal, ref) > 10 * TOL[v.dtype], "the image changed nothing"
 
 
-@requires_gfx115x
+@requires_gfx115x_or_rdna4
 @pytest.mark.parametrize("overshoot", [False, True], ids=["exact", "async_spec"])
 def test_mm_ranges_decode_builder_feeds_batched_kernel(overshoot):
     """The builder's rows give a batched build each sequence's mask, also when
@@ -1597,7 +1614,7 @@ def test_mm_ranges_decode_builder_feeds_batched_kernel(overshoot):
     for i, s in enumerate(lens):
         got = out[i * m : (i + 1) * m].float().nan_to_num(1e9)
         ref = _reference(parts[i][0], parts[i][1], s, v.window, ranges[i])
-        assert _max_rel(got, ref) <= TOL[v.dtype], f"sequence {i}"
+        assert _max_rel(got, ref, v) <= TOL[v.dtype], f"sequence {i}"
         if ranges[i]:
             causal = _reference(parts[i][0], parts[i][1], s, v.window)
             assert _max_rel(causal, ref) > 10 * TOL[v.dtype], (

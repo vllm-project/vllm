@@ -1,4 +1,4 @@
-// Launch ABI of the RDNA3.5 attention kernels: each decode build exposes a
+// Launch ABI of the RDNA attention kernels: each decode build exposes a
 // LaunchFn, each prefill build a PrefillFn.
 #pragma once
 
