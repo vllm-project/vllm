@@ -4,7 +4,7 @@
 
 Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
 :data:`GLM52_PROJECTIONS` was measured on B300 (SM103) and
-:data:`GLM52_PROJECTIONS_SM107` on VR200 (SM107). The SM107 table also covers
+:data:`GLM52_PROJECTIONS_SM107` on VRNVL72 (SM107). The SM107 table also covers
 the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
 projections, which run as BF16 GEMMs at decode batch sizes.
 """
@@ -94,13 +94,9 @@ GLM52_PROJECTIONS = {
     )
 }
 
-# SM107 (VR200): tuned CuTe DSL skinny-GEMM configs, swept against cuBLAS on one
-# GPU. A (shape, M) is listed only where its backend beat cuBLAS by at least
-# max(3%, 0.15 us) in serialized timing; every other M stays on cuBLAS. The
-# times are table backend / cuBLAS at M=4 (one request with MTP K=3) unless noted.
-# q_a + kv_a, replicated: 5.84 / 6.91 us. dsv3_fused_a_gemm is the fastest backend
-# only at M=6..8 (M=7 shares the measured M<=8 kernel) and loses to cuBLAS from
-# M=12.
+# SM107 (VRNVL72) table: each M is listed only where it beat cuBLAS; other M use
+# cuBLAS. Times are table backend / cuBLAS at M=4 unless noted.
+# q_a + kv_a, replicated: 5.84 / 6.91 us.
 _SM107_QKV_A_PROJECTION = GLM52ProjectionSpec(
     n=2624,
     k=6144,
@@ -196,7 +192,7 @@ _SM107_SHARED_DOWN_TP4_PROJECTION = GLM52ProjectionSpec(
     ),
 )
 
-# q_b_proj at TP8: the SM103 entry, re-measured on VR200 and kept (CuTe at M=1-2
+# q_b_proj at TP8: the SM103 entry, re-measured on VRNVL72 and kept (CuTe at M=1-2
 # 3.3 / 5.0 us; dsv3_fused_a_gemm at M=3-16 4.0-4.2 / 4.9-5.1 us).
 _SM107_Q_B_TP8_PROJECTION = GLM52_Q_B_PROJECTION
 
@@ -215,15 +211,11 @@ GLM52_PROJECTIONS_SM107 = {
 }
 
 
-def _is_sm103() -> bool:
-    return current_platform.is_device_capability((10, 3))
-
-
 def _low_latency_table() -> dict[tuple[int, int], GLM52ProjectionSpec] | None:
     """Measured dispatch table for the current device, or None if unsupported."""
     if current_platform.is_device_capability((10, 7)):
         return GLM52_PROJECTIONS_SM107
-    if _is_sm103():
+    if current_platform.is_device_capability((10, 3)):
         return GLM52_PROJECTIONS
     return None
 

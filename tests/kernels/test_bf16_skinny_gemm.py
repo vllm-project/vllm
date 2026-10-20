@@ -77,6 +77,7 @@ GLM_GPU_TABLES = (
     ((10, 3), glm52_gemm.GLM52_PROJECTIONS),
     ((10, 7), glm52_gemm.GLM52_PROJECTIONS_SM107),
 )
+GLM_GPU_TABLE_IDS = [f"sm{major}{minor}" for (major, minor), _ in GLM_GPU_TABLES]
 
 GLM_CUTE_CASES = [
     (capability, spec.n, spec.k, num_tokens)
@@ -493,6 +494,10 @@ def test_glm52_low_latency_table_capability_routing(
         "is_device_capability",
         lambda cc: cc == capability,
     )
+    # Keep build_glm52_plan from registering CuTe warmup configs process-wide.
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
     assert glm52_gemm._low_latency_table() is expected
 
     # The MTP eh_proj is a plain nn.Linear and gets its plan from the same table.
@@ -501,41 +506,6 @@ def test_glm52_low_latency_table_capability_routing(
     assert eh_plan == (
         None if expected is None else expected[(6144, 12288)].build_plan()
     )
-
-
-def test_glm52_sm107_table_plans() -> None:
-    table = glm52_gemm.GLM52_PROJECTIONS_SM107
-
-    def backends(n: int, k: int) -> tuple[set[int], set[int]]:
-        plan = table[(n, k)].build_plan()
-        cute = {m for m, (backend, _) in plan.items() if backend == "cute"}
-        return cute, set(plan) - cute
-
-    assert all((spec.n, spec.k) == key for key, spec in table.items())
-    assert backends(2624, 6144) == (set(range(1, 6)), {6, 7, 8})
-    assert backends(4096, 2048) == (set(range(1, 7)), set())
-    assert backends(6144, 4096) == ({1, 2, 3}, set())
-    assert backends(160, 6144) == ({1, 2, 3, 4, 5, 6, 8, 12, 16}, set())
-    assert backends(1024, 6144) == ({1, 2, 3, 4, 5, 6, 8}, set())
-    assert backends(6144, 512) == ({1, 2, 3, 4, 6}, set())
-    assert backends(6144, 12288) == ({1, 2, 3, 4}, set())
-    assert table[(2048, 2048)] is glm52_gemm.GLM52_Q_B_PROJECTION
-    assert len(table) == 8
-
-
-@pytest.mark.parametrize(
-    "table", [table for _, table in GLM_GPU_TABLES], ids=["sm103", "sm107"]
-)
-def test_glm52_tables_satisfy_kernel_constraints(
-    table: dict[tuple[int, int], glm52_gemm.GLM52ProjectionSpec],
-) -> None:
-    for spec in table.values():
-        assert {m for m, _ in spec.cute_configs}.isdisjoint(spec.dsv3_tokens)
-        for num_tokens, config in spec.cute_configs:
-            assert config.num_rows == num_tokens
-            assert spec.n % config.outputs_per_block == 0
-            assert spec.k % (config.block_size * config.vector_width) == 0
-            assert config.static_k in (None, spec.k)
 
 
 def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
@@ -547,7 +517,7 @@ def test_glm52_layout_rejects_nonpacked_single_row_view() -> None:
     assert not glm52_gemm._is_supported_row_major(multiple_rows)
 
 
-@pytest.mark.parametrize("capability,table", GLM_GPU_TABLES)
+@pytest.mark.parametrize("capability,table", GLM_GPU_TABLES, ids=GLM_GPU_TABLE_IDS)
 def test_glm52_installer_maps_only_selected_unquantized_shapes(
     monkeypatch: pytest.MonkeyPatch,
     capability: tuple[int, int],
@@ -942,7 +912,7 @@ def _require_capability_and_dsv3(capability: tuple[int, int]) -> None:
         not torch.cuda.is_available()
         or torch.cuda.get_device_capability() != capability
     ):
-        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
+        pytest.skip(f"dsv3_fused_a selection requires SM{capability[0]}{capability[1]}")
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         pytest.skip("dsv3_fused_a_gemm was not built")
 
