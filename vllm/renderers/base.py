@@ -9,7 +9,7 @@ from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -103,6 +103,8 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    supports_sanitize_control_tokens: ClassVar[bool] = False
+
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
@@ -1292,6 +1294,15 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         )
 
+    def _check_sanitize_control_tokens(self, chat_params: ChatParams) -> None:
+        if (
+            chat_params.chat_template_kwargs.get("sanitize_control_tokens")
+            and not self.supports_sanitize_control_tokens
+        ):
+            raise VLLMValidationError(
+                f"{type(self).__name__} does not support `sanitize_control_tokens`."
+            )
+
     def render_chat(
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
@@ -1301,6 +1312,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
+        self._check_sanitize_control_tokens(chat_params)
         arrival_time = time.time()
 
         if tok_params is None:
@@ -1341,6 +1353,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
+        self._check_sanitize_control_tokens(chat_params)
         arrival_time = time.time()
 
         if tok_params is None:

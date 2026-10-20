@@ -657,6 +657,8 @@ openai==2.31.0
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   gpt-oss
+openai-harmony==0.0.8
+    # via gpt-oss
 opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
@@ -895,6 +897,7 @@ pydantic==2.12.5
     #   model-hosting-container-standards
     #   mteb
     #   openai
+    #   openai-harmony
     #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings

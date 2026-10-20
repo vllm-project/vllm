@@ -605,6 +605,8 @@ openai==3.2.0
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   gpt-oss
+openai-harmony==0.0.8
+    # via gpt-oss
 opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
@@ -786,6 +788,7 @@ pydantic==2.13.4
     #   model-hosting-container-standards
     #   mteb
     #   openai
+    #   openai-harmony
     #   oss-harmony
     #   pydantic-extra-types
     #   pydantic-settings

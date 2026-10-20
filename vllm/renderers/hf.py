@@ -942,6 +942,8 @@ def replace_vision_chunk_video_placeholder(
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
+    supports_sanitize_control_tokens = True
+
     def __init__(
         self,
         config: VllmConfig,
@@ -1058,6 +1060,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             if chat_template_kwargs.get("tokenize") is False:
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
+        if chat_template_kwargs.get("sanitize_control_tokens"):
+            # transformers only sanitizes control tokens when tokenizing.
+            chat_template_kwargs["tokenize"] = True
 
         prompt_raw = safe_apply_chat_template(
             model_config,
@@ -1161,6 +1166,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
+            chat_template_kwargs["tokenize"] = True
+        if chat_template_kwargs.get("sanitize_control_tokens"):
+            # transformers only sanitizes control tokens when tokenizing.
             chat_template_kwargs["tokenize"] = True
 
         prompt_raw = await self._render_with_timeout(

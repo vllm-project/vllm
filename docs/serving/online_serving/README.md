@@ -265,6 +265,27 @@ the detected format, which can be one of:
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
 
+### Control tokens in message content
+
+By default, text such as `<|im_end|>` or `<think>` inside a message, tool call, or tool result is
+encoded as the corresponding special token, the same as if the chat template had written it. To
+encode such text as plain text instead, so that only the chat template can emit control tokens,
+set `sanitize_control_tokens` in `chat_template_kwargs`:
+
+```python
+completion = client.chat.completions.create(
+    model="Qwen/Qwen3-8B",
+    messages=[{"role": "user", "content": "What does <|im_end|> mean?"}],
+    extra_body={"chat_template_kwargs": {"sanitize_control_tokens": True}},
+)
+```
+
+To enable it for all requests, start the server with
+`--default-chat-template-kwargs '{"sanitize_control_tokens": true}'`. This uses the
+[`sanitize_control_tokens`](https://github.com/huggingface/transformers/pull/47386) option of
+`apply_chat_template`. Models whose renderer does not support it, such as DeepSeek-V3.2 and
+DeepSeek-V4, reject requests that set it.
+
 ## Ray Serve LLM
 
 Ray Serve LLM enables scalable, production-grade serving of the vLLM engine. It integrates tightly with vLLM and extends it with features such as auto-scaling, load balancing, and back-pressure.
