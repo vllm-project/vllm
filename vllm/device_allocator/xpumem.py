@@ -326,9 +326,7 @@ class XpuMemAllocator:
         allocators.clear()
 
     @contextmanager
-    def use_memory_pool(self, tag: str | None = None, host_pinned: bool = False):
-        if host_pinned:
-            raise NotImplementedError("host-pinned memory pools are CUDA only")
+    def use_memory_pool(self, tag: str | None = None):
         if tag is None:
             tag = XpuMemAllocator.default_tag
 

@@ -363,7 +363,9 @@ class Worker(WorkerBase):
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if tag == "kv_cache" and self.vllm_config.cache_config.kv_cache_host_pinned:
-            return self._host_pinned_kv_cache_pool_context()
+            self._check_host_pinned_kv_cache()
+            # allocate_kv_cache does its own cudaHostAlloc, outside any pool.
+            return nullcontext()
 
         if (
             current_platform.is_cuda_alike()
@@ -387,12 +389,10 @@ class Worker(WorkerBase):
             )
         return allocator.use_memory_pool(tag=tag)
 
-    def _host_pinned_kv_cache_pool_context(self) -> AbstractContextManager:
-        """KV cache in host-pinned memory through the cumem pool, see
-        CacheConfig.kv_cache_host_pinned. Only the kv_cache tag goes through
-        the pool, whether or not sleep mode enabled the allocator globally.
-        Integrated (unified-memory) GPUs only: on every other part the GPU
-        has its own memory, and the KV cache belongs there."""
+    def _check_host_pinned_kv_cache(self) -> None:
+        """See CacheConfig.kv_cache_host_pinned. Integrated (unified-memory)
+        GPUs only: on every other part the GPU has its own memory, and the KV
+        cache belongs there."""
         if not (
             current_platform.is_cuda()
             and current_platform.is_integrated_gpu(self.local_rank)
@@ -402,12 +402,12 @@ class Worker(WorkerBase):
                 "(unified-memory) GPUs such as GB10 / DGX Spark or Thor, whose "
                 "device memory the NIC cannot register for RDMA."
             )
-        if not current_platform.is_cumem_allocator_available():
+        if self.vllm_config.model_config.enable_sleep_mode:
+            # cudaFreeHost cannot keep the virtual address that the KV views
+            # and captured CUDA graphs point to, so wake_up could not restore it.
             raise ValueError(
-                "kv_cache_host_pinned needs the cumem allocator extension."
+                "kv_cache_host_pinned is not supported with enable_sleep_mode."
             )
-        allocator = get_mem_allocator_instance()
-        return allocator.use_memory_pool(tag="kv_cache", host_pinned=True)
 
     @contextmanager
     def _scoped_allocator_max_split(self, max_split_size_mb: int):

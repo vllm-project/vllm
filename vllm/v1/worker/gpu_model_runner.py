@@ -7257,6 +7257,7 @@ class GPUModelRunner(
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                host_pinned=self.cache_config.kv_cache_host_pinned,
             )
 
         # Set up cross-layer KV cache sharing

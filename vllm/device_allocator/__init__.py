@@ -23,15 +23,10 @@ class AllocationData:
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
     is_asleep: bool = False
-    # Backed by host-pinned memory (see CuMemAllocator.use_memory_pool); wake_up
-    # must recreate it with the same placement, not the pool default.
-    host_pinned: bool = False
 
 
 class MemAllocator(Protocol):
-    def use_memory_pool(
-        self, tag: str | None = None, host_pinned: bool = False
-    ) -> AbstractContextManager: ...
+    def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
 

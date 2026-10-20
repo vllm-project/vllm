@@ -74,3 +74,42 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
                                   contiguous_cpu.strides(), cuda_dev,
                                   contiguous_cpu.scalar_type(), deleter);
 }
+
+// Zero-filled int8 CUDA tensor of `nbytes` backed by write-combined, mapped
+// host-pinned memory (cudaHostAlloc), freed with cudaFreeHost. For the KV cache
+// on integrated GPUs, where the NIC can register host-pinned memory for RDMA.
+torch::stable::Tensor alloc_host_pinned_tensor(int64_t nbytes) {
+  STD_TORCH_CHECK(nbytes > 0, "nbytes must be positive");
+  void* host_ptr = nullptr;
+  cudaError_t err =
+      cudaHostAlloc(&host_ptr, static_cast<size_t>(nbytes),
+                    cudaHostAllocMapped | cudaHostAllocWriteCombined);
+  STD_TORCH_CHECK(err == cudaSuccess,
+                  "cudaHostAlloc failed: ", cudaGetErrorString(err));
+
+  void* device_ptr = nullptr;
+  err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
+  if (err == cudaSuccess) {
+    err = cudaMemset(device_ptr, 0, static_cast<size_t>(nbytes));
+  }
+  if (err == cudaSuccess) {
+    err = cudaDeviceSynchronize();
+  }
+  if (err != cudaSuccess) {
+    cudaFreeHost(host_ptr);
+    STD_TORCH_CHECK(
+        false, "host-pinned tensor setup failed: ", cudaGetErrorString(err));
+  }
+
+  int device_index = 0;
+  err = cudaGetDevice(&device_index);
+  if (err != cudaSuccess) {
+    cudaFreeHost(host_ptr);
+    STD_TORCH_CHECK(false, "cudaGetDevice failed: ", cudaGetErrorString(err));
+  }
+  const torch::stable::Device cuda_dev(torch::headeronly::DeviceType::CUDA,
+                                       device_index);
+  return torch::stable::from_blob(
+      device_ptr, {nbytes}, {1}, cuda_dev, torch::headeronly::ScalarType::Char,
+      [host_ptr](void*) { cudaFreeHost(host_ptr); });
+}

@@ -284,3 +284,23 @@ def test_non_contiguous_strided_view(device, pinned):
 
     # Correctness check: values match original transposed CPU tensor
     assert torch.equal(gpu_view.cpu(), cpu_view)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only.")
+@pytest.mark.parametrize("device", DEVICES)
+def test_alloc_host_pinned_tensor(device):
+    # KV cache backing for CacheConfig.kv_cache_host_pinned: zeroed, on the
+    # current device, and outside PyTorch's caching allocator.
+    torch.accelerator.set_device_index(torch.device(device).index)
+    nbytes = (1 << 20) + 3
+    before = torch.accelerator.memory_allocated(device)
+    buf = torch.ops._C.alloc_host_pinned_tensor(nbytes)
+    assert buf.device == torch.device(device)
+    assert buf.dtype == torch.int8 and buf.shape == (nbytes,)
+    assert torch.accelerator.memory_allocated(device) == before
+    assert int(buf.abs().sum()) == 0
+
+    buf.fill_(3)
+    torch.accelerator.synchronize(buf.device)
+    assert int(buf.sum(dtype=torch.int64)) == 3 * nbytes
+    del buf
