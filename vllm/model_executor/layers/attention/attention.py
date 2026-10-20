@@ -645,6 +645,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 SlidingWindowSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
+                    num_query_heads=self.num_heads,
                     head_size=self.head_size,
                     head_size_v=self.head_size_v,
                     dtype=self.kv_cache_torch_dtype,
@@ -664,6 +665,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
@@ -675,6 +677,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
+                num_query_heads=self.num_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
