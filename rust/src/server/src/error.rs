@@ -6,6 +6,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
+use vllm_engine_core_client::protocol::output::RequestError;
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
@@ -26,6 +27,8 @@ pub enum ApiError {
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// The engine rejected the request with a retryable error.
+    ServiceUnavailable { code: String, message: String },
 }
 
 impl ApiError {
@@ -37,6 +40,7 @@ impl ApiError {
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -74,6 +78,12 @@ impl ApiError {
                 param: None,
                 code: Some("conflict_error".to_string()),
             },
+            Self::ServiceUnavailable { code, message } => ErrorDetail {
+                message: message.clone(),
+                error_type: "service_unavailable_error".to_string(),
+                param: None,
+                code: Some(code.clone()),
+            },
         };
 
         ErrorResponse { error }
@@ -109,6 +119,18 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
         return invalid_request!("{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
+}
+
+/// Classify an engine-reported request failure: a retryable error (e.g. a
+/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+pub fn engine_error(error: Option<&RequestError>) -> ApiError {
+    match error {
+        Some(error) if error.retryable => ApiError::ServiceUnavailable {
+            code: error.code.clone(),
+            message: error.message.clone(),
+        },
+        _ => server_error!("Internal server error"),
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +237,20 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_request_chat_template_maps_to_invalid_request() {
+        let api_error = chat_submit_error(
+            "tokenize failed",
+            vllm_chat::Error::UntrustedRequestChatTemplate,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.message,
+            "Chat template is passed with request, but --trust-request-chat-template is not set. \
+             Refused request with untrusted chat template."
+        );
+    }
+
+    #[test]
     fn chat_template_render_failure_stays_internal() {
         let error = vllm_chat::Error::ChatTemplate(
             "failed to render jinja template: unknown function".to_string(),
@@ -281,17 +317,17 @@ mod tests {
     }
 
     #[test]
-    fn truncate_exceeds_budget_maps_to_invalid_request() {
-        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+    fn truncate_exceeds_max_model_len_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsMaxModelLen {
             value: 8000,
-            budget: 4000,
+            max_model_len: 4000,
         };
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
-        assert!(response.error.message.contains("max_tokens = 4000"));
+        assert!(response.error.message.contains("max_model_len = 4000"));
     }
 
     #[test]

@@ -905,6 +905,49 @@ def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> Non
     assert not should_use_zentorch_sdpa(attn_type, dtype)
 
 
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.X86,
+    reason="FP8 KV cache requires x86",
+)
+@pytest.mark.parametrize(
+    "kv_cache_dtype,fp8_dtype",
+    [("fp8_e4m3", torch.float8_e4m3fn), ("fp8_e5m2", torch.float8_e5m2)],
+)
+def test_cpu_attn_fp8_cache_write_rounding(
+    kv_cache_dtype: str, fp8_dtype: torch.dtype
+) -> None:
+    """Cache bytes must round ties to even, including exponent boundaries."""
+    info = torch.finfo(fp8_dtype)
+    subnormal = info.tiny * info.eps
+    values = torch.tensor(
+        [
+            0,
+            1 + info.eps / 2,
+            1 + 1.5 * info.eps,
+            2 - info.eps / 2,
+            subnormal / 2,
+            0.75 * subnormal,
+            1.5 * subnormal,
+            info.tiny - subnormal / 2,
+        ]
+    )
+    key = torch.cat((values, -values)).repeat(2).reshape(1, 1, 32)
+    key_cache = torch.empty((1, 1, 32, 32), dtype=torch.uint8)
+    value_cache = torch.empty_like(key_cache)
+    cpu_attn_reshape_and_cache(
+        key,
+        key,
+        key_cache,
+        value_cache,
+        torch.tensor([0]),
+        "vec",
+        kv_cache_dtype=kv_cache_dtype,
+    )
+    expected = key.to(fp8_dtype).view(torch.uint8).flatten()
+    torch.testing.assert_close(key_cache[0, 0, :, 0], expected, rtol=0, atol=0)
+    torch.testing.assert_close(value_cache[0, 0, 0], expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

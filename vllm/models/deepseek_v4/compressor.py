@@ -7,7 +7,7 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -409,12 +409,12 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
-        # full graph cannot branch on per-step CPU metadata after capture
+        # A captured graph would replay the capture batch's skip decision.
         if (
             current_platform.is_cuda()
             and self.head_dim == 512
             and self.compress_ratio == 128
-            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and not torch.cuda.is_current_stream_capturing()
             and state_metadata.c128_boundary is False
         ):
             return

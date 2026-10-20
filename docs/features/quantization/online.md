@@ -99,6 +99,46 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+### Re-quantizing layers to a different precision
+
+An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
+
+vLLM uses the checkpoint method to load and dequantize the checkpoint weight, and then applies the online quantization method. This requires the checkpoint
+method to implement weight dequantization, unsupported source and target
+combinations raise an error.
+
+Currently supported combinations are:
+
+| Checkpoint layer | Online target | Requirements |
+| ---------------- | ------------- | ------------ |
+| Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+
+For example, serialized ModelOpt MXFP8 linears can be converted to
+per-channel-weight/per-token-activation FP8 at load time:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --linear-backend auto \
+  --quantization-config.linear fp8_per_channel
+```
+
+Similarly, for example, NVFP4 MoE checkpoints can be re-quantized to any online MoE method,
+for example compressed-tensors NVFP4 experts to online MXFP4:
+
+```bash
+vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
+  --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
+```
+
+!!! info
+
+    Re-quantization is available for both linear and MoE layers.
+
+    Checkpoint-exclusion policy is not enforced by online quantization/re-quantization. Only exclusion through `--quantization-config.targets`/`--quantization-config.ignore` is enforced. 
+
 ### Online quantization on unquantized layers from partially-quantized checkpoints
 
 Online quantization can be used on already quantized checkpoints independently of their original `quant_method` (`modelopt`, `compressed-tensors`, `quark`, etc.), for layers that are left unquantized in the original checkpoint.
