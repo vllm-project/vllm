@@ -28,7 +28,7 @@ It supports page size = 1.
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import fp32_dot_precision, tl, triton
 from vllm.utils.math_utils import RCP_LN2
 
 
@@ -70,6 +70,7 @@ def _fwd_kernel(
     SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
+    IN_PRECISION: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -175,7 +176,7 @@ def _fwd_kernel(
             other=0.0,
         )
 
-        qk = tl.dot(q, k)
+        qk = tl.dot(q, k, input_precision=IN_PRECISION)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         if USE_SINKS and SINKS_BIAS_KEY0:
             qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
@@ -196,7 +197,7 @@ def _fwd_kernel(
             other=0.0,
         )
         p = p.to(v.dtype)
-        acc = tl.dot(p, v, acc)
+        acc = tl.dot(p, v, acc, input_precision=IN_PRECISION)
         # update m_i
         m_i = m_ij
 
@@ -296,4 +297,5 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        IN_PRECISION=fp32_dot_precision(q.dtype),
     )

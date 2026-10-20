@@ -547,6 +547,32 @@ def test_fused_moe_int64_overflow(workspace_init):
         )
 
 
+def test_fused_experts_fp32_dot_products_are_not_tf32(workspace_init):
+    """Float32 fused MoE matches a float64 reference to IEEE float32 accuracy."""
+    set_random_seed(0)
+    m, e, topk, hidden, inter = 64, 8, 2, 1024, 2048
+    x = torch.randn(m, hidden, device="cuda")
+    w1 = torch.randn(e, 2 * inter, hidden, device="cuda") * hidden**-0.5
+    w2 = torch.randn(e, hidden, inter, device="cuda") * inter**-0.5
+    topk_weights, topk_ids = torch.softmax(
+        torch.randn(m, e, device="cuda"), dim=-1
+    ).topk(topk, dim=-1)
+
+    with set_current_vllm_config(vllm_config):
+        out = fused_moe_module.fused_experts(x, w1, w2, topk_weights, topk_ids.int())
+
+    expected = torch.zeros(m, hidden, device="cuda", dtype=torch.float64)
+    for j in range(topk):
+        ids = topk_ids[:, j]
+        h = torch.einsum("mk,mnk->mn", x.double(), w1.double()[ids])
+        act = F.silu(h[:, :inter]) * h[:, inter:]
+        expected += topk_weights[:, j : j + 1].double() * torch.einsum(
+            "mn,mkn->mk", act, w2.double()[ids]
+        )
+
+    torch.testing.assert_close(out.double(), expected, atol=1e-4, rtol=1e-4)
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
 @pytest.mark.parametrize("e", NUM_EXPERTS_LARGE)
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)

@@ -622,6 +622,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
     ),
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
+    # Float32 tl.dot in the Triton attention and fused-MoE kernels follows it:
+    # float32 accuracy (3xTF32 on CUDA) for "highest", TF32 otherwise.
     # Valid options mirror torch.set_float32_matmul_precision
     "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
         "VLLM_FLOAT32_MATMUL_PRECISION",
