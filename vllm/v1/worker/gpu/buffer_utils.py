@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from array import array
 from collections.abc import Iterable, Sequence
 from functools import partial
 
@@ -10,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
+    TORCH_DTYPE_TO_NUMPY_DTYPE,
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
@@ -164,7 +166,9 @@ class StagedWriteTensor:
 
         self._staged_write_indices: list[int] = []
         self._staged_write_starts: list[int] = []
-        self._staged_write_contents: list[int | float] = []
+        # Small writes share a flat list chunk; an int32 token buffer (a long prompt)
+        # is snapshotted as its own array chunk instead of one Python int per token.
+        self._staged_write_contents: list[list[int | float] | np.ndarray] = []
         self._staged_write_cu_lens: list[int] = []
         self._staged_write_max_len = 0
 
@@ -180,23 +184,41 @@ class StagedWriteTensor:
     ) -> None:
         assert index >= 0
         assert start >= 0
-        if not x:
-            return
+        if isinstance(x, array):
+            n = len(x)
+            if n == 0:
+                return
+            self._staged_write_contents.append(np.array(x))
+        else:
+            flat = self._flat_contents()
+            prev_len = len(flat)
+            flat.extend(x)
+            n = len(flat) - prev_len
+            if n == 0:
+                return
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(start)
-        prev_len = len(self._staged_write_contents)
-        self._staged_write_contents.extend(x)
-        cu_len = len(self._staged_write_contents)
-        self._staged_write_cu_lens.append(cu_len)
-        self._staged_write_max_len = max(self._staged_write_max_len, cu_len - prev_len)
+        self._append_cu_len(n)
 
     def stage_write_elem(self, index: int, x: int) -> None:
         assert index >= 0
+        self._flat_contents().append(x)
         self._staged_write_indices.append(index)
         self._staged_write_starts.append(0)
-        self._staged_write_contents.append(x)
-        self._staged_write_cu_lens.append(len(self._staged_write_contents))
-        self._staged_write_max_len = max(self._staged_write_max_len, 1)
+        self._append_cu_len(1)
+
+    def _flat_contents(self) -> list[int | float]:
+        contents = self._staged_write_contents
+        if contents and isinstance(last := contents[-1], list):
+            return last
+        flat: list[int | float] = []
+        contents.append(flat)
+        return flat
+
+    def _append_cu_len(self, n: int) -> None:
+        cu_lens = self._staged_write_cu_lens
+        cu_lens.append((cu_lens[-1] if cu_lens else 0) + n)
+        self._staged_write_max_len = max(self._staged_write_max_len, n)
 
     def apply_write(self) -> None:
         n = len(self._staged_write_indices)
@@ -207,14 +229,13 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
+        contents = _concat_contents(self._staged_write_contents, self.dtype)
         if self.write_contents is None:
             write_contents = async_tensor_h2d(
-                self._staged_write_contents, device=self.device, dtype=self.dtype
+                contents, device=self.device, dtype=self.dtype
             )
         else:
-            write_contents = self.write_contents.copy_to_uva(
-                self._staged_write_contents
-            )
+            write_contents = self.write_contents.copy_to_uva(contents)
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
@@ -264,7 +285,7 @@ class FusedStagedWriter:
         group_ids: list[int] = []
         indices: list[int] = []
         starts: list[int] = []
-        contents: list[int | float] = []
+        contents: list[list[int | float] | np.ndarray] = []
         cu_lens: list[int] = []
         max_len = 0
 
@@ -276,9 +297,9 @@ class FusedStagedWriter:
             group_ids.extend([group_id] * n)
             indices.extend(t._staged_write_indices)
             starts.extend(t._staged_write_starts)
-            content_base = len(contents)
+            base = cu_lens[-1] if cu_lens else 0
             contents.extend(t._staged_write_contents)
-            cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+            cu_lens.extend(base + cu_len for cu_len in t._staged_write_cu_lens)
             max_len = max(max_len, t._staged_write_max_len)
 
         if not group_ids:
@@ -288,7 +309,11 @@ class FusedStagedWriter:
         indices_uva = self.indices.copy_to_uva(indices)
         starts_uva = self.starts.copy_to_uva(starts)
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
-        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+        contents_gpu = async_tensor_h2d(
+            _concat_contents(contents, torch.int32),
+            device=self.device,
+            dtype=torch.int32,
+        )
 
         _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
             output_ptrs,
@@ -303,6 +328,15 @@ class FusedStagedWriter:
         )
         for t in tensors:
             t.clear_staged_writes()
+
+
+def _concat_contents(
+    chunks: list[list[int | float] | np.ndarray], dtype: torch.dtype
+) -> np.ndarray:
+    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    if len(chunks) == 1:
+        return np.asarray(chunks[0], dtype=np_dtype)
+    return np.concatenate([np.asarray(c, dtype=np_dtype) for c in chunks])
 
 
 def _num_write_chunks(max_len: int) -> int:
