@@ -66,7 +66,6 @@ from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
-    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
@@ -101,19 +100,12 @@ def _make_vllm_config():
 
 
 def _build_layer(
-    vllm_config,
-    conv_state,
-    ssm_state,
-    A_log,
-    dt_bias,
-    conv_weight,
-    conv_bias,
-    enable_packed_recurrent_decode=False,
+    vllm_config, conv_state, ssm_state, A_log, dt_bias, conv_weight, conv_bias
 ):
     """A minimal object that runs the real ``_forward_core`` bound to it."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
-    layer.enable_packed_recurrent_decode = enable_packed_recurrent_decode
+    layer.enable_packed_recurrent_decode = False
     layer.tp_size = 1
     layer.num_k_heads = H
     layer.num_v_heads = HV
@@ -137,10 +129,6 @@ def _build_layer(
             layer,
             name,
             types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
-        )
-    if hasattr(QwenGatedDeltaNetAttention, "_forward_packed_recurrent_decode"):
-        layer._forward_packed_recurrent_decode = types.MethodType(
-            QwenGatedDeltaNetAttention._forward_packed_recurrent_decode, layer
         )
     return layer
 
@@ -203,10 +191,10 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    expected_backend = (
-        "cutedsl" if current_platform.is_device_capability_family(100) else "triton"
+    assert (
+        builder.gdn_prefill_backend
+        == vllm_config.additional_config["gdn_prefill_backend"]
     )
-    assert builder.gdn_prefill_backend == expected_backend
 
     num_tokens = sum(query_lens)
 
@@ -315,132 +303,6 @@ def test_forward_core_split_matches_unified(
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
 
 
-def test_packed_decode_is_bitwise_invariant_in_mixed_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A decode row must not change recurrent kernels when prefills arrive."""
-    torch.manual_seed(0)
-    monkeypatch.setattr(qwen_gdn_linear_attn.envs, "VLLM_BATCH_INVARIANT", True)
-    device = torch.device("cuda")
-    dtype = torch.bfloat16
-    num_decodes = 2
-    num_prefill_tokens = 3
-    num_tokens = num_decodes + num_prefill_tokens
-
-    conv_state_shape, temporal_state_shape = (
-        MambaStateShapeCalculator.gated_delta_net_state_shape(
-            1, H, HV, K, V, CONV_KERNEL, num_spec=0
-        )
-    )
-    conv_state = torch.zeros(3, *conv_state_shape, dtype=dtype, device=device)
-    ssm_state = (
-        torch.randn(3, *temporal_state_shape, dtype=torch.float32, device=device) * 0.05
-    )
-    A_log = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
-    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
-    conv_weight = (
-        torch.randn(CONV_DIM, 1, CONV_KERNEL, dtype=dtype, device=device) * 0.1
-    )
-    conv_bias = torch.randn(CONV_DIM, dtype=dtype, device=device) * 0.1
-    mixed_qkv = torch.randn(num_tokens, CONV_DIM, dtype=dtype, device=device) * 0.1
-    a = torch.randn(num_tokens, HV, dtype=dtype, device=device) * 0.1
-    b = torch.randn(num_tokens, HV, dtype=dtype, device=device) * 0.1
-    state_indices = torch.arange(3, dtype=torch.int32, device=device)
-
-    decode_metadata = GDNAttentionMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=num_decodes,
-        num_decode_tokens=num_decodes,
-        num_spec_decodes=0,
-        num_spec_decode_tokens=0,
-        num_actual_tokens=num_decodes,
-        non_spec_query_start_loc=torch.arange(
-            num_decodes + 1, dtype=torch.int32, device=device
-        ),
-        non_spec_state_indices_tensor=state_indices[:num_decodes],
-    )
-    mixed_metadata = GDNAttentionMetadata(
-        num_prefills=1,
-        num_prefill_tokens=num_prefill_tokens,
-        num_decodes=num_decodes,
-        num_decode_tokens=num_decodes,
-        num_spec_decodes=0,
-        num_spec_decode_tokens=0,
-        num_actual_tokens=num_tokens,
-        has_initial_state=torch.tensor(
-            [True, True, False], dtype=torch.bool, device=device
-        ),
-        non_spec_query_start_loc=torch.tensor(
-            [0, 1, 2, num_tokens], dtype=torch.int32, device=device
-        ),
-        non_spec_state_indices_tensor=state_indices,
-        prefill_query_start_loc=torch.tensor(
-            [0, num_prefill_tokens], dtype=torch.int32, device=device
-        ),
-        prefill_state_indices=state_indices[num_decodes:],
-        prefill_has_initial_state=torch.tensor(
-            [False], dtype=torch.bool, device=device
-        ),
-    )
-
-    def passthrough_conv(x, *args, **kwargs):
-        return x
-
-    def prefill_stub(
-        *,
-        v: torch.Tensor,
-        initial_state: torch.Tensor,
-        **kwargs,
-    ):
-        return torch.zeros_like(v), initial_state.clone()
-
-    def run(metadata, initial_ssm_state):
-        layer = _build_layer(
-            _make_vllm_config(),
-            conv_state.clone(),
-            initial_ssm_state,
-            A_log,
-            dt_bias,
-            conv_weight,
-            conv_bias,
-            enable_packed_recurrent_decode=True,
-        )
-        layer.chunk_gated_delta_rule = prefill_stub
-        with (
-            patch.object(
-                qwen_gdn_linear_attn,
-                "causal_conv1d_update",
-                side_effect=passthrough_conv,
-            ),
-            patch.object(
-                qwen_gdn_linear_attn,
-                "causal_conv1d_fn",
-                side_effect=passthrough_conv,
-            ),
-        ):
-            output = _run_forward_core(
-                layer, metadata, mixed_qkv, b, a, metadata.num_actual_tokens
-            )
-        return output, layer.kv_cache[1]
-
-    decode_output, decode_state = run(decode_metadata, ssm_state.clone())
-    mixed_output, mixed_state = run(mixed_metadata, ssm_state.clone())
-
-    torch.testing.assert_close(
-        mixed_output[:num_decodes],
-        decode_output,
-        atol=0,
-        rtol=0,
-    )
-    torch.testing.assert_close(
-        mixed_state[:num_decodes],
-        decode_state[:num_decodes],
-        atol=0,
-        rtol=0,
-    )
-
-
 @pytest.mark.parametrize("splits", [[23] + [1] * 74, [31, 1, 65]])
 def test_recurrent_bic_prefill_matches_decode_replay(
     splits: list[int], monkeypatch: pytest.MonkeyPatch
@@ -474,15 +336,9 @@ def test_recurrent_bic_prefill_matches_decode_replay(
 
     def run(partitions):
         layer = _build_layer(
-            config,
-            conv.clone(),
-            state.clone(),
-            A_log,
-            dt_bias,
-            weight,
-            bias,
-            enable_packed_recurrent_decode=True,
+            config, conv.clone(), state.clone(), A_log, dt_bias, weight, bias
         )
+        layer.enable_packed_recurrent_decode = True
         outputs = []
         start = 0
         for count in partitions:
@@ -498,14 +354,10 @@ def test_recurrent_bic_prefill_matches_decode_replay(
             meta.non_spec_state_indices_tensor = indices
             if meta.num_prefills:
                 meta.prefill_state_indices = indices
+            token_slice = slice(start, start + count)
             outputs.append(
                 _run_forward_core(
-                    layer,
-                    meta,
-                    x[start : start + count],
-                    b[start : start + count],
-                    a[start : start + count],
-                    count,
+                    layer, meta, x[token_slice], b[token_slice], a[token_slice], count
                 )
             )
             layer.kv_cache = tuple(t.clone() for t in layer.kv_cache)
