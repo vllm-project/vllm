@@ -18,7 +18,8 @@ import time
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web, ClientSession, ClientTimeout, TCPConnector
+from aiohttp.client_exceptions import ServerDisconnectedError
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8004"))
 TARGET = os.environ.get("TARGET_URL") or f"http://localhost:{os.environ.get('TARGET_PORT', '8005')}"
@@ -115,18 +116,30 @@ async def handle(request: web.Request):
 
     tracker.count += 1
 
-    # Forward to vLLM
-    async with session.request(
-        method, target_url, headers=headers, data=body, timeout=TARGET_TIMEOUT
-    ) as resp:
-        response_headers = dict(resp.headers)
-        response_headers.pop("Transfer-Encoding", None)
-        response_body = await resp.read()
-        return web.Response(
-            status=resp.status,
-            headers=response_headers,
-            body=response_body,
-        )
+    # Forward to vLLM.
+    # KEEP-ALIVE FIX (2026-10-20) : uvicorn (vLLM) ferme ses connexions idle pendant
+    # que le pool client les réutilise -> ServerDisconnectedError sporadique (bruit de
+    # fond ~25/j mesuré 13-20/10). Une tentative de plus sur une connexion fraîche
+    # couvre la classe entière ; les fenêtres mortes réelles (port publié par Docker
+    # avant le boot complet de l'APIServer vLLM, cf. boots 15/10 et 19/10) restent des
+    # erreurs légitimes qui remontent après épuisement du retry.
+    for attempt in range(2):
+        try:
+            async with session.request(
+                method, target_url, headers=headers, data=body, timeout=TARGET_TIMEOUT
+            ) as resp:
+                response_headers = dict(resp.headers)
+                response_headers.pop("Transfer-Encoding", None)
+                response_body = await resp.read()
+                return web.Response(
+                    status=resp.status,
+                    headers=response_headers,
+                    body=response_body,
+                )
+        except ServerDisconnectedError:
+            if attempt == 1:
+                raise
+            print(f"[RETRY 1/2] upstream disconnected on {path}, retrying")
 
 
 async def stats(request: web.Request):
@@ -140,7 +153,9 @@ async def stats(request: web.Request):
 
 async def on_startup(app):
     global session
-    session = ClientSession()
+    # force_close : une connexion TCP fraîche par requête (localhost, coût nul) —
+    # supprime la course keep-alive uvicorn/pool client à la source (2026-10-20).
+    session = ClientSession(connector=TCPConnector(force_close=True))
     print(f"Proxy started: :{LISTEN_PORT} -> {TARGET}")
     print(f"Logging up to {MAX_LOG} embedding requests to {LOG_FILE}")
     if LOG_FILE.exists():
