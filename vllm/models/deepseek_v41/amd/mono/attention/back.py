@@ -34,6 +34,11 @@ from flydsl.expr.typing import T, as_ir_value
 
 from ..common.arch import GFX942
 from ..common.gfx942 import fp8x2_f32, ocp_to_fnuz
+from ..stages.moe_shape import MoeBuild, route_shape
+from ..stages.seam import COLS as SEAM_COLS
+from ..stages.seam import K_MIX as SEAM_K_MIX
+from ..stages.seam import MIX as SEAM_MIX
+from ..stages.seam import SLICES as SEAM_SLICES
 from .device import (
     BLOCKS,
     CM_DEV,
@@ -73,6 +78,7 @@ from .plan import (
     HALF,
     HEAD_DIM,
     HEAD_TILE,
+    HIDDEN,
     KEYS,
     NOPE,
     ROPE,
@@ -492,7 +498,12 @@ def stage_split(c, unit):
         stamp(c, 6)
         # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
         # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line)
+        # bytes, two 16 B stores (4 lanes fill a 128 B line). Tuned: each
+        # store fills whole 64 B sectors of the head's 128 B (no partial-sector
+        # writes): store j, lane g takes dims 32 j + 8 g .. from lane
+        # 2 j + g // 2 of its row (its words 4 (g % 2) ..)
+        if const_expr(c["tuned"]):
+            odd = (g % 2) == 1
         for ht2 in range_constexpr(d.head_tiles):
             hh = ht2 * HEAD_TILE + r16
             words = []
@@ -502,14 +513,33 @@ def stage_split(c, unit):
                 )
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
-            for hlf in range_constexpr(2):
-                bo.buffer_store(
-                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                    rsrc(c["part"]),
-                    off + 4 * hlf,
-                    cache_modifier=CM_DEV,
-                )
+            if const_expr(c["tuned"]):
+                row = ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase
+                for j in range_constexpr(2):
+                    src = r16 + 16 * (2 * j + g // 2)
+                    out = [
+                        odd.select(
+                            lane_gather(words[4 + e], src), lane_gather(words[e], src)
+                        )
+                        for e in range(4)
+                    ]
+                    bo.buffer_store(
+                        fx.Vector.from_elements(out, fx.Int32),
+                        rsrc(c["part"]),
+                        (row + 32 * j + 8 * g) // 2,
+                        cache_modifier=CM_DEV,
+                    )
+            else:
+                off = (
+                    ((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g
+                ) // 2
+                for hlf in range_constexpr(2):
+                    bo.buffer_store(
+                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
+                        rsrc(c["part"]),
+                        off + 4 * hlf,
+                        cache_modifier=CM_DEV,
+                    )
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -714,6 +744,128 @@ def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
         v1 = row_sum(rk, 2 * rp + 1, tl)
         emit(t, col, v0, v1)
     gpu.barrier()
+
+
+# ---------------------------------------------------------------- touch
+
+XCDS = 8  # a CTA's L2 is its XCD's: CTA b runs on XCD b % 8
+LINE = 64  # bytes a touch load (one dword) pulls into L2 / MALL
+GATE_ROW = HIDDEN * 2  # the router's bf16 gate weight row, bytes
+GATE_PART = GATE_ROW // 4  # a router task's K part of a row (PARTS = 4)
+SH_ROW = HIDDEN  # a shared gate_up e4m3 row, bytes
+SH_SROW = HIDDEN // 32  # its E8M0 scale row (32 rows a scale row), bytes
+HC_SEGS = SEAM_MIX * 4  # a slice task's hc_fn rows: (projection, stream) x 32 f32
+
+
+def touch_plan(key):
+    """The L2 warm-up, right after their wo_b, by the CTAs the FFN seam leaves
+    idle (past its slice, gate and norm tasks), of the cold weights the FFN
+    seam and the MoE's first stages read next: a CTA's job is the lines one
+    consumer CTA reads -- a slice task's hc_fn columns, a norm task's norm
+    weight, a router task's gate_w rows (16 x a K part), a shared unit's sgu
+    rows (16 gate + 16 up) and scales -- taken by an idle CTA on its XCD. None:
+    a build without it (not tuned) or a shape it skips."""
+    if not key.tuned:
+        return None
+    s = key.tokens
+    lo = SEAM_SLICES + 2 * s  # the FFN seam's CTAs: slices, then gates, norms
+    if BLOCKS - lo < XCDS:
+        return None
+    rs = route_shape(MoeBuild(tokens=s, tp=key.tp))
+    if rs.router_groups[0] != 1 or len(token_tiles(s)) != 1:
+        return None
+    assert rs.router0 + rs.router_tasks <= BLOCKS
+    assert rs.shared0 + rs.shared_units <= BLOCKS
+    jobs = BLOCKS // XCDS  # consumer CTAs an XCD
+    return {
+        "lo": lo,
+        "iters": cdiv(jobs, (BLOCKS - lo) // XCDS),
+        "jobs": jobs,
+        "norm0": SEAM_SLICES + s,
+        "router0": rs.router0,
+        "router_tasks": rs.router_tasks,
+        "shared0": rs.shared0,
+        "shared_units": rs.shared_units,
+        "sh_inter": rs.dims.sh_inter,
+    }
+
+
+def _touch(base, byte, live):
+    """One dword at ``byte`` of ``base`` (``live`` false: masked, no traffic)."""
+    nb = live.select(fx.Int64(0xFFFFFFFF), fx.Int64(0))
+    return fx.Int32(bo.buffer_load(rsrc(base, nb), byte // 4, vec_width=1, dtype=T.i32))
+
+
+@traced
+def stage_touch(c, key, plan):
+    """``touch_plan``'s jobs on this CTA (an idle one, k-th of the K on its
+    XCD): consumer CTAs b = XCD + 8 (k + K i). The loaded words are folded and
+    discarded: no value of the layer depends on them."""
+    tid, bid = c["tid"], c["bid"]
+    a = c["args"]
+    lo, sh, s = plan["lo"], plan["sh_inter"], key.tokens
+    if bid >= lo:
+        r = bid % XCDS
+        lo_r = lo + (r - lo % XCDS + XCDS) % XCDS
+        k = (bid - lo_r) // XCDS
+        kk = (BLOCKS - 1 - lo_r) // XCDS + 1
+        acc = fx.Int32(0)
+        g_lines = ROWS * GATE_PART // LINE  # 640
+        s_lines = ROWS * SH_ROW // LINE  # 1280
+        for i in range_constexpr(plan["iters"]):
+            m = k + kk * i
+            live = m < plan["jobs"]
+            b = r + XCDS * fx.min(m, plan["jobs"] - 1)
+            # a slice task's hc_fn: (projection j, stream o) rows of 32 f32
+            q = fx.min(tid // 2, HC_SEGS - 1)
+            hbyte = ((q // 4) * SEAM_K_MIX + (q % 4) * HIDDEN + b * SEAM_COLS) * 4 + (
+                tid % 2
+            ) * LINE
+            acc = acc ^ _touch(
+                a["hc_fn"], hbyte, live & (b < SEAM_SLICES) & (tid < 2 * HC_SEGS)
+            )
+            # a norm task's norm weight (bf16 [HIDDEN])
+            nt = b - plan["norm0"]
+            acc = acc ^ _touch(
+                a["ffn_w"],
+                fx.min(tid, HIDDEN * 2 // LINE - 1) * LINE,
+                live & (nt >= 0) & (nt < s) & (tid < HIDDEN * 2 // LINE),
+            )
+            # a router task's gate_w rows
+            task = b - plan["router0"]
+            is_r = live & (task >= 0) & (task < plan["router_tasks"])
+            task = fx.min(fx.max(task, 0), plan["router_tasks"] - 1)
+            for qq in range_constexpr(cdiv(g_lines, THREADS)):
+                ln = fx.min(tid + THREADS * qq, g_lines - 1)
+                lv = is_r & ((tid + THREADS * qq) < g_lines)
+                row = (task // 4) * ROWS + ln // (GATE_PART // LINE)
+                byte = (
+                    row * GATE_ROW
+                    + (task % 4) * GATE_PART
+                    + (ln % (GATE_PART // LINE)) * LINE
+                )
+                acc = acc ^ _touch(a["gate_w"], byte, lv)
+            # a shared unit's gate and up rows, their scale rows
+            u = b - plan["shared0"]
+            is_s = live & (u >= 0) & (u < plan["shared_units"])
+            u = fx.min(fx.max(u, 0), plan["shared_units"] - 1)
+            for half in range_constexpr(2):
+                row0 = half * sh + u * ROWS
+                for qq in range_constexpr(cdiv(s_lines, THREADS)):
+                    ln = fx.min(tid + THREADS * qq, s_lines - 1)
+                    lv = is_s & ((tid + THREADS * qq) < s_lines)
+                    byte = (row0 + ln // (SH_ROW // LINE)) * SH_ROW + (
+                        ln % (SH_ROW // LINE)
+                    ) * LINE
+                    acc = acc ^ _touch(a["sgu"], byte, lv)
+            hs = fx.min(tid // 3, 1)
+            sbyte = ((hs * sh + u * ROWS) // 32) * SH_SROW + (tid % 3) * LINE
+            acc = acc ^ _touch(
+                a["sgu_s"],
+                fx.min(sbyte, (2 * sh // 32) * SH_SROW - 4),
+                is_s & (tid < 6),
+            )
+        _ = fresh(acc)
 
 
 # ---------------------------------------------------------------- kernel
@@ -978,3 +1130,6 @@ def run_back(c, key, bid):
         if const_expr(ti == 0):
             stamp(c, 13)
     stamp(c, 4)
+    tplan = touch_plan(key)
+    if const_expr(tplan is not None and "gate_w" in a):
+        stage_touch(c, key, tplan)

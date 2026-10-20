@@ -870,6 +870,12 @@ def build_mono_k2(key: MonoBuild):
             "out": 0,
             "out_stride": 0,
             "zrec": zrec,
+            # the FFN half's first weights (``back.stage_touch``)
+            "gate_w": gate_w,
+            "sgu": sgu,
+            "sgu_s": sgu_s,
+            "hc_fn": hc_fn,
+            "ffn_w": ffn_w,
         }
         blayout = {
             n: layout[n] for n in back_scratch(s, Dims(tp), start=0, tuned=key.tuned)
