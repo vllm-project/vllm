@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from starlette.requests import Request
 
 from tests.entrypoints.openai.chat_completion.test_serving_chat import (
     BASE_MODEL_PATHS,
@@ -463,6 +464,36 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
 REASONING_PARSER = "kimi_k3"
 
 
+def _build_chat_serving(cls, model_config, renderer, reasoning_parser=""):
+    """Build `cls` (single or batch chat serving) over a mock engine."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.model_config = model_config
+    mock_engine.errored = False
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = renderer
+    mock_engine.generate.side_effect = lambda *args, **kwargs: _generator(0, "ok")
+
+    models = OpenAIServingModels(mock_engine, BASE_MODEL_PATHS)
+    online_renderer = OnlineRenderer(
+        model_config=model_config,
+        renderer=mock_engine.renderer,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        reasoning_parser=reasoning_parser or None,
+    )
+    return mock_engine, cls(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        reasoning_parser=reasoning_parser,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_batched_reasoning_wiring_matches_single_chat() -> None:
@@ -486,31 +517,8 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
     shared_renderer = _build_renderer(mock_model_config)
 
     def _build_serving(cls):
-        mock_engine = MagicMock(spec=AsyncLLM)
-        mock_engine.model_config = mock_model_config
-        mock_engine.errored = False
-        mock_engine.input_processor = MagicMock()
-        mock_engine.renderer = shared_renderer
-        mock_engine.generate.side_effect = lambda *args, **kwargs: _generator(0, "ok")
-
-        models = OpenAIServingModels(mock_engine, BASE_MODEL_PATHS)
-        online_renderer = OnlineRenderer(
-            model_config=mock_model_config,
-            renderer=mock_engine.renderer,
-            request_logger=None,
-            chat_template=CHAT_TEMPLATE,
-            chat_template_content_format="auto",
-            reasoning_parser=REASONING_PARSER,
-        )
-        return mock_engine, cls(
-            mock_engine,
-            models,
-            response_role="assistant",
-            online_renderer=online_renderer,
-            chat_template=CHAT_TEMPLATE,
-            chat_template_content_format="auto",
-            request_logger=None,
-            reasoning_parser=REASONING_PARSER,
+        return _build_chat_serving(
+            cls, mock_model_config, shared_renderer, REASONING_PARSER
         )
 
     conversation = [{"role": "user", "content": "What is the capital of France?"}]
@@ -556,3 +564,41 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
         chat_template_kwargs=engine_chat_template_kwargs,
     )
     assert reasoner.is_reasoning_end([]) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("header", [None, "-10", "not-an-int"])
+async def test_batched_priority_header_matches_single_chat(header) -> None:
+    """`/v1/chat/completions/batch` honors the `X-Vllm-Priority` header the
+    same way `/v1/chat/completions` does: it overrides the body priority."""
+    mock_model_config = MockModelConfig()
+    shared_renderer = _build_renderer(mock_model_config)
+
+    def _build_serving(cls):
+        return _build_chat_serving(cls, mock_model_config, shared_renderer)
+
+    headers = [] if header is None else [(b"x-vllm-priority", header.encode())]
+    conversation = [{"role": "user", "content": "Hello"}]
+
+    single_engine, single_serving = _build_serving(OpenAIServingChat)
+    await single_serving.create_chat_completion(
+        ChatCompletionRequest(
+            model=MOCK_MODEL_NAME, messages=conversation, priority=-3
+        ),
+        Request({"type": "http", "headers": headers}),
+    )
+    single_priority = single_engine.generate.call_args.kwargs["priority"]
+
+    batch_engine, batch_serving = _build_serving(OpenAIServingChatBatch)
+    await batch_serving.create_batch_chat_completion(
+        BatchChatCompletionRequest(
+            model=MOCK_MODEL_NAME, messages=[conversation, conversation], priority=-3
+        ),
+        Request({"type": "http", "headers": headers}),
+    )
+
+    assert single_priority == (-10 if header == "-10" else -3)
+    assert [
+        call.kwargs["priority"] for call in batch_engine.generate.call_args_list
+    ] == [single_priority] * 2
