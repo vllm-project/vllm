@@ -20,6 +20,9 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         "medium": ("<ifm|think_fast>", "</ifm|think_fast>"),
         "low": ("<ifm|think_faster>", "</ifm|think_faster>"),
     }
+    # The model often closes medium/low thinking with </ifm|think>, so the end
+    # token of any effort ends reasoning.
+    _END_TOKENS = tuple(end for _, end in _EFFORT_TOKENS.values())
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         chat_template_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
@@ -34,6 +37,9 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         self._start_token, self._end_token = self._EFFORT_TOKENS[effort]
         super().__init__(tokenizer, *args, **kwargs)
         self._tool_calls_start_id = self.vocab.get(self._TOOL_CALLS_START)
+        self._end_token_ids = {
+            self.vocab[end] for end in self._END_TOKENS if end in self.vocab
+        }
         self._stream_buffer = ""
         self._stream_at_start = True
         self._stream_finished = False
@@ -49,11 +55,16 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
     def _without_generated_start(self, model_output: str) -> str:
         return model_output.removeprefix(self.start_token)
 
+    def _find_end(self, text: str) -> tuple[int, str]:
+        hits = [(i, end) for end in self._END_TOKENS if (i := text.find(end)) != -1]
+        return min(hits, default=(-1, ""))
+
     def _split_model_output(self, model_output: str) -> tuple[str, str | None]:
         output = self._without_generated_start(model_output)
-        if self.end_token in output:
-            reasoning, _, content = output.partition(self.end_token)
-            return reasoning, content or None
+        end_index, end = self._find_end(output)
+        if end_index != -1:
+            content = output[end_index + len(end) :]
+            return output[:end_index], content or None
 
         tool_start = output.find(self._TOOL_CALLS_START)
         if tool_start != -1:
@@ -73,7 +84,7 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         for token_id in reversed(input_ids):
             if token_id == self.start_token_id:
                 return False
-            if token_id == self.end_token_id or token_id == self._tool_calls_start_id:
+            if token_id in self._end_token_ids or token_id == self._tool_calls_start_id:
                 return True
         return False
 
@@ -83,13 +94,14 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         delta_ids: Iterable[int],
     ) -> bool:
         del input_ids
-        return self._stream_finished or super().is_reasoning_end_streaming(
-            (), delta_ids
+        return self._stream_finished or any(
+            token_id in self._end_token_ids for token_id in delta_ids
         )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.end_token_id in input_ids:
-            return input_ids[input_ids.index(self.end_token_id) + 1 :]
+        for index, token_id in enumerate(input_ids):
+            if token_id in self._end_token_ids:
+                return input_ids[index + 1 :]
         if (
             self._tool_calls_start_id is not None
             and self._tool_calls_start_id in input_ids
@@ -133,18 +145,18 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         if not self._strip_stream_start():
             return None
 
-        explicit_end = self._stream_buffer.find(self.end_token)
+        explicit_end, end = self._find_end(self._stream_buffer)
         tool_start = self._stream_buffer.find(self._TOOL_CALLS_START)
         if explicit_end != -1:
             reasoning = self._stream_buffer[:explicit_end]
-            content = self._stream_buffer[explicit_end + len(self.end_token) :]
+            content = self._stream_buffer[explicit_end + len(end) :]
         elif tool_start != -1:
             reasoning = self._stream_buffer[:tool_start]
             content = self._stream_buffer[tool_start:]
         else:
             overlap = max(
-                partial_tag_overlap(self._stream_buffer, self.end_token),
-                partial_tag_overlap(self._stream_buffer, self._TOOL_CALLS_START),
+                partial_tag_overlap(self._stream_buffer, tag)
+                for tag in (*self._END_TOKENS, self._TOOL_CALLS_START)
             )
             sendable_end = len(self._stream_buffer) - overlap
             reasoning = self._stream_buffer[:sendable_end]

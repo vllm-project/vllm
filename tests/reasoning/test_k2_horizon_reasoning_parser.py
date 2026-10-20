@@ -155,6 +155,44 @@ def test_character_split_reasoning_stream(reasoning: str):
     assert "".join(content_parts) == "answer"
 
 
+@pytest.mark.parametrize(
+    ("effort", "end_token"),
+    [
+        ("medium", "</ifm|think_fast>"),
+        ("medium", "</ifm|think>"),
+        ("low", "</ifm|think_faster>"),
+        ("low", "</ifm|think>"),
+    ],
+)
+def test_any_effort_end_token_closes_reasoning(effort: str, end_token: str):
+    """K2 Horizon often closes medium/low thinking with </ifm|think>."""
+    tokenizer = _k2_tokenizer()
+    end_token_id = tokenizer.get_vocab()[end_token]
+    kwargs = {"chat_template_kwargs": {"reasoning_effort": effort}}
+    parser = K2HorizonReasoningParser(tokenizer, **kwargs)
+    streaming_parser = K2HorizonReasoningParser(tokenizer, **kwargs)
+    output = f"plan{end_token}answer"
+    deltas = [
+        streaming_parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=char,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+        )
+        for char in output
+    ]
+    output_ids = [*tokenizer.encode("plan"), end_token_id, *tokenizer.encode("answer")]
+
+    assert parser.extract_reasoning(output, _request()) == ("plan", "answer")
+    assert "".join(d.reasoning or "" for d in deltas if d) == "plan"
+    assert "".join(d.content or "" for d in deltas if d) == "answer"
+    assert parser.is_reasoning_end(output_ids)
+    assert parser.is_reasoning_end_streaming(output_ids, [end_token_id])
+    assert parser.extract_content_ids(output_ids) == tokenizer.encode("answer")
+
+
 def test_latest_boundary_controls_reasoning_state():
     tokenizer = _k2_tokenizer()
     parser = K2HorizonReasoningParser(tokenizer)
