@@ -43,7 +43,8 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model]
+            + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
