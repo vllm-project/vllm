@@ -598,3 +598,36 @@ def test_prompt_reasoning_streaming_matches_non_streaming(tokenizer, case):
 
     assert (streamed_reasoning, streamed_content) == non_streaming
     assert parser.count_reasoning_tokens(output_ids) == non_streaming_count
+
+
+@pytest.mark.parametrize("case", ["continue_final_message", "template_closed_thinking"])
+def test_prompt_closed_streaming_count_parses_once(tokenizer, case, monkeypatch):
+    prompt_ids, request, output = prompt_case(tokenizer, case)
+    output_ids = encode(tokenizer, output)
+    parser = reasoning_parser(tokenizer)
+    parser.set_prompt_token_ids(prompt_ids)
+    expected = parser.count_reasoning_tokens(output_ids)
+
+    single_passes = 0
+    single_pass_parse = ParserEngine._single_pass_parse
+
+    def counting_single_pass_parse(self, *args, **kwargs):
+        nonlocal single_passes
+        single_passes += 1
+        return single_pass_parse(self, *args, **kwargs)
+
+    monkeypatch.setattr(ParserEngine, "_single_pass_parse", counting_single_pass_parse)
+
+    parser = reasoning_parser(tokenizer)
+    for i, token_id in enumerate(output_ids):
+        parser.parse_delta(
+            tokenizer.decode([token_id]),
+            [token_id],
+            request,
+            prompt_token_ids=prompt_ids,
+            finished=i == len(output_ids) - 1,
+        )
+        count = parser.count_reasoning_tokens(tuple(output_ids[: i + 1]))
+
+    assert count == expected
+    assert single_passes == 1
