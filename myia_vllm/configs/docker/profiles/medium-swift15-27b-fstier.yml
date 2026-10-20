@@ -1,0 +1,360 @@
+# Docker Compose profile — **EVAL ONLY : tier fs NVMe (TieringOffloadingSpec)** — 2026-10-20
+# ============================================================================
+# Copie du profil PROD medium-swift15-27b.yml, 3 deltas uniquement (fenêtre
+# d'évaluation du tier secondaire filesystem, cf. NOTES v0320_fstier) :
+#   1. --kv-offloading-size défaut 8 GiB (CPU primaire VOLONTAIREMENT petit :
+#      l'éviction vers le tier fs doit se produire en quelques centaines de K
+#      tokens de fillers, pas en 1,5M)
+#   2. --kv-transfer-config : spec_name=TieringOffloadingSpec + secondary_tiers
+#      fs root=/kv-tier-fs — la synthèse _post_init_kv_transfer_config fait un
+#      .update() de kv_connector_extra_config (config/vllm.py:1097) : nos clés
+#      survivent, cpu_bytes_to_use est ajouté depuis le flag ci-dessus.
+#   3. bind ${KV_FS_TIER_PATH} -> /kv-tier-fs (fail-loud, create_host_path:false)
+# ⚠ Le tier fs n'a NI éviction NI plafond (vérifié in-code) : cette fenêtre est
+# bornée, le purgeur est un prérequis production (cf. NOTES).
+# NE PAS PROMOUVOIR CE PROFIL en l'état — la prod reste medium-swift15-27b.yml.
+# PROMOTED 2026-09-24 (GO user) — replaces medium-qwen36-stock-tq.yml (Qwen3.6-
+# 35B-A3B MoE + TurboQuant k8v4) as the fleet engine on GPUs 0,1, port 5002.
+# Rationale (user decision): the 27B tier is where the ecosystem iterates
+# (Swift-1.5 finetunes, Qwen 4 27B announced at Apsara 22/09 as a permanent
+# open-weight tier) while the 35B-A3B MoE line has no announced successor;
+# window-based access to the quality tier was ruled out ("on va galérer avec
+# des fenêtres"). Measured the same evening on this host (record:
+# myia_vllm/_iteration_log/swift15_promotion/NOTES.md):
+#   - VRAM envelope IDENTICAL to the MoE (19.9/18.8 GiB at gpu-util 0.70)
+#   - KV 465,423 tokens = 1.78x the 262K window (fp8, no spec-dec)
+#   - single decode 48.3 t/s, N=4 ~99 t/s agg, prefill 1,812 t/s @101K
+#   - quality canary FR sane, thinking-economical; LiveCodeBench 81.7 (card)
+#   - dashboard condensation: 30.8 s / 2,575->1,578 tok, metric+nuance
+#     preservation AT LEAST on par with the MoE (same-input A/B, 24/09)
+#   - MTP-3 BLOCKED by upstream loader bug on v0.30.0 (BF16 draft head vs
+#     pack-quantized target Linears: "no module named 'fc.weight' in
+#     Qwen3_5MultiTokenPredictor") — TO REPORT UPSTREAM. No spec-dec until
+#     fixed; NEVER turboquant KV with any spec-dec anyway (#53180).
+# Dual served names: the legacy alias qwen3.6-35b-a3b is KEPT so every
+# consumer (prover harness, nbaudit, claudish, condensation, sk-agent,
+# students) keeps working unchanged; swift-1.5-27b is the honest name lanes
+# may migrate to at their own pace. Drop the alias only once no consumer
+# references it (grep claudish routing tables + sk-agent configs first).
+# ROLLBACK (armed): medium-qwen36-stock-tq.yml (MoE + TQ k8v4, KV 936,660,
+# compile-cache volume vllm-compile-cache-qwen36-stock-tq-v0300 kept).
+# ---------------------------------------------------------------------------
+# KV OFFLOAD TIER -- ACTIVE since 2026-10-05 (issue #65), ALWAYS UNPINNED.
+# VERDICT of the 2026-10-05 window (tested live, both configs):
+#   - v0.30.0 + pin=1: monolithic cudaHostRegister -> crash ~7 s after
+#     startup (bogus illegal-access at is_padding.fill_).
+#   - v0.31.0 + pin=1 (#51081 chunked registration, PR tested live):
+#     SAME crash, ~14 s after startup (async_utils.py:174
+#     copy_event.synchronize) -- engine becomes a walking-dead (health 200
+#     but workers dead).  CONCLUSION: cudaHostRegister of the /dev/shm
+#     offload region is BROKEN under WSL2, chunked or not.
+#   - v0.30.0 + pin=0 (PR #69) and v0.31.0 + pin=0: WORK.  pin=0 => PIN_
+#     MEMORY=False => pin_mmap_region never called => tier pageable =>
+#     unpinned cuMemcpyBatchAsync (measured 3.3 GB/s, stores active,
+#     0 errors, replay bench 43x on the GPU-prefix path).
+# Do NOT set pin=1 while the offload flags are present on this host.
+# MEASURED (bench v3, 05/10 10:22Z, tier 24 GiB): LOAD PATH CONFIRMED.
+#   Gold 17,407 tok cold 16.3 s -> 26 fillers (491K tok) evict it from GPU
+#   -> replay 0.32 s (51x) with CPU_to_GPU +655 MB, GPU prefix cache cold
+#   (hits flat), answer correct = hybrid GDN load correctness end-to-end.
+# SIZING RULE (the v2 lesson): a tier SMALLER than the GPU cache is a
+#   write-only sink.  12 GiB (~440K tok) < GPU KV 461K -> capacity LRU
+#   evicted every stored prefix before any replay could hit (bench v2:
+#   26.5 GB stored, 0 loads).  24 GiB = ~685K tok at the measured
+#   37.6 KB/tok effective (padding + TP copies) = 1.48x GPU KV -- keep the
+#   tier >= 1.5x GPU KV; raising gpu-util or KV dtype changes re-derive this.
+# 2026-10-20 (Q22 a+b, GO user): KV dtype -> nvfp4 (750,747 tok, x1.75) and
+#   tier 24 -> 32 GiB.  32 GiB clears >=1.5x GPU-KV in tokens under either
+#   storage format (nvfp4 or fp8 blocks) and equals ~2x the GPU-KV byte pool;
+#   48 GiB kept in reserve to protect host commit margin during the Minimax
+#   pilot (commit was 83.7% pre-window).  Tier tmpfs = pages committed on
+#   touch: capacity raise is free until filled.
+# RAM cost: 34.4 GB tmpfs address space (32 GiB tier), pages committed on touch
+#   (traffic-bound; worst-case bench touched ~19 GB), 63 GB /dev/shm cap.
+# METRIC TRAP: kv_offload_cpu_cache_usage_perc = pinned-by-in-flight-transfers
+#   gauge, NOT a fill gauge (reads 2% while full).  Do not use it for occupancy.
+# NOTE: KV_OFFLOAD_GB_SWIFT15=0 does NOT disable offload -- config/vllm.py:1039
+# tests `is None`.  ROLLBACK of the offload = remove the two --kv-offloading
+# flags (pin=0 stays: it is the only working offload config on this host).
+# ---------------------------------------------------------------------------
+# ⚠ Operator traps (all live incidents): --env-file myia_vllm/.env on EVERY
+# compose command · NO '#' inside the backslash-continued command block ·
+# cold compile-cache boot 10-25 min is normal (health=000 at T+4 min too) ·
+# sidecars via docker start, never compose up, after an interrupted boot.
+# ============================================================================
+
+services:
+  vllm-medium-swift15-27b:
+    image: ${VLLM_IMAGE_SWIFT15:-vllm/vllm-openai:v0.32.0}
+    container_name: myia_vllm-medium-swift15-27b
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        ok=0; big=0
+        for i in $$(seq 1 36); do
+          big=$$(find /root/.cache/huggingface -type f -size +4G -printf '%s\n' 2>/dev/null | sort -rn | head -1); big=$${big:-0}
+          if [ "$$big" -gt 4000000000 ]; then ok=1; break; fi
+          echo "[hf-mount-guard] largest blob $$big bytes (<4G), waiting for WSL HF bind ($$i/36)..."; sleep 5
+        done
+        if [ "$$ok" != 1 ]; then
+          echo "HF-CACHE-PHANTOM-MOUNT: no >4G blob after 3 min (largest=$$big). Refusing to start. Fix: 'wsl - l -v' (Ubuntu must be Running), then: docker compose -f <this-profile> down && up -d"
+          exit 1
+        fi
+        exec vllm serve \
+          --host 0.0.0.0 \
+          --port ${VLLM_PORT_GLM:-5002} \
+          --model ${VLLM_MODEL_SWIFT15:-ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AWQ} \
+          --revision ${VLLM_REVISION_SWIFT15:-9dba8a05877150d587215a519ce6befec3c9978a} \
+          --served-model-name qwen3.6-35b-a3b swift-1.5-27b \
+          --api-key ${VLLM_API_KEY_MEDIUM} \
+          --tensor-parallel-size 2 \
+          --gdn-prefill-backend triton \
+          --no-enable-flashinfer-autotune \
+          --gpu-memory-utilization 0.70 \
+          --max-model-len 262144 \
+          --kv-cache-dtype ${KV_DTYPE_SWIFT15:-nvfp4} \
+          --dtype auto \
+          --limit-mm-per-prompt '{"image":4,"video":0}' \
+          --mm-processor-kwargs '{"max_pixels":774000}' \
+          --skip-mm-profiling \
+          --max-num-batched-tokens 8192 \
+          --max-num-seqs 48 \
+          --speculative-config '${VLLM_SPEC_CONFIG_SWIFT15:-null}' \
+          --performance-mode interactivity \
+          --enable-chunked-prefill \
+          --kv-offloading-size ${KV_OFFLOAD_GB_SWIFT15:-8} \
+          --kv-offloading-backend ${KV_OFFLOAD_BACKEND_SWIFT15:-native} \
+          --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/kv-tier-fs","n_read_threads":16,"n_write_threads":16}]}}' \
+          --enable-prefix-caching \
+          --prefix-caching-hash-algo sha256 \
+          --prefix-match-unit 16 \
+          --mamba-ssm-cache-dtype float16 \
+          --enable-auto-tool-choice \
+          --tool-call-parser qwen3_coder \
+          --reasoning-parser qwen3 \
+          --distributed-executor-backend mp \
+          --disable-custom-all-reduce \
+          --async-scheduling \
+          --no-scheduler-reserve-full-isl \
+          --default-chat-template-kwargs '{"preserve_thinking":true,"reasoning_effort":"medium"}' \
+          --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,"repetition_penalty":1.0}' \
+          --middleware error_source_capture.ErrorSourceCapture
+    labels:
+      - "autoheal=False"
+    ipc: host
+    shm_size: '16gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1']
+              capabilities: [gpu]
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=0,1
+      - CUDA_VISIBLE_DEVICES=0,1
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - VLLM_MARLIN_USE_ATOMIC_ADD=1
+      - VLLM_USE_DEEP_GEMM=0
+      - OMP_NUM_THREADS=1
+      - VLLM_LOG_DIR=/logs
+      - PYTHONPATH=/middleware
+      - VLLM_MAX_REQUEST_BODY_BYTES=0
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - NCCL_P2P_DISABLE=1
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_WSL2_ENABLE_PIN_MEMORY=0 # VERDICT (fenetre 05/10): cudaHostRegister of the shm offload region is BROKEN under WSL2, chunked or not -- v0.30.0 (monolithic) crashed at is_padding.fill_, v0.31.0+#51081 (chunked, PR tested live) crashed at async_utils copy_event.synchronize. pin=0 = the only working offload config on this host.
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
+    volumes:
+      - ${VLLM_MODELS_PATH:-./models}:/models:ro
+      - type: bind
+        source: ${HF_CACHE_PATH:-~/.cache/huggingface}
+        target: /root/.cache/huggingface
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KV_FS_TIER_PATH}
+        target: /kv-tier-fs
+        bind:
+          create_host_path: false
+      - vllm-compile-cache-swift15-27b-v0320:/root/.cache/vllm
+      - ${VLLM_LOG_PATH:-./../../../logs}:/logs
+      - ./../../../middleware:/middleware:ro
+    ports:
+      - "${VLLM_PORT_GLM:-5002}:${VLLM_PORT_GLM:-5002}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${VLLM_PORT_GLM:-5002}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 1800s
+    restart: unless-stopped
+
+  watchdog-swift15-27b:
+    image: docker:cli
+    container_name: myia_vllm-watchdog-swift15-27b
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl >/dev/null 2>&1
+
+        CONTAINER="myia_vllm-medium-swift15-27b"
+        PORT="$${VLLM_PORT_GLM:-5002}"
+        INTERVAL=30
+        HEALTH_TIMEOUT=5
+        GEN_TIMEOUT=90
+        PROBE_MAX_TOKENS=24
+        GEN_TIMEOUT_WARM=120
+        WARMUP_PROBES=3
+        WARMUP_LEFT=$$WARMUP_PROBES
+        WEDGE_MAX=2
+        UNHEALTHY_MAX=4
+        DOWN_MAX=24
+        WEDGE_FAIL=0
+        DOWN_FAIL=0
+        STARTING_MAX=3
+        PREV_RC=-1
+        STARTING_CHURN=0
+        STALL_MAX=24
+        STARTING_CYCLES=0
+
+        echo "Watchdog v5 for Swift-1.5-27B (wedge + hard-hang + crash-loop + boot-stall)"
+        echo "  Interval: $${INTERVAL}s. Probes host.docker.internal."
+
+        while true; do
+          TS=$$(date '+%Y-%m-%d %H:%M:%S')
+
+          H=$$(curl -s -o /dev/null -w "%{http_code}" --max-time $$HEALTH_TIMEOUT \
+            "http://host.docker.internal:$$PORT/health" 2>/dev/null)
+
+          if [ "$$H" = "200" ]; then
+            if [ $$WARMUP_LEFT -gt 0 ]; then GT=$$GEN_TIMEOUT_WARM; else GT=$$GEN_TIMEOUT; fi
+            G=$$(curl -s -o /dev/null -w "%{http_code}" --max-time $$GT \
+              -X POST "http://host.docker.internal:$$PORT/v1/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $${VLLM_API_KEY_MEDIUM}" \
+              -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Count to twenty."}],"max_tokens":'$$PROBE_MAX_TOKENS',"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' 2>/dev/null)
+            DOWN_FAIL=0
+            STARTING_CHURN=0; PREV_RC=-1
+            STARTING_CYCLES=0
+            if [ "$$G" = "200" ]; then
+              if [ $$WEDGE_FAIL -gt 0 ]; then
+                echo "$$TS RECOVERED (decode ok after $$WEDGE_FAIL wedge fails)"
+              elif [ $$WARMUP_LEFT -gt 0 ]; then
+                echo "$$TS OK health=200 decode=200 (warm-up grace consumed — engine is warm)"
+              else
+                echo "$$TS OK health=200 decode=200"
+              fi
+              WEDGE_FAIL=0
+              WARMUP_LEFT=0
+            elif [ $$WARMUP_LEFT -gt 0 ]; then
+              WARMUP_LEFT=$$((WARMUP_LEFT - 1))
+              echo "$$TS WARMUP health=200 decode=$$G — post-boot grace, $$WARMUP_LEFT probe(s) left, NOT counted as wedge"
+            else
+              WEDGE_FAIL=$$((WEDGE_FAIL + 1))
+              echo "$$TS WEDGE health=200 decode=$$G (fail $$WEDGE_FAIL/$$WEDGE_MAX)"
+              if [ $$WEDGE_FAIL -ge $$WEDGE_MAX ]; then
+                echo "$$TS RESTARTING $$CONTAINER (WEDGE: API up but decode stuck)"
+                docker restart $$CONTAINER
+                WEDGE_FAIL=0
+                WARMUP_LEFT=$$WARMUP_PROBES
+                echo "$$TS Restart issued. Waiting 600s for boot..."
+                sleep 600
+                continue
+              fi
+            fi
+          else
+            HS=$$(docker inspect --format '{{.State.Health.Status}}' $$CONTAINER 2>/dev/null)
+            WEDGE_FAIL=0
+            if [ "$$HS" = "starting" ]; then
+              DOWN_FAIL=0
+              STARTING_CYCLES=$$((STARTING_CYCLES + 1))
+              WARMUP_LEFT=$$WARMUP_PROBES
+              RC=$$(docker inspect --format '{{.RestartCount}}' $$CONTAINER 2>/dev/null)
+              RC=$${RC:-0}
+              if [ "$$PREV_RC" -ge 0 ] && [ "$$RC" -gt "$$PREV_RC" ]; then
+                STARTING_CHURN=$$((STARTING_CHURN + 1))
+              fi
+              PREV_RC=$$RC
+              if [ $$STARTING_CHURN -ge $$STARTING_MAX ]; then
+                OOMHITS=$$(docker logs --tail 500 $$CONTAINER 2>&1 | grep -ci "out of memory")
+                if [ "$${OOMHITS:-0}" -gt 0 ]; then
+                  echo "$$TS CRASH-LOOP $$CONTAINER docker=starting, RestartCount churning (=$$RC, +$$STARTING_CHURN), CUDA-OOM present in log ($$OOMHITS hits). NOT auto-restarting (futile)."
+                else
+                  echo "$$TS CRASH-LOOP $$CONTAINER docker=starting, RestartCount churning (=$$RC, +$$STARTING_CHURN), NO OOM in log — cause UNKNOWN. Read: docker logs $$CONTAINER. NOT auto-restarting."
+                fi
+              elif [ $$STARTING_CYCLES -ge $$STALL_MAX ]; then
+                LOADING=$$(docker logs --tail 2000 $$CONTAINER 2>&1 | grep -c "Starting to load model")
+                LOADED=$$(docker logs --tail 2000 $$CONTAINER 2>&1 | grep -c "Model loading took")
+                MINS=$$((STARTING_CYCLES * INTERVAL / 60))
+                if [ "$${LOADING:-0}" -gt 0 ] && [ "$${LOADED:-0}" -eq 0 ]; then
+                  echo "$$TS BOOT-STALL $$CONTAINER stuck LOADING WEIGHTS for $${MINS} min, RestartCount FLAT (=$$RC). Prime suspect: HF-cache bind resolved EMPTY (phantom). CHECK: docker exec $$CONTAINER du -sh /root/.cache/huggingface/hub -> must show the 19.6G quant. If empty/missing: confirm 'wsl -l -v' shows Ubuntu Running, then compose down && up -d. NOT auto-restarting."
+                else
+                  echo "$$TS BOOT-STALL $$CONTAINER docker=starting for $${MINS} min, RestartCount FLAT (=$$RC), weights loaded — stalled AFTER load (compile / KV alloc / graph capture). Read: docker logs $$CONTAINER. NOT auto-restarting."
+                fi
+              else
+                echo "$$TS BOOTING health=$$H (docker=starting, within 30-min grace; RestartCount=$$RC, cycle $$STARTING_CYCLES/$$STALL_MAX)"
+              fi
+              sleep $$INTERVAL
+              continue
+            fi
+            STARTING_CYCLES=0
+            HI=$$(curl -s -o /dev/null -w "%{http_code}" --max-time $$HEALTH_TIMEOUT \
+              "http://vllm-medium-swift15-27b:$$PORT/health" 2>/dev/null)
+            DOWN_FAIL=$$((DOWN_FAIL + 1))
+            if [ "$$HI" = "200" ]; then
+              THRESH=$$DOWN_MAX
+              echo "$$TS PORT-FWD-LOSS host=$$H internal=200 docker=$$HS (fail $$DOWN_FAIL/$$THRESH)"
+            elif [ "$$HS" = "unhealthy" ]; then
+              THRESH=$$UNHEALTHY_MAX
+              echo "$$TS ENGINE-HUNG host=$$H internal=$$HI docker=unhealthy (fail $$DOWN_FAIL/$$THRESH, ~2min fast-path)"
+            else
+              THRESH=$$DOWN_MAX
+              echo "$$TS ENGINE-DOWN host=$$H internal=$$HI docker=$$HS (fail $$DOWN_FAIL/$$THRESH)"
+            fi
+            if [ $$DOWN_FAIL -ge $$THRESH ]; then
+              echo "$$TS RESTARTING $$CONTAINER (unresponsive $$DOWN_FAIL cycles, docker=$$HS)"
+              docker restart $$CONTAINER
+              DOWN_FAIL=0
+              WARMUP_LEFT=$$WARMUP_PROBES
+              echo "$$TS Restart issued. Waiting 600s for boot..."
+              sleep 600
+              continue
+            fi
+          fi
+
+          sleep $$INTERVAL
+        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - VLLM_API_KEY_MEDIUM=${VLLM_API_KEY_MEDIUM}
+      - VLLM_PORT_GLM=${VLLM_PORT_GLM:-5002}
+    depends_on:
+      vllm-medium-swift15-27b:
+        condition: service_healthy
+    restart: unless-stopped
+
+  wedge-telemetry:
+    image: python:3-slim
+    container_name: myia_vllm-wedge-telemetry-swift15
+    command: ["python", "/app/wedge_telemetry.py", "--interval", "60", "--out", "/out/wedge_telemetry.jsonl"]
+    environment:
+      - WEDGE_METRICS_URL=http://vllm-medium-swift15-27b:${VLLM_PORT_GLM:-5002}/metrics
+    volumes:
+      - ./../../../scripts/monitoring/wedge_telemetry.py:/app/wedge_telemetry.py:ro
+      - ./../../../_iteration_log:/out
+    depends_on:
+      vllm-medium-swift15-27b:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  vllm-compile-cache-swift15-27b-v0320:
+  vllm-compile-cache-swift15-27b-v0310: # kept: rollback volume for v0.31.0
+  vllm-compile-cache-swift15-27b-v1: # kept: rollback volume for v0.30.0
