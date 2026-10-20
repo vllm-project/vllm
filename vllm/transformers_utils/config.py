@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, SupportsIndex, TypeAlias, cast
 
 import huggingface_hub
 import torch
@@ -194,11 +194,54 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+# to_dict() writes type(config).model_type, so each alias gets its own subclass.
+_MODEL_TYPE_ALIASES: dict[
+    tuple[type[PreTrainedConfig], str], type[PreTrainedConfig]
+] = {}
+
+
+def _restore_model_type_alias(
+    config_class: type[PreTrainedConfig],
+    model_type: str,
+    state: dict[str, Any],
+) -> PreTrainedConfig:
+    cls = _config_class_for_model_type(model_type, config_class)
+    config = cast(PreTrainedConfig, object.__new__(cls))
+    config.__dict__.update(state)
+    return config
+
+
+def _config_class_for_model_type(
+    model_type: str, config_class: type[PreTrainedConfig]
+) -> type[PreTrainedConfig]:
+    if getattr(config_class, "model_type", None) == model_type:
+        return config_class
+    key = (config_class, model_type)
+    alias_cls = _MODEL_TYPE_ALIASES.get(key)
+    if alias_cls is None:
+
+        class ModelTypeAlias(config_class):  # type: ignore[misc, valid-type]
+            def __reduce_ex__(self, _protocol: SupportsIndex) -> tuple[Any, ...]:
+                return (
+                    _restore_model_type_alias,
+                    (config_class, model_type, dict(self.__dict__)),
+                )
+
+        # Assign after the class body so this name is not treated as local.
+        ModelTypeAlias.model_type = model_type
+        ModelTypeAlias.__name__ = f"{config_class.__name__}_{model_type}"
+        ModelTypeAlias.__qualname__ = ModelTypeAlias.__name__
+        alias_cls = ModelTypeAlias
+        _MODEL_TYPE_ALIASES[key] = alias_cls
+    return alias_cls
+
+
 def _register_config_class(
     model_type: str, config_class: type[PreTrainedConfig]
-) -> None:
-    config_class.model_type = model_type
-    AutoConfig.register(model_type, config_class, exist_ok=True)
+) -> type[PreTrainedConfig]:
+    registered = _config_class_for_model_type(model_type, config_class)
+    AutoConfig.register(model_type, registered, exist_ok=True)
+    return registered
 
 
 def _maybe_register_hf_config(config: PreTrainedConfig | None) -> None:
@@ -419,16 +462,21 @@ class HFConfigParser(ConfigParserBase):
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
-                _register_config_class(model_type, config_class)
+                registered = _register_config_class(model_type, config_class)
                 # If the on-disk model_type differs from the overridden
-                # one, register under both so AutoConfig.from_pretrained
-                # returns the correct class regardless of what the
-                # checkpoint says
+                # one, register this same class under both names.
+                # AutoConfig.register checks model_type only at call time.
                 if (
                     config_model_type := config_dict.get("model_type")
                 ) and config_model_type != model_type:
-                    _register_config_class(config_model_type, config_class)
-                    config_class.model_type = model_type
+                    previous_model_type = registered.model_type
+                    registered.model_type = config_model_type
+                    try:
+                        AutoConfig.register(
+                            config_model_type, registered, exist_ok=True
+                        )
+                    finally:
+                        registered.model_type = previous_model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
