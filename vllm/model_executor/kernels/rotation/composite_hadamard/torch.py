@@ -16,7 +16,7 @@ def _fwht(x: torch.Tensor) -> torch.Tensor:
     output = x
     stride = 1
     while stride < x.shape[-1]:
-        pairs = output.reshape(*x.shape[:-1], -1, 2, stride)
+        pairs = output.reshape(*x.shape[:-1], x.shape[-1] // (2 * stride), 2, stride)
         left = pairs[..., 0, :]
         right = pairs[..., 1, :]
         output = torch.cat((left + right, left - right), dim=-1).reshape(x.shape)
