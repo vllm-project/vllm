@@ -123,6 +123,7 @@ def benchmark_config(
     num_iters: int = 100,
     block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
+    per_act_token_quant: bool = False,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
@@ -224,12 +225,19 @@ def benchmark_config(
                 torch.rand((E, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
                 * factor_for_scale
             )
+        elif per_act_token_quant:
+            # Per-channel weights; activations are quantized per token at run time.
+            w1_scale = torch.rand(
+                (num_experts, shard_intermediate_size, 1), dtype=torch.float32
+            )
+            w2_scale = torch.rand((num_experts, hidden_size, 1), dtype=torch.float32)
         else:
             w1_scale = torch.randn(num_experts, dtype=torch.float32)
             w2_scale = torch.randn(num_experts, dtype=torch.float32)
 
-        a1_scale = torch.randn(1, dtype=torch.float32)
-        a2_scale = torch.randn(1, dtype=torch.float32)
+        if not per_act_token_quant:
+            a1_scale = torch.randn(1, dtype=torch.float32)
+            a2_scale = torch.randn(1, dtype=torch.float32)
 
         w1 = w1.to(FP8_DTYPE)
         w2 = w2.to(FP8_DTYPE)
@@ -255,6 +263,8 @@ def benchmark_config(
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_act_token_quant,
             block_shape=block_quant_shape,
             weight_dtype="int4" if use_int4_w4a16 else None,
         )
@@ -606,6 +616,7 @@ class BenchmarkWorker:
         use_int4_w4a16: bool = False,
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
+        per_act_token_quant: bool = False,
     ) -> tuple[dict[str, int], float]:
         # local import to allow serialization by ray
 
@@ -649,6 +660,7 @@ class BenchmarkWorker:
             num_iters=100,
             block_quant_shape=block_quant_shape,
             use_deep_gemm=use_deep_gemm,
+            per_act_token_quant=per_act_token_quant,
         )
         return config, kernel_time
 
@@ -666,6 +678,7 @@ class BenchmarkWorker:
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
         use_deep_gemm: bool,
+        per_act_token_quant: bool = False,
     ) -> dict[str, int]:
         # local import to allow serialization by ray
         from vllm.platforms import current_platform
@@ -713,6 +726,7 @@ class BenchmarkWorker:
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
+                        per_act_token_quant=per_act_token_quant,
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
@@ -819,6 +833,24 @@ def get_weight_block_size_safety(config, default_value=None):
     return default_value
 
 
+def uses_per_token_act_quant(config) -> bool:
+    """Whether a compressed-tensors checkpoint quantizes activations per token.
+
+    vLLM then runs the fused MoE with per-token activation and per-channel
+    weight scales, which is a different kernel specialization from per-tensor
+    FP8 but reads the same config file.
+    """
+    quantization_config = getattr(config, "quantization_config", {})
+    if not isinstance(quantization_config, dict):
+        return False
+    config_groups = quantization_config.get("config_groups", {})
+    if len(config_groups) != 1:
+        return False
+    group = next(iter(config_groups.values()))
+    input_activations = group.get("input_activations") or {}
+    return input_activations.get("strategy") == "token"
+
+
 def get_model_params(config):
     architectures = getattr(config, "architectures", None) or [type(config).__name__]
     architecture = architectures[0]
@@ -850,6 +882,7 @@ def get_model_params(config):
         hidden_size = config.hidden_size
     elif architecture in (
         "BailingMoeV3ForCausalLM",
+        "BeamForCausalLM",
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
@@ -981,6 +1014,11 @@ def main(args: argparse.Namespace):
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     use_int4_w4a16 = args.dtype == "int4_w4a16"
     block_quant_shape = get_weight_block_size_safety(config)
+    per_act_token_quant = (
+        use_fp8_w8a8 and block_quant_shape is None and uses_per_token_act_quant(config)
+    )
+    if per_act_token_quant:
+        print("Benchmarking per-token activation and per-channel weight FP8.")
     if use_int4_w4a16:
         group_size = get_quantization_group_size(config)
         if group_size is None:
@@ -1083,6 +1121,7 @@ def main(args: argparse.Namespace):
                     search_space,
                     block_quant_shape,
                     use_deep_gemm,
+                    per_act_token_quant,
                 )
                 for batch_size in batch_sizes
             ],
@@ -1121,6 +1160,7 @@ def main(args: argparse.Namespace):
                     use_int4_w4a16,
                     block_quant_shape,
                     use_deep_gemm,
+                    per_act_token_quant,
                 )
                 for batch_size in batch_sizes
             ],
