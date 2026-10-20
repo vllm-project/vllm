@@ -685,6 +685,39 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_rejects_deeply_nested_json_schema() {
+        let schema = (1..65).fold(
+            json!({"type": "string"}),
+            |items, _| json!({"type": "array", "items": items}),
+        );
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            },
+        }))
+        .expect("parse response_format");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_error_response()
+                .error
+                .message
+                .contains("The JSON schema is nested too deeply")
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_rejects_whitespace_only_structured_outputs_grammar() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
