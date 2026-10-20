@@ -272,7 +272,6 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     direct_register_custom_op,
     get_dtype_size,
-    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -308,6 +307,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 if TYPE_CHECKING:
@@ -358,8 +358,8 @@ def _detect_output_quant_key(
 
 def _canonicalize_sparse_mla_kv_cache_dtype(
     attn_backend: type[AttentionBackend],
-    kv_cache_dtype: CacheDType,
-) -> CacheDType:
+    kv_cache_dtype: CacheDType | str,
+) -> CacheDType | str:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
         # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
@@ -486,7 +486,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         if cache_config is not None:
-            kv_cache_dtype: CacheDType = cache_config.cache_dtype
+            kv_cache_dtype: CacheDType | str = cache_config.cache_dtype
         else:
             kv_cache_dtype = "auto"
         self.quant_config = quant_config
@@ -564,6 +564,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Sparse MLA reads top-k indices from a shared buffer. Pass it
         # explicitly so backbone "skip" layers (indexer=None) still find it.
+        self.topk_buffer_width = (
+            topk_indices_buffer.shape[-1] if topk_indices_buffer is not None else None
+        )
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
             if index_group_builder is not None:
@@ -736,6 +739,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
+        )
+        # Matches the graph quant replaced by fusion; writes into the output.
+        self._aiter_output_quant = (
+            self._quant_fp8_op.use_aiter and self._quant_fp8_op.enabled()
         )
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
@@ -1188,8 +1195,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp8_data)
+                if self._aiter_output_quant:
+                    torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                        quant_output[:quant_idx], actual, output_scale, False
+                    )
+                else:
+                    fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                    quant_output[:quant_idx].copy_(fp8_data)
             else:
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
@@ -1278,7 +1290,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 ("W_V", W_V),
                 ("W_V_scale", W_V_scale),
             ):
-                replace_parameter(self, name, tensor, prefer_copy=True)
+                replace_parameter(self, name, tensor)
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
@@ -1295,7 +1307,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 ("W_V", W_V),
                 ("W_V_scale", W_V_scale),
             ):
-                replace_parameter(self, name, tensor, prefer_copy=True)
+                replace_parameter(self, name, tensor)
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
@@ -1330,15 +1342,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            replace_parameter(self, "W_UV", W_UV.transpose(0, 1))
             # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0))
             if self.dcp_q_replicate:
                 replace_parameter(
                     self,
                     "W_UK_T_dcp_qrep",
                     get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
-                    prefer_copy=True,
                 )
 
         # If we should not load quant weights, we initialize the scales to 1.0
@@ -1381,6 +1392,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
+            topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
