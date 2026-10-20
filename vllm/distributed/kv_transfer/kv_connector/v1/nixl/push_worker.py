@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -150,6 +151,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+
+    def _validate_remote_agent_handshake(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_size: int,
+        remote_dcp_size: int = 1,
+    ) -> None:
+        super()._validate_remote_agent_handshake(
+            nixl_agent_meta, remote_tp_size, remote_dcp_size
+        )
+        assert self.transfer_topo is not None
+        if (
+            self._head_sharded_draft_regions
+            and self.transfer_topo.tp_size != remote_tp_size
+        ):
+            raise NotImplementedError(
+                "NIXL push mode does not support a head-sharded draft's KV "
+                "under an MLA target with heterogeneous TP. Use pull mode."
+            )
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
