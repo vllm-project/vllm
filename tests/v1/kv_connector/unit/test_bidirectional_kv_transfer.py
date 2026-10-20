@@ -27,7 +27,6 @@ external tokens > 0.
 
 import copy
 import time
-from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -592,8 +591,7 @@ def test_d_node_request_finished_remote_num_tokens():
     kv = eco[0].outputs[0].kv_transfer_params
     assert kv is not None
     assert kv["remote_num_tokens"] > 0
-    remote_block_ids = cast(list[list[int]], kv["remote_block_ids"])
-    assert sum(len(group) for group in remote_block_ids) > 0
+    assert sum(len(g) for g in kv["remote_block_ids"]) > 0
 
 
 def test_d_node_partial_last_block_remote_num_tokens():
@@ -619,8 +617,7 @@ def test_d_node_partial_last_block_remote_num_tokens():
     )
     kv = eco[0].outputs[0].kv_transfer_params
     assert kv is not None
-    remote_block_ids = cast(list[list[int]], kv["remote_block_ids"])
-    total_blocks = sum(len(group) for group in remote_block_ids)
+    total_blocks = sum(len(g) for g in kv["remote_block_ids"])
     assert total_blocks == 3
     assert kv["remote_num_tokens"] < total_blocks * BS
     assert kv["remote_num_tokens"] > 0

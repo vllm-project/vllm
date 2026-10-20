@@ -17,7 +17,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig, VllmConfig
+from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -70,7 +70,6 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
-    OffloadingSpec,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -81,7 +80,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import RequestStatus
 
 
 def _as_mock(value: object) -> MagicMock:
@@ -145,8 +144,8 @@ def test_swa_offload_window_covers_unaligned_hit(
         parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
     )
     sched = OffloadingConnectorScheduler(
-        cast(OffloadingSpec, spec),
-        cast(VllmConfig, config),
+        spec,
+        config,
         KVCacheConfig(num_blocks=256, kv_cache_tensors=[], kv_cache_groups=groups),
     )
     request = MagicMock()
@@ -182,30 +181,17 @@ def test_swa_offload_window_covers_unaligned_hit(
         assert not load_async
         return
     assert external == boundary and load_async
-    assert external is not None
     pool = BlockPool(256, enable_caching=True, hash_block_size=8)
     managers = []
     for i, group in enumerate(groups):
-        kv_cache_spec = group.kv_cache_spec
-        m: FullAttentionManager | SlidingWindowManager
-        if i == 0:
-            assert isinstance(kv_cache_spec, FullAttentionSpec)
-            m = FullAttentionManager(
-                kv_cache_spec=kv_cache_spec,
-                block_pool=pool,
-                enable_caching=True,
-                kv_cache_group_id=i,
-                scheduler_block_size=256,
-            )
-        else:
-            assert isinstance(kv_cache_spec, SlidingWindowSpec)
-            m = SlidingWindowManager(
-                kv_cache_spec=kv_cache_spec,
-                block_pool=pool,
-                enable_caching=True,
-                kv_cache_group_id=i,
-                scheduler_block_size=256,
-            )
+        cls = FullAttentionManager if i == 0 else SlidingWindowManager
+        m = cls(
+            kv_cache_spec=group.kv_cache_spec,
+            block_pool=pool,
+            enable_caching=True,
+            kv_cache_group_id=i,
+            scheduler_block_size=256,
+        )
         m.add_local_computed_blocks(request.request_id, [], 0, external)
         managers.append(m)
     for m in managers:
@@ -292,15 +278,14 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         generate_store_output(keys)
     )
 
-    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids=block_ids_by_req.__getitem__,
+            resolve_block_ids={}.__getitem__,
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(cast(SchedulerOutput, output))
+    jobs = scheduler._build_partial_tail_store_jobs(output)
 
     assert len(jobs) == 1
     offered_keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
@@ -356,15 +341,14 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
         generate_store_output(keys)
     )
 
-    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids=block_ids_by_req.__getitem__,
+            resolve_block_ids={}.__getitem__,
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(cast(SchedulerOutput, output))
+    jobs = scheduler._build_partial_tail_store_jobs(output)
 
     assert len(jobs) == 2
     src_specs = [
@@ -404,11 +388,10 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
         generate_store_output(keys)
     )
 
-    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SchedulerOutput.make_empty()
     output.kv_connector_block_state = KVConnectorBlockState(
         req_ids=set(),
-        resolve_block_ids=block_ids_by_req.__getitem__,
+        resolve_block_ids={}.__getitem__,
         boundary_state_offloads={"req": [(1, 99, 16)]},
     )
     meta = scheduler.build_connector_meta(output)
@@ -451,7 +434,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
         num_scheduled_tokens={"req": 16},
         finished_req_ids=set(),
     )
-    jobs = scheduler._build_store_jobs(cast(SchedulerOutput, output))
+    jobs = scheduler._build_store_jobs(output)
 
     assert len(jobs) == 1
     [job] = jobs.values()
@@ -2981,14 +2964,11 @@ def test_pending_transfer_defers_prefix_lookup():
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.manager = MagicMock(spec=OffloadingManager)
 
-    request = cast(Request, SimpleNamespace(request_id="req-0"))
+    request = SimpleNamespace(request_id="req-0")
     group_state = SimpleNamespace(block_ids=[1, 2, 3])
     req_status = cast(
         RequestOffloadState,
-        SimpleNamespace(
-            group_states=[group_state],
-            transfer_jobs={123},
-        ),
+        SimpleNamespace(group_states=[group_state], transfer_jobs={123}),
     )
     scheduler._req_status = {request.request_id: req_status}
 
@@ -5082,13 +5062,12 @@ class TestMambaHybridOffloadServing:
         req_status.group_states[0].block_ids[:] = list(range(1, n_full + 1))
         req_status.group_states[1].block_ids[:] = list(range(101, 101 + n_mamba + 1))
 
-        block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
         out = SimpleNamespace(
             num_scheduled_tokens={"A": self.PROMPT_TOKENS},
             finished_req_ids=set(),
             kv_connector_block_state=KVConnectorBlockState(
                 req_ids=set(),
-                resolve_block_ids=block_ids_by_req.__getitem__,
+                resolve_block_ids={}.__getitem__,
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )

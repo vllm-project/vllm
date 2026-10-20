@@ -106,7 +106,7 @@ def region_pull_worker():
     worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
     worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
     worker._engine_by_address = {("localhost", 1): "P"}
-    setattr(worker, "_read_blocks_mixed", MagicMock())  # noqa: B010
+    worker._read_blocks_mixed = MagicMock()  # type: ignore[method-assign]
     worker.nixl_wrapper = MagicMock()
     return worker
 
@@ -377,7 +377,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
         NixlPullConnectorScheduler,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
     scheduler = object.__new__(NixlPullConnectorScheduler)
     scheduler._reqs_in_batch = set()
@@ -391,10 +391,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     )
 
     def cached(block_id):
-        return KVCacheBlock(
-            block_id=block_id,
-            _block_hash=BlockHashWithGroupId(str(block_id).encode()),
-        )
+        return KVCacheBlock(block_id=block_id, _block_hash=object())
 
     def uncached(block_id):
         return KVCacheBlock(block_id=block_id)
@@ -434,7 +431,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         NixlPullConnectorScheduler,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
     scheduler = object.__new__(NixlPullConnectorScheduler)
     scheduler._reqs_in_batch = set()
@@ -447,9 +444,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         select_transfer_block_ids=lambda block_ids: block_ids
     )
 
-    blocks = KVCacheBlocks(
-        blocks=([KVCacheBlock(block_id=0, _block_hash=BlockHashWithGroupId(b"0"))],)
-    )
+    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, _block_hash=object())],))
     request = create_request(do_remote_prefill=True)
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
@@ -707,7 +702,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
-    worker._recving_transfers = defaultdict(list)
+    worker._recving_transfers = {}
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -1574,7 +1569,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     scheduler.connector = MagicMock()
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
-    setattr(scheduler.kv_cache_manager, "cache_blocks", MagicMock())  # noqa: B010
+    scheduler.kv_cache_manager.cache_blocks = MagicMock()  # type: ignore[method-assign]
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.prefix_replay_tokens = 0
@@ -2347,8 +2342,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
 
     worker = object.__new__(NixlPushConnectorWorker)
-    # Skeleton worker: silence __del__.
-    setattr(worker, "shutdown", lambda: None)  # noqa: B010
+    worker.shutdown = lambda: None  # type: ignore[method-assign]  # silence __del__
     worker.use_mla = True
     worker._has_mamba = True
     worker._is_csa_linear = False
@@ -2371,7 +2365,7 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = defaultdict(dict, {engine_id: {0: 100, 1: 101}})
+    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
@@ -2379,8 +2373,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()
-    xfer_blocks = MagicMock(return_value=1)
-    setattr(worker, "_xfer_blocks", xfer_blocks)  # noqa: B010
+    worker._xfer_blocks = MagicMock(return_value=1)  # type: ignore[method-assign]
 
     meta = MagicMock()
     meta.remote.engine_id = engine_id
@@ -2389,7 +2382,7 @@ def test_push_write_hybrid_mla_replicates_attention():
 
     worker._xfer_blocks_for_req("req-1", meta)
 
-    calls = xfer_blocks.call_args_list
+    calls = worker._xfer_blocks.call_args_list
     assert len(calls) == 2
     for call, rank, local_handle, remote_handle in zip(
         calls, (0, 1), (200, 201), (100, 101)

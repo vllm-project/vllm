@@ -3,14 +3,11 @@
 
 """Tests for KV cache offloading configuration."""
 
-from typing import cast
-
 import pytest
 
 from vllm.config import (
     CacheConfig,
     KVTransferConfig,
-    ModelConfig,
     ParallelConfig,
     VllmConfig,
 )
@@ -129,12 +126,9 @@ def _build_config(
     )
     cfg = VllmConfig.__new__(VllmConfig)
     cfg.kv_transfer_config = kv_transfer_config
-    cfg.model_config = cast(
-        ModelConfig,
-        SimpleNamespace(
-            enable_sleep_mode=enable_sleep_mode,
-            enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
-        ),
+    cfg.model_config = SimpleNamespace(
+        enable_sleep_mode=enable_sleep_mode,
+        enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
     )
     cfg._verify_kv_transfer_compat()
     return cfg
