@@ -3763,6 +3763,12 @@ void paged_attention_custom_launcher_navi(
 // compatibility; a TORCH_CHECK prevents dispatch to NAVI with interleaved V.
 // TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
+//
+// BLK_SIZE, HEAD_SIZE, OUTT and ALIBI_ENABLED are the remaining template
+// parameters of the launchers. BLK_SIZE/HEAD_SIZE/ALIBI_ENABLED/OUTT are baked
+// into the generated entry points (see generate_paged_attn.py) so that each
+// translation unit only instantiates one slice of the kernel set;
+// use_interleaved_v_cache and is_navi remain runtime branches.
 #define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,    \
                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)                \
   if (use_interleaved_v_cache) {                                             \
@@ -3776,22 +3782,46 @@ void paged_attention_custom_launcher_navi(
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
   } else {                                                                   \
-    if (!is_navi) {                                                          \
-      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, \
-                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE, \
-                                      false>(                                \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
-          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);       \
-    } else {                                                                 \
-      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,       \
-                                           HEAD_SIZE, OUTT, PSIZE,           \
-                                           ALIBI_ENABLED, MFMA_TYPE, false>( \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache, \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,      \
-          max_seq_len, alibi_slopes, k_scale, v_scale);                      \
-    }                                                                        \
+    ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,   \
+                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)               \
   }
+
+// The non-interleaved path picks the CDNA or the Navi launcher at runtime.
+// When the build has no gfx11/gfx12 arch (VLLM_ROCM_ATTN_NO_NAVI, defined by
+// the generated translation units, see csrc/rocm/generate_paged_attn.py),
+// is_navi_gpu() can never be true, so the Navi kernel set is dead weight and is
+// not instantiated.
+#ifdef VLLM_ROCM_ATTN_NO_NAVI
+  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)    \
+    TORCH_CHECK(!is_navi,                                                     \
+                "Navi (gfx11/gfx12) GPUs are not supported by this build: "   \
+                "its arch list has no Navi code objects");                    \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,    \
+                                    false>(                                   \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,         \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);
+#else
+  #define ATTN_CALL_NON_INTERLEAVED(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE)    \
+    if (!is_navi) {                                                           \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,  \
+                                      false>(                                 \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
+    } else {                                                                  \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
+                                           HEAD_SIZE, OUTT, PSIZE,            \
+                                           ALIBI_ENABLED, MFMA_TYPE, false>(  \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+    }
+#endif
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
                                    OUTT, PSIZE, MFMA_TYPE)                   \
@@ -3824,18 +3854,13 @@ void paged_attention_custom_launcher_navi(
     }
 #endif
 
-#define CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)    \
-  switch (block_size) {                                                     \
-    case 16:                                                                \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE, MFMA_TYPE); \
-      break;                                                                \
-    case 32:                                                                \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE, MFMA_TYPE); \
-      break;                                                                \
-    default:                                                                \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);           \
-      break;                                                                \
-  }
+// NOTE: ALIBI_ENABLED and the out dtype (fp8 vs query dtype) are kept as
+// runtime branches. Baking them into the generated entry points as well (4
+// translation units per (variant, block size) instead of 1) was measured to be
+// a loss: it halves the per-unit codegen (61.6 s -> 33.1 s) but every unit pays
+// ~20 s to parse this header, so the _rocm_C work grew from 1434 s to 2974 s,
+// the -j64 wall stayed at 64 s (skinny_gemms is the limit there) and -j16 went
+// from 142 s to 240 s.
 
 // ---------------------------------------------------------------------------
 // Fixed-head-size entry points.
@@ -3845,12 +3870,17 @@ void paged_attention_custom_launcher_navi(
 // size, block size, alibi, out dtype, v-cache layout) combination. To let ninja
 // compile them in parallel instead of serializing ~10 min onto a single core,
 // the instantiations are spread over one translation unit per (dtype, kv-cache
-// dtype, head size) combination, see attention_paged_attn_*.cu.
+// dtype, head size, block size, alibi, out dtype) combination: the translation
+// units, their prototypes and the dispatch arms of paged_attention() are all
+// emitted from the variant list in csrc/rocm/generate_paged_attn.py.
 // ---------------------------------------------------------------------------
 
 // Parameter list shared by paged_attention() and every entry point defined in
-// attention_paged_attn_*.cu. The names must match what CALL_CUSTOM_LAUNCHER*
-// expect to find in scope.
+// the generated attention_paged_attn_*.cu files. The names must match what
+// CALL_CUSTOM_LAUNCHER* expect to find in scope. block_size is not part of it:
+// it is part of the entry point name, so that each translation unit only
+// instantiates the kernels of one block size and paged_attention() switches on
+// it.
 #define ATTN_PARAMS                                                            \
   torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,      \
       torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,  \
@@ -3859,27 +3889,20 @@ void paged_attention_custom_launcher_navi(
       const std::optional<torch::Tensor>&query_start_loc, int64_t max_seq_len, \
       const std::optional<torch::Tensor>&alibi_slopes, torch::Tensor &k_scale, \
       torch::Tensor &v_scale,                                                  \
-      const std::optional<torch::Tensor>&fp8_out_scale, int64_t block_size,    \
-      bool is_navi, bool use_interleaved_v_cache
+      const std::optional<torch::Tensor>&fp8_out_scale, bool is_navi,          \
+      bool use_interleaved_v_cache
 
 #define ATTN_FWD                                                              \
   out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,          \
       num_kv_heads, scale, block_tables, seq_lens, query_start_loc,           \
-      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, block_size, \
-      is_navi, use_interleaved_v_cache
+      max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale, is_navi,    \
+      use_interleaved_v_cache
 
-// Declare/define one fixed-head-size entry point. A definition in one of the
-// attention_paged_attn_*.cu files is reachable only if attention_dispatch.cu
-// names it in one of its ATTN_HEAD_SWITCH() calls (CMakeLists.txt fails if one
-// is missing).
+// Declare/define one entry point. The generated attention_paged_attn_*.cu files
+// define one, and attention_paged_attn_entries.inc declares them; both are
+// emitted from the same variant list, so an entry point cannot be compiled
+// without being dispatched.
 #define ATTN_ENTRY(fn) void fn(ATTN_PARAMS)
-
-// Instantiate one entry point (one per attention_paged_attn_*.cu file), for
-// every supported block size. Kept as an alias of CALL_CUSTOM_LAUNCHER_BLK so
-// the block-size switch has a single definition; the head-size switch lives in
-// attention_dispatch.cu.
-#define ATTN_LAUNCH(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE) \
-  CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)
 
 #undef WARP_SIZE
 #undef MAX
