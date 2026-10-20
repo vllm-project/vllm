@@ -236,6 +236,8 @@ def _mp_barrier_construct_and_hold(
         if not replicated or rank == 0:
             t[:, :] = fill_value
         barrier.wait(30)
+        # fd is only cleared by cleanup(), which this holder never calls.
+        assert region.fd is not None
         done_queue.put(
             {
                 "rank": rank,
@@ -433,6 +435,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         result = done_queue.get(timeout=30)
         assert result["error"] is None, result["error"]
 
+        assert region.mmap_obj is not None
         raw = memoryview(region.mmap_obj)
         for chunk in range(num_chunks):
             row_start = chunk * num_workers * PAGE_SIZE
@@ -700,6 +703,7 @@ def test_multi_worker_race_constructs_one_shared_region(iid):
         assert len(regions) == num_workers, "Some workers failed to construct"
 
         for r in regions:
+            assert r.mmap_obj is not None
             assert not r.mmap_obj.closed
             assert r.total_size_bytes == 4 * num_workers * PAGE_SIZE
     finally:
@@ -714,8 +718,11 @@ def test_multi_worker_race_shared_memory_visible(iid):
     regions, errors = _race_construct(iid, num_workers=num_workers)
     assert not errors
     try:
-        regions[0].mmap_obj[0:1] = b"\xab"
+        writer_mmap = regions[0].mmap_obj
+        assert writer_mmap is not None
+        writer_mmap[0:1] = b"\xab"
         for r in regions[1:]:
+            assert r.mmap_obj is not None
             assert memoryview(r.mmap_obj)[0:1] == b"\xab"
     finally:
         for r in regions:
@@ -788,13 +795,34 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_non_owner_leaves_file(iid):
-    """A non-owner must close local resources without removing the file."""
-    r0 = _make_region(iid, unlink_owner=False)
-    r1 = _make_region(iid, unlink_owner=False)
+def test_cleanup_creator_all_effects(iid):
+    """cleanup() on the creator closes mmap, closes fd, and removes the file."""
+    r = _make_region(iid)
+    path = r.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
+    fd = r.fd
+    mmap_obj = r.mmap_obj
+    assert fd is not None
+    assert mmap_obj is not None
+
+    r.cleanup()
+
+    assert mmap_obj.closed, "mmap should be closed after cleanup"
+    assert not os.path.exists(path), "creator should remove the file"
+    with pytest.raises(OSError):
+        os.fstat(fd)  # fd should be closed
+
+
+def test_cleanup_non_creator_all_effects(iid):
+    """cleanup() on a non-creator closes mmap and fd, but leaves the file on disk."""
+    r0 = _make_region(iid)  # creator
+    r1 = _make_region(iid)  # joiner
     path = r0.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
+    assert fd1 is not None
+    assert mmap_obj1 is not None
     try:
         r1.cleanup()
 
@@ -1036,7 +1064,8 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     create_next_worker_view returns a view that shares storage with _base; both must be
     released before mmap.close() can succeed."""
     r = _make_region(iid)
-    mmap_obj = r.mmap_obj
+    mmap_obj = r.mmap_obj  # captured before cleanup() clears it
+    assert mmap_obj is not None
 
     t = r.create_next_worker_view(PAGE_SIZE)
     del t
@@ -1243,7 +1272,7 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
     finally:
         del export
-        region.mmap_obj.close()
+        region.mmap_obj.close()  # type: ignore[union-attr]
         _cleanup_file(region.mmap_path)
 
 
@@ -1261,6 +1290,7 @@ def test_backing_file_unlinked_after_barrier(iid):
         assert not os.path.exists(path), "name must be dropped after the barrier"
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
+        assert region.mmap_obj is not None
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
         # A stale generation must not unlink the path of its replacement.

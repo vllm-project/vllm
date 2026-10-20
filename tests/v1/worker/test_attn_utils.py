@@ -92,6 +92,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
             get_attn_backend=lambda backend=backend: backend,
+            is_draft_layer=False,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     monkeypatch.setattr(
@@ -110,6 +111,29 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
+
+
+def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    backend = SimpleNamespace(
+        customize_spec=AttentionBackend.customize_spec,
+        get_supported_kernel_block_sizes=lambda _=None: [16],
+    )
+    layers = {
+        name: SimpleNamespace(
+            get_kv_cache_spec=lambda _: spec,
+            get_attn_backend=lambda: backend,
+            is_draft_layer=name == "draft",
+        )
+        for name in ("target", "draft")
+    }
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
+
+    specs = attn_utils.get_kv_cache_spec(config)
+    assert specs["draft"].is_draft and not specs["target"].is_draft
 
 
 class _FakeMetadataBuilder:
@@ -515,6 +539,7 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     # Content dim packs K and V: 2 * head_size.
     assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
     assert kv_cache.dtype == spec.dtype
+    assert spec.page_size_padded is not None
     assert kv_cache.stride(0) == spec.page_size_padded // elem_size
     assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
     # Within one block the (unpadded) content stays compact.
