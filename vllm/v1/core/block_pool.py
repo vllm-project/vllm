@@ -755,6 +755,23 @@ class BlockPool:
     def _owns(self, block: KVCacheBlock) -> bool:
         return block.pool is None or block.pool is self
 
+    def apply_retention_to_cached_blocks(
+        self,
+        request: Request,
+        blocks: Sequence[KVCacheBlock],
+        block_size: int,
+    ) -> None:
+        """Update adopted cache hits, retaining their original token offsets."""
+        cached_blocks = [
+            block
+            if self._owns(block) and block.block_hash is not None
+            else self.null_block
+            for block in blocks
+        ]
+        self._apply_retention_hook(
+            request, cached_blocks, len(cached_blocks), block_size
+        )
+
     def _apply_retention_hook(
         self,
         request: Request,

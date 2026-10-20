@@ -606,6 +606,14 @@ class KVCacheManager:
             num_encoder_tokens,
         )
 
+        # A cache-hit request can finish without publishing another full block.
+        # Apply its intent only after admission succeeds and the local hits have
+        # been touched. Remote slots are not reusable content until loaded.
+        if request.kv_hints is not None and num_new_computed_tokens > 0:
+            self.coordinator.apply_retention_to_computed_blocks(
+                request, new_computed_block_list, num_new_computed_tokens
+            )
+
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if delay_cache_blocks:

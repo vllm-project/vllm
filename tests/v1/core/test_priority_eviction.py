@@ -3,6 +3,7 @@
 
 import random
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 
@@ -1895,3 +1896,91 @@ class TestChainCascades:
         pool.priority_eviction_queue.unprotect(trunk[0].block_id)
         pool._maybe_evict_cached_block(trunk[0])
         assert trunk[1].block_hash is not None and trunk[1].ref_cnt == 1
+
+
+class TestRetentionOnAdoptedCacheHits:
+    @pytest.fixture
+    def now(self, monkeypatch):
+        import vllm.v1.core.priority_eviction_queue as eviction
+
+        now = [0.0]
+        monkeypatch.setattr(eviction, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        return now
+
+    @staticmethod
+    def _cached_prefix(with_hint=True, num_blocks=32):
+        manager = make_kv_cache_manager(
+            make_kv_cache_config(16, num_blocks),
+            max_model_len=256,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        producer = make_request("producer", list(range(64)), 16, sha256)
+        if with_hint:
+            producer.kv_hints = make_retain_envelope(
+                [dict(start=0, end=None, priority=50, duration=30)], scope="owner"
+            )
+        assert manager.allocate_slots(producer, 64) is not None
+        blocks = list(manager.get_blocks(producer.request_id).blocks[0])
+        manager.free(producer)
+        return manager, blocks
+
+    @staticmethod
+    def _consumer(priority=50):
+        request = make_request(
+            "consumer", list(range(66)), 16, sha256, session_id="owner"
+        )
+        request.kv_hints = make_retain_envelope(
+            [dict(start=0, end=None, priority=priority, duration=60)]
+        )
+        return request
+
+    @staticmethod
+    def _adopt(manager, request):
+        computed, hit, _ = manager.get_computed_blocks(request)
+        assert hit == 64
+        return manager.allocate_slots(
+            request, 2, num_new_computed_tokens=hit, new_computed_blocks=computed
+        )
+
+    @pytest.mark.parametrize("action", ["set", "renew", "lower", "release"])
+    def test_hit_only_continuation_applies_its_retention_intent(self, now, action):
+        manager, blocks = self._cached_prefix(with_hint=action != "set")
+        priority = 0 if action == "release" else 20 if action == "lower" else 50
+        request = self._consumer(priority)
+        now[0] = 10
+        assert self._adopt(manager, request) is not None
+        pool = manager.block_pool
+        queue = pool.priority_eviction_queue
+        for block in blocks:
+            assert block.ref_cnt == 1 and block not in queue
+            if action == "release":
+                assert block.block_id not in queue._meta
+            else:
+                hold = queue._meta[block.block_id].holds["owner"]
+                assert (hold.priority, hold.expiry) == (priority, 70)
+        manager.free(request)
+        assert queue.num_blocks == (0 if action == "release" else 4)
+        assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
+
+    def test_failed_admission_does_not_renew_hits(self, now):
+        manager, blocks = self._cached_prefix(num_blocks=6)
+        pressure = manager.block_pool.get_new_blocks(1)
+        now[0] = 10
+        assert self._adopt(manager, self._consumer()) is None
+        meta = manager.block_pool.priority_eviction_queue._meta
+        assert all(meta[b.block_id].holds["owner"].expiry == 30 for b in blocks)
+        manager.block_pool.free_blocks(pressure)
+
+    def test_decode_inside_a_block_does_not_repeat_the_adoption_update(self, now):
+        manager, blocks = self._cached_prefix()
+        request = self._consumer()
+        now[0] = 10
+        assert self._adopt(manager, request) is not None
+        request.num_computed_tokens = 66
+        request.append_output_token_ids([100])
+        now[0] = 20
+        assert manager.allocate_slots(request, 1) is not None
+        meta = manager.block_pool.priority_eviction_queue._meta
+        assert all(meta[b.block_id].holds["owner"].expiry == 70 for b in blocks)
+        manager.free(request)
