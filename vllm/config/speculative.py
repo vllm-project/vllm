@@ -91,11 +91,8 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 
-# Architectures of the self-contained Qwen3 DSpark drafts whose checkpoints ship
-# the SAME architecture for the DSpark (``markov_rank > 0``) and the DFlash
-# (``markov_rank == 0``) variant, e.g. deepseek-ai/dflash_qwen3_4b_block7 and
-# deepseek-ai/dspark_qwen3_4b_block7 are both ``Qwen3DSparkModel``. The DSpark
-# model class serves both, because its Markov head is a no-op at rank 0.
+# DFlash and DSpark Qwen3 drafts ship the same architecture; the DSpark model
+# class serves both, since markov_rank == 0 makes its Markov head a no-op.
 _SELF_CONTAINED_QWEN3_DSPARK_ARCHITECTURES = frozenset(
     {
         "Qwen3DSparkModel",
@@ -109,14 +106,9 @@ def _route_self_contained_qwen3_dspark_draft(
     draft_architectures: list[str],
     model_name: str,
 ) -> SpeculativeMethod | None:
-    """Route a DFlash-named self-contained Qwen3 DSpark draft to the dspark method.
+    """Serve a dflash-named self-contained Qwen3 DSpark draft with dspark.
 
-    DeepSeek ships the same architecture for its DSpark (``markov_rank > 0``) and
-    DFlash (``markov_rank == 0``) drafts -- ``dflash_qwen3_4b_block7`` and
-    ``dspark_qwen3_4b_block7`` are both ``Qwen3DSparkModel`` -- and the DSpark
-    model class serves both. A ``method`` of ``"dflash"`` would EAGLE-rename such
-    a draft to an unregistered ``"DFlash<arch>"`` architecture, so use the dspark
-    path instead. See https://github.com/vllm-project/vllm/issues/49614.
+    "dflash" would EAGLE-rename the draft to an unregistered "DFlash<arch>".
     """
     if method != "dflash":
         return method
@@ -1453,12 +1445,8 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
-                # A self-contained Qwen3 DSpark draft is served by its DSpark model
-                # class whatever its checkpoint is named, so route a "dflash"
-                # method (given explicitly, or inferred from a "dflash" model
-                # name) to the dspark path. Otherwise the draft architecture is
-                # EAGLE-renamed to an unregistered "DFlash<arch>" and the engine
-                # fails to start (issue #49614).
+                # A "dflash" method here, explicit or inferred from the model
+                # name, would break these drafts at load time.
                 self.method = _route_self_contained_qwen3_dspark_draft(
                     self.method,
                     self.draft_model_config.architectures,

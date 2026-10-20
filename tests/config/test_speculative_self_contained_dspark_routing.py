@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for DFlash-named self-contained Qwen3 DSpark drafts (#49614).
-
-DeepSeek ships the SAME draft architecture for its DSpark (``markov_rank > 0``)
-and DFlash (``markov_rank == 0``) checkpoints: ``dflash_qwen3_4b_block7`` and
-``dspark_qwen3_4b_block7`` are both ``Qwen3DSparkModel``, and
-``Qwen3DSparkForCausalLM`` serves both, so these drafts must take the dspark
-path. With ``method="dflash"`` -- passed explicitly or inferred from the
-``dflash`` model name -- the draft was instead EAGLE-renamed to the unregistered
-``DFlashQwen3DSparkModel`` and the engine failed to start.
-"""
+"""DFlash-named Qwen3 DSpark drafts must take the dspark path (#49614)."""
 
 import pytest
 
