@@ -2538,6 +2538,12 @@ def run_moe(c, key, bid, tls, tl0):
     stamp(timeline, tls, tid, tl0 + 2)
     for t in range(first_task(bid, route0, key.tuned), s, BLOCKS):
         stage_route(c, t)
+    after_route = c.get("after_route")
+    if const_expr(after_route is not None):
+        # the caller's work nothing in this launch waits on: on the route
+        # CTAs, past the route, not in front of it
+        for t in range(first_task(bid, route0, key.tuned), s, BLOCKS):
+            after_route(t)
     stamp(timeline, tls, tid, tl0 + 3)
     c["xl"], c["xsl"] = c["x8l"], c["x8sl"]
     # a CTA's one shared unit (task, token tile) at most: straight-line code,

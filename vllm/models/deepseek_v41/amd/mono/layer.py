@@ -46,7 +46,7 @@ from .attention.plan import (
 from .common.arch import GFX942
 from .common.mx import clamp_fp8
 from .common.ops import bf16_pair, butterfly, fp8_pack4, peer_bases, traced
-from .common.plan import WAVES, first_task, key_tuple
+from .common.plan import first_task, key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
 from .stages import moe, seam
@@ -292,7 +292,7 @@ def build_mono_k1(key: MonoBuild):
 
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
+        red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
 
@@ -433,7 +433,12 @@ def build_mono_k1(key: MonoBuild):
 
         def seam_slice():
             for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
-                seam.stage_slice(ca, task)
+                if const_expr(key.tuned and key.fold):
+                    # the fold and the slice fused, a thread's columns in
+                    # registers throughout
+                    seam.stage_reduce_slice(ca, task, reduce=False)
+                else:
+                    seam.stage_slice(ca, task)
             gpu.barrier()
 
         def store(*v):
@@ -580,10 +585,11 @@ def store_normed(normed, t, col, ys, live, cb=None, wide=False):
             )
 
 
-def _seam_lds(s):
+def _seam_lds(s, tuned=False):
     @fx.struct
     class SeamLds:
-        red: fx.Array[fx.Float32, WAVES * 2 * 64 * 4, 16]
+        # a token tile's mix partials, tuned every tile's (``seam.slice_mix_all``)
+        red: fx.Array[fx.Float32, seam.red_words(s, tuned), 16]
         rl: fx.Array[fx.Float32, s * seam.KT, 16]
         fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
         pl: fx.Array[fx.Float32, s * seam.COLS, 16]
@@ -706,6 +712,10 @@ def run_ffn(
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
+    if const_expr(key.tuned):
+        # the MoE's waits on a run of flags (the router's on every token's
+        # row): spread over a wave's lanes, one round trip
+        cb["poll"] = amb.poll_wave
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
@@ -713,26 +723,46 @@ def run_ffn(
     # attention, so it stamps its own start here.
     if const_expr(part is not None):
         mark(0)
-    for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
-        # tuned: the slice's own loads in flight across the wait on the partials
-        pre = seam.slice_preload(ca, task) if key.tuned else None
-        if const_expr(part is not None):
-            seam.stage_push(ca, task, part)
-        seam.stage_reduce(ca, task)
-        seam.stage_slice(ca, task, pre)
-    mark(K2_SEAM_POINT)
-    for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
-        seam.stage_gate(ca, t)
-    mark(K2_SEAM_POINT + 1)
-    for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
-        seam.stage_norm(
-            ca,
-            t,
-            lambda *v: store_normed(
-                normed, *v, cb if x_pairs else None, wide=key.tuned
-            ),
-        )
-        publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+    if const_expr(key.tuned):
+        # the slices' reduce and slice fused (a thread's columns in registers
+        # throughout), then the norms (the MoE waits on them), then the gates:
+        # their outputs are the layer's, nothing in this launch waits on them.
+        # Past one router group (every CTA from the xq's on a router task)
+        # they run on the route CTAs past the route (``moe.run_moe``'s
+        # ``after_route``): idle until the router's logits land, where in
+        # front of the route they held it up.
+        for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
+            seam.stage_norm(
+                ca,
+                t,
+                lambda *v: store_normed(normed, *v, cb if x_pairs else None, wide=True),
+                tail_barrier=False,
+            )
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
+        mark(K2_SEAM_POINT + 1)
+        if const_expr(rs.router_groups[0] > 1):
+            cb["after_route"] = lambda t: seam.stage_gate(ca, t)
+        else:
+            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
+                seam.stage_gate(ca, t)
+    else:
+        for task in range(first_task(bid, 0), SLICES, BLOCKS):
+            if const_expr(part is not None):
+                seam.stage_push(ca, task, part)
+            seam.stage_reduce(ca, task)
+            seam.stage_slice(ca, task)
+        mark(K2_SEAM_POINT)
+        for t in range(first_task(bid, GATE0), s, BLOCKS):
+            seam.stage_gate(ca, t)
+        mark(K2_SEAM_POINT + 1)
+        for t in range(first_task(bid, NORM0), s, BLOCKS):
+            seam.stage_norm(ca, t, lambda *v: store_normed(normed, *v))
+            publish(cb["put"], cb["xrdy"], t, 1, tid == 0)
     gpu.barrier()
     mark(K2_SEAM_POINT + 2)
 
@@ -764,7 +794,7 @@ def build_mono_k2(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
-    SeamLds = _seam_lds(s)
+    SeamLds = _seam_lds(s, key.tuned)
 
     @fx.union
     class K2Lds:

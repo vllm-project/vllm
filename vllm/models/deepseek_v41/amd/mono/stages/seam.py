@@ -33,6 +33,8 @@ from flydsl.expr.typing import T
 
 from vllm.models.deepseek_v41.amd.mono.common.ops import (
     batched_rounds,
+    bf2_f32,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -45,7 +47,12 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
     sum_partials,
     traced,
 )
-from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES, pair_layout
+from vllm.models.deepseek_v41.amd.mono.common.plan import (
+    THREADS,
+    WAVES,
+    cdiv,
+    pair_layout,
+)
 from vllm.models.deepseek_v41.amd.mono.common.sync import preg
 from vllm.models.deepseek_v41.amd.mono.stages.gemv import (
     ld_bf,
@@ -182,46 +189,22 @@ def slice_fn_loads(c, c0):
     return out
 
 
-PRE_ROUNDS = 4  # ``slice_preload``: a step's slice rounds held at most
-
-
-def slice_preload(c, task):
-    """``stage_slice``'s global loads of task ``task`` (none of them the
-    reduce's result), issued before the caller's wait on the attention's
-    partials (``stage_reduce``); None past PRE_ROUNDS rounds."""
-    s, tid = c["S"], c["tid"]
-    n = s * KT
-    rounds = -(-n // THREADS)
-    if rounds > PRE_ROUNDS:
-        return None
-    c0 = task * COLS
-    rows = [slice_loads(c, c0, fx.min(tid + THREADS * i, n - 1)) for i in range(rounds)]
-    return rows, slice_fn_loads(c, c0)
-
-
 @traced
-def stage_slice(c, task, pre=None):
+def stage_slice(c, task):
     """R_new, the layer input and the partial projections of hidden columns
-    32 task .. +32, all four streams, every token (``pre``: its loads,
-    ``slice_preload``)."""
+    32 task .. +32, all four streams, every token."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl = c["rl"], c["fl"]
     a = c["args"]
     c0 = task * COLS
-    if const_expr(pre is None):
-        batched_rounds(
-            tid,
-            s * KT,
-            lambda e: slice_loads(c, c0, e),
-            lambda e, got: slice_row(c, c0, e, got),
-        )
-    else:
-        rows, fns = pre
-        for i in range_constexpr(len(rows)):
-            e = tid + THREADS * i
-            if e < s * KT:
-                slice_row(c, c0, e, rows[i])
-    if const_expr(c["tuned"] and pre is None):
+    batched_rounds(
+        tid,
+        s * KT,
+        lambda e: slice_loads(c, c0, e),
+        lambda e, got: slice_row(c, c0, e, got),
+    )
+    if const_expr(c["tuned"]):
+        # the mix weights' loads together, past the rows'
         fns = slice_fn_loads(c, c0)
     for i in range_constexpr((MIX * KT + THREADS - 1) // THREADS):
         e = tid + THREADS * i
@@ -286,6 +269,233 @@ def slice_mix(c, task, t0, n):
         for w in range_constexpr(WAVES):
             tot = tot + fx.ptr_load(red + (((w * 2 + h) * 64 + ln) * 4 + j % 4))
         c["put"](c["pmix"], (task * s + t) * PART + j, tot)
+    gpu.barrier()
+
+
+# ---------------------------------------------------------------- reduce + slice
+def fn_loads(c, task):
+    """``stage_slice``'s fn weights a thread stores to ``fl`` (``fn_store``)."""
+    tid = c["tid"]
+    a = c["args"]
+    c0 = task * COLS
+    out = []
+    for i in range(cdiv(MIX * KT, THREADS)):
+        e = fx.min(tid + THREADS * i, MIX * KT - 1)
+        j = e // KT
+        o = (e % KT) // COLS
+        out.append(ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS))
+    return out
+
+
+@traced
+def fn_store(c, fs):
+    """``fn_loads``' weights as the original's two bf16 MFMAs take them: hi =
+    bf16(fn), lo = bf16(fn - hi), their sum exact in fp32 -> ``fl``."""
+    tid = c["tid"]
+    for i in range_constexpr(len(fs)):
+        e = tid + THREADS * i
+        if e < MIX * KT:
+            f = fs[i]
+            hi = bf16_round(f)
+            fx.ptr_store(hi + bf16_round(f - hi), c["fl"] + e)
+
+
+QUAD = 4  # columns a thread of ``stage_reduce_slice``
+
+
+@traced
+def stage_reduce_slice(c, task, reduce=True):
+    """``stage_reduce`` then ``stage_slice`` (fold) of the FFN seam, the same
+    values (tuned builds; ``reduce`` False: K1's seam, its pend row instead of
+    the TP partials). A thread takes four columns of a token through it all: the TP
+    partials summed in rank order, R_new of the four streams, and the layer
+    input -- from registers, no LDS hand-off, so the layer input leaves as soon
+    as the partials land. Every operand that does not depend on them (the
+    residual, comb / post / pre, the fn weights) is loaded before their poll."""
+    s, tid = c["S"], c["tid"]
+    a = c["args"]
+    tp = c["d"].tp
+    c0 = task * COLS
+    n = s * COLS // QUAD
+    assert n <= THREADS
+    fs = fn_loads(c, task)
+    idx = fx.min(tid, n - 1)
+    t = idx // (COLS // QUAD)
+    col = c0 + QUAD * (idx % (COLS // QUAD))
+    rw = [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(a["res_in"]),
+                ((t * HC + h) * HIDDEN + col) // 2,
+                vec_width=2,
+                dtype=T.i32,
+            )
+        )
+        for h in range(HC)
+    ]
+    cmv = [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(a["comb_in"]), (t * HC + h) * HC, vec_width=4, dtype=T.f32
+            )
+        )
+        for h in range(HC)
+    ]
+    postv = fx.Vector(
+        bo.buffer_load(rsrc(a["post_in"]), t * HC, vec_width=4, dtype=T.f32)
+    )
+    prev = fx.Vector(
+        bo.buffer_load(rsrc(a["pre_in"]), t * HC, vec_width=4, dtype=T.f32)
+    )
+    if const_expr(reduce):
+        if tid < n:
+            own = preg(c["sym"], 0, "attn")
+            ws = c["poll"](
+                [(own, attn_region_pair(src, t, s, col), 2) for src in range(tp)]
+            )
+            reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev)
+    else:
+        # K1: the owed post's sublayer output is the caller's ``pend`` row
+        pw = fx.Vector(
+            bo.buffer_load(
+                rsrc(a["pend"]), (t * HIDDEN + col) // 2, vec_width=2, dtype=T.i32
+            )
+        )
+        if tid < n:
+            reduce_slice_quad(c, task, t, col, None, rw, cmv, postv, prev, pw)
+    fn_store(c, fs)
+    gpu.barrier()
+    slice_rest(c, task)
+
+
+@traced
+def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
+    """A thread's (token t, columns col ..  col + 3) of ``stage_reduce_slice``
+    (``ws``: the TP partials' words; None: ``pw``, the pend row's)."""
+    rl = c["rl"]
+    a = c["args"]
+    pend = []
+    if const_expr(ws is None):
+        for p in range_constexpr(2):
+            lo, hi = bf2_f32(fx.Int32(pw[p]))
+            pend += [lo, hi]
+    else:
+        for p in range_constexpr(2):
+            acc0, acc1 = bf2_f32(ws[0][p])
+            for src in range_constexpr(1, len(ws)):
+                lo, hi = bf2_f32(ws[src][p])
+                acc0 = acc0 + lo
+                acc1 = acc1 + hi
+            pend += [bf16_round(acc0), bf16_round(acc1)]
+    cc = col - task * COLS
+    r = []
+    for h in range_constexpr(HC):
+        lo0, hi0 = bf2_f32(fx.Int32(rw[h][0]))
+        lo1, hi1 = bf2_f32(fx.Int32(rw[h][1]))
+        r.append([lo0, hi0, lo1, hi1])
+    rows = []
+    for o in range_constexpr(HC):
+        cm = [fx.Float32(cmv[h][o]) for h in range(HC)]
+        post = fx.Float32(postv[o])
+        vs = []
+        for k in range_constexpr(QUAD):
+            v = post * pend[k] + (r[0][k] * cm[0])
+            for h in range_constexpr(1, HC - 1):
+                v = v + cm[h] * r[h][k]
+            v = bf16_round(fma(cm[HC - 1], r[HC - 1][k], v))
+            fx.ptr_store(v, rl + (t * KT + o * COLS + cc + k))
+            vs.append(v)
+        bo.buffer_store(
+            fx.Vector.from_elements(
+                [
+                    bf16_pair(vs[0], vs[1]).bitcast(fx.Int32),
+                    bf16_pair(vs[2], vs[3]).bitcast(fx.Int32),
+                ],
+                fx.Int32,
+            ),
+            rsrc(a["res_out"]),
+            ((t * HC + o) * HIDDEN + col) // 2,
+        )
+        rows.append(vs)
+    outs = []
+    for k in range_constexpr(QUAD):
+        acc = fx.Float32(0.0)
+        for h in range_constexpr(HC):
+            acc = acc + fx.Float32(prev[h]) * rows[h][k]
+        outs.append(acc)
+    c["put_bf"](c["lin"], t * HIDDEN + col, outs)
+
+
+@traced
+def slice_rest(c, task):
+    """``stage_slice`` past the layer input: the sums of squares and the mix
+    projection partials (``fl`` filled, ``rl`` complete)."""
+    s, lane, wave = c["S"], c["lane"], c["wave"]
+    rl = c["rl"]
+    for t in range_constexpr(s):
+        if wave == t % WAVES:
+            x0 = fx.ptr_load(rl + (t * KT + 2 * lane))
+            x1 = fx.ptr_load(rl + (t * KT + 2 * lane + 1))
+            sq = butterfly(x0 * x0 + x1 * x1, (32, 16, 8, 4, 2, 1))
+            if lane == 0:
+                c["put"](c["pmix"], (task * s + t) * PART + MIX, sq)
+    slice_mix_all(c, task)
+
+
+RED_TILE = WAVES * 2 * 64 * 4  # ``slice_mix``'s MFMA partials of a token tile
+
+
+def red_words(s, tuned=False):
+    """The seam's LDS ``red``: ``slice_mix``'s partials of a token tile, or
+    (``tuned``) ``slice_mix_all``'s of every token tile."""
+    return RED_TILE * (len(token_tiles(s)) if tuned else 1)
+
+
+@traced
+def slice_mix_all(c, task):
+    """``slice_mix`` of every token tile, the same sums: all tiles' MFMAs, one
+    barrier, then all tiles' wave sums (two barriers in all, not two a tile)."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    rl, fl, red = c["rl"], c["fl"], c["red"]
+    kw = KT // WAVES
+    tiles = token_tiles(s)
+    for ti in range_constexpr(len(tiles)):
+        t0, n = tiles[ti]
+        tok = plus(t0, fx.min(lane % 16, n - 1))
+        cs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(2)]
+        for kk in range_constexpr(kw // 4):
+            colk = wave * kw + lane // 16 + 4 * kk
+            b = fx.ptr_load(rl + (tok * KT + colk))
+            for h in range_constexpr(2):
+                row = h * 16 + lane % 16
+                av = fx.ptr_load(fl + (fx.min(row, MIX - 1) * KT + colk))
+                av = (row < MIX).select(av, fx.Float32(0.0))
+                ops = rocdl._split_mfma_operands([av, b, cs[h], 0, 0, 0])
+                cs[h] = fx.Vector(
+                    rocdl.mfma_f32_16x16x4f32(T.vec(4, T.f32), *ops).result
+                )
+        for h in range_constexpr(2):
+            fx.ptr_store(
+                cs[h], red + (ti * RED_TILE + ((wave * 2 + h) * 64 + lane) * 4)
+            )
+    gpu.barrier()
+    total = MIX * s
+    for pas in range_constexpr(0, total, THREADS):
+        u = pas + tid
+        if u < total:
+            ti = u // (MIX * 16)
+            loc = u % (MIX * 16)
+            tl = loc // MIX
+            j = loc % MIX
+            t = ti * 16 + tl
+            h = j // 16
+            ln = 16 * ((j % 16) // 4) + tl
+            tot = fx.Float32(0.0)
+            for w in range_constexpr(WAVES):
+                tot = tot + fx.ptr_load(
+                    red + (ti * RED_TILE + ((w * 2 + h) * 64 + ln) * 4 + j % 4)
+                )
+            c["put"](c["pmix"], (task * s + t) * PART + j, tot)
     gpu.barrier()
 
 
@@ -367,7 +577,7 @@ def stage_gate(c, t):
 
 # ---------------------------------------------------------------- norm
 @traced
-def stage_norm(c, t, store):
+def stage_norm(c, t, store, tail_barrier=True):
     """Token t's RMSNorm (rstd = rsq(fma(sum, 1/H, eps)), bf16((x rstd) w));
     256 threads, 3 chunks of 8 at 8 t + 2048 c, each chunk's bf16 values handed
     to ``store(t, col, ys, live)`` by every thread (``live``: a thread's chunk
@@ -377,20 +587,39 @@ def stage_norm(c, t, store):
     tt = fx.min(tid, 255)
     mine = tid < 256
     cols = [tt * 8 + 2048 * ch for ch in range(3)]
+    xs = []
     if const_expr(c["tuned"]):
-        # the norm weights in flight before the row's wait (none of them the row's)
-        ws = [
-            [ld_bf(a["norm_w"], fx.min(cols[ch], HIDDEN - 8) + j) for j in range(8)]
+        # the norm weights in flight before the row's wait (they do not depend
+        # on it), then the three chunks' pairs in one poll batch: one round trip
+        wv = [
+            fx.Vector(
+                bo.buffer_load(
+                    rsrc(a["norm_w"]),
+                    fx.min(cols[ch], HIDDEN - 8) // 2,
+                    vec_width=4,
+                    dtype=T.i32,
+                )
+            )
             for ch in range(3)
         ]
-    xs = []
-    for ch in range_constexpr(3):
-        base = t * HIDDEN + fx.min(cols[ch], HIDDEN - 8)
-        words = c["poll"]([(c["lin"], base // 2 + k, 1) for k in range(4)])
-        v = []
-        for k in range_constexpr(4):
-            v += [bf_lo(words[k][0]), bf_hi(words[k][0])]
-        xs.append([(cols[ch] < HIDDEN).select(x, fx.Float32(0.0)) for x in v])
+        bases = [t * HIDDEN + fx.min(cols[ch], HIDDEN - 8) for ch in range(3)]
+        words = c["poll"](
+            [(c["lin"], bases[ch] // 2 + k, 1) for ch in range(3) for k in range(4)]
+        )
+        for ch in range_constexpr(3):
+            v = []
+            for k in range_constexpr(4):
+                w = words[4 * ch + k][0]
+                v += [bf_lo(w), bf_hi(w)]
+            xs.append([(cols[ch] < HIDDEN).select(x, fx.Float32(0.0)) for x in v])
+    else:
+        for ch in range_constexpr(3):
+            base = t * HIDDEN + fx.min(cols[ch], HIDDEN - 8)
+            words = c["poll"]([(c["lin"], base // 2 + k, 1) for k in range(4)])
+            v = []
+            for k in range_constexpr(4):
+                v += [bf_lo(words[k][0]), bf_hi(words[k][0])]
+            xs.append([(cols[ch] < HIDDEN).select(x, fx.Float32(0.0)) for x in v])
     acc = fx.Float32(0.0)
     for ch in range_constexpr(3):
         for x in xs[ch]:
@@ -404,14 +633,19 @@ def stage_norm(c, t, store):
     for ch in range_constexpr(3):
         col = fx.min(cols[ch], HIDDEN - 8)
         if const_expr(c["tuned"]):
-            ys = [bf16_round((xs[ch][j] * r) * ws[ch][j]) for j in range(8)]
+            nw = []
+            for k in range_constexpr(4):
+                nw += [bf_lo(fx.Int32(wv[ch][k])), bf_hi(fx.Int32(wv[ch][k]))]
+            ys = [bf16_round((xs[ch][j] * r) * nw[j]) for j in range(8)]
         else:
             ys = [
                 bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j))
                 for j in range(8)
             ]
         store(t, col, ys, mine & (cols[ch] < HIDDEN))
-    gpu.barrier()
+    if const_expr(tail_barrier):
+        # (a caller that publishes next has the drain's barrier instead)
+        gpu.barrier()
 
 
 # ---------------------------------------------------------------- reduce
