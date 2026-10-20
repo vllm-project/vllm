@@ -1349,6 +1349,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if _adaptive_xqa_mismatch_safe(vllm_config):
             return max_decode_query_len(vllm_config)
         return None
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
@@ -1384,9 +1385,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         use_dcp: bool,
     ) -> bool:
         """Whether decode reads per-request query lengths from the device
-        qo_indptr. Adaptive verification trims drafts on device, and only
-        trtllm-gen supports that (the selector already rejects the other
-        configurations)."""
+        qo_indptr via the trtllm-gen varlen path. (The SM120/121 XQA adaptive
+        mismatch path is handled separately by _adaptive_xqa_mismatch_safe.)"""
         speculative_config = vllm_config.speculative_config
         return (
             speculative_config is not None

@@ -1202,6 +1202,9 @@ def test_flashinfer_varlen_cudagraph_capability(
         use_v2_model_runner=True,
     )
     monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    # Stub supports_trtllm_attention so the XQA predicate is hermetic (it
+    # reads VLLM_BATCH_INVARIANT + has_nvidia_artifactory() directly).
+    monkeypatch.setattr(fi, "supports_trtllm_attention", lambda *_, **__: True)
     # Force the SM120/121 capability check so the XQA predicate is platform-
     # independent in this unit test.
     monkeypatch.setattr(
