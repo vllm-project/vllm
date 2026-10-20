@@ -467,8 +467,10 @@ pub(super) struct ChatMessageDelta {
 fn validate_chat_cross_parameters(
     req: &ChatCompletionRequest,
 ) -> Result<(), validator::ValidationError> {
-    // 1. Validate logprobs dependency
-    if req.top_logprobs.is_some() && !req.logprobs {
+    // 1. Validate logprobs dependency. Like Python, `top_logprobs: 0` (the
+    // OpenAI default) does not request any alternatives, so it is allowed
+    // without `logprobs`.
+    if req.top_logprobs.is_some_and(|n| n != 0) && !req.logprobs {
         let mut e = validator::ValidationError::new("top_logprobs_requires_logprobs");
         e.message = Some("top_logprobs is only allowed when logprobs is enabled".into());
         return Err(e);

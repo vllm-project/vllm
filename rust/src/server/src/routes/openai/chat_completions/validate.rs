@@ -28,7 +28,7 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    if request.top_logprobs.is_some() && !request.logprobs {
+    if request.top_logprobs.is_some_and(|n| n != 0) && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
             "top_logprobs can only be used when logprobs=true."
@@ -149,6 +149,7 @@ mod tests {
 
     use crate::routes::openai::utils::types::ReasoningEffort;
     use serde_json::json;
+    use validator::Validate as _;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -362,11 +363,28 @@ mod tests {
 
     #[test]
     fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
+        for top_logprobs in [-1, 1] {
+            let request = ChatCompletionRequest {
+                top_logprobs: Some(top_logprobs),
+                ..base_request()
+            };
+            assert!(request.validate().is_err(), "{top_logprobs}");
+            assert!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
+                "{top_logprobs}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_zero_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
             top_logprobs: Some(0),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        request.validate().expect("schema validation accepts top_logprobs=0");
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("top_logprobs=0 does not request alternatives");
     }
 
     #[test]
