@@ -257,3 +257,30 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 32, 33, 96, 2047, 2048])
+def test_rocm_bf16x3_dispatch_routes_by_num_tokens(num_tokens):
+    """The fp32 low-M kernel keeps the smallest batches; everything above it
+    takes the bf16x3 path, split-K below MM_MIN_TOKENS and hipBLASLt from
+    there."""
+    from vllm.model_executor.layers.fused_moe.router import (
+        bf16x3_router_gemm_rocm as rocm_bf16x3,
+    )
+    from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+        rocm_fp32_router_gemm,
+    )
+
+    if not rocm_bf16x3.platform_supported():
+        pytest.skip("ROCm bf16x3 router GEMM requires gfx950")
+    torch.manual_seed(0)
+    x = torch.randn(num_tokens, 6144, device="cuda").to(torch.bfloat16)
+    w = torch.randn(128, 6144, device="cuda") * 0.053
+    split = rocm_bf16x3.split_bf16x3(w)
+
+    out = torch.ops.vllm.rocm_bf16x3_router_gemm_dispatch(x, w, split)
+    if num_tokens <= GateLinear.FP32_MAX_TOKENS:
+        expected = rocm_fp32_router_gemm(x, w)
+    else:
+        expected = rocm_bf16x3.bf16x3_router_gemm(x, split)
+    assert torch.equal(out, expected)

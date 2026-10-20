@@ -86,7 +86,9 @@ def test_is_supported_rejects_ineligible_inputs():
     w = torch.zeros(128, 6144, dtype=torch.float32, device=meta)
     assert rocm_bf16x3.is_supported(x, w)
 
-    assert not rocm_bf16x3.is_supported(x[: rocm_bf16x3.MIN_TOKENS - 1], w)
+    # The split-K kernel serves every batch below MM_MIN_TOKENS.
+    assert rocm_bf16x3.is_supported(x[:1], w)
+    assert not rocm_bf16x3.is_supported(x[:0], w)
     assert not rocm_bf16x3.is_supported(x.float(), w)
     assert not rocm_bf16x3.is_supported(x, w.bfloat16())
     assert not rocm_bf16x3.is_supported(x, w[:, :128])
@@ -119,7 +121,12 @@ _FP32_FALLBACK_BEST = 5.7e-7
 
 
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
-@pytest.mark.parametrize("num_tokens", [2048, 8192, 16385])
+@pytest.mark.parametrize(
+    "num_tokens",
+    # Split-K below MM_MIN_TOKENS, including partial BLOCK_M tiles; the
+    # stacked GEMM from there on.
+    [1, 33, 96, 257, 1000, 2047, 2048, 8192, 16385],
+)
 def test_matches_fp64_reference(hidden_size: int, num_experts: int, num_tokens: int):
     _requires_gfx950()
     x, w = _inputs(num_tokens, hidden_size, num_experts)
@@ -131,37 +138,91 @@ def test_matches_fp64_reference(hidden_size: int, num_experts: int, num_tokens: 
     assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
 
 
+@pytest.mark.parametrize("num_tokens", [96, 8192])
 @pytest.mark.parametrize("num_experts", [17, 384])
-def test_matches_fp64_for_non_power_of_two_experts(num_experts: int):
-    """Exercises the reduction's N mask, which the model shapes never hit."""
+def test_matches_fp64_for_non_power_of_two_experts(num_tokens: int, num_experts: int):
+    """Exercises the N masks, which the model shapes never hit."""
     _requires_gfx950()
-    x, w = _inputs(8192, 6144, num_experts)
+    x, w = _inputs(num_tokens, 6144, num_experts)
     out = rocm_bf16x3.bf16x3_router_gemm(x, rocm_bf16x3.split_bf16x3(w))
     ref = x.double() @ w.double().T
 
-    assert out.shape == (8192, num_experts)
+    assert out.shape == (num_tokens, num_experts)
     assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
 
 
+@pytest.mark.parametrize("hidden_size", [1000, 2880])
+def test_split_k_matches_fp64_for_ragged_hidden_size(hidden_size: int):
+    """K that no split or BLOCK_K divides exercises the K mask."""
+    _requires_gfx950()
+    x, w = _inputs(96, hidden_size, 128)
+    out = rocm_bf16x3.bf16x3_router_gemm(x, rocm_bf16x3.split_bf16x3(w))
+    ref = x.double() @ w.double().T
+    assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
+
+
+def test_split_k_honors_activation_row_stride():
+    """is_supported admits activations with padded rows; the kernel must read
+    them through their stride rather than assume contiguity."""
+    _requires_gfx950()
+    x, w = _inputs(96, 6144 + 64, 128)
+    x = x[:, :6144]
+    w = w[:, :6144].contiguous()
+    assert rocm_bf16x3.is_supported(x, w)
+    out = rocm_bf16x3.bf16x3_router_gemm(x, rocm_bf16x3.split_bf16x3(w))
+    expected = rocm_bf16x3.bf16x3_router_gemm(
+        x.contiguous(), rocm_bf16x3.split_bf16x3(w)
+    )
+    assert torch.equal(out, expected)
+
+
+@pytest.mark.parametrize("num_tokens", [33, 96, 1000])
+def test_split_k_is_deterministic(num_tokens: int):
+    """The K partitions are summed in a fixed order, not with atomics."""
+    _requires_gfx950()
+    x, w = _inputs(num_tokens, 6144, 128)
+    split = rocm_bf16x3.split_bf16x3(w)
+    first = rocm_bf16x3.bf16x3_router_gemm(x, split)
+    for _ in range(3):
+        assert torch.equal(rocm_bf16x3.bf16x3_router_gemm(x, split), first)
+
+
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
-def test_more_accurate_than_fp32_fallback(hidden_size: int, num_experts: int):
+@pytest.mark.parametrize("num_tokens", list(range(1, 65)) + [96, 192, 1024, 2047])
+def test_split_k_config_bounds(hidden_size: int, num_experts: int, num_tokens: int):
+    block_m, block_n, split_k, _ = rocm_bf16x3._split_k_config(
+        num_tokens, num_experts, hidden_size
+    )
+    tiles = -(-num_tokens // block_m) * -(-num_experts // block_n)
+    assert split_k >= 1 and split_k & (split_k - 1) == 0
+    assert split_k == 1 or split_k * tiles <= 768
+    assert split_k == 1 or hidden_size // split_k >= 192
+
+
+@pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
+@pytest.mark.parametrize("num_tokens", [96, 1536, 16384])
+def test_more_accurate_than_fp32_fallback(
+    hidden_size: int, num_experts: int, num_tokens: int
+):
     """The claim is not just accuracy but beating the fp32 GEMM it replaces."""
     _requires_gfx950()
-    x, w = _inputs(16384, hidden_size, num_experts)
+    x, w = _inputs(num_tokens, hidden_size, num_experts)
     ref = x.double() @ w.double().T
     out = rocm_bf16x3.bf16x3_router_gemm(x, rocm_bf16x3.split_bf16x3(w))
     assert (out.double() - ref).norm() / ref.norm() < _FP32_FALLBACK_BEST
 
 
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
-def test_expert_selection_matches_fp64(hidden_size: int, num_experts: int):
+@pytest.mark.parametrize("num_tokens", [2047, 16384])
+def test_expert_selection_matches_fp64(
+    hidden_size: int, num_experts: int, num_tokens: int
+):
     """Relative L2 is a proxy; the expert set is what reaches the model.
 
     Measures zero misroutes on both shapes, where the fp32 fallback misroutes a
     nonzero number at some token counts.
     """
     _requires_gfx950()
-    num_tokens = 16384
     x, w = _inputs(num_tokens, hidden_size, num_experts)
     ref_set = _top_set(x.double() @ w.double().T)
     out = rocm_bf16x3.bf16x3_router_gemm(x, rocm_bf16x3.split_bf16x3(w))
@@ -170,11 +231,12 @@ def test_expert_selection_matches_fp64(hidden_size: int, num_experts: int):
     assert misrouted / num_tokens < 1e-4
 
 
-def test_writes_into_supplied_out():
+@pytest.mark.parametrize("num_tokens", [96, 8192])
+def test_writes_into_supplied_out(num_tokens: int):
     _requires_gfx950()
-    x, w = _inputs(8192, 6144, 128)
+    x, w = _inputs(num_tokens, 6144, 128)
     split = rocm_bf16x3.split_bf16x3(w)
-    out = torch.empty(8192, 128, dtype=torch.float32, device="cuda")
+    out = torch.empty(num_tokens, 128, dtype=torch.float32, device="cuda")
 
     returned = rocm_bf16x3.bf16x3_router_gemm(x, split, out=out)
     assert returned is out

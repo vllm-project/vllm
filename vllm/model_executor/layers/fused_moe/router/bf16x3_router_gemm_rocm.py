@@ -9,9 +9,12 @@ whose sum reproduces it exactly moves the GEMM onto the bf16 pipe and is more
 accurate than the path it replaces, which rounds the activations on the way to
 fp32 while this one leaves them untouched.
 
-The terms are stacked along the expert dimension into one ``(TERMS * E, K)``
-weight, so the router costs a single hipBLASLt GEMM plus a reduction over the
-``TERMS`` column blocks of its output.
+Large batches stack the terms along the expert dimension into one
+``(TERMS * E, K)`` weight, so the router costs a single hipBLASLt GEMM plus a
+reduction over the ``TERMS`` column blocks of its output. That pair has a
+launch and allocation floor that decode batches cannot amortize, so smaller
+batches instead run a split-K Triton kernel that accumulates the three terms
+in registers and sums the K partitions in a fixed order.
 """
 
 import torch
@@ -21,7 +24,7 @@ from vllm.triton_utils import tl, triton
 
 __all__ = [
     "BF16X3_TERMS",
-    "MIN_TOKENS",
+    "MM_MIN_TOKENS",
     "bf16x3_router_gemm",
     "is_supported",
     "platform_supported",
@@ -30,11 +33,12 @@ __all__ = [
 
 BF16X3_TERMS = 3
 
-# Below this the fp32 fallback is faster: the GEMM plus reduction has a ~32us
-# floor from launch and allocation that small batches cannot amortize.
-# Measured on gfx950; the crossover is 1536 at (K=6144, E=128) and (K=3072,
-# E=256), and this leaves margin for untested shapes.
-MIN_TOKENS = 2048
+# From this many tokens on the stacked hipBLASLt GEMM serves the router; below
+# it the split-K kernel does. The GEMM plus reduction has a ~10us floor from
+# launch and allocation that small batches cannot amortize, where the split-K
+# kernel is 1.1-1.8x faster than the GEMM and 1.6-2.1x faster than the fp32
+# F.linear fallback on gfx950 at (K=6144, E=128) and (K=3072, E=256).
+MM_MIN_TOKENS = 2048
 
 _MAX_INT32 = (1 << 31) - 1
 
@@ -76,13 +80,17 @@ def platform_supported() -> bool:
 
 
 def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
-    """Whether this path can serve ``x @ weight.T`` -> fp32 profitably."""
+    """Whether this path can serve ``x @ weight.T`` -> fp32 profitably.
+
+    Batches small enough for the gfx950 fp32 low-M kernel are faster there;
+    the caller is expected to try that kernel first.
+    """
     if x.dim() != 2 or weight.dim() != 2:
         return False
     n, k = weight.shape
     m = x.shape[0]
     return (
-        m >= MIN_TOKENS
+        m > 0
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.float32
         and x.shape[1] == k
@@ -93,7 +101,126 @@ def is_supported(x: torch.Tensor, weight: torch.Tensor) -> bool:
         # a hidden copy that gives back the win over the fallback.
         and x.stride(1) == 1
         and 0 < m * BF16X3_TERMS * n <= _MAX_INT32
+        # The split-K kernel indexes both operands with int32 offsets.
+        and BF16X3_TERMS * n * k <= _MAX_INT32
+        and m * x.stride(0) <= _MAX_INT32
     )
+
+
+@triton.jit
+def _split_k_partials_kernel(
+    x_ptr,
+    w_ptr,
+    partials_ptr,
+    M,
+    N,
+    K,
+    stride_xm,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    K_PER_SPLIT: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    split = tl.program_id(2)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+    # One accumulator per term: the small terms are summed among themselves
+    # before they meet the large one.
+    acc0 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc1 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    acc2 = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k_start in range(0, K_PER_SPLIT, BLOCK_K):
+        k = split * K_PER_SPLIT + k_start + offs_k
+        mask_k = k < K
+        x = tl.load(
+            x_ptr + offs_m[:, None] * stride_xm + k[None, :],
+            mask=mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        )
+        w_offs = offs_n[None, :] * K + k[:, None]
+        w_mask = mask_n[None, :] & mask_k[:, None]
+        w0 = tl.load(w_ptr + w_offs, mask=w_mask, other=0.0)
+        w1 = tl.load(w_ptr + N * K + w_offs, mask=w_mask, other=0.0)
+        w2 = tl.load(w_ptr + 2 * N * K + w_offs, mask=w_mask, other=0.0)
+        acc0 = tl.dot(x, w0, acc0)
+        acc1 = tl.dot(x, w1, acc1)
+        acc2 = tl.dot(x, w2, acc2)
+    tl.store(
+        partials_ptr + (split * M + offs_m[:, None]) * N + offs_n[None, :],
+        acc0 + (acc1 + acc2),
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+@triton.jit
+def _split_k_reduce_kernel(
+    partials_ptr,
+    out_ptr,
+    numel,
+    SPLIT_K: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    # Fixed split order, so the result does not depend on scheduling.
+    for split in tl.static_range(SPLIT_K):
+        acc += tl.load(partials_ptr + split * numel + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, acc, mask=mask)
+
+
+def _split_k_config(m: int, n: int, k: int) -> tuple[int, int, int, int]:
+    """Return (BLOCK_M, BLOCK_N, SPLIT_K, num_warps), swept on gfx950.
+
+    Split K while the grid stays within 768 programs and each split keeps at
+    least 192 of K. Over M in [64, 2047] and six router shapes this lands
+    within 3% of the best split on average and 16% in the worst case.
+    """
+    block_m = 16 if m <= 16 else 32 if m <= 64 else 64
+    block_n = 32
+    tiles = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)
+    split_k = 1
+    while split_k * 2 * tiles <= 768 and k // (split_k * 2) >= 192:
+        split_k *= 2
+    return block_m, block_n, split_k, 4
+
+
+def _bf16x3_router_gemm_split_k(
+    x: torch.Tensor, weight_split: torch.Tensor, out: torch.Tensor
+) -> torch.Tensor:
+    m, k = x.shape
+    n = weight_split.shape[1]
+    block_m, block_n, split_k, num_warps = _split_k_config(m, n, k)
+    block_k = 64
+    k_per_split = triton.cdiv(triton.cdiv(k, split_k), block_k) * block_k
+    partials = torch.empty((split_k, m, n), dtype=torch.float32, device=x.device)
+    grid = (triton.cdiv(m, block_m), triton.cdiv(n, block_n), split_k)
+    _split_k_partials_kernel[grid](
+        x,
+        weight_split,
+        partials,
+        m,
+        n,
+        k,
+        x.stride(0),
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        K_PER_SPLIT=k_per_split,
+        num_warps=num_warps,
+        num_stages=2,
+        matrix_instr_nonkdim=16,
+    )
+    block = 1024
+    _split_k_reduce_kernel[(triton.cdiv(m * n, block),)](
+        partials, out, m * n, SPLIT_K=split_k, BLOCK=block, num_warps=4
+    )
+    return out
 
 
 @triton.jit
@@ -139,6 +266,8 @@ def bf16x3_router_gemm(
         out = torch.empty((m, n), dtype=torch.float32, device=x.device)
     else:
         assert out.shape == (m, n) and out.is_contiguous(), "bad out layout"
+    if m < MM_MIN_TOKENS:
+        return _bf16x3_router_gemm_split_k(x, weight_split, out)
 
     # Rows [t*E, (t+1)*E) of the (TERMS * E, K) view hold term t, so the GEMM
     # emits one column block per term and the reduction sums them.
