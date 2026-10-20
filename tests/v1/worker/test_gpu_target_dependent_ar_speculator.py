@@ -36,6 +36,9 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class _TestSpeculator(TargetDependentARSpeculator):
+    # Set by each test to the draft model `load_draft_model` should hand back.
+    test_draft_model: torch.nn.Module
+
     def load_draft_model(self, target_model, target_attn_layer_names):
         return self.test_draft_model
 
@@ -101,7 +104,8 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            # Stand-in group: build_attn_metadata only reads these two members.
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 get_metadata_builder=lambda _: SimpleNamespace(
                     build=build, supports_update_block_table=False
                 ),
@@ -118,6 +122,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         seq_lens_cpu_upper_bound=torch.tensor([10, 20], dtype=torch.int32),
         step=1,
     )
+    assert metadata is not None
     assert metadata["draft"] == (num_reqs_padded, 0, num_reqs_padded, 0)
 
 
@@ -461,6 +466,7 @@ def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
+    monkeypatch,
     method_name,
     cg_mode,
     num_speculative_steps,
@@ -470,8 +476,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
-    speculator.slot_mapping_observer = None
-    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),
@@ -480,7 +484,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
     generate_draft = Mock()
-    speculator._generate_draft = generate_draft
+    # Stub the bound method on a hand-built speculator to count eager draft calls.
+    monkeypatch.setattr(speculator, "_generate_draft", generate_draft)
     run_fullgraph = Mock()
     speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
     batch_desc = BatchExecutionDescriptor(
@@ -507,13 +512,14 @@ def test_fused_full_graph_maps_split_group_block_tables():
     spec = MLAAttentionSpec(
         block_size=1024, num_kv_heads=1, head_size=128, dtype=torch.uint8
     )
+    kernel_block_table = torch.zeros(1, 4, 32, dtype=torch.int32)
     group = AttentionGroup(
         SimpleNamespace(),
         ["layer.0"],
         spec,
         0,
         kernel_block_size=256,
-        kernel_block_table=torch.zeros(1, 4, 32, dtype=torch.int32),
+        kernel_block_table=kernel_block_table,
         kernel_block_offsets=torch.arange(4, dtype=torch.int32),
     )
     speculator = object.__new__(_TestSpeculator)
@@ -528,7 +534,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
     replayed_tables = []
     speculator.decode_cudagraph_manager = SimpleNamespace(
         run_fullgraph=lambda _: replayed_tables.append(
-            group.kernel_block_table[0, :2, :8].tolist()
+            kernel_block_table[0, :2, :8].tolist()
         )
     )
 
@@ -656,7 +662,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.num_speculative_steps = num_speculative_steps
     speculator.attn_groups = [
         [
-            SimpleNamespace(
+            SimpleNamespace(  # type: ignore[list-item]  # stand-in group
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )
