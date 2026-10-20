@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 
-use crate::error::{ApiError, server_error};
+use crate::error::{ApiError, chat_submit_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
@@ -113,7 +113,7 @@ async fn tokenize_chat(
         .request_processor()
         .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
-        .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
+        .map_err(|error| chat_submit_error("tokenize failed", error))?;
     let tokens = state
         .chat
         .text()

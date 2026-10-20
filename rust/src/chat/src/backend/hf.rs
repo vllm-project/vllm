@@ -284,6 +284,7 @@ mod tests {
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
+                trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
             },
