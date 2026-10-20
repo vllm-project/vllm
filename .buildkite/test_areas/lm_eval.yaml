@@ -119,6 +119,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Large Models FP8"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 45
@@ -398,6 +399,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Large Models EP"
+      automatic_shard: true
       dind: false
       device: mi355_2
       num_devices: 2
@@ -789,6 +791,7 @@ steps:
 
 - label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY"
   key: moe-refactor-integration-test-b200-dp-temporary
+  automatic_shard: true
   device: b200-k8s
   optional: true
   num_devices: 2
