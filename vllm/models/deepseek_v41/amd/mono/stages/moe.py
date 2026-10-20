@@ -158,6 +158,12 @@ DOWN_CHAINS = 2
 # units at 6 rows, a part's CTAs 22 + 8 (two rounds of 16).
 DOWN_LDS_PICKS = 72
 DOWN_SPLIT_PARTS = 3
+# tuned, past DOWN_LDS_PICKS: a CTA running this many down tasks pipelines its
+# rounds -- the next round's weights in flight across this round's poll, MID
+# copy and MFMAs -- with the round's MID rows staged in LDS (``down_rounds_pipe``;
+# a round past the block's picks reads them into registers, its next weights
+# after its MFMAs)
+DOWN_PIPE_N = (2,)
 # a reduce task's columns: at 128 a thread polled 6 pairs at 48 rows, each
 # pass a round trip in series (32: 1-2 passes, S=48 -1 us)
 RED_COLS = 32
@@ -1696,6 +1702,22 @@ def stage_down(c, tasks):
     # before the routed results, which a CTA mostly waits on here; after the
     # rounds it sat on the path past the last ug task
     down_shared(c, tasks)
+    if const_expr(down_pipe(c["rs"]) and n in DOWN_PIPE_N):
+        down_rounds_pipe(c, tasks, nu, sl, sw, slots, per_round)
+    else:
+        down_rounds(c, tasks, nu, sl, sw, slots, per_round)
+    gpu.barrier()
+    for t0, nn in token_tiles(s):
+        for j in range_constexpr(n):
+            down_combine(c, tasks[j], j, t0, nn)
+
+
+@traced
+def down_rounds(c, tasks, nu, sl, sw, slots, per_round):
+    """``stage_down``'s rounds: a round's every load in flight before its first
+    wait, its picks' B operands straight from MID into registers."""
+    s, wave, tab = c["S"], c["wave"], c["tab"]
+    n = len(tasks)
     for rnd in range(0, (nu + per_round - 1) // per_round, 1):
         # the round's slots of U (wave, wave + WAVES, ...), every load of them
         # and of every task in flight before the first wait: the weights and
@@ -1744,10 +1766,6 @@ def stage_down(c, tasks):
                                 avs[j * slots + i],
                                 us[i] < nu,
                             )
-    gpu.barrier()
-    for t0, nn in token_tiles(s):
-        for j in range_constexpr(n):
-            down_combine(c, tasks[j], j, t0, nn)
 
 
 def _lds_byte_ptr(base, off):
@@ -1785,6 +1803,277 @@ def rows_to_lds(c, region, lds, rb, row0, rows, r0, live):
                 fx.Int32(0),
                 CM_DEV,
             )
+
+
+@traced
+def down_rounds_pipe(c, tasks, nu, sl, sw, slots, per_round):
+    """``stage_down``'s rounds past ``DOWN_LDS_PICKS``, pipelined: round r + 1's
+    weights (``down_weight_loads``: a slot past U reads nothing) and the first
+    load of its ug flags go out past round r's MID copy, so they stream across
+    its MFMAs and the next round's flag check and copy. A round's slots' picks
+    are one run of the pick order: their MID rows go to the LDS block
+    (``mid_rows_to_lds``) when the run fits its ``pipe_picks``, else its MFMAs
+    read them from MID a few K steps at a time (``down_slot_regs``). Two rounds
+    an iteration, the weights in alternate registers: one loop-carried set is
+    a copy a round at the loop head, which waits for every load of it. A
+    round past the last (an odd count) loads and stores nothing. Either way
+    the same MFMAs on the same words in the same order."""
+    nr = (nu + per_round - 1) // per_round
+    w = down_weight_loads(c, tasks, down_experts(c, 0, slots, nu))
+    pk = ug_flags_peek(c, down_round_ucs(c, 0, slots, nu))
+    for rp in range(0, (nr + 1) // 2, 1):
+        wb, pkb = down_round_pipe(c, tasks, nu, sl, sw, slots, per_round, 2 * rp, w, pk)
+        w, pk = down_round_pipe(
+            c, tasks, nu, sl, sw, slots, per_round, 2 * rp + 1, wb, pkb
+        )
+
+
+@traced
+def down_round_pipe(c, tasks, nu, sl, sw, slots, per_round, rnd, w, pk):
+    """Round ``rnd`` of ``down_rounds_pipe`` on weights ``w`` and the flags'
+    early load ``pk``: the next round's (weights, flags' load)."""
+    s, wave, tab = c["S"], c["wave"], c["tab"]
+    n = len(tasks)
+    cap = c["pipe_picks"]
+    svs, avs = w
+    us = [wave + WAVES * (slots * rnd + i) for i in range(slots)]
+    ucs = [fx.min(u, nu - 1) for u in us]
+    firsts = [c["rs"].slot_first(tab, u) for u in ucs]
+    # every wave past the last round's reads of the block
+    gpu.barrier()
+    # the round's ug flags: their first load went out a round ago
+    ug_flags_settle(c, ucs, pk)
+    counts = [c["rs"].slot_first(tab, u + 1) - f for u, f in zip(ucs, firsts)]
+    r0 = uniform(c["rs"].slot_first(tab, fx.min(per_round * rnd, nu)))
+    r1 = uniform(c["rs"].slot_first(tab, fx.min(per_round * (rnd + 1), nu)))
+    # the next weights' expert ids before the copy (LLVM waits for an LDS
+    # copy before any later LDS read)
+    es = down_experts(c, rnd + 1, slots, nu)
+    npk = ug_flags_peek(c, down_round_ucs(c, rnd + 1, slots, nu))
+    # this round's scale blocks (loaded a round ago) before the copy: an
+    # LDS store past an LDS copy waits for every load before it
+    for q in range_constexpr(len(svs)):
+        scale_block_store(c, svs[q], sl + q * sw)
+    fits = r1 - r0 <= cap
+    if fits:
+        for i in range_constexpr(slots):
+            mid_rows_to_lds(c, uniform(firsts[i]), uniform(counts[i]), r0, us[i] < nu)
+    # one issue point for both paths (a load issued in each branch is a
+    # register copy at the join, which waits for every load of it)
+    nw = down_weight_loads(c, tasks, es)
+    # issued here, not sunk into the MFMAs below
+    rocdl.sched_barrier(0)
+    for i in range_constexpr(slots):
+        sls = [sl + (j * slots + i) * sw for j in range(n)]
+        ais = [avs[j * slots + i] for j in range(n)]
+        for j0 in range_constexpr(0, s, TILE):
+            if const_expr(j0 == 0):
+                down_slot_pick_tile(
+                    c, tasks, sls, ais, firsts[i], counts[i], r0, us[i] < nu, fits
+                )
+            elif j0 < counts[i]:
+                down_slot_pick_tile(
+                    c,
+                    tasks,
+                    sls,
+                    ais,
+                    firsts[i] + j0,
+                    counts[i] - j0,
+                    r0,
+                    us[i] < nu,
+                    fits,
+                )
+    return nw, npk
+
+
+def down_round_ucs(c, rnd, slots, nu):
+    wave = c["wave"]
+    return [fx.min(wave + WAVES * (slots * rnd + i), nu - 1) for i in range(slots)]
+
+
+def ug_flags_peek(c, ucs):
+    """The first load of a down round's ug flags (``down_ug_flags``), issued a
+    round early: ``ug_flags_settle`` re-loads only while any is stale."""
+    flags = down_ug_flags(c, ucs)
+    r = rsrc(c["ugf"].value)
+    words = []
+    for f in flags:
+        w = fx.Vector(
+            bo.buffer_load(r, f * 2, vec_width=2, dtype=T.i32, cache_modifier=CM_DEV)
+        )
+        words += [w[0], w[1]]
+    return fx.Vector.from_elements(words, fx.Int32)
+
+
+@traced
+def ug_flags_settle(c, ucs, v):
+    """``c["poll"]`` of the round's ug flags from their early load ``v``: the
+    same loads re-issued while a tag is stale (``sync._spin``)."""
+    flags = down_ug_flags(c, ucs)
+    tag = c["poll"].__self__.tag
+    r = rsrc(c["ugf"].value)
+    nw = 2 * len(flags)
+
+    def load_all():
+        words = []
+        for f in flags:
+            w = fx.Vector(
+                bo.buffer_load(
+                    r, f * 2, vec_width=2, dtype=T.i32, cache_modifier=CM_DEV
+                )
+            )
+            words += [w[0], w[1]]
+        return fx.Vector.from_elements(words, fx.Int32)
+
+    def pending(x):
+        bad = x[1] != tag
+        for e in range_constexpr(3, nw, 2):
+            bad = bad | (x[e] != tag)
+        return bad
+
+    while pending(v):
+        rocdl.s_sleep(1)
+        v = load_all()
+
+
+@traced
+def down_slot_pick_tile(c, tasks, sls, avs, first, count, r0, live, fits):
+    """A slot's pick tile from first: B operands from the round's LDS block
+    when the round ``fits``, else from MID in chunks."""
+    if fits:
+        down_slot_lds(c, tasks, sls, avs, first, count, r0, live)
+    else:
+        down_slot_regs(c, tasks, sls, avs, first, count, live)
+
+
+DOWN_REG_CHUNK = 3  # K steps of MID operands a chunk (``down_slot_regs``)
+
+
+@traced
+def down_slot_regs(c, tasks, sls, avs, first, count, live):
+    """``down_mfma`` of each of ``tasks`` on one slot with its picks' B
+    operands loaded from MID a chunk of ``DOWN_REG_CHUNK`` K steps at a time
+    (registers for a chunk, not the slot's): the same MFMAs on the same words
+    in the same order (K steps ascending, chain st % DOWN_CHAINS)."""
+    lane, tab, d = c["lane"], c["tab"], c["d"]
+    n = len(tasks)
+    steps = d.inter // 128
+    sas = [lds_scales_half(sls[j], task_half(tasks[j]), lane, steps) for j in range(n)]
+    jj = umod(lane, 16)
+    col = fx.min(jj, count - 1)
+    g = udiv(lane, 16)
+    row = first + col
+    lane_word = fresh(row * d.mid_words + g * 4)
+    cbase = mid_code_index(d, row, g, True)
+    accs = [
+        [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(DOWN_CHAINS)]
+        for _ in range(n)
+    ]
+    for c0 in range_constexpr(0, steps, DOWN_REG_CHUNK):
+        sts = list(range(c0, min(steps, c0 + DOWN_REG_CHUNK)))
+        bvs, sbs = [], []
+        for st in sts:
+            halves = []
+            for h in range_constexpr(2):
+                v = fx.Vector(
+                    bo.buffer_load(
+                        rsrc(c["mid"].value),
+                        lane_word + (st * 32 + 16 * h),
+                        vec_width=4,
+                        dtype=T.i32,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+                if const_expr(st * 128 + 64 * h + 48 >= d.inter_real):
+                    past = st * 128 + 64 * h + 16 * g >= d.inter_real
+                    v = fx.Vector.from_elements(
+                        [past.select(fx.Int32(0), v[q]) for q in range(4)], fx.Int32
+                    )
+                halves.append(v)
+            bvs.append(fp8_operand(halves))
+            sb = fx.Int32(
+                bo.buffer_load(
+                    rsrc(c["mids"].value),
+                    cbase + st,
+                    vec_width=1,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
+            )
+            if const_expr((st + 1) * 128 > d.inter_real):
+                past = (4 * st + g) * 32 >= d.inter_real
+                sb = past.select(fx.Int32(UNIT_SCALE), sb)
+            sbs.append(sb)
+        for q, st in enumerate(sts):
+            hh = st % DOWN_CHAINS
+            for j in range_constexpr(n):
+                accs[j][hh] = mfma_scaled(
+                    avs[j][st], bvs[q], accs[j][hh], sas[j][st], sbs[q], FP4, FP8
+                )
+    pick = c["rs"].pick_at(tab, first + col)
+    for j in range_constexpr(n):
+        acc = accs[j][0]
+        for hh in range_constexpr(1, DOWN_CHAINS):
+            acc = acc + accs[j][hh]
+        for q in range_constexpr(4):
+            r = 4 * udiv(lane, 16) + q
+            if live & (jj < count):
+                contrib_store(c, j, pick * 16 + r, acc[q])
+
+
+@traced
+def down_slot_lds(c, tasks, sls, avs, first, count, r0, live):
+    """``down_mfma`` of each of ``tasks`` on one slot, its picks' B operands
+    read from the round's LDS block (``mid_rows_to_lds``) a K step at a time,
+    shared by the tasks: the same MFMAs on the same words, in the same order."""
+    lane, tab, d = c["lane"], c["tab"], c["d"]
+    n = len(tasks)
+    steps = d.inter // 128
+    sas = [lds_scales_half(sls[j], task_half(tasks[j]), lane, steps) for j in range(n)]
+    jj = umod(lane, 16)
+    col = fx.min(jj, count - 1)
+    g = udiv(lane, 16)
+    row = first + col - r0
+    lane_word = row * d.mid_words + g * 4
+    cbase = mid_code_index(d, row, g, True)
+    accs = [
+        [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(DOWN_CHAINS)]
+        for _ in range(n)
+    ]
+    for st in range_constexpr(steps):
+        halves = []
+        for h in range_constexpr(2):
+            v = fx.Vector(
+                fx.ptr_load(
+                    c["dmid"] + (lane_word + (st * 32 + 16 * h)),
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            )
+            if const_expr(st * 128 + 64 * h + 48 >= d.inter_real):
+                past = st * 128 + 64 * h + 16 * g >= d.inter_real
+                v = fx.Vector.from_elements(
+                    [past.select(fx.Int32(0), v[q]) for q in range(4)], fx.Int32
+                )
+            halves.append(v)
+        bv = fp8_operand(halves)
+        sb = fx.ptr_load(c["dmids"] + (cbase + st))
+        if const_expr((st + 1) * 128 > d.inter_real):
+            past = (4 * st + g) * 32 >= d.inter_real
+            sb = past.select(fx.Int32(UNIT_SCALE), sb)
+        hh = st % DOWN_CHAINS
+        for j in range_constexpr(n):
+            accs[j][hh] = mfma_scaled(
+                avs[j][st], bv, accs[j][hh], sas[j][st], sb, FP4, FP8
+            )
+    pick = c["rs"].pick_at(tab, first + col)
+    for j in range_constexpr(n):
+        acc = accs[j][0]
+        for hh in range_constexpr(1, DOWN_CHAINS):
+            acc = acc + accs[j][hh]
+        for q in range_constexpr(4):
+            r = 4 * udiv(lane, 16) + q
+            if live & (jj < count):
+                contrib_store(c, j, pick * 16 + r, acc[q])
 
 
 @traced
@@ -2379,6 +2668,18 @@ def down_lds_mid(rs) -> bool:
     return rs.tuned and rs.picks <= DOWN_LDS_PICKS
 
 
+def down_pipe(rs) -> bool:
+    """Whether a ``DOWN_PIPE_N`` CTA's rounds run ``down_rounds_pipe``."""
+    return rs.tuned and not down_lds_mid(rs)
+
+
+def pipe_mids_words(rs, p):
+    """``down_rounds_pipe``'s MIDS block of ``p`` picks: a word a code
+    (``mid_code_index``)."""
+    d = rs.dims
+    return -(-p * (d.inter // 32) // 4) * 4
+
+
 def down_lds_mid_words(rs):
     """The LDS words of every pick's MID and MIDS rows (``mid_rows_to_lds``)."""
     if not down_lds_mid(rs):
@@ -2414,6 +2715,17 @@ def stage_lds(s, rs):
         sdl = wsl + contrib
         sh0 = -(-(sdl + 2 * s * ROWS) // 32) * 32
         dmid_words, dmids_words = down_lds_mid_words(rs)
+        pipe_picks = 0
+        if down_pipe(rs):
+            # the round's MID block in the words past the shared tile the
+            # other stages take anyway (no LDS added): as many picks as fit
+            room = max(x8 + groups, wsl + x8 + groups) - sh0
+            while (pipe_picks + 1) * d.mid_words + pipe_mids_words(
+                rs, pipe_picks + 1
+            ) <= room:
+                pipe_picks += 1
+            dmid_words = pipe_picks * d.mid_words
+            dmids_words = pipe_mids_words(rs, pipe_picks)
         offsets = {
             "x8l": 0,
             "x8sl": x8,
@@ -2432,7 +2744,11 @@ def stage_lds(s, rs):
             "ug": wsl + x8 + groups,
             "down": sh0 + max(shared_xl + shared_xsl, dmid_words + dmids_words),
         }
-        return {"offsets": offsets, "words": {"all": max(words.values())}}
+        return {
+            "offsets": offsets,
+            "words": {"all": max(words.values())},
+            "pipe_picks": pipe_picks,
+        }
     offsets = {
         "x8l": 0,
         "x8sl": x8,
@@ -2484,6 +2800,7 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
     }
     for name, off in stage_lds(s, rs)["offsets"].items():
         c[name] = lds.stage.ptr + off
+    c["pipe_picks"] = stage_lds(s, rs).get("pipe_picks", 0)
     for region, (off, _) in layout.items():
         c[region] = sreg(scratch, off, region)
     return c
