@@ -2984,7 +2984,7 @@ async fn invalid_request_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3014,7 +3014,7 @@ async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert!(
         json["error"]["message"]
             .as_str()
@@ -3267,7 +3267,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert_eq!(
         json["error"]["message"],
         "At most 1 image(s) may be provided in one prompt."
@@ -3619,7 +3619,7 @@ async fn non_stream_chat_step5_vl_rejects_when_image_limit_is_zero() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert_eq!(
         json["error"]["message"],
         "At most 0 image(s) may be provided in one prompt."
@@ -4093,7 +4093,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(
         text.contains(&format!(
             "test tokenizer cannot decode unknown token id {UNKNOWN_DECODE_TOKEN_ID}"
@@ -4138,7 +4138,7 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
@@ -4214,7 +4214,7 @@ async fn retryable_engine_error_returns_service_unavailable() {
         engine_task.await.expect("mock engine task");
         let text = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(
-            text.contains("\"code\":\"engine_paused\""),
+            text.contains("\"type\":\"ServiceUnavailableError\"") && text.contains("\"code\":503"),
             "{uri} {request}: {text}"
         );
     }
@@ -4390,7 +4390,7 @@ async fn completions_invalid_request_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4420,7 +4420,7 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert!(
         json["error"]["message"]
             .as_str()
@@ -5490,7 +5490,7 @@ async fn stream_raw_generate_error_finish_returns_sse_error() {
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
+    assert!(text.contains("\"type\":\"InternalServerError\""), "{text}");
     assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"finish_reason\":\"error\""), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
@@ -7177,7 +7177,7 @@ async fn pause_route_rejects_invalid_mode() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
     assert_eq!(json["error"]["param"], "mode");
     engine_task.abort_and_join().await;
 }
@@ -7342,7 +7342,7 @@ async fn abort_requests_route_rejects_malformed_json() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "Bad Request");
     engine_task.abort_and_join().await;
 }
 
@@ -8309,7 +8309,7 @@ async fn tokenize_chat_conflicting_generation_flags_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8328,7 +8328,7 @@ async fn tokenize_chat_empty_messages_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8347,7 +8347,7 @@ async fn tokenize_chat_empty_message_content_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8366,8 +8366,8 @@ async fn tokenize_unknown_model_returns_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["code"], "model_not_found");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8386,8 +8386,8 @@ async fn detokenize_unknown_model_returns_404() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["code"], "model_not_found");
+    assert_eq!(json["error"]["type"], "NotFoundError");
+    assert_eq!(json["error"]["code"], 404);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8450,7 +8450,7 @@ async fn tokenize_chat_continue_without_assistant_returns_400() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
 /// `continue_final_message` must not append a new generation suffix vs `add_generation_prompt`.
