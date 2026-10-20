@@ -87,6 +87,55 @@ def quantize_to_mxfp4(
     return packed, scales
 
 
+def test_mxfp4_reference_exact_values_and_block_scales():
+    """Anchor the shared oracle to E2M1 codes and independently known scales."""
+    levels = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float32,
+        device="cpu",
+    ).repeat(2)
+    block_scales = torch.tensor(
+        [0.125, 0.5, 2.0, 8.0], dtype=torch.float32, device="cpu"
+    )
+    values = (block_scales[:, None] * levels).reshape(1, HEAD_DIM)
+
+    packed, scales = quantize_to_mxfp4(values)
+
+    expected_packed = (
+        torch.tensor(
+            [0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE],
+            dtype=torch.uint8,
+            device="cpu",
+        )
+        .repeat(8)
+        .reshape(1, HEAD_DIM // 2)
+    )
+    torch.testing.assert_close(packed, expected_packed, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scales,
+        torch.tensor([[124, 126, 128, 130]], dtype=torch.uint8, device="cpu"),
+        rtol=0,
+        atol=0,
+    )
+
+
 def _reference(
     positions: torch.Tensor,
     q: torch.Tensor,
@@ -227,6 +276,70 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
     assert torch.equal(weights_ref, weights_fused), (
         f"weights mismatch: max abs diff "
         f"{(weights_ref - weights_fused).abs().max().item()}"
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 257])
+@pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm MXFP4 only")
+@torch.inference_mode()
+def test_rocm_mxfp4_fused_indexer_q_matches_reference(num_tokens, cache_dtype):
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("ROCm MXFP4 indexer Q requires gfx950")
+
+    n_head = 64
+    device = "cuda"
+    torch.manual_seed(0)
+    q = torch.randn(num_tokens, n_head, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    # Vary every head/block's magnitude so an incorrect scale swizzle is visible.
+    block_scales = torch.exp2(
+        torch.randint(
+            -4, 5, (num_tokens, n_head, HEAD_DIM // 32, 1), device=device
+        ).float()
+    )
+    q = (q.reshape(num_tokens, n_head, HEAD_DIM // 32, 32) * block_scales).reshape_as(q)
+    q = q.to(torch.bfloat16)
+    q[:, 0] = 0
+    positions = torch.randint(
+        0, MAX_POS, (num_tokens,), dtype=torch.int64, device=device
+    )
+    cos_sin_cache = torch.randn(MAX_POS, ROPE_DIM, dtype=cache_dtype, device=device)
+    weights = torch.randn(num_tokens, n_head, dtype=torch.bfloat16, device=device)
+    softmax_scale = HEAD_DIM**-0.5
+    head_scale = 0.125
+
+    (q_ref, scales_ref), weights_ref = _reference(
+        positions,
+        q,
+        cos_sin_cache,
+        weights,
+        softmax_scale,
+        head_scale,
+        n_head,
+        use_fp4=True,
+    )
+    (q_actual, scales_actual), weights_actual = fused_indexer_q_rope_quant(
+        positions,
+        q,
+        cos_sin_cache,
+        weights,
+        softmax_scale,
+        head_scale,
+        use_fp4=True,
+        weights_out_dtype=torch.bfloat16,
+    )
+
+    torch.testing.assert_close(q_actual, q_ref, rtol=0, atol=0)
+    # Logical scales are [T, H, 4]; AITER stores [T, 1, block, H % 16, H // 16].
+    scales_ref = scales_ref.view(torch.uint8).reshape(num_tokens, 4, 16, 4)
+    scales_ref = scales_ref.permute(0, 3, 2, 1).unsqueeze(1).contiguous()
+    torch.testing.assert_close(scales_actual, scales_ref, rtol=0, atol=0)
+
+    assert weights_actual.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        weights_actual, weights_ref.to(torch.bfloat16), rtol=0, atol=0
     )
 
 
