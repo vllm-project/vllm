@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import cast
 
@@ -317,7 +317,7 @@ class VoxtralForConditionalGeneration(
 
         # update quant config to so that ignored module and target module names
         # match the vLLM model names
-        if hasattr(vllm_config, "quant_config"):
+        if vllm_config.quant_config is not None:
             vllm_config.quant_config = self.maybe_update_quant_config(
                 vllm_config.quant_config
             )
@@ -724,6 +724,7 @@ class VoxtralEncoderModel(nn.Module):
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
         self.is_causal = getattr(self.config, "is_causal", False)
+        WhisperEncoderCls: Callable[..., WhisperEncoder | WhisperCausalEncoder]
         if self.is_causal:
             WhisperEncoderCls = WhisperCausalEncoder
         else:
@@ -830,7 +831,7 @@ class VoxtralEncoderModel(nn.Module):
         return results
 
     def load_weight(self, weight: tuple[str, torch.Tensor]) -> str:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),

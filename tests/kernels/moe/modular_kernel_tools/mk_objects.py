@@ -53,6 +53,11 @@ class TestMoEQuantConfig:
     per_out_ch_quant: bool
     per_act_token_quant: bool
     block_shape: list[int] | None
+    # Weight dtype, when it differs from the activation quant_dtype (e.g.
+    # MXFP4 W4A16, where weights are mxfp4 but activations are unquantized).
+    # Defaults to quant_dtype, mirroring FusedMoEQuantConfig.make()'s own
+    # weight_dtype fallback.
+    weight_dtype: torch.dtype | str | None = None
 
 
 @dataclass
@@ -92,6 +97,7 @@ common_float_types: list[torch.dtype | str] = [
     torch.float32,
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
+mxfp4_types: list[torch.dtype | str] = ["mxfp4"]
 nvfp4_types = ["nvfp4"]
 fp8_types = [current_platform.fp8_dtype()]
 
@@ -165,7 +171,9 @@ def expert_info(kind) -> ExpertInfo:
 register_prepare_and_finalize(
     MoEPrepareAndFinalizeNoDPEPModular,
     standard_format,
-    common_float_types,
+    # mxfp4 is single-GPU (AiterExperts) only, so it is registered here
+    # rather than on any multi-gpu prepare/finalize type.
+    common_float_types + mxfp4_types,
     blocked_quantization_support=True,
     backend=None,
 )
@@ -318,20 +326,37 @@ if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(
 
 if has_aiter():
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
     )
 
-    register_experts(
-        AiterExperts,
-        standard_format,
-        # AiterExperts also supports the fully-unquantized (None, None)
-        # scheme (see SUPPORTED_W_A in rocm_aiter_moe.py), not just fp8.
-        common_float_types,
-        blocked_quantization_support=True,
-        needs_aiter=True,
-    )
+    # Registration dtypes gate which quant configs the modular-kernel test
+    # harness will ever pair with a given class (see Config.is_valid()):
+    # they must match what each subclass's _supports_quant_scheme() actually
+    # declares, or the harness will generate a case the class rejects.
+    for aiter_experts_cls, aiter_supported_dtypes in (
+        (AiterUnquantizedExperts, common_float_types),
+        (AiterFp8BlockExperts, fp8_types),
+        (AiterFp8TensorExperts, fp8_types),
+        (AiterFp8ChannelExperts, fp8_types),
+        (AiterMxfp4Experts, mxfp4_types),
+    ):
+        register_experts(
+            aiter_experts_cls,
+            standard_format,
+            aiter_supported_dtypes,
+            blocked_quantization_support=True,
+            needs_aiter=True,
+        )
 else:
-    AiterExperts = None
+    AiterUnquantizedExperts = None
+    AiterFp8BlockExperts = None
+    AiterFp8TensorExperts = None
+    AiterFp8ChannelExperts = None
+    AiterMxfp4Experts = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -447,23 +472,25 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
         ),
     ]
 
-
-def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
-    s = rank * num_local_experts
-    e = s + num_local_experts
-    return t[s:e]
-
-
-def make_cutlass_strides(
-    e: int,
-    n: int,
-    k: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    ab_strides1 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    ab_strides2 = torch.full((e,), n, device="cuda", dtype=torch.int64)
-    c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
-    c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
-    return ab_strides1, ab_strides2, c_strides1, c_strides2
+if has_aiter():
+    MK_QUANT_CONFIGS += [
+        # W4A16: weights are mxfp4, activations are unquantized.
+        TestMoEQuantConfig(
+            quant_dtype=None,
+            weight_dtype="mxfp4",
+            per_out_ch_quant=False,
+            per_act_token_quant=False,
+            block_shape=None,
+        ),
+        # W4A4: weights and activations are both mxfp4 (weight_dtype
+        # defaults to quant_dtype).
+        TestMoEQuantConfig(
+            quant_dtype="mxfp4",
+            per_out_ch_quant=False,
+            per_act_token_quant=False,
+            block_shape=None,
+        ),
+    ]
 
 
 def make_fused_experts(

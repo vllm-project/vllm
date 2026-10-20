@@ -131,6 +131,7 @@ def test_hash_collision_video_num_frames():
         }
         video = MediaWithBytes((frames, metadata), source)
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         return items.get_all_items_for_hash()[0]
 
     hasher = MultiModalHasher
@@ -155,6 +156,7 @@ def test_hash_video_tensor_frames():
         }
         video = MediaWithBytes((frames, metadata), source)
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         return items.get_all_items_for_hash()[0]
 
     np_frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
@@ -235,8 +237,16 @@ def _rgba_png_bytes() -> bytes:
     return buf.getvalue()
 
 
-def test_hash_collision_media_io_config():
-    data = _rgba_png_bytes()
+def _rgb_trns_png_bytes() -> bytes:
+    image = Image.new("RGB", (8, 8), (255, 0, 0))
+    buf = BytesIO()
+    image.save(buf, format="PNG", transparency=(255, 0, 0))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("png_bytes", [_rgba_png_bytes, _rgb_trns_png_bytes])
+def test_hash_collision_media_io_config(png_bytes):
+    data = png_bytes()
     white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
     black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
     white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
