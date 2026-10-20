@@ -81,19 +81,18 @@ uv pip install -r requirements/test/cuda.in
 .venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
 
-When adding tests, follow [`tests/AGENTS.md`](tests/AGENTS.md):
+When adding tests:
 
-- **Prove bug fixes.** When the bug is reproducible, the new test must fail
-  without the fix and pass with it; show both runs in the PR.
 - **Design before you write.** Answer four questions first: what is the module
   for, what is its I/O contract, what failure am I guarding against, and what is
-  the cheapest level that actually reproduces it? User-visible fixes need at
-  least one test through a real entry point (`LLM`, OpenAI server).
+  the cheapest level that actually reproduces it? Fixes to user-visible
+  behavior need a test through a real entry point (`LLM`, OpenAI server); see
+  [`tests/AGENTS.md`](tests/AGENTS.md).
 - **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
   helpers; add a new file only when no nearby suite fits.
-- **Test behavior with intent.** Assert specific observable outcomes through
-  public APIs; state why in the name or docstring. Skip trivial wiring; flaky
-  tests are worse than no tests.
+- **Test behavior with intent.** Assert observable outcomes through public APIs;
+  state why in the name or docstring. Skip trivial wiring; flaky tests are worse
+  than no tests.
 - **Keep it minimal.** One behavior per test and the smallest setup that
   triggers it; if the test diff dwarfs the code change, cut scope.
 - **No one-off kernel benchmarks in `tests/`.** Put kernel perf work in
@@ -154,8 +153,6 @@ Security reviewers should start with [`SECURITY.md`](SECURITY.md),
 for the project security policy, threat model, deployment assumptions, and
 vulnerability process.
 
-- **Writing or changing tests**: [`tests/AGENTS.md`](tests/AGENTS.md)
-  — Bug-fix evidence, test level, determinism, isolation, and CI wiring.
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.
