@@ -421,3 +421,22 @@ def test_background_handshake_dials_every_read_source():
     worker._background_moriio_handshake("req", "prefill", _meta(["full"], 4))
     dialed = [(args[3], args[5]) for args in submitted if len(args) == 6]
     assert dialed == [(f"prefill_dp0_tp{p}", p) for p in range(4)]
+
+
+def test_head_read_rejects_more_local_than_remote_blocks():
+    """Equal TP between different layouts reads head by head, and refuses a
+    local block table longer than the peer's."""
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    (producer,), (consumer,) = _ranks("gqa", 1, 1, True, LAYOUTS[2], state)
+    remote = PREFILL_BLOCKS["full"]
+    with pytest.raises(ValueError, match="longer than remote_block_ids"):
+        consumer.worker._compute_read_attention_offsets(
+            "attn0",
+            DECODE_BLOCKS["full"][: len(remote)] + [0],
+            remote,
+            _metadata(producer),
+            remote_tp_size=1,
+            remote_engine_id="prefill",
+            source=None,
+        )

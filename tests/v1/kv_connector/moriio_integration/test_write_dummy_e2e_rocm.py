@@ -90,6 +90,8 @@ _WIDE_DUMMY_DIR = Path(__file__).resolve().parent
 # MoRI transport between the single-node prefill and decode GPUs.
 BACKEND = os.getenv("MORIIO_DUMMY_E2E_BACKEND", "xgmi")
 TOP_K = 20
+# Well under the 60 s deferred-send reaper, which frees unreleased blocks.
+PREFILL_FREE_TIMEOUT_S = 20
 MAX_TOKENS = 4
 MAX_MODEL_LEN = 4096
 
@@ -623,7 +625,7 @@ def _pd_pair(
     prefill_overrides: dict[str, Any],
     decode_overrides: dict[str, Any],
     case: Case,
-) -> Iterator[tuple[str, RemoteOpenAIServer]]:
+) -> Iterator[tuple[str, RemoteOpenAIServer, RemoteOpenAIServer]]:
     selector, devices = _visible_devices()
     prefill_devices = devices[: case.prefill_tp]
     decode_devices = devices[case.prefill_tp : case.prefill_tp + case.decode_tp]
@@ -668,7 +670,7 @@ def _pd_pair(
             for future in futures:
                 servers.append(future.result())
         _wait_for_registration(proxy_url, arch.model)
-        yield proxy_url, servers[1]
+        yield proxy_url, servers[0], servers[1]
 
 
 def _wait_for_registration(proxy_url: str, model: str) -> None:
@@ -772,6 +774,22 @@ def _distance(ref: dict[str, float], got: dict[str, float]) -> float:
     return max(abs((ref[t] - ref_mean) - (got[t] - got_mean)) for t in common)
 
 
+def _wait_for_prefill_blocks_freed(prefill: RemoteOpenAIServer) -> None:
+    """Prefill frees a finished request's blocks once every decode rank that
+    holds a share of it has released it. A missed release leaves them in use
+    until the deferred-send reaper frees them after 60 s."""
+    deadline = time.monotonic() + PREFILL_FREE_TIMEOUT_S
+    while True:
+        usage = sum(s.value for s in _metric(prefill, "vllm:kv_cache_usage_perc"))
+        if usage == 0:
+            return
+        assert time.monotonic() < deadline, (
+            f"prefill still holds {usage:.2%} of its KV cache "
+            f"{PREFILL_FREE_TIMEOUT_S} s after the last request finished"
+        )
+        time.sleep(0.5)
+
+
 def _external_hits(server: RemoteOpenAIServer) -> float:
     samples = _metric(server, "vllm:external_prefix_cache_hits_total")
     return sum(sample.value for sample in samples)
@@ -849,6 +867,7 @@ def _pd_distances(
 ) -> tuple[list[float], float]:
     with _pd_pair(arch, prefill_overrides, decode_overrides, case) as (
         proxy_url,
+        _,
         decode,
     ):
         hits_before = _external_hits(decode)
@@ -913,12 +932,13 @@ def test_heterogeneous_tp_hands_decode_every_prompt_token(case: Case):
         pytest.skip("MoRI xGMI cannot open a session to a GPU decode does not see")
     arch = ARCHS[case.arch]
     overrides = _arch_overrides(arch)
-    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, decode):
+    with _pd_pair(arch, overrides, overrides, case) as (proxy_url, prefill, decode):
         lengths = _prompt_lengths(arch, decode)
         prompts = _prompts(lengths)
         hits_before = _external_hits(decode)
         tops = [_first_step(proxy_url, arch.model, prompt) for prompt in prompts]
         hits = _external_hits(decode) - hits_before
+        _wait_for_prefill_blocks_freed(prefill)
     print(f"[pd] {case.id} lens={lengths} external_hits={hits}")
 
     expected = _expected_external_hits(prompts, arch.hybrid, case.read_mode)
