@@ -477,7 +477,7 @@ fn validate_chat_cross_parameters(
     }
 
     // 2. Validate stream_options dependency
-    if req.stream_options.is_some() && !req.stream {
+    if req.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !req.stream {
         let mut e = validator::ValidationError::new("stream_options_requires_stream");
         e.message = Some("stream_options can only be used when stream is true".into());
         return Err(e);
