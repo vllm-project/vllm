@@ -227,11 +227,14 @@ On ROCm, the virtual memory allocation on ROCm is done through chunked memory al
 
 ## Experimental CUDA process checkpoint executor
 
-An opt-in executor checkpoints each CUDA worker after ordinary level-1 sleep,
+This capability is experimental and disabled by default. Selecting the executor
+below checkpoints each CUDA worker after ordinary level-1 sleep,
 then restores all workers before waking allocator-managed memory. This preserves
 the remaining CUDA state, including captured graph executable objects, without
 recapturing graphs. Ordinary level-1 semantics still apply: KV cache contents are
 discarded. This is not a durable application checkpoint or model switching API.
+
+Set `VLLM_USE_V2_MODEL_RUNNER=1` before starting the engine:
 
 ```python
 from vllm import LLM
@@ -256,16 +259,18 @@ the same process namespace and user as the executor. Driver permission and
 resource restrictions still apply; see the
 [CUDA checkpoint API documentation](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-driver-api/group__CUDA__CHECKPOINT.html).
 
-The experimental configuration was tested on NVIDIA H20 with driver
-580.126.09, NCCL 2.29.7, and FlashInfer 0.6.18.post1. This does not establish
-compatibility with other GPU, driver, or communication-library combinations.
-Follow-up validation on a 4x H20 host with the 580.126.09 kernel-mode driver
-retained passed 20/20 whole-process checkpoint/restore rounds at TP2 and TP4
-on UMD 610.57.04 and at TP2 on UMD 615.71.09; see the PR discussion.
+The initial validation used NVIDIA H20 with driver 580.126.09, NCCL 2.29.7,
+and FlashInfer 0.6.18.post1. See [PR #58183](https://github.com/vllm-project/vllm/pull/58183)
+for versioned test results and communication performance comparisons. Support
+for other GPU, driver, and communication-library combinations is not established.
 
-Only a single node with tensor parallel size 1, 2, or 4 is accepted. Pipeline,
-data, and context parallelism, external cache transfer, and sleep level 2
-are not supported by this executor. Level 0 remains
+Only a single node with tensor parallel size 1, 2, or 4 is accepted. Use
+`VLLM_USE_V2_MODEL_RUNNER=1`, the standard GPU worker and the `cumem` sleep
+backend. Pipeline, data, context and expert parallelism, external cache or
+weight transfer, custom worker classes, and sleep level 2 are rejected before
+worker startup (sleep level 2 is rejected when requested). Worker extensions
+that allocate additional CUDA IPC resources are outside the validated scope.
+Level 0 remains
 a scheduler pause and does not perform a CUDA checkpoint.
 
 For tensor parallel size 2 or 4, use NCCL 2.29.7 or later with memory
@@ -291,29 +296,13 @@ the driver checkpoint. Disabling standalone FlashInfer all-reduce with
 `fuse_allreduce_rms` pass, which can allocate FlashInfer workspaces independently.
 When that pass is enabled, the same backend restriction and workspace hooks
 apply. A configuration using only NCCL must also disable that compiler pass.
-The FlashInfer `mnnvl` backend is not accepted:
-its multicast reconstruction failed after driver restoration in driver 580
-tests. NVIDIA reports this is a user-mode driver (UMD) defect in release 580
-that should be fixed in release 595 and above; the kernel-mode driver may
-stay at 580 (see ai-dynamo/snapshot#510). NCCL NVLS is also disabled because
-its persistent shared allocations prevented driver checkpoint in those tests.
-In a whole-process checkpoint setup (live engine, no sleep stage),
-checkpoint/restore of TP2/TP4 engines with the default communication stack
-(FlashInfer `trtllm`, custom all-reduce, symmetric-memory all-reduce, and
-NCCL NVLS all enabled) passed 20/20 rounds on UMD 610.57.04 (TP2 and TP4) and
-UMD 615.71.09 (TP2), with CUDA graphs preserved. This executor's combined
-sleep-then-checkpoint flow has since been validated on UMD 610.57.04: with
-the stock restrictions, TP2 passed 20/20 sleep/wake rounds with CUDA graphs
-preserved; with the restrictions lifted (full default communication stack,
-with and without NCCL communicator suspend), freeze hangs at the Checkpoint
-call while a worker holds live multicast groups. The restrictions therefore
-remain required regardless of UMD version until freeze-time multicast
-teardown exists. When
-running a newer UMD from a cuda-compat package, the host-side checkpoint
-tooling must not stay on the 580 UMD while the worker processes run a newer
-one; a 580 CLI against newer-UMD workers hangs at freeze. Performance costs
-of these
-restrictions must be measured against the workload's default communication
+The FlashInfer `mnnvl` backend is not accepted, and the NCCL suspend configuration
+requires NVLS to be disabled. Live multicast
+allocations can block the combined sleep/checkpoint flow even on newer
+user-mode drivers. Keep these restrictions when upgrading the driver. The
+helper must use the same user-mode driver as the workers; mixed versions are
+unsupported. Performance costs of the restrictions must be measured against
+the workload's default communication
 configuration; retaining GPU peer-to-peer communication alone does not establish
 unchanged inference performance.
 
@@ -335,12 +324,19 @@ any is unlocked. A driver operation has a 30-second response deadline (lock also
 has a 10-second driver timeout). Worker sleep/wake and FlashInfer workspace
 hooks have a 120-second response deadline. Failure terminates the workers rather than
 serving with a partially restored rank set; restart the engine after failure.
+Shutdown terminates the dedicated worker and helper processes without restoring
+their CUDA state or requiring free GPU memory for the model.
 
 Repeated level-1 sleep is idempotent. A first partial wake, such as
 `wake_up(tags=["weights"])`, restores the **whole CUDA process** before restoring
 the selected allocator tags. It cannot selectively restore graph or driver
 state. Ordinary worker RPCs are rejected while checkpointed. A checkpointed
 worker cannot execute another model until restored.
+
+Wait for a sleep request to finish before issuing another pause, sleep, wake,
+or resume request. While level-1 sleep is draining requests, these overlapping
+operations are rejected. A partial wake keeps scheduling paused until all
+allocator tags are awake.
 
 As with the ordinary executor, `sleep()` is a no-op while weights remain asleep.
 For example, after `wake_up(tags=["kv_cache"])`, another `sleep()` does not
