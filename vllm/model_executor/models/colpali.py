@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColPali late interaction model for multi-modal retrieval and reranking.
+"""ColPali late interaction model for multi-modal retrieval and reranking.
 
 ColPali extends PaliGemma with a ColBERT-style late interaction head,
 producing per-token embeddings for both text and image inputs. It uses
@@ -21,7 +20,7 @@ from collections.abc import Iterable, Mapping
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PaliGemmaProcessor
+from transformers import ColPaliConfig, PaliGemmaConfig, PaliGemmaProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
@@ -29,6 +28,7 @@ from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
@@ -42,15 +42,8 @@ from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class ColPaliProcessingInfo(PaliGemmaProcessingInfo):
-    """Processing info for ColPali models.
-
-    ColPali models use a custom HuggingFace config (ColPaliConfig) that is
-    not an instance of PaliGemmaConfig. We override get_hf_config() and
-    get_hf_processor() to skip the strict type check.
-    """
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
+    def get_hf_config(self) -> PaliGemmaConfig:
+        return self.ctx.get_hf_config(ColPaliConfig).vlm_config
 
     def get_hf_processor(self, **kwargs: object) -> PaliGemmaProcessor:
         # Force standard PaliGemmaProcessor even when trust_remote_code=True.
@@ -60,31 +53,19 @@ class ColPaliProcessingInfo(PaliGemmaProcessingInfo):
 class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
     """Multimodal processor for ColPali."""
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         # The ColPali tokenizer_config.json ships with a small default
         # max_length (50) that truncates the 1024 image tokens inserted
         # by PaliGemmaProcessor, causing a token-count mismatch.
         # vLLM enforces its own max_model_len, so we disable HF
         # truncation to keep all image + text tokens intact.
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            dict(**hf_processor_mm_kwargs, truncation=False),
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs._replace(hf_kwargs=dict(hf_inputs.hf_kwargs, truncation=False))
 
 
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
@@ -130,14 +111,24 @@ class ColPaliModel(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
         config = vllm_config.model_config.hf_config
+        super().__init__(
+            vllm_config=vllm_config.with_hf_config(config.vlm_config), prefix=prefix
+        )
+
         head_dtype = vllm_config.model_config.head_dtype
 
         hidden_size = getattr(config, "hidden_size", None)
         if hidden_size is None and hasattr(config, "text_config"):
-            hidden_size = config.text_config.hidden_size
+            text_config = config.text_config
+            # Recent transformers versions may leave `text_config` as a plain
+            # dict (e.g. when loading vidore/colpali-v1.3-hf), so handle both
+            # the dict and the config-object forms.
+            hidden_size = (
+                text_config.get("hidden_size")
+                if isinstance(text_config, dict)
+                else getattr(text_config, "hidden_size", None)
+            )
         if hidden_size is None:
             raise ValueError(
                 "Unable to determine text hidden size from config. "

@@ -66,6 +66,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    register_nixl_memory,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -315,9 +316,8 @@ class ShardedRDTWeightTransferEngine(
             raise ValueError(
                 f"The 'sharded_rdt' weight transfer backend requires "
                 f"distributed_executor_backend='ray', got {backend!r}. Pass "
-                f"--distributed-executor-backend ray (and keep "
-                f"VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1, the default, so the "
-                f"workers are RayExecutorV2 actors with tensor transport)."
+                f"--distributed-executor-backend ray so the workers are "
+                f"RayExecutorV2 actors with tensor transport."
             )
         # Ownership table, routing rules, and (once bound) every producer's
         # handle — pulls go to one owner per chunk, but free_group fans out to
@@ -588,8 +588,6 @@ class ShardedRDTWeightTransferEngine(
         plan = self._cached_plan
         if plan is None or not plan.chunks:
             return
-        from ray.experimental import register_nixl_memory
-
         # (a) consumer receive buffers — one per ring slot, at the largest chunk.
         max_pack = max(c.pack_bytes for c in plan.chunks)
         alloc = buffer_alloc_bytes(max_pack, self._buffer_presize)
@@ -740,7 +738,7 @@ class ShardedRDTWeightTransferEngine(
         any time after the metadata push. See the doc's "slot generation
         handshake".
         """
-        from ray.experimental import register_nixl_memory, set_target_for_ref
+        from ray.experimental import set_target_for_ref
 
         if self._slot_read_done:
             with self._slot_cv:

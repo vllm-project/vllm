@@ -31,6 +31,7 @@ from vllm.platforms import current_platform
 
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
+MROPE_OP = torch.ops.vllm.mrope.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
@@ -79,7 +80,7 @@ class MatcherCustomOp(ABC):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
 
     def inputs(self) -> list[torch.Tensor]:
-        """Utility for inputs to the pattern"""
+        """Utility for inputs to the pattern."""
         raise NotImplementedError
 
 
@@ -160,6 +161,74 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             )
         )
         return result
+
+
+class MatcherMRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        rotary_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mrope_section: tuple[int, int, int],
+        mrope_interleaved: bool,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = RotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(3, 5)
+        query = self.empty(5, self.q_size)
+        key = self.empty(5, self.kv_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result = auto_functionalized(
+            MROPE_OP,
+            positions=positions,
+            query=query,
+            key=key,
+            cos_sin_cache=cos_sin_cache,
+            head_size=self.head_size,
+            rotary_dim=self.rotary_dim,
+            mrope_section_t=self.mrope_section[0],
+            mrope_section_h=self.mrope_section[1],
+            mrope_section_w=self.mrope_section[2],
+            mrope_interleaved=self.mrope_interleaved,
+            is_neox_style=self.is_neox,
+        )
+        return result[1], result[2]
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            "MRoPE fusion requires the rotary_embedding custom op"
+        )
 
 
 class MatcherRMSNormGated(MatcherCustomOp):
@@ -325,10 +394,13 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
-            assert not quant_key.scale.group_shape.is_per_tensor(), (
-                "ROCm aiter fusion pass does not support per tensor quantization"
-            )
-            if quant_key.scale.group_shape.is_per_token():
+            if quant_key.scale.group_shape.is_per_tensor():
+                assert quant_key.scale.static, (
+                    "ROCm aiter fusion pass only supports static per-tensor "
+                    "quantization"
+                )
+                self.QUANT_OP = rocm_aiter_ops.get_per_tensor_quant_op()
+            elif quant_key.scale.group_shape.is_per_token():
                 self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
             else:
                 assert quant_key.scale.group_shape.col == 128, (
@@ -363,14 +435,24 @@ class MatcherQuantFP8(MatcherCustomOp):
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
+        if quant_key_group_shape == GroupShape.PER_TENSOR:
+            # rocm_aiter_per_tensor_quant mutates `out` and `scale` and returns
+            # None, so it has to be matched through auto_functionalized.
+            assert scale is not None
+            out = torch.empty_like(input, dtype=self.quant_key.dtype)
+            result = auto_functionalized(
+                self.QUANT_OP, out=out, x=input, scale=scale, is_dynamic=False
+            )
+            # `scale` is mutable, so its functionalized output is a distinct
+            # value; return it to keep the quant node inside the match.
+            return result[1], result[2]
         if quant_key_group_shape == GroupShape.PER_TOKEN:
             return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
-        else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+        return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
         self,
@@ -412,8 +494,13 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.static:
             assert scale is not None
+            group_shape = self.quant_key.scale.group_shape
             _, result = auto_functionalized(
-                self.QUANT_OP, result=result, input=input, scale=scale
+                self.QUANT_OP,
+                result=result,
+                input=input,
+                scale=scale,
+                group_shape=[group_shape.row, group_shape.col],
             )
             return result, scale
         else:

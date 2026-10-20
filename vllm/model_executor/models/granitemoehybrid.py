@@ -42,7 +42,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
@@ -320,10 +319,6 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
-    # Transformers < 5.13.0
-    "attention": GraniteMoeHybridAttentionDecoderLayer,
-    "mamba": GraniteMoeHybridMambaDecoderLayer,
-    # Transformers >= 5.13.0
     "full_attention": GraniteMoeHybridAttentionDecoderLayer,
     "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
@@ -591,7 +586,6 @@ class GraniteMoeHybridForCausalLM(
     SupportsPP,
     IsHybrid,
     SupportsQuant,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -633,6 +627,7 @@ class GraniteMoeHybridForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -646,6 +641,7 @@ class GraniteMoeHybridForCausalLM(
             head_dim=hf_config.mamba_d_head,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

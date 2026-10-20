@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Mock-based unit tests for ObjectStoreSecondaryTierManager.
+"""Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
 These tests replace the NIXL backend with an in-memory mock so they run
 without S3 credentials or a live object store. They verify the manager's

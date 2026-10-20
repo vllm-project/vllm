@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-KV cache helper for store.
-"""
+"""KV cache helper for store."""
 
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -22,6 +20,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -33,6 +32,16 @@ EngineId = str
 # block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
 # mutability and are for connector internal use only.
 BlockIds = tuple[list[int], ...] | list[list[int]]
+
+
+def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
+    """Drop speculative scratch slots and keep only the running-state slot."""
+    if not blocks:
+        return blocks
+    # Keep at least the running-state slot, even before scratch allocation.
+    if num_scratch := min(num_spec_blocks, len(blocks) - 1):
+        blocks = blocks[:-num_scratch]
+    return blocks[-1:]
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
@@ -60,6 +69,7 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
+        self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
 
     @classmethod
@@ -156,6 +166,10 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            self._failed_recving_pending |= kv_output.failed_recving
+
+        failed_recving = self._failed_recving_pending & finished_recving
+        self._failed_recving_pending -= failed_recving
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -168,6 +182,7 @@ class KVOutputAggregator:
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
+            failed_recving=failed_recving,
             expected_finished_count=self._expected_finished_count,
         )
 
@@ -227,11 +242,10 @@ def copy_kv_blocks(
 
 
 def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache blocks to the local block_size.
+    """Transforms the layout of received KV cache blocks to the local block_size.
     (Only works for local blocksize > remote blocksize)
 
-    example:
+    Example:
     local blocksize = 16 tokens, remote blocksize = 4 tokens
     local block[0] = remote block[0, 1, 2, 3]
     remote is |h0-b0|h1-b0|h2-b0|h3-b0|h0-b1|h1-b1|h2-b1|h3-b1|...
@@ -240,10 +254,9 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
     1. view => view remote as n_blocks * remote_shape(H,remoteN,D)
     2. permute => (H, nblocks, remoteN, D)
     3. flatten => (H, localN, D)
+
     """
     blocks_to_update = cache.index_select(0, indices)
-    # use physical order
-    blocks_to_update = blocks_to_update.permute(0, 2, 1, 3)
     n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
@@ -253,57 +266,28 @@ def kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio):
         .permute(0, 2, 1, 3, 4)
         .flatten(2, 3)
     )
-    permuted_blocks = permuted_blocks.permute(0, 2, 1, 3)
-    cache.index_copy_(0, indices, permuted_blocks)
-
-
-def kv_postprocess_layout_on_receive(cache, indices):
-    """Transforms the layout of received KV cache blocks to the local format.
-
-    This method corrects layout mismatches from direct memory copies by
-    permuting the tensor dimensions.
-
-    4D cache:
-    - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
-    5D cache:
-    - **Source Layout:** `[num_blocks, kv_dim, n_kv_head, block_size, head_dim]`
-    - **Target Layout:** `[num_blocks, kv_dim, block_size, n_kv_head, head_dim]`
-
-    Implementation:
-    - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
-    - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
-    - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
-
-    """
-    blocks_to_update = cache.index_select(0, indices)
-    target_shape = list(blocks_to_update.shape)
-    target_shape[0] = -1
-    inv_order = [0, 1, 3, 2, 4] if blocks_to_update.ndim == 5 else [0, 2, 1, 3]
-    src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
-    permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
-    """
-    Transforms the layout of received KV cache to the local block_size and LBHNC.
-    (Only works for local blocksize > remote blocksize)
+    """Transforms the layout of received KV cache to the local block_size and LBHNC.
+    (Only works for local blocksize >= remote blocksize)
 
     prefill is LBHNC, smaller block_size
     decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
-    block_size, n_kv_heads, head_size = blocks_to_update.shape[1:]
+    n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
     remote_block_size = block_size // block_size_ratio
     n_blocks = block_size_ratio
 
+    # View the received bytes in memory order as the remote head-major blocks.
     permuted_blocks = (
-        blocks_to_update.reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
-        .permute(0, 1, 3, 2, 4)
-        .flatten(1, 2)
+        blocks_to_update.transpose(1, 2)
+        .reshape(-1, n_blocks, n_kv_heads, remote_block_size, head_size)
+        .permute(0, 2, 1, 3, 4)
+        .flatten(2, 3)
     )
     cache.index_copy_(0, indices, permuted_blocks)
 
@@ -311,9 +295,9 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
 def yield_req_data(
     scheduler_output,
 ) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
-    """
-    Yields:
-        (req_id, new_block_id_groups, preempted)
+    """Yields:
+    (req_id, new_block_id_groups, preempted)
+
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
@@ -340,6 +324,7 @@ def get_current_attn_backends(
 
     Returns:
         Deduplicated list of attention backend classes.
+
     """
     layer_type = cast(type[Any], AttentionLayerBase)
     layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
@@ -365,6 +350,35 @@ def get_current_attn_backends(
                 use_mla=vllm_config.model_config.use_mla,
             )
         ]
+
+
+def get_current_attn_backends_and_specs(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    fallback: list[type[AttentionBackend]],
+) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
+    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+
+    Compressed caches are skipped: their kernel pages never split transferred
+    blocks.
+    """
+    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    layer_type = cast(type[Any], AttentionLayerBase)
+    for group in kv_cache_config.transfer_groups:
+        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
+        layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
+        for name, layer in layers.items():
+            spec = specs.get(name, group.kv_cache_spec)
+            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
+                layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+                assert layout.is_block_outermost, "Compressed caches must be packed"
+                continue
+            if not isinstance(spec, AttentionSpec):
+                spec = None
+            pairs[layer.get_attn_backend(), spec] = None
+    if not pairs:
+        return fallback, [None] * len(fallback)
+    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 
 
 def get_current_attn_backend(

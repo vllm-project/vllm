@@ -101,7 +101,7 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         embeds: torch.Tensor,
@@ -159,7 +159,9 @@ class Qwen3Eagle3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         # Get drafter's quantization config
@@ -210,6 +212,7 @@ class Qwen3Eagle3Model(nn.Module):
                 self.config, "target_hidden_size", self.config.hidden_size
             )
             self.fc_input_size = target_hidden_size * num_aux_features
+            self.input_norm: RMSNorm | None
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     self.fc_input_size,
@@ -282,7 +285,9 @@ class Qwen3Eagle3Model(nn.Module):
 class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
@@ -309,12 +314,16 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        self.draft_id_to_target_id = nn.Parameter(
-            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-            requires_grad=False,
-        )
+        target_vocab_size = vllm_config.model_config.get_vocab_size()
+        if self.config.draft_vocab_size != target_vocab_size:
+            self.draft_id_to_target_id = nn.Parameter(
+                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+                requires_grad=False,
+            )
+        else:
+            self.draft_id_to_target_id = None
 
-        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+        self.use_parallel_drafting = speculative_config.parallel_drafting
 
         if self.use_parallel_drafting:
             self.register_buffer(
@@ -331,7 +340,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

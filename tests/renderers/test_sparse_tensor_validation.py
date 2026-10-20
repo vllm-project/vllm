@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests verify that malicious sparse tensors are rejected before they can trigger
+"""Tests verify that malicious sparse tensors are rejected before they can trigger
 out-of-bounds memory writes, or an unbounded allocation, during to_dense()
 operations.
 
@@ -51,8 +50,7 @@ def _encode_tensor(tensor: torch.Tensor) -> bytes:
 
 
 def _create_malicious_sparse_tensor() -> torch.Tensor:
-    """
-    Create a malicious sparse COO tensor with out-of-bounds indices.
+    """Create a malicious sparse COO tensor with out-of-bounds indices.
 
     This tensor has indices that point beyond the declared shape, which would
     cause an out-of-bounds write when converted to dense format without
@@ -117,8 +115,10 @@ class TestPromptEmbedsValidation:
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
 
-        # Should raise RuntimeError due to invalid sparse tensor
-        with pytest.raises((RuntimeError, ValueError)) as exc_info:
+        # The invariant check raises RuntimeError from inside torch.load;
+        # safe_load_prompt_embeds now reports that as a client error so the
+        # caller gets a 400 rather than the 500 a bare RuntimeError produced.
+        with pytest.raises(VLLMValidationError) as exc_info:
             safe_load_prompt_embeds(model_config, encoded)
 
         # Error should indicate sparse tensor validation failure
@@ -137,7 +137,7 @@ class TestPromptEmbedsValidation:
         )
         encoded = _encode_tensor(malicious_tensor)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_negative_indices_rejected(self, model_config):
@@ -152,7 +152,7 @@ class TestPromptEmbedsValidation:
         )
         encoded = _encode_tensor(malicious_tensor)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_hidden_size_mismatch_rejected(self, model_config):
@@ -264,7 +264,7 @@ class TestImageEmbedsValidation:
             io_handler.load_bytes(buffer.read())
 
     def test_valid_numpy_tensor_accepted(self):
-        """numpy .npy format should load and return correct tensor."""
+        """Numpy .npy format should load and return correct tensor."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
@@ -279,8 +279,7 @@ class TestImageEmbedsValidation:
         assert torch.allclose(result, torch.from_numpy(arr))
 
     def test_numpy_int32_tensor_accepted(self):
-        """numpy int32 arrays should round-trip correctly."""
-
+        """Numpy int32 arrays should round-trip correctly."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.arange(280, dtype=np.int32)
@@ -294,8 +293,7 @@ class TestImageEmbedsValidation:
         assert (result == torch.from_numpy(arr)).all()
 
     def test_load_file_numpy_tensor_accepted(self, tmp_path):
-        """numpy .npy files should load correctly via load_file."""
-
+        """Numpy .npy files should load correctly via load_file."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
@@ -362,13 +360,10 @@ class TestAudioEmbedsValidation:
 
 
 class TestSparseTensorValidationIntegration:
-    """
-    These tests verify the complete attack chain is blocked at all entry points.
-    """
+    """These tests verify the complete attack chain is blocked at all entry points."""
 
     def test_attack_scenario_completions_api(self, model_config):
-        """
-        Simulate a complete attack through the Completions API.
+        """Simulate a complete attack through the Completions API.
 
         Attack scenario:
         1. Attacker crafts malicious sparse tensor
@@ -379,13 +374,12 @@ class TestSparseTensorValidationIntegration:
         # Step 1-2: Attacker creates malicious payload
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
 
-        # Step 3-4: Server processes and should reject
-        with pytest.raises((RuntimeError, ValueError)):
+        # Step 3-4: Server processes and should reject, as a client error
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, attack_payload)
 
     def test_attack_scenario_chat_api_image(self):
-        """
-        Simulate attack through Chat API with image_embeds.
+        """Simulate attack through Chat API with image_embeds.
 
         Verifies the image embeddings path is protected.
         """
@@ -396,8 +390,7 @@ class TestSparseTensorValidationIntegration:
             io_handler.load_base64("", attack_payload.decode("utf-8"))
 
     def test_attack_scenario_chat_api_audio(self):
-        """
-        Simulate attack through Chat API with audio_embeds.
+        """Simulate attack through Chat API with audio_embeds.
 
         Verifies the audio embeddings path is protected.
         """

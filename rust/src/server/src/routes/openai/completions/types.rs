@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::{Prompt, TruncationSide};
 
+use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
     Usage, default_true, deserialize_request_top_k, validate_stop,
@@ -90,6 +92,10 @@ pub struct CompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
 
@@ -109,6 +115,12 @@ pub struct CompletionRequest {
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
+
+    /// Number of tokens to batch into each streamed chunk. Raises the server's
+    /// `--stream-interval` for this request. Values below the server setting
+    /// are clamped up to it. The first and last chunks are always sent
+    /// immediately. Ignored for non-streaming requests.
+    pub stream_interval: Option<NonZeroU32>,
 
     /// Length penalty for beam search
     pub length_penalty: Option<f32>,
@@ -146,6 +158,11 @@ pub struct CompletionRequest {
 
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
+
+    /// Specific vocab token IDs to return logprobs for at each generated
+    /// position, in addition to the sampled token. Takes precedence over
+    /// the top-k selected by `logprobs`. Requires `logprobs` to be set.
+    pub logprob_token_ids: Option<Vec<u32>>,
 
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt
@@ -223,6 +240,7 @@ pub(super) struct CompletionResponse {
     pub model: String,
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -249,6 +267,7 @@ pub(super) struct CompletionStreamResponse {
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
+    pub metrics: Option<StreamPerRequestMetrics>,
 }
 
 impl CompletionStreamResponse {
@@ -258,6 +277,7 @@ impl CompletionStreamResponse {
             envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
+            metrics: None,
         }
     }
 }

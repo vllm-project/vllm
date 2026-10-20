@@ -2,10 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -63,12 +65,15 @@ impl Default for Prompt {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
+    /// Whether to apply the engine's configured watermark to this request.
+    pub watermarking: bool,
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
@@ -94,6 +99,11 @@ pub struct SamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
+    /// Candidate token IDs per scored causal prompt row, where row `i` scores
+    /// its IDs as predictions of prompt token `prompt_logprob_start + i + 1`.
+    pub prompt_logprob_token_ids: Option<Vec<Vec<i32>>>,
+    /// First causal prompt row to score; `None` scores from the first row.
+    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling. `None` means no
     /// explicit user override.
     pub min_p: Option<f32>,
@@ -121,6 +131,8 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
+    /// Pre-tokenized sequences to prohibit, in addition to `bad_words`.
+    pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
     ///
@@ -135,8 +147,16 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// `None` returns routing for the whole prompt.
+    pub routed_experts_prompt_start: Option<u32>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// Raises the interval above the frontend-level `--stream-interval`;
+    /// values below it are clamped up to it. The first and final outputs are
+    /// always emitted immediately.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -144,6 +164,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
+            watermarking: true,
             top_p: None,
             top_k: None,
             seed: None,
@@ -152,6 +173,8 @@ impl Default for SamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: None,
             frequency_penalty: None,
             presence_penalty: None,
@@ -162,10 +185,13 @@ impl Default for SamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words: None,
+            bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: None,
+            stream_interval: None,
         }
     }
 }
@@ -208,10 +234,22 @@ pub struct TextRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Optional reasoning-parser kwargs forwarded to engine-side structured
-    /// output logic.
+    /// Optional orchestrator-originated KV hints.
     #[serde(default)]
-    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    pub kv_hints: Option<KvHintsEnvelope>,
+    /// Reasoning-parser kwargs forwarded to engine-side structured output
+    /// logic. The engine consults them only when it owns grammar activation;
+    /// see [`Self::reasoning_ended`].
+    #[serde(default)]
+    pub reasoning_parser_kwargs: ReasoningParserKwargs,
+    /// Optional engine reasoning-gate override selected by a higher-level frontend.
+    ///
+    /// `Some(true)` means the structured output grammar covers reasoning from
+    /// the first generated token, so the engine masks and advances immediately
+    /// instead of waiting for its reasoning parser. Unset for final-output-only
+    /// grammars and for requests without a grammar.
+    #[serde(default)]
+    pub reasoning_ended: Option<bool>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -239,7 +277,9 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: None,
             arrival_time: None,
         }
@@ -284,5 +324,24 @@ mod tests {
         assert!(err.is_request_validation_error());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
+    }
+
+    #[test]
+    fn sampling_params_serialization_omits_unset_fields() {
+        let params = SamplingParams {
+            max_tokens: Some(64),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&params).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(
+            obj.values().all(|v| !v.is_null()),
+            "unexpected null in {value}"
+        );
+        assert_eq!(obj["max_tokens"], 64);
+
+        let back: SamplingParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back, params);
     }
 }
