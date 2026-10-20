@@ -426,20 +426,31 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
     tier = _make_tier(monkeypatch, kvcr)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
+    # k1 lives only in a secondary tier, so the pin probe must not promote it
+    # until the primary HITs are pinned, and must still promote it afterwards.
+    secondary_keys = (keys[1],)
     chunk_ids = {keys[0]: 1, keys[2]: 3}
     lifecycle: list[str] = []
 
     class Parent:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.promoted: list[OffloadKey] = []
+
         def on_new_request(self, req_context):
             lifecycle.append("new")
+            self.calls.append("new")
             return SimpleNamespace()
 
         def lookup(self, key, req_context):
             return LookupResult.HIT if key in hit_keys else LookupResult.MISS
 
         def probe_batch(self, requested_keys, req_context):
+            self.calls.append("probe")
             return [
-                LookupProbe(
+                LookupProbe(key, None, 0)
+                if key in secondary_keys
+                else LookupProbe(
                     key,
                     LookupResult.HIT if key in hit_keys else LookupResult.MISS,
                 )
@@ -447,9 +458,17 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
             ]
 
         def promote_batch(self, probes, req_context):
-            return {}
+            requested = list(probes)
+            self.calls.append("promote")
+            self.promoted.extend(probe.key for probe in requested)
+            return {
+                probe.key: LookupResult.HIT_PENDING
+                for probe in requested
+                if probe.promotion_tier is not None
+            }
 
         def create_store_job(self, requested_keys, req_context):
+            self.calls.append("create_store_job")
             return TransferJob(
                 job_id=11,
                 keys=requested_keys,
@@ -460,12 +479,16 @@ def test_kvcr_tier_serves_primary_pin_request(monkeypatch):
 
         def on_request_finished(self, req_context):
             lifecycle.append("finished")
+            self.calls.append("finished")
 
     bindings = kvcr.constructor_bindings
     assert bindings is not None
     request = bindings.request_pin(keys)
 
-    tier.serve_external_requests(Parent())
+    parent = Parent()
+    tier.serve_external_requests(parent)
+    assert parent.calls == ["new", "probe", "create_store_job", "promote", "finished"]
+    assert parent.promoted == [keys[1]]
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request

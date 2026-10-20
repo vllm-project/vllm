@@ -190,10 +190,18 @@ class _FrameworkPinAdapter:
         try:
             parent.on_new_request(req_context)
             started = True
+            # Probe the whole pin batch before touching primary capacity: a
+            # secondary-tier HIT starts a promotion, which may evict an
+            # earlier HIT of this batch before it is pinned.
+            probes = parent.probe_batch(offload_keys, req_context)
             hit_keys = tuple(
-                key
-                for key in offload_keys
-                if parent.lookup(key, req_context) is LookupResult.HIT
+                probe.key for probe in probes if probe.result is LookupResult.HIT
+            )
+            # Keep the old lookup() side effect: a secondary-tier HIT starts
+            # a promotion even when nothing could be pinned this round.
+            parent.promote_batch(
+                [probe for probe in probes if probe.promotion_tier is not None],
+                req_context,
             )
             if not hit_keys:
                 return None
