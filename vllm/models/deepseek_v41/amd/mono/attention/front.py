@@ -332,18 +332,42 @@ def stage_qkv(c, t):
     jj = fx.max(jr, 0)
     cs = is_rope.select(ld_f32(a["cos_sin"], pos * ROPE + jj), fx.Float32(1.0))
     sn = is_rope.select(ld_f32(a["cos_sin"], pos * ROPE + HALF + jj), fx.Float32(0.0))
-    specs = []
-    for p in range_constexpr(2):
-        specs += [(c["qkvp"], (p * s + t) * QKV_ROWS + qc[j], 1) for j in range(8)]
-        specs += [
-            (c["qkvp"], (p * s + t) * QKV_ROWS + Q_RANK + tt * 2 + j, 1)
-            for j in range(2)
+    if const_expr(c["tuned"]):
+        # the partials as 16 B (two-pair) loads: one poll batch, one round trip
+        # (threads past the q columns read the last ones, their values unused)
+        q0 = fx.min(tt * 8, Q_RANK - 8)
+        specs = []
+        for p in range_constexpr(2):
+            specs += [
+                (c["qkvp"], (p * s + t) * QKV_ROWS + q0 + 2 * m, 2) for m in range(4)
+            ]
+            specs += [(c["qkvp"], (p * s + t) * QKV_ROWS + Q_RANK + tt * 2, 2)]
+        got = c["mb"].poll(specs)
+
+        def part_val(p, j):
+            return got[5 * p + j // 2][j % 2] if j < 8 else got[5 * p + 4][j - 8]
+
+        vals = [
+            bf16_round(
+                part_val(0, j).bitcast(fx.Float32) + part_val(1, j).bitcast(fx.Float32)
+            )
+            for j in range(10)
         ]
-    got = c["mb"].poll(specs)
-    vals = [
-        bf16_round(got[j][0].bitcast(fx.Float32) + got[10 + j][0].bitcast(fx.Float32))
-        for j in range(10)
-    ]
+    else:
+        specs = []
+        for p in range_constexpr(2):
+            specs += [(c["qkvp"], (p * s + t) * QKV_ROWS + qc[j], 1) for j in range(8)]
+            specs += [
+                (c["qkvp"], (p * s + t) * QKV_ROWS + Q_RANK + tt * 2 + j, 1)
+                for j in range(2)
+            ]
+        got = c["mb"].poll(specs)
+        vals = [
+            bf16_round(
+                got[j][0].bitcast(fx.Float32) + got[10 + j][0].bitcast(fx.Float32)
+            )
+            for j in range(10)
+        ]
     xq = [((tt * 8 + j) < Q_RANK).select(vals[j], fx.Float32(0.0)) for j in range(8)]
     xk = vals[8:10]
     ssq = xq[0] * xq[0]
@@ -585,7 +609,11 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
     n_wqkv = WQKV_TASKS * WQKV_KPARTS  # 224
     assert n_wqkv <= BLOCKS
     n_free = BLOCKS - n_wqkv  # CTAs without a wqkv part: xq, kt
-    QKV0 = 0  # on wqkv CTAs
+    # The q / kv norms run on wqkv CTAs, their partials' wait behind the wq_b
+    # weights that are due by then anyway. Tuned: on the CTAs without a wqkv
+    # part (token t on the key table's CTA), whose wq_b weights land long
+    # before the partials do.
+    QKV0 = n_wqkv if key.tuned else 0
     WQB0 = 0
     in_cta_quant = s <= TILE and not x8_given
     xq_stage = s > TILE and not x8_given
@@ -597,8 +625,8 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
     # critical loads before its later stages' weights: a wqkv CTA its first
     # input tile and its wqkv part, the next tiles while it quantizes, then
     # its wq_b tasks; a CTA with a key-table task those after that work.
-    # The q / kv norms run on wqkv CTAs, their partials' wait behind the
-    # wq_b weights that are due by then anyway.
+    # Tuned, the wq_b weights are issued once a CTA's wqkv part is done (past
+    # one token tile): any earlier wait would also take them.
     wqkv_unit = first_task(bid, 0)
     has_wqkv = wqkv_unit < n_wqkv
     task = fx.min(wqkv_unit, n_wqkv - 1) % WQKV_TASKS
@@ -669,13 +697,34 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
         bops = wqb_weights()
         if has_wqkv:
             stage_wqkv(c, task, part, kops, *tiles[0], has_wqkv)
-    else:
-        if const_expr(key.tuned):
+    elif const_expr(key.tuned):
+        if has_wqkv:
             # a CTA polls copy bid % XRDY_COPIES of the flags
             xcopy = bid % XRDY_COPIES * flag_stride(xq_units)
             await_flags(c, c["xrdy"], s, lambda u: xcopy + WQKV_KPARTS * u + part)
-        else:
-            await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
+            xr = (
+                c["x8"],
+                c["x8s"],
+                X_WORDS,
+                part * KWORDS,
+                KWORDS,
+                X_GROUPS,
+                part * KGROUPS,
+                KGROUPS,
+            )
+            regs = rows_loads(c, *xr, tiles[0][0], tiles[0][1], pred=has_wqkv)
+            for ti in range_constexpr(len(tiles)):
+                t0, n = tiles[ti]
+                rows_store(c, regs, KWORDS, KGROUPS, c["xl"], c["xsl"], n)
+                if const_expr(ti + 1 < len(tiles)):
+                    t1, n1 = tiles[ti + 1]
+                    regs = rows_loads(c, *xr, t1, n1, pred=has_wqkv)
+                stage_wqkv(c, task, part, kops, t0, n, has_wqkv)
+        # the wq_b weights only now: loads complete in issue order, so the
+        # input rows' or the wqkv weights' wait would also take them
+        bops = wqb_weights()
+    else:
+        await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
         xr = (
             c["x8"],
             c["x8s"],

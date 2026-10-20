@@ -345,8 +345,19 @@ def put_mxfp8_group_vllm(c, words_mb, codes_mb, t, g, v, amax):
 
 
 # ---------------------------------------------------------------- router
+def router_task_weights(c, task):
+    """``stage_router``'s weight operands of task ``task``: loads only, issued
+    before the x wait (the gate weight needs nothing of this step)."""
+    experts = c["rs"].experts
+    per_group = experts // ROWS * ROUTER_PARTS
+    tile, part = task % per_group // ROUTER_PARTS, task % ROUTER_PARTS
+    return router_weight_loads(
+        c["args"]["gate_w"], tile, part, c["lane"], c["wave"], CM_NT
+    )
+
+
 @traced
-def stage_router(c, task):
+def stage_router(c, task, wvs=None):
     """Router task (token group, row tile, K part): K part ``part`` of rows
     16 ``tile`` .. of the bf16 gate weight [experts, 5120] times the group's
     tokens (``RouteShape.router_groups``), a token tile at a time -- the
@@ -372,7 +383,8 @@ def stage_router(c, task):
         )
         for j0 in range(0, per, TILE)
     ]
-    wvs = router_weight_loads(a["gate_w"], tile, part, lane, wave, CM_NT)
+    if const_expr(wvs is None):
+        wvs = router_weight_loads(a["gate_w"], tile, part, lane, wave, CM_NT)
     xs = [router_x_loads(a["x"], part, n, lane, wave, c["x_cm"], t0) for t0, n in tiles]
     for (t0, n), xvs in zip(tiles, xs):
         router_tile_mfma(wvs, xvs, lane, wave, red)
@@ -412,6 +424,9 @@ def stage_route(c, t):
     a = c["args"]
     if wave == 0:
         ept = experts // 64
+        if const_expr(c["rs"].tuned):
+            # the bias in flight before the logits' wait
+            bias = [ld_f32(a["bias"], lane + 64 * i) for i in range(ept)]
         # each logit's router part sums, added in part order (vLLM's gate: f32 out)
         assert ROUTER_PARTS == 4
         got = c["poll"](
@@ -434,7 +449,8 @@ def stage_route(c, t):
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            vals.append(fx.max(sc + ld_f32(a["bias"], e), fx.Float32(float("-inf"))))
+            b = bias[i] if c["rs"].tuned else ld_f32(a["bias"], e)
+            vals.append(fx.max(sc + b, fx.Float32(float("-inf"))))
             idxs.append(fx.Int32(e))
         for p, q in c["rs"].sort_net:
             sw = vals[p] < vals[q]
@@ -1108,6 +1124,10 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
         c["poll"]([(c["x8rdy"], token_of(fx.min(tid, live - 1)), 1)])
     gpu.barrier()
     tuned = c["rs"].tuned
+    if const_expr(tuned and isinstance(live, int)):
+        load_x8_rows_all(c, words_mb, codes_mb, xl, xsl, token_of, live)
+        gpu.barrier()
+        return
     for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
         quads = width // 4
         for i in range_constexpr(-(-TILE * quads // THREADS)):
@@ -1127,6 +1147,34 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
                     v, dst + (row * lds_row(width) + umod(q, quads, tuned) * 4)
                 )
     gpu.barrier()
+
+
+@traced
+def load_x8_rows_all(c, words_mb, codes_mb, xl, xsl, token_of, live):
+    """``load_x8_rows``' copy of every token's rows (``live`` a Python int):
+    every load issued before the first store, where a load under its own
+    branch waited out its round trip before the next issued (a dozen in
+    series)."""
+    tid = c["tid"]
+    got = []
+    for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
+        quads = width // 4
+        for i in range_constexpr(-(-live * quads // THREADS)):
+            q = fx.min(tid + THREADS * i, live * quads - 1)
+            v = fx.Vector(
+                bo.buffer_load(
+                    rsrc(c[mb].value),
+                    token_of(udiv(q, quads)) * width + umod(q, quads) * 4,
+                    vec_width=4,
+                    dtype=T.i32,
+                    cache_modifier=CM_DEV,
+                )
+            )
+            got.append((tid + THREADS * i, udiv(q, quads), v, dst, width, quads))
+    for gi in range_constexpr(len(got)):
+        q, row, v, dst, width, quads = got[gi]
+        if q < live * quads:
+            fx.ptr_store(v, dst + (row * lds_row(width) + umod(q, quads) * 4))
 
 
 def gather_x8r(c, first, count):
@@ -2122,8 +2170,10 @@ def run_moe(c, key, bid, tls, tl0):
     for task in range(
         first_task(bid, c["rs"].router0, key.tuned), router_tasks, BLOCKS
     ):
+        # tuned: the gate weights in flight before x's wait
+        wvs = router_task_weights(c, task) if key.tuned else None
         await_x(c, list(range(s)))
-        stage_router(c, task)
+        stage_router(c, task, wvs)
     stamp(timeline, tls, tid, tl0 + 2)
     for t in range(first_task(bid, route0, key.tuned), s, BLOCKS):
         stage_route(c, t)

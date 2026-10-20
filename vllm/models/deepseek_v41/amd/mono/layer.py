@@ -278,6 +278,11 @@ def build_mono_k1(key: MonoBuild):
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
     GATE0 = SLICES + s
+    n_wqkv = mb_front.WQKV_TASKS * mb_front.WQKV_KPARTS
+    if key.tuned and n_wqkv + 2 * s <= BLOCKS:
+        # the gates on CTAs without a wqkv part (past the front's key-table /
+        # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
+        GATE0 = n_wqkv + s
     assert GATE0 + s <= BLOCKS
 
     @fx.struct
@@ -414,6 +419,7 @@ def build_mono_k1(key: MonoBuild):
             },
             "d": StageDims(tp),
             "fold": key.fold,
+            "tuned": key.tuned,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -629,6 +635,7 @@ def run_ffn(
         "fl": sl.fl.ptr,
         "red": sl.red.ptr,
         "pend_lds": sl.pl.ptr,
+        "tuned": key.tuned,
         "put": amb.put,
         "put_bf": amb.put_bf,
         "put_words": amb.put_words,
@@ -678,10 +685,12 @@ def run_ffn(
     if const_expr(part is not None):
         mark(0)
     for task in range(first_task(bid, 0, key.tuned), SLICES, BLOCKS):
+        # tuned: the slice's own loads in flight across the wait on the partials
+        pre = seam.slice_preload(ca, task) if key.tuned else None
         if const_expr(part is not None):
             seam.stage_push(ca, task, part)
         seam.stage_reduce(ca, task)
-        seam.stage_slice(ca, task)
+        seam.stage_slice(ca, task, pre)
     mark(K2_SEAM_POINT)
     for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
         seam.stage_gate(ca, t)

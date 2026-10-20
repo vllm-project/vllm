@@ -169,28 +169,71 @@ def slice_row(c, c0, e, got):
     fx.ptr_store(v, c["rl"] + (t * KT + o * COLS + e % COLS))
 
 
+def slice_fn_loads(c, c0):
+    """``stage_slice``'s mix weights of this thread (a load an element of
+    MIX x KT, past them the last)."""
+    tid, a = c["tid"], c["args"]
+    out = []
+    for i in range((MIX * KT + THREADS - 1) // THREADS):
+        e = fx.min(tid + THREADS * i, MIX * KT - 1)
+        j = e // KT
+        o = (e % KT) // COLS
+        out.append(ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS))
+    return out
+
+
+PRE_ROUNDS = 4  # ``slice_preload``: a step's slice rounds held at most
+
+
+def slice_preload(c, task):
+    """``stage_slice``'s global loads of task ``task`` (none of them the
+    reduce's result), issued before the caller's wait on the attention's
+    partials (``stage_reduce``); None past PRE_ROUNDS rounds."""
+    s, tid = c["S"], c["tid"]
+    n = s * KT
+    rounds = -(-n // THREADS)
+    if rounds > PRE_ROUNDS:
+        return None
+    c0 = task * COLS
+    rows = [slice_loads(c, c0, fx.min(tid + THREADS * i, n - 1)) for i in range(rounds)]
+    return rows, slice_fn_loads(c, c0)
+
+
 @traced
-def stage_slice(c, task):
+def stage_slice(c, task, pre=None):
     """R_new, the layer input and the partial projections of hidden columns
-    32 task .. +32, all four streams, every token."""
+    32 task .. +32, all four streams, every token (``pre``: its loads,
+    ``slice_preload``)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl = c["rl"], c["fl"]
     a = c["args"]
     c0 = task * COLS
-    batched_rounds(
-        tid,
-        s * KT,
-        lambda e: slice_loads(c, c0, e),
-        lambda e, got: slice_row(c, c0, e, got),
-    )
+    if const_expr(pre is None):
+        batched_rounds(
+            tid,
+            s * KT,
+            lambda e: slice_loads(c, c0, e),
+            lambda e, got: slice_row(c, c0, e, got),
+        )
+    else:
+        rows, fns = pre
+        for i in range_constexpr(len(rows)):
+            e = tid + THREADS * i
+            if e < s * KT:
+                slice_row(c, c0, e, rows[i])
+    if const_expr(c["tuned"] and pre is None):
+        fns = slice_fn_loads(c, c0)
     for i in range_constexpr((MIX * KT + THREADS - 1) // THREADS):
         e = tid + THREADS * i
         if e < MIX * KT:
-            j = e // KT
-            o = (e % KT) // COLS
             # the original's two bf16 MFMAs take fn as hi = bf16(fn) and lo =
             # bf16(fn - hi): their sum, exact in fp32, is the weight it applies
-            f = ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS)
+            if const_expr(c["tuned"]):
+                f = fns[i]
+            else:
+                j = e // KT
+                o = (e % KT) // COLS
+                f = ld_f32(a["hc_fn"], j * K_MIX + o * HIDDEN + c0 + e % COLS)
             hi = bf16_round(f)
             fx.ptr_store(hi + bf16_round(f - hi), fl + e)
     gpu.barrier()
@@ -334,6 +377,12 @@ def stage_norm(c, t, store):
     tt = fx.min(tid, 255)
     mine = tid < 256
     cols = [tt * 8 + 2048 * ch for ch in range(3)]
+    if const_expr(c["tuned"]):
+        # the norm weights in flight before the row's wait (none of them the row's)
+        ws = [
+            [ld_bf(a["norm_w"], fx.min(cols[ch], HIDDEN - 8) + j) for j in range(8)]
+            for ch in range(3)
+        ]
     xs = []
     for ch in range_constexpr(3):
         base = t * HIDDEN + fx.min(cols[ch], HIDDEN - 8)
@@ -354,9 +403,13 @@ def stage_norm(c, t, store):
     r = hw_rsq(fma(tot, fx.Float32(1.0 / HIDDEN), fx.Float32(EPS)))
     for ch in range_constexpr(3):
         col = fx.min(cols[ch], HIDDEN - 8)
-        ys = [
-            bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j)) for j in range(8)
-        ]
+        if const_expr(c["tuned"]):
+            ys = [bf16_round((xs[ch][j] * r) * ws[ch][j]) for j in range(8)]
+        else:
+            ys = [
+                bf16_round((xs[ch][j] * r) * ld_bf(a["norm_w"], col + j))
+                for j in range(8)
+            ]
         store(t, col, ys, mine & (cols[ch] < HIDDEN))
     gpu.barrier()
 
