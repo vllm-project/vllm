@@ -164,6 +164,59 @@ class Mailbox:
             e += 2 * n
         return outs
 
+    def put_unit(self, a, u, words):
+        """16 B unit ``u`` := (3 raw 32-bit words, tag), one 16 B store (the
+        tuned builds' attention all-reduce, ``seam.attn_unit``): a
+        quarter of the bytes are tags, not half (``put_words``' pairs). A
+        consumer's 16 B load sees the unit whole (``poll_units``)."""
+        vals = [fx.Int32(w) for w in words] + [self.tag]
+        bo.buffer_store(
+            fx.Vector.from_elements(vals, fx.Int32),
+            rsrc(a.value),
+            u * 4,
+            cache_modifier=_SCOPE_CM[a.space],
+        )
+
+    def poll_units(self, specs, batch=POLL_MAX):
+        """Batched poll of 16 B units ``specs`` = [(Addr, unit index)], all of one
+        space (``put_unit``): re-loaded together while any tag is stale. Returns
+        each unit's 3 value words."""
+        if const_expr(len(specs) == 0):
+            return []
+        if const_expr(len(specs) > batch):
+            return self.poll_units(specs[:batch], batch) + self.poll_units(
+                specs[batch:], batch
+            )
+        spaces = {a.space for a, _ in specs}
+        assert len(spaces) == 1, f"one poll batch spans {spaces}"
+        cm = _SCOPE_CM[spaces.pop()]
+        bases = [a.value for a, _ in specs]
+        tag = self.tag
+
+        def load_all():
+            words = []
+            for b, (_, u) in zip(bases, specs):
+                w = fx.Vector(
+                    bo.buffer_load(
+                        rsrc(b),
+                        fx.Int32(u) * 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                        cache_modifier=cm,
+                    )
+                )
+                words += [w[e] for e in range(4)]
+            return fx.Vector.from_elements(words, fx.Int32)
+
+        def pending(v):
+            bad = v[3] != tag
+            for e in range_constexpr(7, 4 * len(specs), 4):
+                bad = bad | (v[e] != tag)
+            return bad
+
+        v = _spin(load_all, pending)
+        return [[v[4 * k + q] for q in range(3)] for k in range(len(specs))]
+
     def poll_wave(self, specs, batch=POLL_MAX):
         """``poll`` for a caller whose every wave runs whole (no lane masked off),
         the tuned builds' MoE (``layer.run_ffn``):

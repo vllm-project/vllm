@@ -293,11 +293,14 @@ def quant_x_half(c, regs, n):
 
 
 @traced
-def stage_wqkv(c, task, part, ops, t0, n, live):
+def stage_wqkv(c, task, part, ops, t0, n, live, settle=False):
     """Rows 16 task .. of wqkv over K half ``part`` against tokens t0 .. t0 + n
-    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part)."""
+    -> fp32 partials QKVP[part] (``live``: a CTA with a wqkv part; ``settle``:
+    the next token tile's rows, in flight, landed before the stores)."""
     tid, red = c["tid"], c["red"]
     gemv_mfmas(c, HIDDEN, c["xl"], c["xsl"], red, ops, rows=n, nsteps=KSTEPS)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if (tid < ROWS * n) & live:
         r = tid % ROWS
@@ -509,15 +512,18 @@ def wqb_pos(c, t0, n):
 
 
 @traced
-def stage_wqb(c, task0, bops, t0, n, rope):
+def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
     """Rows 16 (task0 + BLOCKS k) .. of the rank's H x 512 query rows, every
     task k of the CTA: GEMVs -> bf16 -> GPT-J RoPE of a head's dims 448..
-    (fp32) -> bf16 -> q."""
+    (fp32) -> bf16 -> q (``settle``: the next token tile's rows, in flight,
+    landed before the stores)."""
     tid, red, d = c["tid"], c["red"], c["d"]
     a = c["args"]
     nt = len(bops)
     for k in range_constexpr(nt):
         gemv_mfmas(c, Q_RANK, c["qxl"], c["qxsl"], red + k * RED, bops[k], rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     per = ROWS * n // 2  # bf16 pairs a task
     if tid < nt * per:
@@ -594,11 +600,25 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
 
 
 @traced
-def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
+def run_front(
+    c,
+    key,
+    bid,
+    x8_given=False,
+    before_wqkv=None,
+    after_wqkv=None,
+    past_wqkv=None,
+    qkv_wrap0=None,
+):
     """The front's stages on this CTA. ``x8_given``: a stage before this one
     (the mono layer's seam norm) publishes X8 / XRDY for every token (no input
     quantization here). ``before_wqkv()`` runs ahead of the wqkv weights' loads
-    (a latency-critical stage of the caller's), ``after_wqkv()`` right after."""
+    (a latency-critical stage of the caller's), ``after_wqkv()`` right after,
+    ``past_wqkv(sel)`` (if ``sel``) past this CTA's wqkv part, or on a CTA
+    without one past its wq_b weights' loads and key-table task: work this
+    launch does not wait on, off the wqkv partials' path. ``qkv_wrap0``: the
+    q / kv norms of tokens past the CTAs without a wqkv part on the CTAs from
+    there (else from CTA 0). The last two: tuned builds."""
     s = key.tokens
     wqb_tasks = Dims(key.tp).wqb_tasks
     a = c["args"]
@@ -676,7 +696,11 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 u = free + n_free * tid
                 if u < xq_units:
                     c["mb"].put(c["xrdy"], u, fx.Int32(1))
-    if const_expr(not c.get("index", False)):
+    # past one x8_given launch's wq_b weights a CTA without a wqkv part
+    # builds its key table (K2's): its loads behind the weights, the weights
+    # in flight from the launch's start, not from the wqkv partials' arrival
+    late_kt = x8_given and past_wqkv is not None
+    if const_expr(not c.get("index", False) and not late_kt):
         # an index source's top-k comes after this launch: K2 builds its table
         for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
             stage_kt(c, t)
@@ -719,10 +743,9 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 if const_expr(ti + 1 < len(tiles)):
                     t1, n1 = tiles[ti + 1]
                     regs = rows_loads(c, *xr, t1, n1, pred=has_wqkv)
-                stage_wqkv(c, task, part, kops, t0, n, has_wqkv)
-        # the wq_b weights only now: loads complete in issue order, so the
-        # input rows' or the wqkv weights' wait would also take them
-        bops = wqb_weights()
+                stage_wqkv(
+                    c, task, part, kops, t0, n, has_wqkv, settle=ti + 1 < len(tiles)
+                )
     else:
         await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
         xr = (
@@ -747,11 +770,30 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
             if const_expr(ti + 2 == len(tiles)):
                 bops = wqb_weights()
             stage_wqkv(c, task, part, kops, t0, n, has_wqkv)
+    if const_expr(past_wqkv is not None):
+        past_wqkv(has_wqkv)
+    if const_expr(key.tuned and not in_cta_quant):
+        # the wq_b weights only now: loads complete in issue order, so the
+        # input rows' or the wqkv weights' wait would also take them
+        bops = wqb_weights()
     stamp(c, 2)
+    if const_expr(late_kt):
+        if const_expr(not c.get("index", False)):
+            for t in range(is_free.select(free, fx.Int32(s)), s, n_free):
+                stage_kt(c, t)
+        past_wqkv(~has_wqkv)
 
     # ---- q / kv norms, KV insert
-    for t in range(first_task(bid, QKV0), s, BLOCKS):
-        stage_qkv(c, t)
+    if const_expr(qkv_wrap0 is None or s <= n_free):
+        for t in range(first_task(bid, QKV0), s, BLOCKS):
+            stage_qkv(c, t)
+    else:
+        # past the CTAs without a wqkv part, from CTA qkv_wrap0
+        assert qkv_wrap0 + s - n_free <= n_wqkv
+        for t in range(first_task(bid, QKV0), n_free, BLOCKS):
+            stage_qkv(c, t)
+        for u in range(first_task(bid, qkv_wrap0), s - n_free, BLOCKS):
+            stage_qkv(c, u + n_free)
     stamp(c, 3)
 
     # ---- wq_b: every task's rows of a token tile at a time, the next
@@ -769,5 +811,13 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
         rows_store(c, regs, QX_WORDS, Q_RANK // 32, c["qxl"], c["qxsl"], n)
         if const_expr(ti + 1 < len(tiles)):
             regs = rows_loads(c, *qx, *tiles[ti + 1])
-        stage_wqb(c, wqb_task, bops, t0, n, ropes[ti])
+        stage_wqb(
+            c,
+            wqb_task,
+            bops,
+            t0,
+            n,
+            ropes[ti],
+            settle=key.tuned and ti + 1 < len(tiles),
+        )
     stamp(c, 4)

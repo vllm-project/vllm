@@ -289,12 +289,13 @@ def build_mono_k1(key: MonoBuild):
         # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
         GATE0 = n_wqkv + s
     assert GATE0 + s <= BLOCKS
+    rl_row, fl_row = _seam_rows(key.tuned)
 
     @fx.struct
     class SeamLds:
         red: fx.Array[fx.Float32, seam.red_words(s, key.tuned), 16]
-        rl: fx.Array[fx.Float32, s * seam.KT, 16]
-        fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
+        rl: fx.Array[fx.Float32, s * rl_row, 16]
+        fl: fx.Array[fx.Float32, seam.MIX * fl_row, 16]
 
     @fx.union
     class K1Lds:
@@ -425,6 +426,8 @@ def build_mono_k1(key: MonoBuild):
             "d": StageDims(tp),
             "fold": key.fold,
             "tuned": key.tuned,
+            "rl_row": rl_row,
+            "fl_row": fl_row,
         }
         for region in ("lin", "pmix"):
             ca[region] = sreg(scratch, layout[region][0], region)
@@ -450,13 +453,42 @@ def build_mono_k1(key: MonoBuild):
             for t in range(first_task(bid, NORM0, key.tuned), s, BLOCKS):
                 seam.stage_norm(ca, t, store)
                 publish_x8(c, t)
-            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
-                seam.stage_gate(ca, t)
+            if const_expr(not key.tuned):
+                for t in range(first_task(bid, GATE0), s, BLOCKS):
+                    seam.stage_gate(ca, t)
             gpu.barrier()
 
-        mb_front.run_front(
-            c, fkey, bid, x8_given=True, before_wqkv=seam_slice, after_wqkv=seam_rest
-        )
+        def seam_gates(sel):
+            # tuned: the gates' outputs are K2's, so past the CTA's wqkv part
+            # (and its key-table task), not between the partials' inputs and
+            # the wqkv
+            for t in range(first_task(bid, GATE0, key.tuned), s, BLOCKS):
+                if sel:
+                    seam.stage_gate(ca, t)
+            gpu.barrier()
+
+        if const_expr(key.tuned):
+            mb_front.run_front(
+                c,
+                fkey,
+                bid,
+                x8_given=True,
+                before_wqkv=seam_slice,
+                after_wqkv=seam_rest,
+                past_wqkv=seam_gates,
+                # the q / kv norms past the CTAs without a wqkv part: on the
+                # norms' CTAs, whose wqkv parts end first (their rows land first)
+                qkv_wrap0=NORM0,
+            )
+        else:
+            mb_front.run_front(
+                c,
+                fkey,
+                bid,
+                x8_given=True,
+                before_wqkv=seam_slice,
+                after_wqkv=seam_rest,
+            )
 
     @flyc.jit
     def launch(
@@ -585,13 +617,21 @@ def store_normed(normed, t, col, ys, live, cb=None, wide=False):
             )
 
 
+def _seam_rows(tuned):
+    """The seam's LDS row strides of ``rl`` / ``fl`` (tuned: padded,
+    ``seam.RL_ROW``)."""
+    return (seam.RL_ROW, seam.FL_ROW) if tuned else (seam.KT, seam.KT)
+
+
 def _seam_lds(s, tuned=False):
+    rl_row, fl_row = _seam_rows(tuned)
+
     @fx.struct
     class SeamLds:
         # a token tile's mix partials, tuned every tile's (``seam.slice_mix_all``)
         red: fx.Array[fx.Float32, seam.red_words(s, tuned), 16]
-        rl: fx.Array[fx.Float32, s * seam.KT, 16]
-        fl: fx.Array[fx.Float32, seam.MIX * seam.KT, 16]
+        rl: fx.Array[fx.Float32, s * rl_row, 16]
+        fl: fx.Array[fx.Float32, seam.MIX * fl_row, 16]
         pl: fx.Array[fx.Float32, s * seam.COLS, 16]
 
     return SeamLds
@@ -666,10 +706,14 @@ def run_ffn(
         "red": sl.red.ptr,
         "pend_lds": sl.pl.ptr,
         "tuned": key.tuned,
+        "rl_row": _seam_rows(key.tuned)[0],
+        "fl_row": _seam_rows(key.tuned)[1],
         "put": amb.put,
         "put_bf": amb.put_bf,
         "put_words": amb.put_words,
         "poll": amb.poll,
+        "poll_units": amb.poll_units,
+        "put_unit": amb.put_unit,
         "peer_addr": lambda p: bases[p],
         "rank": rank,
         "sym": own,
@@ -794,6 +838,7 @@ def build_mono_k2(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
+    assert not key.tuned or seam.attn_units_fit(s, tp)
     SeamLds = _seam_lds(s, key.tuned)
 
     @fx.union
@@ -920,7 +965,17 @@ def build_mono_k2(key: MonoBuild):
                 dst = preg(bases[p], 0, "attn")
                 amb.put_bf(dst, 2 * seam.attn_region_pair(rank, t, s, col), [v0, v1])
 
-        c["wob_out"] = push
+        def push_unit(wt, tile, units, j, words):
+            # tuned: this rank's unit of bf16 partial words to every rank's
+            # ATTN region (``seam.attn_unit``)
+            u = seam.attn_unit(rank, tile, units, wt, j, tp)
+            for p in range_constexpr(tp):
+                amb.put_unit(preg(bases[p], 0, "attn"), u, words)
+
+        if const_expr(key.tuned):
+            c["wob_unit_out"] = push_unit
+        else:
+            c["wob_out"] = push
         if const_expr(key.timeline):
             c["tl"], c["tl_points"] = tl, K2_POINTS
         mb_back.epoch_begin(c, epoch, ep)

@@ -45,6 +45,7 @@ from .device import (
     THREADS,
     WAVES,
     Mailbox,
+    bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -83,6 +84,7 @@ from .plan import (
     NOPE,
     ROPE,
     ROWS,
+    TILE,
     WOA_ROWS,
     Dims,
     back_scratch,
@@ -653,11 +655,15 @@ def stage_combine(c, unit):
 
 
 @traced
-def stage_woa(c, task, ops, t0, n):
-    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B."""
+def stage_woa(c, task, ops, t0, n, settle=False):
+    """Rows 32 task .. of wo_a -> bf16 -> vLLM's MXFP8 of the 32 -> X8B
+    (``settle``: the next token tile's rows are in flight -- landed before this
+    tile's stores, so its LDS store need not wait behind them)."""
     tid, red, d, lane = c["tid"], c["red"], c["d"], c["lane"]
     split = WOA_SPLIT_K
     gemv_mfmas(c, d.group_k, c["xl"], c["xsl"], red, ops, split, tiled=True, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     mine = tid < WOA_ROWS * n
     tl = fx.min(tid // WOA_ROWS, n - 1)
@@ -719,18 +725,44 @@ def _wob_store(a, t, col, v0, v1):
 
 
 @traced
-def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False):
+def stage_wob(c, task, ops, task2, ops2, has2, t0, n, mark=False, settle=False):
     """Rows 16 task .. (and 16 task2 .., ``has2``) of wo_b -> bf16 -> out, or
-    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair."""
+    (``c["wob_out"]``, the mono layer) the caller's hook with each bf16 pair;
+    a tuned mono layer's (``c["wob_unit_out"]``) with each unit of three
+    (``settle``: the next token tile's rows, in flight, landed before the
+    stores -- else its LDS store waits behind the peer pushes' round trip)."""
     tid, red = c["tid"], c["red"]
     o_rows = c["d"].o_rows
     a = c["args"]
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red, ops, rows=n)
     gemv_mfmas(c, o_rows, c["xl"], c["xsl"], red + RED, ops2, rows=n)
+    if const_expr(settle):
+        rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
     if const_expr(mark):
         stamp(c, 15)
     per = ROWS * n // 2  # bf16 pairs a task
+    unit_out = c.get("wob_unit_out")
+    if const_expr(unit_out is not None):
+        # a task's 8 n words in units of three (token-major), a thread a unit
+        # (``seam.attn_unit``), one 16 B store a unit and rank
+        units = cdiv(per, 3)
+        ku = tid // units
+        if (tid < 2 * units) & ((ku == 0) | has2):
+            j = tid % units
+            rk = red + ku * RED
+            words = []
+            for q in range_constexpr(3):
+                # a last unit's spare slot repeats its last word (never read)
+                f = fx.min(j * 3 + q, per - 1)
+                rp = f % (ROWS // 2)
+                tl = f // (ROWS // 2)
+                v0 = row_sum(rk, 2 * rp, tl)
+                v1 = row_sum(rk, 2 * rp + 1, tl)
+                words.append(bf16_pair(v0, v1).bitcast(fx.Int32))
+            unit_out((ku == 0).select(task, task2), t0 // TILE, units, j, words)
+        gpu.barrier()
+        return
     k = tid // per
     emit = c.get("wob_out") or (lambda t, col, v0, v1: _wob_store(a, t, col, v0, v1))
     if (tid < 2 * per) & ((k == 0) | has2):
@@ -1081,7 +1113,7 @@ def run_back(c, key, bid):
             rows_store(c, regs, group_k // 4, group_k // 32, c["xl"], c["xsl"], n)
             if const_expr(ti + 1 < len(tiles)):
                 regs = rows_loads(c, *xo, *tiles[ti + 1])
-            stage_woa(c, woa_t, ops, t0, n)
+            stage_woa(c, woa_t, ops, t0, n, settle=c["tuned"] and ti + 1 < len(tiles))
         stamp(c, 10)
         if const_expr(c["tuned"]):
             publish_copies(c, c["ardy"], woa_t, ARDY_COPIES, woa_tasks)
@@ -1126,6 +1158,7 @@ def run_back(c, key, bid):
             t0,
             n,
             mark=ti == 0,
+            settle=c["tuned"] and ti + 1 < len(tiles),
         )
         if const_expr(ti == 0):
             stamp(c, 13)
