@@ -1051,6 +1051,15 @@ def test_model_question_limit_is_enforced_before_admission(
         assert not server.engine.generated
 
 
+def test_systemone_rejects_unknown_request_fields(decision_server):
+    server = decision_server
+    body = decision_body("systemone") | {"assets": {"img": {"type": "image"}}}
+    response = server.client.post("/v1/systemone", json=body)
+    assert response.status_code == 400, response.text
+    assert "unknown field(s) ['assets']" in response.json()["error"]["message"]
+    assert not server.engine.admitted
+
+
 @pytest.mark.parametrize("endpoint", ["decisions", "systemone"])
 @pytest.mark.parametrize(
     "failure",
