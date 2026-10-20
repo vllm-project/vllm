@@ -2606,12 +2606,18 @@ class rocm_aiter_ops:
         if not cls._AITER_ENABLED:
             return False
         try:
-            from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (  # noqa: F401
+            from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
                 fused_gdn_decode_qkvz,
             )
         except ImportError:
             return False
-        return True
+        import inspect
+
+        # qkvz_layout, query_start_loc and out are added in ROCm/aiter#6488.
+        params = inspect.signature(fused_gdn_decode_qkvz).parameters
+        return (
+            "qkvz_layout" in params and "query_start_loc" in params and "out" in params
+        )
 
     @staticmethod
     def _gdn_flydsl_prefill_kernels_importable() -> bool:
