@@ -57,7 +57,7 @@ from vllm.models.deepseek_v41.amd.mono.common.plan import (
     key_tuple,
     pair_layout,
 )
-from vllm.models.deepseek_v41.amd.mono.common.sync import Space, preg, sreg
+from vllm.models.deepseek_v41.amd.mono.common.sync import preg, sreg
 
 from .a16w4 import scale_f32, scale_loads, step_mfma, weight_loads
 from .sources import SOURCES
@@ -68,7 +68,6 @@ from .sync import (
     cta_sync,
     error_word,
     load32,
-    release,
     store32,
 )
 
@@ -320,7 +319,6 @@ def stage_norm(c, t):
     if tid < SEAM_TASKS:
         got = c["mb"].poll([(c["ssq"], t * SEAM_TASKS + tid, 1)], site=SITE_NORM)
         part = got[0][0].bitcast(fx.Float32)
-        c["mb"].acquire(Space.SCRATCH)
     cta_sync()
     var = block_sum(c, part, 0) / fx.Float32(HIDDEN)
     rstd = fx.Float32(1.0) / fx.Float32(fmath.sqrt(var + fx.Float32(EPS)))
@@ -348,7 +346,6 @@ def await_x(c, tokens_n):
     tid = c["tid"]
     if tid < tokens_n:
         c["mb"].poll([(c["xrdy"], tid, 1)], site=SITE_ROUTER)
-        c["mb"].acquire(Space.SCRATCH)
     cta_sync()
 
 
@@ -701,8 +698,7 @@ def stage_down(c, tasks):
         c["mb"].poll(
             [(c["upf"], u * UP_TILES + fx.min(lane, UP_TILES - 1), 1)], site=SITE_DOWN
         )
-        # the wave's polls are complete (the loop exits for all lanes at once)
-        c["mb"].acquire(Space.SCRATCH)
+        # MID's sc1 loads below issue after every lane's poll has completed
         col = slot_col(c, cnt)
         xs = x_operands(c, c["mid"].value, u * 16 + col, INTER // 2, 0, K2_STEPS)
         pick = tab_ld(c, T_SLOT_PICK + u * 16 + col)
@@ -988,7 +984,6 @@ def finish(c, key, epoch, tag, handshake, inject, peers):
         injected_fault(c, inject)
     cta_sync(drain=True)
     if (tid == 0) & (bid != key.drop_mark):
-        release("agent")
         store32(epoch, EPOCH_MARKS + bid, tag, "agent")
     epoch_end(c, epoch, tag)
     if (handshake != 0) & (bid == 0) & (tid == 0):
@@ -1015,9 +1010,9 @@ def trade_faults(c, tag, peers):
     hs = [preg(b, HANDSHAKE_BYTES, "handshake") for b in peers]
     own = preg(mb.err_base, HANDSHAKE_BYTES, "handshake")
     for p in range_constexpr(c["tp"]):
-        mb.publish(hs[p], c["rank"], failed)
+        mb.publish_release(hs[p], c["rank"], failed)
     got = mb.poll([(own, p, 1) for p in range(c["tp"])], site=SITE_HANDSHAKE)
-    mb.acquire(Space.PEER)
+    mb.acquire_system()
     for p in range_constexpr(c["tp"]):
         if (got[p][0] != 0) & (error_word(mb.err_base) == 0):
             Mailbox(tag, mb.err_base, [mb.err_base], p, mb.epoch).fail(SITE_PEER)

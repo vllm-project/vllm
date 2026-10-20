@@ -432,10 +432,12 @@ OBJDUMP = shutil.which("llvm-objdump") or next(
 
 @pytest.mark.skipif(OBJDUMP is None, reason="needs llvm-objdump")
 def test_isa_encodes_the_mailbox_contract(weights):
-    """Every system-scope access is one aligned 64-bit pair (or the 32-bit
-    error word); every release is a cache write-back then a drain before its
-    store, every acquire a drain then an invalidate (LLVM AMDGPU GFX942
-    memory-model code sequences)."""
+    """The linked kernel's memory operations take the shapes ``mono/sync.py``
+    argues from: every system-scope access one aligned 64-bit pair or the
+    32-bit error word; on this GPU every cross-CTA access sc1 (agent-coherent),
+    so no L2 write-back or invalidate; the handshake's system release a
+    write-back then a drain before its store, its acquire a drain then an
+    invalidate."""
     from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
         code_object,
     )
@@ -465,4 +467,4 @@ def test_isa_encodes_the_mailbox_contract(weights):
         if op[0] == "buffer_inv":
             assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
     kinds = {" ".join(op) for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")}
-    assert {"buffer_wbl2 sc1", "buffer_wbl2 sc0 sc1", "buffer_inv sc1"} <= kinds
+    assert kinds == {"buffer_wbl2 sc0 sc1", "buffer_inv sc0 sc1"}

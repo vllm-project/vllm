@@ -1,23 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Bounded tagged hand-offs and the sticky error word, on the LLVM AMDGPU
-memory model (AMDGPUUsage, "Memory Model GFX942"; GFX950 uses its code
-sequences).
+"""Bounded tagged hand-offs and the sticky error word.
 
-A pair is one naturally aligned 64-bit LLVM atomic, (value | tag << 32), stored
-and loaded ``monotonic`` at its space's scope: ``agent`` for this GPU's scratch,
-system for the peer buffers. An atomic access may not be split (LLVM Atomics,
-"Unordered": "a load cannot see a value which was never stored"), so a load
-that sees a pair's tag sees that store's value; the value needs no further
-ordering. They lower to one ``global_store/load_dwordx2`` with ``sc1``
-(agent) or ``sc0 sc1`` (system). The peer buffers are fine-grained uncached
-(MTYPE UC) allocations, which bypass the L2.
+Contract, on the LLVM AMDGPU memory model (AMDGPUUsage, "Memory Model GFX942",
+whose code sequences GFX950 uses):
 
-Plain data a pair announces (``publish``) is ordered by a release fence at the
-pair's scope before its store (``buffer_wbl2``, ``s_waitcnt vmcnt(0)``) and
-read after an acquire fence following the poll (``s_waitcnt vmcnt(0)``,
-``buffer_inv``). CTA-wide hand-offs drain every wave's stores and barrier
-before the one publishing store (``cta_sync``).
+- A pair is one naturally aligned 64-bit LLVM atomic, (value | tag << 32),
+  stored and loaded ``monotonic`` at its space's scope: ``agent`` for this
+  GPU's scratch, system for the fine-grained uncached (MTYPE UC) peer heap.
+  An atomic access may not be split (LLVM Atomics, "Unordered": "a load cannot
+  see a value which was never stored"), so a load that sees a pair's tag sees
+  that store's value. Lowered: one ``global_store/load_dwordx2`` with ``sc1``
+  (agent) or ``sc0 sc1`` (system).
+- Plain data a pair announces on this GPU is stored and loaded with ``sc1``,
+  the GFX942 encoding of agent-scope atomic accesses, which are coherent
+  across the agent's L2s; so no ``buffer_wbl2`` / ``buffer_inv`` is needed
+  for it. Its order against the pair is the vector-memory counter: the
+  producer's ``s_waitcnt vmcnt(0)`` before the pair store (``publish``; a CTA
+  first drains every wave and barriers, ``cta_sync``), and the consumer's
+  data loads issued after its poll completed. GFX942: "A s_waitcnt vmcnt(0)
+  ... ensures a previous vector memory operation has completed before
+  executing a subsequent vector memory ... operation and so can be used to
+  meet the requirements of acquire and release."
+- The step-end fault handshake orders the error words across GPUs with
+  system-scope release / acquire fences (``publish_release``,
+  ``acquire_system``).
 
 A poll gives up after ``ticks`` of the 100 MHz clock or once any rank has set
 the error word; a timeout sets ``[1, rank, epoch, site]`` on every rank.
@@ -149,15 +156,19 @@ class Mailbox:
             store64(a.value, i + k, pack(words[k], self.tag), _SCOPE[a.space])
 
     def publish(self, a, i, v):
-        """Pair i of ``a`` := (v, tag) after a release fence at its scope: the
-        calling thread's earlier stores (and, past a ``cta_sync``, its CTA's)
-        are visible to whoever acquires after seeing the tag."""
+        """Pair i of ``a`` (scratch) := (v, tag) once the calling wave's ``sc1``
+        stores (past a ``cta_sync(drain=True)``, its CTA's) have completed."""
+        assert a.space is Space.SCRATCH
+        rocdl.s_waitcnt(vmcnt=0)
+        self.put(a, i, v)
+
+    def publish_release(self, a, i, v):
+        """Pair i of ``a`` := (v, tag) after a release fence at its scope."""
         release(_SCOPE[a.space])
         self.put(a, i, v)
 
-    def acquire(self, space):
-        """After a poll of published pairs: their data is visible."""
-        acquire_fence(_SCOPE[space])
+    def acquire_system(self):
+        acquire_fence(None)
 
     def fail(self, site):
         lo = (fx.Int64(fx.Int32(self.rank)) << 32) | fx.Int64(1)
