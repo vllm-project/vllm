@@ -156,10 +156,20 @@ def _run_prepare(
     )
 
 
+@pytest.mark.parametrize(
+    "pad_fix",
+    [pytest.param(True, id="pad-fix-on"), pytest.param(False, id="pad-fix-off")],
+)
 @pytest.mark.parametrize("cp_rank,cp_size", [(0, 1), (0, 2), (1, 2)])
-def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size):
+def test_prepare_dflash_inputs_excludes_rejected_context_suffix(
+    cp_rank, cp_size, pad_fix, monkeypatch
+):
     # Positions 10/11 use physical block 7. Rejected positions 12/13 would use
     # block 8, but must be PAD context rather than contaminating draft KV.
+    if pad_fix:
+        monkeypatch.delenv("VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_DISABLE_DFLASH_PREPARE_PAD_FIX", "1")
     out = _run_prepare(
         target_positions=[10, 11, 12, 13],
         block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
@@ -183,10 +193,24 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
     assert not out.input_buffers.is_padding[:3].any()
-    assert out.input_buffers.is_padding[3:].all()
-    assert (out.input_buffers.input_ids[3:] == 0).all()
-    assert (out.input_buffers.positions[3:] == 0).all()
-    assert (out.query_slot_mapping[3:] == PAD_SLOT_ID).all()
+    # Pad-tail contract (speculator module comment): with the pad fix the
+    # query-slot PAD tail is one parallel launch bounded by the draft
+    # replay read range -- [q_pad_start, HWM) = [3, 12) here, HWM =
+    # max_num_reqs * num_query_per_req = 4 * 3 -- while the stock
+    # in-kernel tail pads the full [3, 16) buffer. Rows past HWM are
+    # never read by any draft-path consumer (captured replays see the
+    # capture-time PAD init), so the bounded launch must leave them
+    # untouched.
+    pad_end = 12 if pad_fix else 16
+    assert out.input_buffers.is_padding[3:pad_end].all()
+    assert (out.input_buffers.input_ids[3:pad_end] == 0).all()
+    assert (out.input_buffers.positions[3:pad_end] == 0).all()
+    assert (out.query_slot_mapping[3:pad_end] == PAD_SLOT_ID).all()
+    if pad_fix:
+        assert not out.input_buffers.is_padding[12:].any()
+        assert (out.input_buffers.input_ids[12:] == -1).all()
+        assert (out.input_buffers.positions[12:] == -1).all()
+        assert (out.query_slot_mapping[12:] == -2).all()
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
