@@ -76,12 +76,6 @@ features:
       - "--speculative-config"
       - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
     hardware_overrides:
-      # The B200 AgentX lane (SemiAnalysisAI/InferenceX#3837) verifies the full
-      # 5-token block, the setting its golden acceptance curve was measured with.
-      b200:
-        args:
-          - "--speculative-config"
-          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
       # Adaptive verification writes query_start_loc on device and captures
       # varlen decode CUDA graphs. maybe_create_adaptive_verification_manager
       # therefore requires both supports_device_cpu_query_lens_mismatch()
@@ -322,8 +316,10 @@ strategy_overrides:
       # pinned host DRAM keeps that resident footprint inside HBM on these
       # SKUs; the lookups read the tables through UVA and the output is
       # unchanged.
-      # B200 TP2 serves the low-concurrency (c1) agentic setting: THP-backed
-      # Engram tables, 4096 batched tokens, and graphs captured up to 4092 tokens.
+      # B200 TP2 serves the low-concurrency (c1) agentic setting
+      # (SemiAnalysisAI/InferenceX#3837): THP-backed Engram tables, FlashInfer
+      # autotuning, 0.97 GPU memory, the V2 model runner, 4096 batched tokens,
+      # and graphs captured up to 4092 tokens.
       b200:
         extra_args:
           - "--kernel-config"
@@ -399,7 +395,7 @@ strategy_overrides:
       # prefill-bearing steps replay graphs, and new prefills admitted every 64
       # engine steps, aligned across DP ranks (the vLLM default of 1 admits on every
       # step). The builder's DEP spans all 8 GPUs; the qualified lane runs DEP2
-      # (`--data-parallel-size 2`) and DEP4 — see "B200 AgentX tuning" in the guide.
+      # (`--data-parallel-size 2`) and DEP4; see "AgentX tuning on NVIDIA GPUs" in the guide.
       b200:
         extra_args:
           - "--attention-config"
@@ -913,38 +909,69 @@ guide: |
   configuration (`--max-cudagraph-capture-size 8190`),
   `--max-num-batched-tokens 8192` and `--max-num-seqs 256`; B200, GB200 and
   GB300 add Engram CPU offload and otherwise inherit the shared Blackwell
-  settings. Scheduler limits are workload-dependent at TP2, so size
+  settings. B200 is the exception for both strategies: it renders the qualified B200
+  AgentX settings described in **AgentX tuning on NVIDIA GPUs**, so B200 DEP uses
+  `FLASHINFER_MLA_SPARSE_DSV41`, `{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe"}`,
+  `{"cpu_offload":true,"embedding_across_dp":true}` and `--max-num-seqs 32`.
+  Scheduler limits are workload-dependent at TP2, so size
   `--max-num-batched-tokens` and `--max-cudagraph-capture-size` for your own
   serving profile. For high interactivity on any of them, use
   `--tensor-parallel-size 4`.
 
   ## AgentX tuning on NVIDIA GPUs
 
-  On B200, TP2 at concurrency 1 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'`,
-  `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. DEP2 (TP1 x DP2 with expert
-  parallelism) serves concurrency 8 to 32 with `--max-num-batched-tokens 4096`. At c8 and c16
-  graph capture stops at 576 tokens and `--prefill-schedule-interval` stays at the vLLM default
-  of 1, while c24 and c32 extend piecewise graphs to 4096 tokens and set
-  `--prefill-schedule-interval 64`. `--max-num-seqs` is 16 at c8 and c16 and 32 at c24 and c32.
+  The B200 AgentX lane ([SemiAnalysisAI/InferenceX#3837](https://github.com/SemiAnalysisAI/InferenceX/pull/3837))
+  serves the 0909 launch checkpoint ([deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash);
+  pick **FP8 (0909)** to match it) with FlashInfer autotuning
+  (`--kernel-config '{"enable_flashinfer_autotune":true}'`), `--gpu-memory-utilization 0.97`
+  and `VLLM_USE_V2_MODEL_RUNNER=1` on every point.
 
-  DEP4 (TP1 x DP4) serves concurrency 64 to 128. It sets `--prefill-schedule-interval 48` at c96
-  and c128, with `--max-num-seqs` matching the concurrency, and keeps the default of 1 at c64.
-  Graph capture extends to 8190 tokens, and decode-replay graphs are captured separately:
+  **TP4** serves concurrency 1 to 128 with `--tensor-parallel-size 4`, THP-backed Engram tables
+  (`--engram-config '{"cpu_offload":true,"use_thp":true}'`) and these per-point limits:
+
+  | Concurrency | `--max-num-seqs` | `--max-num-batched-tokens` | `--max-cudagraph-capture-size` |
+  |---|---|---|---|
+  | 1, 4 | 8 | 4096 | 4092 |
+  | 8, 16 | 16, 32 | 8192 | 8190 |
+  | 32, 64, 128 | 64, 128, 256 | 8192 | 8190 |
+
+  Every TP4 point captures piecewise graphs at the DSpark verification multiples
+  `[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]`,
+  extended with `6144,8190` from c8. From c16 it also captures decode-replay graphs separately,
+  with the same `decoder_replay_cudagraph_capture_sizes` as DEP4 below.
+
+  **TP2** at concurrency 1 runs the TP4 c1 settings on two GPUs (`--max-num-seqs 8`,
+  `--max-num-batched-tokens 4096`, capture to 4092).
+
+  **DEP2** (TP1 x DP2 with expert parallelism) serves concurrency 8 to 32 with
+  `--max-num-batched-tokens 4096`. `--max-num-seqs` is per DP rank: 16 at c8 and c16 and 32 at
+  c24 and c32. At c8 and c16 graph capture stops at 576 tokens
+  (`--max-cudagraph-capture-size 576`) and `--prefill-schedule-interval` stays at the vLLM
+  default of 1, while c24 and c32 extend piecewise graphs to 4096 tokens and set
+  `--prefill-schedule-interval 64`.
+
+  **DEP4** (TP1 x DP4) serves concurrency 64 to 128 with `--max-num-batched-tokens 8192` and
+  `--max-cudagraph-capture-size 8190`. `--max-num-seqs` is 64 at c64, 96 at c96 and 128 at
+  c128. It sets `--prefill-schedule-interval 48` at c96 and c128 and keeps the default of 1
+  at c64. Decode-replay graphs are captured separately:
 
   ```
   --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048,2304,2560,2816,3072,3328,3584,3840,4096]}'
   ```
 
-  For DEP2 at c64 and c128, add vLLM's native CPU KV offloading with
+  **DEP2 with host KV** at c64 and c128 adds vLLM's native CPU KV offloading with
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
-  server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`. The remaining clients
-  queue behind the 48 running sequences. Graph capture stops at 576 tokens, as for DEP2 at
-  c8 and c16.
+  server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`. `--max-num-seqs` is per
+  DP rank, so the server runs up to 96 sequences: nothing queues at c64, and about 32 clients
+  wait at c128. It keeps `--prefill-schedule-interval` at 1 and captures graphs only up to
+  576 tokens (`--max-cudagraph-capture-size 576`), as DEP2 does at c8 and c16.
 
-  In the command builder, B200 with Tensor Parallel renders the TP2 c1 settings, and B200 with
-  Data + Expert Parallel renders the DEP2 c24/c32 engine settings. The builder's DEP spans all
-  eight GPUs, so pin `--data-parallel-size 2` (or 4 for DEP4) and take the per-concurrency
-  values above.
+  In the command builder, pick **B200** and the **FP8 (0909)** checkpoint, and tick
+  **Speculative decoding** and **Text only** (both are opt-in). **Tensor Parallel** then
+  renders the TP2 c1 settings, and **Data + Expert Parallel** renders the DEP2 c24/c32 engine
+  settings. The builder's DEP spans all eight GPUs, so set `--data-parallel-size 2` (or 4 for
+  DEP4), select the matching GPUs, change the vLLM Router's `--intra-node-data-parallel-size`
+  to the same value, and take the per-concurrency values above.
 
   ### Aggregate serving on B300
 
