@@ -298,6 +298,15 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_fault_tolerance: Option<Unsupported>,
 
+    /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
+    #[arg(
+        long,
+        visible_alias = "no-enable-elastic-ep",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_elastic_ep: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
@@ -307,6 +316,17 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
+
+    /// If `True`, LoRA support for the tower (vision encoder) and connector
+    /// of multimodal models will be enabled. This is an experimental feature
+    /// and currently only supports some MM models such as the Qwen VL series.
+    #[arg(
+        long,
+        visible_alias = "no-enable-tower-connector-lora",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tower_connector_lora: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
@@ -358,6 +378,14 @@ pub struct EngineUnsupportedArgs {
     /// It makes sense to set this only if `--otlp-traces-endpoint` is set.
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
+
+    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    /// bucket-family key to a list of strictly increasing, positive, finite
+    /// upper bounds. When a family key is present, its list replaces the
+    /// default buckets for every histogram in that family; families not listed
+    /// keep their defaults.
+    #[arg(long)]
+    pub custom_histogram_buckets: Option<Unsupported>,
 
     /// Maximum number of requests that can be in-flight (waiting or running)
     /// at the same time. When the limit is reached, new requests are rejected
@@ -601,13 +629,17 @@ pub struct ServerUnsupportedArgs {
     pub middleware: Option<Unsupported>,
 
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-disable-fastapi-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub disable_fastapi_docs: Option<Unsupported>,
+    pub disable_fastapi_docs: Option<Noop>,
 
     /// Maximum size (bytes) of an incomplete HTTP event (header or body) for
     /// h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB).
