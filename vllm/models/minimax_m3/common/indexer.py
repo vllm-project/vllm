@@ -111,7 +111,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         head_dim: int,
         prefix: str,
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
     ) -> None:
         super().__init__()
@@ -354,7 +354,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
@@ -495,7 +495,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
 def select_indexer_impl_cls(
     *,
     topk_blocks: int,
-    indexer_kv_dtype: IndexerKVDType = "bf16",
+    indexer_kv_dtype: IndexerKVDType | str = "bf16",
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
@@ -571,7 +571,7 @@ class MiniMaxM3Indexer(nn.Module):
         local_blocks: int = 0,
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
-        indexer_kv_dtype: IndexerKVDType = "bf16",
+        indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
