@@ -239,6 +239,7 @@ steps:
 # test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -272,6 +273,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Miscellaneous Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       timeout_in_minutes: 55
@@ -1086,3 +1088,27 @@ steps:
   - amd-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+
+- label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
+  key: dsv41-mono-decode-gfx942-amd
+  dind: false
+  device: mi300_1
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/amd/
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - tests/kernels/models/amd/test_dsv41_gfx942_topk.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py
+  - tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py
+  - tests/kernels/models/amd/test_dsv41_mono_gfx942.py
+  commands:
+  - pytest -v -s tests/kernels/models/amd/test_dsv41_gfx942_topk.py tests/kernels/models/amd/test_dsv41_gfx942_cand_logits.py tests/kernels/models/amd/test_dsv41_gfx942_sparse_indexer.py tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py tests/kernels/models/amd/test_dsv41_gfx942_draft_lm_head.py tests/kernels/models/amd/test_dsv41_mono_gfx942.py

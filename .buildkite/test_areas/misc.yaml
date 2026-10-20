@@ -144,20 +144,21 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
+  automatic_shard: true
   timeout_in_minutes: 45
-  parallelism: 4
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) V1 KV Connectors Shard %N"
+      label: ":amd: (MI355 DPX) V1 KV Connectors"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -188,6 +189,27 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
+# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# the connector or its tests change.
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  key: amd-umbp-connector-unit-mi355
+  dind: false
+  device: mi355_dpx
+  num_devices: 1
+  timeout_in_minutes: 30
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 # Single-node MoRIIO WRITE P/D on dummy weights: prefill and decode on separate
 # GPUs over xGMI, compared exactly against a direct serve.
