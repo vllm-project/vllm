@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.platforms.interface import Platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -326,6 +327,65 @@ def test_monolithic_capture_survives_kernel_rebuilds():
         assert captured[-1] == [[t + offset, t + offset + 1] for t in range(3)]
     with pytest.raises(ValueError, match="not supported"):
         forward(_ToyMonolithicExperts(supports_capture=False))
+
+
+@pytest.mark.parametrize(
+    "rows, top_k",
+    [([[7, 8], [9, 10]], 2), ([], 2), ([[0]], 1)],
+    ids=["multiple-elements", "idle-rank", "zero-expert-id"],
+)
+def test_platform_rows_override_preserves_tensor_results(monkeypatch, rows, top_k):
+    """Platform rows bypass shape inference, even when empty or all zero."""
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2, num_experts_per_tok=top_k)
+    expected = torch.tensor(rows, dtype=torch.int32).reshape(-1, top_k)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=5))
+    topk = torch.full((7, top_k), -2, dtype=torch.int32)
+
+    class CustomPlatform(Platform):
+        @classmethod
+        def get_routed_experts_local_rows(cls, ids, context, dp_rank, tp_size):
+            assert ids is topk and context is ctx
+            assert (dp_rank, tp_size) == (1, 2)
+            return expected
+
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CustomPlatform())
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(0, topk)
+
+    torch.testing.assert_close(capturer.device_buffer[: len(expected), 0], expected)
+    assert (capturer.device_buffer[len(expected) :] == -1).all()
+
+
+def test_platform_rows_none_restores_default_layout(monkeypatch):
+    """The default platform hook still trims gathered TP padding."""
+    capturer = _capturer_with_buffer(tp_size=2)
+    topk = torch.arange(8, dtype=torch.int32).reshape(4, 2)
+    ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", Platform())
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(0, topk)
+
+    torch.testing.assert_close(capturer.device_buffer[:3, 0], topk[:3])
+    assert (capturer.device_buffer[3:] == -1).all()
+
+
+@pytest.mark.parametrize("platform_override", [False, True])
+def test_capture_rejects_rows_exceeding_buffer(monkeypatch, platform_override):
+    """Oversized routing results fail before writing any capture rows."""
+    capturer = _capturer_with_buffer(max_tokens=2)
+    rows = torch.zeros(3, 2, dtype=torch.int32)
+    platform = (
+        SimpleNamespace(get_routed_experts_local_rows=lambda *args: rows)
+        if platform_override
+        else Platform()
+    )
+    monkeypatch.setattr(f"{_REC_MODULE}.current_platform", platform)
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=_forward_context()),
+        pytest.raises(ValueError, match="returned 3 rows for a 2-row buffer"),
+    ):
+        capturer.capture(0, rows)
+    assert (capturer.device_buffer == -1).all()
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():
