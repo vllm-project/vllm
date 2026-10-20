@@ -450,6 +450,8 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
+    if block_shape is not None:
+        BLOCK_K = min(BLOCK_K, min(block_shape[0], block_shape[1]))
 
     grid = (
         expert_num_tokens.size(0),

@@ -37,6 +37,9 @@
     "INSTALL_KV_CONNECTORS": {
       "default": "false"
     },
+    "BUILD_NIXL": {
+      "default": "false"
+    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
@@ -69,9 +72,6 @@
     },
     "RUN_WHEEL_CHECK": {
       "default": "true"
-    },
-    "FLASHINFER_VERSION": {
-      "default": "0.7.0.post1"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

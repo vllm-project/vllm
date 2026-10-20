@@ -10,7 +10,7 @@ Usage:
     python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    python_version: Python version to use (e.g., "3.10") or "local" to use
+    python_version: Python version to use (e.g., "3.11") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
 
@@ -38,19 +38,23 @@ SILENT_GROUPS = [
     "tests/entrypoints/generate",
     "tests/entrypoints/multimodal",
     "tests/entrypoints/pooling",
+    "tests/entrypoints/rl",
     "tests/entrypoints/serve",
+    "tests/entrypoints/speech_to_text",
     "tests/entrypoints/tool_parsers",
     "tests/entrypoints/unit_tests",
-    "tests/entrypoints/weight_transfer",
+    "tests/entrypoints/common",
     "tests/kernels/attention",
     "tests/kernels/core",
     "tests/kernels/helion",
     "tests/kernels/mamba",
     "tests/kernels/quantization",
-    "tests/model_executor/layers",
+    "tests/model_executor",
     "tests/models/language",
     "tests/models/quantization",
+    "tests/models/test_initialization.py",
     "tests/multimodal",
+    "tests/parser",
     "tests/plugins/bge_m3_sparse_plugin",
     "tests/plugins/prithvi_io_processor_plugin",
     "tests/plugins/vllm_add_dummy_platform",
@@ -58,6 +62,7 @@ SILENT_GROUPS = [
     "tests/plugins_tests",
     "tests/quantization",
     "tests/reasoning",
+    "tests/renderers",
     "tests/samplers",
     "tests/spec_decode",
     "tests/tokenizers_",
@@ -68,12 +73,16 @@ SILENT_GROUPS = [
     "tests/v1/determinism",
     "tests/v1/distributed",
     "tests/v1/executor",
+    "tests/v1/kv_offload",
     "tests/v1/logits_processors",
+    "tests/v1/metrics",
     "tests/v1/sample",
     "tests/v1/shutdown",
     "tests/v1/simple_kv_offload",
     "tests/v1/spec_decode",
+    "tests/v1/streaming_input",
     "tests/v1/structured_output",
+    "tests/v1/worker",
 ]
 
 # After fixing errors resulting from changing follow_imports
@@ -84,17 +93,11 @@ SEPARATE_GROUPS = [
     "tests/distributed",
     "tests/entrypoints/llm",
     "tests/entrypoints/openai",
-    "tests/entrypoints/speech_to_text",
     "tests/kernels",
     "tests/kernels/moe",
     "tests/lora",
-    "tests/model_executor",
-    "tests/model_executor/model_loader",
     "tests/models",
-    "tests/models/test_initialization.py",
     "tests/models/multimodal",
-    "tests/parser",
-    "tests/renderers",
     "tests/tool_parsers",
     "tests/v1",
     "tests/v1/attention",
@@ -103,10 +106,6 @@ SEPARATE_GROUPS = [
     "tests/v1/ec_connector",
     "tests/v1/engine",
     "tests/v1/kv_connector",
-    "tests/v1/kv_offload",
-    "tests/v1/metrics",
-    "tests/v1/streaming_input",
-    "tests/v1/worker",
 ]
 
 
@@ -152,7 +151,7 @@ def mypy(
 
     Args:
         targets: List of files or directories to check.
-        python_version: Python version to use (e.g., "3.10") or None to use
+        python_version: Python version to use (e.g., "3.11") or None to use
             the default mypy version.
         follow_imports: Value for the --follow-imports option or None to use
             the default mypy behavior.

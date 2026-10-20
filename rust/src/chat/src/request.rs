@@ -394,7 +394,9 @@ pub struct ChatOptions {
     pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is
-    /// used instead of the model's default chat template.
+    /// used instead of the model's default chat template. Only the HF renderer
+    /// honors it, and only with `--trust-request-chat-template`; native
+    /// renderers ignore it.
     pub chat_template: Option<String>,
 
     /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
@@ -801,6 +803,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         );
 
@@ -815,6 +818,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }
     }
 

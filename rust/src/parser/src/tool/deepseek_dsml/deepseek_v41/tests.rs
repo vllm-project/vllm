@@ -28,6 +28,7 @@ fn tools() -> Vec<Tool> {
             }
         }),
         strict: None,
+        defer_loading: None,
     }]
 }
 
