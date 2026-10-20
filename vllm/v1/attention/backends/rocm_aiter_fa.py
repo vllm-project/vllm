@@ -486,6 +486,8 @@ class AiterFlashAttentionMetadataBuilder(
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
+        # The FlyDSL plan must match the KV cache it reads, not the model config.
+        self.kv_cache_num_heads = kv_cache_spec.num_kv_heads
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
@@ -680,8 +682,7 @@ class AiterFlashAttentionMetadataBuilder(
         key = (num_decodes, query_len)
         plan = rocm_aiter_ops.flydsl_pa_decode_plan(
             seq_lens,
-            # Must match the KV cache the kernel reads, not the model config.
-            self.kv_cache_spec.num_kv_heads,
+            self.kv_cache_num_heads,
             query_length=query_len,
             plan=self._flydsl_plans.get(key),
         )

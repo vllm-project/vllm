@@ -1319,13 +1319,20 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         )
         with torch.device("cpu"):
             metadata = builder.build(0, common)
+            decode = metadata.decode_metadata
+            assert decode is not None
             # The next step with the same batch size refreshes the same plan,
             # so a CUDA graph that captured it keeps reading valid buffers.
-            plan = metadata.decode_metadata.flydsl_plan
+            plan = decode.flydsl_plan
             assert plan is not None
-            assert metadata.decode_metadata.flydsl_query_len == query_len
+            assert decode.flydsl_query_len == query_len
             metadata = builder.build(0, common)
-        assert metadata.decode_metadata.flydsl_plan is plan
+            # MTP draft passes of the same shape reuse the target's plan.
+            draft_metadata = builder.build_for_drafting(common, draft_index=0)
+        for m in (metadata, draft_metadata):
+            assert m.decode_metadata is not None
+            assert m.decode_metadata.flydsl_plan is plan
+            assert m.decode_metadata.flydsl_query_len == query_len
         assert metadata.num_decodes == batch_spec.batch_size
 
         kv_cache = torch.empty(
@@ -1366,6 +1373,10 @@ def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, que
         output = torch.empty_like(query)
         impl.forward(layer, query, None, None, kv_cache, metadata, output)
         assert calls == 1
+        draft_output = torch.empty_like(query)
+        impl.forward(layer, query, None, None, kv_cache, draft_metadata, draft_output)
+        assert calls == 2
+        torch.testing.assert_close(draft_output, output, atol=0, rtol=0)
 
     def dequant(x: torch.Tensor, s: float) -> torch.Tensor:
         return ((x / s).to(cache_dtype).to(x.dtype) * s).reshape(
