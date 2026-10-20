@@ -1,37 +1,261 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Host side of --monokernel: config and weight refusals, per-step routing,
+the per-forward plan, cache binding and the fail-stop gate."""
 
+import resource
+import subprocess
+import sys
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterMxfp4Experts,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.caches import CacheBinding
-from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import DecodeConfig
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
+    FfnExecutor,
+)
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.routing import decide_step
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.spec import (
+    DECODE_CONFIG,
+    DecodeConfig,
+    specialized_decode_config,
+)
+from vllm.models.minimax_m3.amd.specialized_decode.runtime.weights import (
+    EXPERTS,
+    HIDDEN,
+    INTER,
+    MonoLayerWeights,
+)
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseDecodeMetadata,
     MiniMaxM3SparseMetadata,
 )
 
 
-def _metadata() -> MiniMaxM3SparseMetadata:
-    return MiniMaxM3SparseMetadata(
-        seq_lens=torch.ones(1, dtype=torch.int32),
+def _metadata(rows, *, decode_tokens=None, prefills=0, query_len=1, padded=0):
+    decode_tokens = rows if decode_tokens is None else decode_tokens
+    metadata = MiniMaxM3SparseMetadata(
+        seq_lens=torch.ones(rows, dtype=torch.int32),
         max_seq_len=1,
-        slot_mapping=torch.zeros(1, dtype=torch.int64),
-        num_actual_tokens=1,
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefills=0,
-        num_prefill_tokens=0,
+        slot_mapping=torch.arange(rows),
+        num_actual_tokens=decode_tokens,
+        num_decodes=decode_tokens,
+        num_decode_tokens=decode_tokens,
+        num_prefills=prefills,
+        num_prefill_tokens=prefills,
         decode=MiniMaxM3SparseDecodeMetadata(
-            seq_lens=torch.ones(1, dtype=torch.int32),
-            block_table=torch.zeros(1, 1, dtype=torch.int32),
-            decode_query_len=1,
+            seq_lens=torch.ones(decode_tokens, dtype=torch.int32),
+            block_table=torch.zeros(decode_tokens, 1, dtype=torch.int32),
+            decode_query_len=query_len,
         ),
     )
+    if padded:
+        metadata.slot_mapping[rows - padded :] = -1
+    return metadata
+
+
+NONE, FULL = CUDAGraphMode.NONE, CUDAGraphMode.FULL
+
+
+@pytest.mark.parametrize(
+    "rows, mode, metadata, mono",
+    [
+        (1, NONE, _metadata(1), True),
+        (16, NONE, _metadata(16), True),
+        (2, FULL, _metadata(2), True),
+        (4, NONE, _metadata(4, decode_tokens=2, padded=2), True),
+        (17, NONE, _metadata(1), False),
+        (1, CUDAGraphMode.PIECEWISE, _metadata(1), False),
+        (1, NONE, None, False),
+        (1, NONE, _metadata(1, prefills=1), False),
+        (1, NONE, _metadata(1, decode_tokens=2), False),
+        (4, NONE, _metadata(4, query_len=2), False),
+    ],
+)
+def test_step_routing(rows, mode, metadata, mono):
+    assert decide_step(DECODE_CONFIG, rows, mode, metadata).use_mono is mono
+
+
+def _vllm_config(layers=60, **parallel):
+    values = dict(
+        tensor_parallel_size=4,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        decode_context_parallel_size=1,
+        prefill_context_parallel_size=1,
+        enable_expert_parallel=False,
+        enable_eplb=False,
+        use_ubatching=False,
+    )
+    values.update(parallel)
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(**values),
+        cache_config=SimpleNamespace(
+            cache_dtype="fp8",
+            block_size=128,
+            enable_prefix_caching=False,
+            kv_offloading_size=None,
+        ),
+        attention_config=SimpleNamespace(
+            resolve_indexer_kv_dtype=lambda _default: "fp8"
+        ),
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
+        kernel_config=SimpleNamespace(moe_backend="aiter", monokernel=True),
+        lora_config=None,
+        kv_transfer_config=SimpleNamespace(kv_connector=None),
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
+        speculative_config=None,
+        weight_transfer_config=None,
+        offload_config=SimpleNamespace(
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        ),
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            enable_sleep_mode=False,
+            hf_text_config=SimpleNamespace(
+                use_index_cache=False,
+                num_hidden_layers=layers,
+                sparse_attention_config={"sparse_attention_freq": [0] * 3 + [1] * 57},
+            ),
+        ),
+    )
+
+
+def test_config_refusals_report_every_reason():
+    assert specialized_decode_config(_vllm_config()) is DECODE_CONFIG
+
+    config = _vllm_config(tensor_parallel_size=2, enable_expert_parallel=True)
+    config.cache_config.block_size = 64
+    config.aux_output_config.enable_return_routed_experts = True
+    config.model_config.hf_text_config.sparse_attention_config["sparse_attention_freq"][
+        2
+    ] = 1
+    with pytest.raises(ValueError) as error:
+        specialized_decode_config(config)
+    for reason in (
+        "tensor parallel",
+        "expert parallelism",
+        "block size",
+        "routed-expert capture",
+        "sparse attention on layers 3 through 59",
+    ):
+        assert reason in str(error.value)
+
+
+def _parameter(shape, dtype, *, meta=True):
+    return torch.empty(shape, dtype=dtype, device="meta" if meta else "cpu")
+
+
+def _layer():
+    w13 = _parameter((EXPERTS, 2 * INTER, HIDDEN // 2), torch.float4_e2m1fn_x2)
+    w2 = _parameter((EXPERTS, HIDDEN, INTER // 2), torch.float4_e2m1fn_x2)
+    w13.is_shuffled = True
+    w2.is_shuffled = True
+    fused_experts = object.__new__(AiterMxfp4Experts)
+    fused_experts.moe_config = SimpleNamespace(
+        use_mori_kernels=False,
+        use_mxfp4_w4a4_dsv4=False,
+    )
+    experts = SimpleNamespace(
+        top_k=4,
+        renormalize=True,
+        scoring_func="sigmoid",
+        swiglu_alpha=1.702,
+        swiglu_beta=1.0,
+        swiglu_limit=7.0,
+        quant_method=SimpleNamespace(
+            mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+            moe_kernel=SimpleNamespace(fused_experts=fused_experts),
+        ),
+        w13_weight=w13,
+        w2_weight=w2,
+        w13_weight_scale=_parameter((EXPERTS, 2 * INTER, HIDDEN // 32), torch.uint8),
+        w2_weight_scale=_parameter((EXPERTS, HIDDEN, INTER // 32), torch.uint8),
+    )
+    moe = SimpleNamespace(
+        is_fused_shared_expert_enabled=True,
+        use_aiter_moe_fse=True,
+        experts=SimpleNamespace(routed_experts=experts),
+        gate=SimpleNamespace(weight=_parameter((128, HIDDEN), torch.float32)),
+        e_score_correction_bias=_parameter((128,), torch.float32),
+        routed_scaling_factor=2.0,
+        n_shared_experts=1,
+    )
+    qkv = type("MinimaxM3QKVParallelLinearWithIndexer", (), {})()
+    qkv.weight = _parameter((2560, HIDDEN), torch.bfloat16, meta=False)
+    output = type("RowParallelLinear", (), {})()
+    output.weight = _parameter((HIDDEN, 2048), torch.bfloat16, meta=False)
+    head_norm = SimpleNamespace(weight=_parameter((128,), torch.bfloat16))
+    attn = SimpleNamespace(
+        qkv_proj=qkv,
+        o_proj=output,
+        q_norm=head_norm,
+        k_norm=head_norm,
+        index_q_norm=head_norm,
+        index_k_norm=head_norm,
+    )
+    norms = []
+    for _ in range(2):
+        norm = type("MiniMAXGemmaRMSNorm", (), {})()
+        norm.weight = _parameter((HIDDEN,), torch.bfloat16)
+        norm.variance_epsilon = 1e-6
+        norms.append(norm)
+    return SimpleNamespace(
+        layer_id=3,
+        self_attn=attn,
+        block_sparse_moe=moe,
+        input_layernorm=norms[0],
+        post_attention_layernorm=norms[1],
+    )
+
+
+def test_weight_views_are_zero_copy():
+    layer = _layer()
+    moe = layer.block_sparse_moe
+    moe.gate.weight = _parameter((128, HIDDEN), torch.float32, meta=False)
+    weights = MonoLayerWeights.from_layer(layer, require_cuda=False)
+    assert weights.qkv.data_ptr() == layer.self_attn.qkv_proj.weight.data_ptr()
+    assert weights.output.data_ptr() == layer.self_attn.o_proj.weight.data_ptr()
+    assert weights.router.data_ptr() == moe.gate.weight.data_ptr()
+    assert weights.router.dtype == torch.float32
+    assert weights.w13.dtype == torch.float4_e2m1fn_x2
+
+
+def _experts(layer):
+    return layer.block_sparse_moe.experts.routed_experts
+
+
+WEIGHT_REFUSALS = {
+    "AITER_MXFP4_MXFP4": lambda x: setattr(
+        _experts(x).quant_method, "mxfp4_backend", Mxfp4MoeBackend.AITER_MXFP4_BF16
+    ),
+    "effective BF16": lambda x: setattr(
+        _experts(x).quant_method.moe_kernel.fused_experts.moe_config,
+        "use_mori_kernels",
+        True,
+    ),
+    "router": lambda x: setattr(
+        x.block_sparse_moe.gate, "weight", _parameter((128, HIDDEN), torch.bfloat16)
+    ),
+    "routed scale": lambda x: setattr(x.block_sparse_moe, "routed_scaling_factor", 1),
+}
+
+
+@pytest.mark.parametrize("match", WEIGHT_REFUSALS)
+def test_weight_refusals(match):
+    layer = _layer()
+    WEIGHT_REFUSALS[match](layer)
+    with pytest.raises(ValueError, match=match):
+        MonoLayerWeights.from_layer(layer, require_cuda=False)
 
 
 class _Executor:
@@ -40,51 +264,29 @@ class _Executor:
     def __init__(self):
         self.fault_word = torch.zeros(4, dtype=torch.int32)
         self.slots: torch.Tensor | None = None
-        self.outputs = 0
-        self.binds: list[tuple[int, CacheBinding]] = []
+        self.binds: list[int] = []
         self.bind_failure: Exception | None = None
-        self.layer_calls: list[int] = []
+        self.calls: Counter = Counter()
 
-    def layer(self, layer_id: int):
-        self.layer_calls.append(layer_id)
+    def layer(self, layer_id):
         return lambda _positions, hidden, residual: (hidden, residual)
 
-    def bind(self, layer_id: int, binding: CacheBinding):
+    def bind(self, layer_id, binding):
         if self.bind_failure is not None:
             raise self.bind_failure
-        self.binds.append((layer_id, binding))
+        self.binds.append(layer_id)
 
     def begin_step(self, slots):
         self.slots = slots
 
-    def output_step(self):
-        self.outputs += 1
-
-    def health(self):
-        return None
-
     def after_step(self):
-        return None
+        self.calls["after"] += 1
 
     def abort(self):
-        return None
+        self.calls["abort"] += 1
 
     def close(self):
-        return None
-
-
-def _binding(*, replacement: torch.Tensor | None = None) -> CacheBinding:
-    tensor = replacement if replacement is not None else torch.empty(1)
-    return CacheBinding(
-        main=tensor,
-        key_pages=torch.empty(1),
-        value_pages=torch.empty(1),
-        k_scale=torch.empty(1),
-        v_scale=torch.empty(1),
-        index_key=torch.empty(1),
-        sparse_table=torch.empty(1),
-        sparse_context=torch.empty(1),
-    )
+        self.calls["close"] += 1
 
 
 def _no_checks(monkeypatch, refusals=()):
@@ -92,122 +294,190 @@ def _no_checks(monkeypatch, refusals=()):
     monkeypatch.setattr(
         runtime, "MonoLayerWeights", SimpleNamespace(from_layer=lambda layer: layer)
     )
-    monkeypatch.setattr(
-        runtime, "get_tp_group", lambda: SimpleNamespace(cpu_group=None)
-    )
+    monkeypatch.setattr(runtime, "tp_agree", lambda ok: ok)
 
 
 @pytest.fixture
-def decode(monkeypatch: pytest.MonkeyPatch):
+def decode(monkeypatch):
     _no_checks(monkeypatch)
     layers = [
         SimpleNamespace(layer_id=i, self_attn=SimpleNamespace(layer_name=f"layer.{i}"))
         for i in (3, 4)
     ]
-    model = SimpleNamespace(layers=layers)
     executor = _Executor()
     instance = runtime.SpecializedDecode(
-        model, DecodeConfig(last_layer=4), executor=executor
-    )
-    monkeypatch.setattr(
-        runtime, "get_tp_group", lambda: SimpleNamespace(cpu_group=None)
+        SimpleNamespace(layers=layers), DecodeConfig(last_layer=4), executor
     )
     return instance, executor
 
 
-def test_plan_is_once_per_forward_and_returns_immutable_layer_map(
-    decode, monkeypatch: pytest.MonkeyPatch
-):
+def test_plan_maps_every_sparse_layer_once_per_forward(decode, monkeypatch):
     instance, executor = decode
     context = SimpleNamespace(
-        attn_metadata={"layer.3": _metadata()},
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        attn_metadata={"layer.3": _metadata(1)},
+        cudagraph_runtime_mode=NONE,
     )
     monkeypatch.setattr(runtime, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(runtime, "get_forward_context", lambda: context)
 
+    assert instance.plan(torch.zeros(1, dtype=torch.int64), object()) is None
     step = instance.plan(torch.zeros(1, dtype=torch.int64), None)
     assert step is not None and step.launched
-    assert executor.layer_calls == [3, 4]
-    assert step.layer(3) is not None
-    assert step.layer(4) is not None
-    assert instance.mono_steps == 1
-    assert instance.stock_steps == 0
+    assert [step.layer(i) is not None for i in (2, 3, 4, 5)] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert (instance.mono_steps, instance.stock_steps) == (1, 1)
     assert executor.slots is not None and executor.slots.numel() == 1
 
 
-def test_cache_lifecycle_is_skipped_without_cache_reads(decode, monkeypatch):
-    instance, executor = decode
-    executor.uses_caches = False
-    monkeypatch.setattr(
-        runtime, "checked_cache_bindings", lambda layers: pytest.fail("bound")
-    )
-    instance.bind_caches()
-
-
-def test_model_refusal_is_rank_uniform(monkeypatch: pytest.MonkeyPatch):
-    _no_checks(monkeypatch, refusals=["layer 3 is odd"])
-    with pytest.raises(ValueError, match="layer 3 is odd"):
-        runtime.SpecializedDecode(
-            SimpleNamespace(layers=[]), DecodeConfig(), _Executor()
-        )
-
-    _no_checks(monkeypatch)
-    monkeypatch.setattr(runtime, "tp_agree", lambda ok: False)
-    with pytest.raises(ValueError, match="another TP rank"):
-        runtime.SpecializedDecode(
-            SimpleNamespace(layers=[]), DecodeConfig(), _Executor()
-        )
-
-
-def test_executor_is_built_after_weight_checks(monkeypatch: pytest.MonkeyPatch):
-    order = []
-    _no_checks(monkeypatch)
-
-    def refusals(model, config):
-        order.append("weights")
-        return []
-
-    monkeypatch.setattr(runtime, "model_refusals", refusals)
-    model = SimpleNamespace(layers=[])
-
-    def factory(decode):
-        order.append("executor")
-        return _Executor()
-
-    instance = runtime.SpecializedDecode(model, DecodeConfig(), factory)
-    assert order == ["weights", "executor"]
-    assert isinstance(instance.executor, _Executor)
-
-
-def test_cache_bind_is_identity_stable_and_rebinds_replacements(
-    decode, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "refusals, peers_agree, match",
+    [(["layer 3 is odd"], True, "layer 3 is odd"), ([], False, "another TP rank")],
+)
+def test_refusal_is_rank_uniform_and_precedes_the_executor(
+    monkeypatch, refusals, peers_agree, match
 ):
+    _no_checks(monkeypatch, refusals)
+    monkeypatch.setattr(runtime, "tp_agree", lambda ok: ok and peers_agree)
+    built: list = []
+    with pytest.raises(ValueError, match=match):
+        runtime.SpecializedDecode(
+            SimpleNamespace(layers=[]), DecodeConfig(), built.append
+        )
+    assert not built
+
+
+def _binding() -> CacheBinding:
+    return CacheBinding(*(torch.empty(1) for _ in range(8)))
+
+
+def test_cache_bind_rebinds_only_replaced_caches(decode, monkeypatch):
     instance, executor = decode
-    first = _binding()
-    bindings = {3: first}
+    bindings = {3: _binding()}
     monkeypatch.setattr(runtime, "checked_cache_bindings", lambda layers: bindings)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-
     instance.bind_caches()
     instance.bind_caches()
-    assert [layer_id for layer_id, _ in executor.binds] == [3]
-
-    bindings = {3: _binding(replacement=torch.empty(1))}
-    monkeypatch.setattr(runtime, "checked_cache_bindings", lambda layers: bindings)
+    assert executor.binds == [3]
+    bindings[3] = _binding()
     instance.bind_caches()
-    assert [layer_id for layer_id, _ in executor.binds] == [3, 3]
+    assert executor.binds == [3, 3]
 
-
-def test_failed_cache_bind_does_not_publish_identity(
-    decode, monkeypatch: pytest.MonkeyPatch
-):
-    instance, executor = decode
-    binding = _binding()
-    monkeypatch.setattr(runtime, "checked_cache_bindings", lambda layers: {3: binding})
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    published = dict(instance._cache_identities)
+    bindings[3] = _binding()
     executor.bind_failure = ValueError("injected")
     with pytest.raises(RuntimeError, match="rank-uniform.*cache bind") as error:
         instance.bind_caches()
     assert isinstance(error.value.__cause__, ValueError)
-    assert instance._cache_identities == {}
+    assert instance._cache_identities == published
+
+
+def _bare_decode(executor) -> runtime.SpecializedDecode:
+    decode = object.__new__(runtime.SpecializedDecode)
+    decode.executor = executor
+    decode._closed = False
+    return decode
+
+
+LAUNCHED = runtime.Step(3, (lambda *args: args[1:],))
+
+
+@pytest.mark.parametrize("step", [None, runtime.Step(3, (None,)), LAUNCHED])
+def test_every_forward_asserts_the_error_word_is_clear(step):
+    """Stock and mono steps alike, so a word set between steps (a host abort)
+    stops the next step whichever path it takes."""
+    executor = _Executor()
+    decode = _bare_decode(executor)
+    decode.after_step(step)
+    assert executor.calls["after"] == (step is LAUNCHED)
+    executor.fault_word[0] = 1
+    with pytest.raises(RuntimeError, match="error word set"):
+        decode.after_step(step)
+
+
+@pytest.mark.parametrize("step, aborts", [(None, 0), (LAUNCHED, 1)])
+def test_layer_exception_marks_peers_only_after_a_launch(step, aborts):
+    executor = _Executor()
+    decode = _bare_decode(executor)
+    with pytest.raises(ValueError, match="layer"):
+        decode.after_step(step, ValueError("layer"))
+    assert executor.calls == Counter(abort=aborts)
+
+
+def test_close_is_idempotent_and_stops_reading_the_word():
+    executor = _Executor()
+    decode = _bare_decode(executor)
+    decode.close()
+    decode.close()
+    assert executor.calls == Counter(close=1)
+    executor.fault_word[0] = 1
+    decode.after_step(None)
+
+
+def test_abort_never_raises():
+    executor = object.__new__(FfnExecutor)
+    executor.rank = 1
+
+    def broken():
+        raise RuntimeError("peer view")
+
+    executor.peer = SimpleNamespace(
+        bytes=torch.zeros(16, dtype=torch.uint8),
+        addresses=SimpleNamespace(tolist=broken),
+    )
+    executor.abort()
+
+
+_GATE_IN_FULL_GRAPH = """
+import torch
+from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
+
+decode = object.__new__(runtime.SpecializedDecode)
+decode.executor = type("E", (), {})()
+decode.executor.fault_word = torch.zeros(4, dtype=torch.int32, device="cuda")
+decode._closed = False
+token = torch.zeros(1, dtype=torch.int64, device="cuda")
+
+def forward():
+    decode.after_step(None)
+    token.fill_(42)
+
+forward()
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):
+    forward()
+token.zero_()
+decode.executor.fault_word[0] = FAIL
+graph.replay()
+copy_stream = torch.cuda.Stream()
+copy_stream.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(copy_stream):
+    host = token.to("cpu", non_blocking=True)
+    done = torch.cuda.Event(blocking=True)
+    done.record(copy_stream)
+done.synchronize()
+print("token", host.item(), flush=True)
+"""
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("fail", [0, 1])
+def test_set_word_stops_a_replayed_step_before_its_output_copy(fail):
+    """The gate replayed from a FULL graph: with the word set, work queued
+    after it (the token write and its copy-stream copy) never reaches the host
+    and the process dies; this also fails on a torch build whose device
+    asserts compile to nothing."""
+    run = subprocess.run(
+        [sys.executable, "-c", _GATE_IN_FULL_GRAPH.replace("FAIL", str(fail))],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)),
+    )
+    if fail:
+        assert run.returncode != 0 and "token" not in run.stdout
+    else:
+        assert run.returncode == 0 and "token 42" in run.stdout, run.stderr

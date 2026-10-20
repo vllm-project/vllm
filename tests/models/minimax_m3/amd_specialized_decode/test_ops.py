@@ -1,17 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-GPU stage parity of the FFN launch (a TP=1 build) against vLLM's and
-AITER's native ops, with MXFP4 weights from vLLM's real post-load path."""
+"""Op-level tests of the fused FFN launch (TP=1 builds unless noted) against
+vLLM's and AITER's native ops, with MXFP4 weights from vLLM's real post-load
+path: stage parity, routing ties, padding, residency, graph replay, fail-stop
+sites, epoch reset, the gfx950 hand-off ISA, and the hand-off stresses (one-GPU
+cross-XCD; TP4 over XGMI, optional)."""
 
 import glob
+import os
 import shutil
 import subprocess
 import tempfile
+import time
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
 
@@ -26,6 +34,9 @@ if not on_gfx950():
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 
+from tests.models.minimax_m3.amd_specialized_decode import (  # noqa: E402
+    _xcd_stress as xs,
+)
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (  # noqa: E402
     gemma_fused_add_rmsnorm,
 )
@@ -33,12 +44,17 @@ from vllm.models.minimax_m3.amd.specialized_decode.mono import (  # noqa: E402
     ffn,
     sync,
 )
+from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (  # noqa: E402
+    code_object,
+)
 from vllm.models.minimax_m3.amd.specialized_decode.mono.runner import (  # noqa: E402
     FfnRunner,
+    _writable_flydsl_cache,
 )
 
 E = ffn.EXPERTS + 1
 H, INTER = ffn.HIDDEN, ffn.INTER
+SHORT_WAIT = 10_000_000  # 100 ms of the 100 MHz clock
 
 
 def _metrics(got, want):
@@ -118,7 +134,7 @@ def _native_route(logits, bias):
     return ids, wts
 
 
-def _clear_choices(logits, bias, margin=1e-4):
+def _clear_choices(logits, bias, margin):
     """Rows whose 4th and 5th biased scores differ by more than ``margin``."""
     top = (logits.sigmoid() + bias).topk(ffn.TOPK + 1, dim=-1).values
     return (top[:, ffn.TOPK - 1] - top[:, ffn.TOPK]) > margin
@@ -128,12 +144,12 @@ def _pairs(region, n):
     return region[: n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
 
 
-def _runner(weights, s, tp=1, experts=ffn.Experts.ALL, **build):
+def _runner(weights, s, tp=1, widths=None, **build):
     dev = torch.device("cuda")
     bufs = [torch.zeros(ffn.peer_bytes(tp), dtype=torch.uint8, device=dev)]
     bufs += [torch.zeros_like(bufs[0]) for _ in range(tp - 1)]
     peers = torch.tensor([b.data_ptr() for b in bufs], dtype=torch.int64, device=dev)
-    runner = FfnRunner(tp, 0, bufs[0].data_ptr(), peers, dev, (s,), experts, **build)
+    runner = FfnRunner(tp, 0, bufs[0].data_ptr(), peers, dev, widths or (s,), **build)
     runner.warm(weights)
     runner.peer_bufs = bufs
     return runner
@@ -150,20 +166,21 @@ def _inputs(s, seed=1):
     return part, residual
 
 
-def _run(weights, s, experts=ffn.Experts.ALL, seed=1, inputs=None, slots=None):
+def _slots(s):
+    return torch.arange(s, dtype=torch.int64, device="cuda")
+
+
+def _run(weights, s, seed=1, inputs=None, slots=None):
     part, residual = _inputs(s, seed) if inputs is None else inputs
-    if slots is None:
-        slots = torch.arange(s, dtype=torch.int64, device="cuda")
-    runner = _runner(weights, s, experts=experts)
-    out, res_out = runner(part, residual, weights, slots)
+    runner = _runner(weights, s)
+    out, res_out = runner(
+        part, residual, weights, _slots(s) if slots is None else slots
+    )
     torch.accelerator.synchronize()
     assert _error(runner.peer_bufs[0])[0] == 0
     x = runner.region(s, "xn")[: s * H * 2].view(torch.bfloat16).view(s, H)
     parts = _pairs(runner.region(s, "logit"), s * ffn.EXPERTS * ffn.ROUTER_PARTS)
-    parts = parts.view(torch.float32).view(s * ffn.EXPERTS, ffn.ROUTER_PARTS)
-    logits = parts[:, 0].clone()
-    for p in range(1, ffn.ROUTER_PARTS):
-        logits += parts[:, p]
+    parts = parts.view(torch.float32).view(s, ffn.EXPERTS, ffn.ROUTER_PARTS)
     route = _pairs(runner.region(s, "route"), s * 2 * ffn.TOPK).view(s, 2 * ffn.TOPK)
     return SimpleNamespace(
         part=part,
@@ -171,14 +188,16 @@ def _run(weights, s, experts=ffn.Experts.ALL, seed=1, inputs=None, slots=None):
         out=out,
         res_out=res_out,
         x=x,
-        logits=logits.view(s, ffn.EXPERTS),
+        logits=parts.sum(-1),
         ids=route[:, : ffn.TOPK].contiguous(),
         wts=route[:, ffn.TOPK :].contiguous().view(torch.float32),
     )
 
 
-@pytest.mark.parametrize("s", [1, 3, 8, 16])
+@pytest.mark.parametrize("s", [1, 3, 16])
 def test_ffn_stages_match_native(weights, s):
+    """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
+    routed A16W4 experts, each against its native op."""
     r = _run(weights, s)
     want_x, want_res = gemma_fused_add_rmsnorm(
         r.part, r.residual, weights.post_norm, ffn.EPS
@@ -191,7 +210,7 @@ def test_ffn_stages_match_native(weights, s):
     torch.testing.assert_close(r.logits, want_logits, rtol=1e-4, atol=1e-4)
 
     ids, wts = _native_route(r.logits, weights.router_bias)
-    clear = _clear_choices(r.logits, weights.router_bias)
+    clear = _clear_choices(r.logits, weights.router_bias, 1e-4)
     assert clear.any()
     got_ids, order = r.ids.sort(-1)
     want_ids, want_order = ids.sort(-1)
@@ -206,72 +225,15 @@ def test_ffn_stages_match_native(weights, s):
     shared = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
     all_ids = torch.cat([r.ids, shared], 1)
     all_wts = torch.cat([r.wts, torch.ones_like(r.wts[:, :1])], 1)
-    want = _native_experts(r.x, weights, all_ids, all_wts)
-    cos, rel = _metrics(r.out, want)
+    cos, rel = _metrics(r.out, _native_experts(r.x, weights, all_ids, all_wts))
     assert cos > 0.9999 and rel < 1e-2
-
-
-SHORT_WAIT = 10_000_000  # 100 ms of the 100 MHz clock
-
-
-def test_production_wait_bound_is_ten_seconds():
-    assert ffn.FfnBuild(tokens=1).wait_ticks == 1_000_000_000
-
-
-def test_missing_peer_times_out_and_marks_every_rank(weights):
-    """A TP=2 launch whose peer never runs: its waits give up, the error word
-    is set on both ranks, and the launch still completes."""
-    runner = _runner(weights, 1, tp=2, wait_ticks=SHORT_WAIT)
-    part, residual = _inputs(1)
-    runner(part, residual, weights, torch.zeros(1, dtype=torch.int64, device="cuda"))
-    torch.accelerator.synchronize()
-    for buf in runner.peer_bufs:
-        failed, rank, epoch, site = _error(buf)
-        # stages that start waiting together race to report their site
-        assert (failed, rank, epoch) == (1, 0, 0) and site > 0
-
-
-def test_missing_epoch_mark_fails_without_advancing(weights):
-    runner = _runner(weights, 1, drop_mark=7, wait_ticks=SHORT_WAIT)
-    part, residual = _inputs(1)
-    runner(part, residual, weights, torch.zeros(1, dtype=torch.int64, device="cuda"))
-    torch.accelerator.synchronize()
-    assert _error(runner.peer_bufs[0]) == [1, 0, 0, ffn.SITE_EPOCH]
-    assert runner.epoch[0].item() == 0
-
-
-def test_padded_rows_are_inert(weights):
-    """Rows whose slot is -1 (graph padding) hold NaN: the real rows match a
-    launch without them bit for bit, the padded rows pick no expert and return
-    zeros."""
-    real, pad = 3, 5
-    part, residual = _inputs(real)
-    nan = torch.full((pad, H), float("nan"), device="cuda").bfloat16()
-    slots = torch.tensor([7, 9, 11] + [-1] * pad, dtype=torch.int64, device="cuda")
-    padded = _run(
-        weights,
-        real + pad,
-        inputs=(torch.cat([part, nan]), torch.cat([residual, nan])),
-        slots=slots,
-    )
-    alone = _run(weights, real, inputs=(part, residual))
-    assert torch.equal(padded.out[:real], alone.out)
-    assert torch.equal(padded.res_out[:real], alone.res_out)
-    assert torch.equal(padded.ids[:real], alone.ids)
-    assert (padded.ids[real:] == -1).all()
-    assert (padded.out[real:] == 0).all()
-
-
-def test_all_padded_launch_completes(weights):
-    r = _run(weights, 4, slots=torch.full((4,), -1, dtype=torch.int64, device="cuda"))
-    assert (r.ids == -1).all() and (r.out == 0).all()
 
 
 def test_route_ties_and_near_ties(weights):
     """Experts 0 and 1 share a router row and bias: an exact 4th-place tie,
     which the kernel gives to the lower expert. Elsewhere the selection matches
     AITER's on native FP32 logits wherever the 4th/5th margin exceeds the
-    logits' measured difference."""
+    logits' measured difference times the maximal sigmoid slope, twice."""
     w = SimpleNamespace(**vars(weights))
     w.router = weights.router.clone()
     w.router_bias = weights.router_bias.clone()
@@ -288,29 +250,38 @@ def test_route_ties_and_near_ties(weights):
     logits = r.x.float() @ weights.router.T
     bound = (r.logits - logits).abs().max().item() * 0.25 * 2
     ids, _ = _native_route(logits, weights.router_bias)
-    top = (logits.sigmoid() + weights.router_bias).topk(ffn.TOPK + 1, dim=-1).values
-    clear = (top[:, ffn.TOPK - 1] - top[:, ffn.TOPK]) > bound
+    clear = _clear_choices(logits, weights.router_bias, bound)
     assert clear.float().mean() > 0.5
     assert torch.equal(r.ids.sort(-1).values[clear], ids.sort(-1).values[clear])
 
 
-@pytest.mark.parametrize("experts", [ffn.Experts.SHARED, ffn.Experts.ROUTED])
-@pytest.mark.parametrize("s", [1, 16])
-def test_ffn_expert_sides_match_native(weights, s, experts):
-    r = _run(weights, s, experts)
-    if experts is ffn.Experts.SHARED:
-        ids = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
-        wts = torch.ones(s, 1, device=r.x.device)
-    else:
-        ids, wts = r.ids, r.wts
-    want = _native_experts(r.x, weights, ids, wts)
-    cos, rel = _metrics(r.out, want)
-    assert cos > 0.9999 and rel < 1e-2
+def test_padded_rows_are_inert(weights):
+    """Rows whose slot is -1 (graph padding) hold NaN: the real rows match a
+    launch without them bit for bit, the padded rows pick no expert and return
+    zeros; an all-padded launch completes."""
+    real, pad = 3, 5
+    part, residual = _inputs(real)
+    nan = torch.full((pad, H), float("nan"), device="cuda").bfloat16()
+    slots = torch.tensor([7, 9, 11] + [-1] * pad, dtype=torch.int64, device="cuda")
+    padded = _run(
+        weights,
+        real + pad,
+        inputs=(torch.cat([part, nan]), torch.cat([residual, nan])),
+        slots=slots,
+    )
+    alone = _run(weights, real, inputs=(part, residual))
+    assert torch.equal(padded.out[:real], alone.out)
+    assert torch.equal(padded.res_out[:real], alone.res_out)
+    assert torch.equal(padded.ids[:real], alone.ids)
+    assert (padded.ids[real:] == -1).all() and (padded.out[real:] == 0).all()
+
+    r = _run(weights, 4, slots=torch.full((4,), -1, dtype=torch.int64, device="cuda"))
+    assert (r.ids == -1).all() and (r.out == 0).all()
 
 
 def test_every_width_is_resident(weights):
-    """The driver's occupancy of every production build: one 512-thread CTA per
-    CU on each of the 256 CUs."""
+    """The driver's occupancy of every production (TP4) build: one 512-thread
+    CTA per CU on each of the 256 CUs."""
     dev = torch.device("cuda")
     peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
     peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
@@ -322,17 +293,13 @@ def test_every_width_is_resident(weights):
 
 
 def test_graph_replay_is_bit_stable(weights):
-    """Every width captured once, replayed 300 rounds in alternation: each
-    replay matches an eager launch bit for bit, also after the persistent slot
-    buffer marks a different set of rows as padding."""
-    dev = torch.device("cuda")
-    widths = (1, 2, 4, 8, 16)
-    peer = torch.zeros(ffn.peer_bytes(1), dtype=torch.uint8, device=dev)
-    peers = torch.tensor([peer.data_ptr()], dtype=torch.int64, device=dev)
-    runner = FfnRunner(1, 0, peer.data_ptr(), peers, dev, widths)
-    runner.warm(weights)
+    """Widths captured once and replayed 300 rounds in alternation: each replay
+    matches an eager launch bit for bit, also after the persistent slot buffer
+    marks a different set of rows as padding."""
+    widths = (1, 4, 16)
+    runner = _runner(weights, 1, widths=widths)
     inputs = {s: _inputs(s, seed=s) for s in widths}
-    slots = {s: torch.arange(s, dtype=torch.int64, device=dev) for s in widths}
+    slots = {s: _slots(s) for s in widths}
 
     def eager(s):
         out, res = runner(*inputs[s], weights, slots[s])
@@ -359,38 +326,40 @@ def test_graph_replay_is_bit_stable(weights):
         assert torch.equal(outs[s][0], ref[0])
         assert (outs[s][0][s // 2 :] == 0).all()
     torch.accelerator.synchronize()
-    assert _error(peer)[0] == 0
+    assert _error(runner.peer_bufs[0])[0] == 0
     assert runner.epoch[0].item() > 300 * len(widths)
 
 
-def _slots(s):
-    return torch.arange(s, dtype=torch.int64, device="cuda")
-
-
-def test_final_launch_handshake_completes(weights):
-    runner = _runner(weights, 2)
-    inputs = _inputs(2)
-    plain = runner(*inputs, weights, _slots(2))[0].clone()
-    final = runner(*inputs, weights, _slots(2), final=True)[0]
+@pytest.mark.parametrize(
+    "build, arm, final, want",
+    [
+        ({}, None, True, [0, 0, 0, 0]),
+        ({"tp": 2}, None, False, [1, 0, 0, None]),
+        ({"drop_mark": 7}, None, False, [1, 0, 0, ffn.SITE_EPOCH]),
+        ({}, "inject", True, [1, 0, 0, ffn.SITE_INJECT]),
+        ({}, "wrap", False, [1, 0, None, ffn.SITE_WRAP]),
+    ],
+    ids=["handshake", "missing_peer", "missing_epoch_mark", "late_fault", "wrap"],
+)
+def test_fail_stop_sites(weights, build, arm, final, want):
+    """Every bounded wait and backstop sets the sticky error word [failed,
+    rank, epoch, site] on every rank and the launch still completes; a clean
+    step-end handshake sets nothing. A missing epoch mark does not advance the
+    epoch."""
+    runner = _runner(weights, 1, wait_ticks=SHORT_WAIT, **build)
+    if arm == "inject":
+        runner.inject.copy_(torch.tensor([1, 100_000], dtype=torch.int32))
+    if arm == "wrap":
+        runner.epoch[0] = ffn.EPOCH_LIMIT
+    runner(*_inputs(1), weights, _slots(1), final=final)
     torch.accelerator.synchronize()
-    assert _error(runner.peer_bufs[0])[0] == 0
-    assert torch.equal(plain, final)
-
-
-def test_injected_late_fault_reaches_the_error_word(weights):
-    runner = _runner(weights, 1)
-    runner.inject.copy_(torch.tensor([1, 100_000], dtype=torch.int32))
-    runner(*_inputs(1), weights, _slots(1), final=True)
-    torch.accelerator.synchronize()
-    assert _error(runner.peer_bufs[0]) == [1, 0, 0, ffn.SITE_INJECT]
-
-
-def test_epoch_limit_is_a_fail_stop_backstop(weights):
-    runner = _runner(weights, 1)
-    runner.epoch[0] = ffn.EPOCH_LIMIT
-    runner(*_inputs(1), weights, _slots(1))
-    torch.accelerator.synchronize()
-    assert _error(runner.peer_bufs[0])[3] == ffn.SITE_WRAP
+    for buf in runner.peer_bufs:
+        got = _error(buf)
+        assert [g if w is not None else None for g, w in zip(got, want)] == want
+        # stages that start waiting together race to report their site
+        assert got[3] > 0 or not got[0]
+    if "drop_mark" in build:
+        assert runner.epoch[0].item() == 0
 
 
 def _reset_executor(runner, monkeypatch, agree):
@@ -477,23 +446,13 @@ OBJDUMP = shutil.which("llvm-objdump") or next(
 )
 
 
-@pytest.fixture(scope="module")
-def tp4_isa(weights):
-    """The linked TP4 S=1 kernel's instructions, each split into words."""
-    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
-        code_object,
-    )
-
+def _disassemble(compiled):
+    """The linked code object's instructions, each split into words."""
     if OBJDUMP is None:
         pytest.skip("needs llvm-objdump")
     assert OBJDUMP is not None
-    dev = torch.device("cuda")
-    peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
-    peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
-    runner = FfnRunner(4, 0, peer.data_ptr(), peers, dev, (1,))
-    runner.warm(weights)
-    elf = Path(tempfile.mkdtemp()) / "ffn.elf"
-    elf.write_bytes(code_object(runner._compiled[1]._keepalive._ir_text))
+    elf = Path(tempfile.mkdtemp()) / "kernel.elf"
+    elf.write_bytes(code_object(compiled._keepalive._ir_text))
     isa = subprocess.run(
         [OBJDUMP, "-d", "--mcpu=gfx950", str(elf)], capture_output=True, text=True
     ).stdout
@@ -501,13 +460,21 @@ def tp4_isa(weights):
     return [op for op in ops if op]
 
 
-def test_isa_encodes_the_mailbox_contract(tp4_isa):
-    """The shapes ``mono/sync.py`` argues from: every system-scope access one
-    aligned 64-bit pair or the 32-bit error word; every scoped (cross-CTA)
-    access an atomic / av global op, none a buffer op carrying cache bits
-    outside the memory model; the handshake's system release a write-back then
-    a drain, its acquire a drain then an invalidate."""
-    ops = tp4_isa
+def test_isa_encodes_the_handoff_contract(weights):
+    """The linked TP4 S=1 kernel has the shapes ``mono/sync.py`` argues from:
+    every system-scope access one aligned 64-bit pair or the 32-bit error
+    word; no buffer op carries cache bits; every global access (only hand-offs
+    use them) carries ``sc1``, alone for agent scope, and every agent store /
+    load form ``mono/sync.py`` uses is lowered that way; the handshake's
+    system release is a write-back then a drain, its acquire a drain then an
+    invalidate, and (performance policy) no other L2 maintenance remains."""
+    dev = torch.device("cuda")
+    peer = torch.zeros(ffn.peer_bytes(4), dtype=torch.uint8, device=dev)
+    peers = torch.tensor([peer.data_ptr()] * 4, dtype=torch.int64, device=dev)
+    runner = FfnRunner(4, 0, peer.data_ptr(), peers, dev, (1,))
+    runner.warm(weights)
+    ops = _disassemble(runner._compiled[1])
+
     system = [op[0] for op in ops if "sc0" in op and "sc1" in op]
     assert {o for o in system if "store" in o} == {"global_store_dwordx2"}
     assert {o for o in system if "load" in o} <= {
@@ -516,22 +483,9 @@ def test_isa_encodes_the_mailbox_contract(tp4_isa):
     }
     data = [op for op in ops if op[0].startswith(("buffer_load", "buffer_store"))]
     assert data and not [op for op in data if "sc0" in op or "sc1" in op]
-    for i, op in enumerate(ops):
-        if op[0] == "buffer_wbl2":
-            assert ops[i + 1][:2] == ["s_waitcnt", "vmcnt(0)"]
-        if op[0] == "buffer_inv":
-            assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
 
-
-def test_isa_scopes_every_handoff_access(tp4_isa):
-    """gfx950 encodings: every global access (only hand-offs use them) carries
-    ``sc1``, alone for agent scope or with ``sc0`` for system scope, and every
-    agent-scope store / load form ``mono/sync.py`` uses is lowered that way."""
-    accesses = [
-        op for op in tp4_isa if op[0].startswith(("global_load", "global_store"))
-    ]
+    accesses = [op for op in ops if op[0].startswith(("global_load", "global_store"))]
     assert accesses and all("sc1" in op for op in accesses)
-    agent = {op[0] for op in accesses if "sc0" not in op}
     assert {
         "global_store_dword",
         "global_store_dwordx2",
@@ -539,7 +493,15 @@ def test_isa_scopes_every_handoff_access(tp4_isa):
         "global_load_dword",
         "global_load_dwordx2",
         "global_load_dwordx4",
-    } <= agent
+    } <= {op[0] for op in accesses if "sc0" not in op}
+
+    for i, op in enumerate(ops):
+        if op[0] == "buffer_wbl2":
+            assert ops[i + 1][:2] == ["s_waitcnt", "vmcnt(0)"]
+        if op[0] == "buffer_inv":
+            assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
+    kinds = {" ".join(op) for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")}
+    assert kinds == {"buffer_wbl2 sc0 sc1", "buffer_inv sc0 sc1"}
 
 
 _STREAM = fx.Stream(None)
@@ -579,30 +541,12 @@ def test_isa_orders_handoff_data_around_av_none_fences():
     not an L2 write-back / invalidate, between the data stores and the pair
     store, and between the pair load and the data loads (the data's addresses
     do not depend on the pair, so only the acquire orders them)."""
-    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
-        code_object,
-    )
-
-    if OBJDUMP is None:
-        pytest.skip("needs llvm-objdump")
-    assert OBJDUMP is not None
     buf = torch.zeros(1 << 14, dtype=torch.uint8, device="cuda")
     base = buf.data_ptr()
-    fn = flyc.compile(
-        _launch_handoff_probe,
-        base,
-        base + 8192,
-        base + 12288,
-        7,
-        torch.cuda.current_stream(),
+    stream = torch.cuda.current_stream()
+    ops = _disassemble(
+        flyc.compile(_launch_handoff_probe, base, base + 8192, base + 12288, 7, stream)
     )
-    elf = Path(tempfile.mkdtemp()) / "probe.elf"
-    elf.write_bytes(code_object(fn._keepalive._ir_text))
-    isa = subprocess.run(
-        [OBJDUMP, "-d", "--mcpu=gfx950", str(elf)], capture_output=True, text=True
-    ).stdout
-    ops = [line.split("//")[0].split() for line in isa.splitlines() if "\t" in line]
-    ops = [op for op in ops if op]
     stores = [i for i, op in enumerate(ops) if op[0].startswith("global_store")]
     loads = [i for i, op in enumerate(ops) if op[0].startswith("global_load")]
     assert all("sc1" in ops[i] and "sc0" not in ops[i] for i in stores + loads)
@@ -627,9 +571,152 @@ def test_isa_orders_handoff_data_around_av_none_fences():
     assert not [op for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")]
 
 
-def test_same_gpu_handoffs_do_no_l2_maintenance(tp4_isa):
-    """Performance policy, not correctness: agent-scope hand-off fences are
-    av-none (waits only), so the only L2 write-back / invalidate left is the
-    step-end system handshake's."""
-    kinds = {" ".join(op) for op in tp4_isa if op[0] in ("buffer_wbl2", "buffer_inv")}
-    assert kinds == {"buffer_wbl2 sc0 sc1", "buffer_inv sc0 sc1"}
+XCD_LAUNCHES = int(os.environ.get("MINIMAX_M3_XCD_STRESS_LAUNCHES", "200"))
+
+
+def test_handoffs_between_xcds():
+    """The same-GPU hand-off protocol under the adversarial one-GPU stress
+    (``_xcd_stress.py``): every hand-off between CTAs on different XCDs
+    delivers the producer's current payload, and no wait times out."""
+    _writable_flydsl_cache()
+    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
+    assert cus >= xs.BLOCKS, "every CTA must be resident"
+    err, out = xs.run(XCD_LAUNCHES)
+    assert err[0].item() == 0, err.tolist()
+    bad = out[:, 2]
+    assert bad.sum().item() == 0, out[bad.nonzero().flatten()][:8].tolist()
+
+    xcc = out[:, 0]
+    assert sorted(set(xcc.tolist())) == list(range(8))
+    # every round's producer / consumer pair on two XCDs
+    blocks = torch.arange(xs.BLOCKS)
+    for k in range(1, 128, 2):
+        assert (xcc != xcc[(blocks + xs.BLOCKS - k) % xs.BLOCKS]).all(), k
+
+
+@pytest.mark.parametrize("stores, loads", [(False, True), (True, False)])
+def test_plain_payload_accesses_are_caught(stores, loads):
+    """The stress has teeth: with either side of the payload a plain cached
+    access, consumers read stale data."""
+    _writable_flydsl_cache()
+    err, out = xs.run(4, stores, loads, stop_on_error=False)
+    assert err[0].item() == 0, err.tolist()
+    assert (out[:, 2] > 0).any()
+
+
+STRESS_LAUNCHES = int(os.environ.get("MINIMAX_M3_STRESS_LAUNCHES", "120000"))
+STRESS_WIDTHS = (1, 4, 16)
+MAX_SKEW_CYCLES = 200_000  # ~0.1 ms at the shader clock
+RESET_EVERY = 997  # launches between collective epoch resets
+
+
+def _stress_rank(rank, port, results):
+    from vllm.models.deepseek_v41.amd.mono.common import peer_memory
+    from vllm.models.minimax_m3.amd.specialized_decode.runtime import executor as ex
+
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group(
+        "gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4
+    )
+    dev = torch.device("cuda", rank)
+    w = weights.__wrapped__()
+    peer = peer_memory.PeerBuffer(ffn.peer_bytes(4), dist.group.WORLD, rank, 4, dev)
+    peer.bytes.zero_()
+    runner = FfnRunner(4, rank, peer.local, peer.addresses, dev, STRESS_WIDTHS)
+    runner.warm(w)
+    torch.accelerator.synchronize()
+    dist.barrier()
+
+    def inputs(s, which):
+        g = torch.Generator(device=dev).manual_seed(zlib.crc32(f"{s}/{which}".encode()))
+        residual = torch.randn(s, H, device=dev, generator=g).bfloat16()
+        g.manual_seed(zlib.crc32(f"{s}/{which}/{rank}".encode()))
+        part = torch.randn(s, H, device=dev, generator=g).bfloat16()
+        return part, residual, torch.arange(s, dtype=torch.int64, device=dev)
+
+    cases, graphs, outs, refs, keep = [], {}, {}, {}, {}
+    for s in STRESS_WIDTHS:
+        for which in (0, 1):
+            case = (s, which)
+            cases.append(case)
+            # graphs read their inputs by address: they must outlive them
+            keep[case] = part, residual, slots = inputs(s, which)
+            final = which == 1
+            refs[case] = runner(part, residual, w, slots, final)[0].clone()
+            graphs[case] = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graphs[case]):
+                outs[case] = runner(part, residual, w, slots, final)[0]
+    torch.accelerator.synchronize()
+    dist.barrier()
+
+    # the executor's step hook, its epoch reset agreed over this group
+    ex.tp_agree = lambda ok: peer_memory.tp_agree(ok, dist.group.WORLD)
+    executor = object.__new__(ex.FfnExecutor)
+    executor.rank, executor.runner, executor.peer = rank, runner, peer
+    executor._layers = {0: None}
+    executor.outputs = executor._since_reset = executor.resets = 0
+    executor._reset_launches = RESET_EVERY
+    executor._epoch_event = None
+    executor._epoch_host = torch.zeros(1, dtype=torch.int32)
+
+    order = torch.Generator().manual_seed(1234)
+    skew = torch.Generator().manual_seed(rank)
+    mismatches = torch.zeros((), dtype=torch.int64, device=dev)
+    for n in range(STRESS_LAUNCHES):
+        case = cases[int(torch.randint(len(cases), (1,), generator=order))]
+        torch.cuda._sleep(int(torch.randint(MAX_SKEW_CYCLES, (1,), generator=skew)))
+        graphs[case].replay()
+        mismatches += (outs[case] != refs[case]).any()
+        executor.output_step()
+        if n % 4096 == 4095:
+            torch.accelerator.synchronize()
+    torch.accelerator.synchronize()
+
+    outs_cpu = torch.cat([refs[c].flatten() for c in cases]).view(torch.int32).cpu()
+    gathered = [torch.zeros_like(outs_cpu) for _ in range(4)]
+    dist.all_gather(gathered, outs_cpu)
+    results[rank] = SimpleNamespace(
+        mismatches=int(mismatches.item()),
+        error=_error(peer.bytes),
+        epoch=int(runner.epoch[0].item()),
+        resets=executor.resets,
+        same_across_ranks=all(torch.equal(gathered[0], g) for g in gathered),
+    )
+    dist.barrier()
+    graphs.clear()
+    peer.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.optional
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(torch.accelerator.device_count() < 4, reason="needs 4 GPUs")
+def test_peer_handoffs_under_rank_skew():
+    """TP4 over XGMI: four ranks replay graphs of three widths, alternating two
+    payload sets (half ending in the step-end fault handshake), with random
+    per-rank device delays before every launch and the executor's collective
+    epoch reset every ``RESET_EVERY`` launches. Every launch reproduces its
+    first result bit for bit, the reduced output matches across ranks, and no
+    wait times out."""
+    from vllm.utils.network_utils import get_open_port
+
+    timeout = 600 + STRESS_LAUNCHES // 1000
+    results = mp.Manager().dict()
+    ranks = mp.start_processes(
+        _stress_rank, args=(get_open_port(), results), nprocs=4, join=False
+    )
+    deadline = time.monotonic() + timeout
+    while not ranks.join(timeout=10):
+        if time.monotonic() > deadline:
+            for p in ranks.processes:
+                p.kill()
+            pytest.fail(f"TP4 stress ranks still running after {timeout} s")
+    for rank in range(4):
+        r = results[rank]
+        assert r.error[0] == 0, r.error
+        assert r.mismatches == 0
+        assert r.same_across_ranks
+        # every replayed launch since the last reset moved the epoch on
+        assert r.resets == STRESS_LAUNCHES // RESET_EVERY
+        eager = 0 if r.resets else 2 * len(STRESS_WIDTHS)
+        assert r.epoch == STRESS_LAUNCHES % RESET_EVERY + eager

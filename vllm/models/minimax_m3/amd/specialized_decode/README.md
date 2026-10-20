@@ -50,5 +50,5 @@ and the `amdgcn-av` metadata) as implemented by the LLVM bundled with FlyDSL
 (FlyDSL `thirdparty/llvm-build-info.json`; the wheel reports
 `24.0.0git e2a39f504fee...`). FlyDSL comes in through AITER (`v0.1.25` in
 `docker/Dockerfile.rocm_base`). Like DS V4.1, startup does not check the
-FlyDSL version; `test_ffn_kernel.py` checks the gfx950 lowering of the linked
+FlyDSL version; `test_ops.py` checks the gfx950 lowering of the linked
 kernel instead.
