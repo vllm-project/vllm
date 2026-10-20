@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
 from typing import Any
 
 import torch
@@ -7,13 +8,19 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_metadata_cudagraphs import (
+    AttnMetadataCudaGraphs,
+    GraphKey,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     compute_mm_prefix_ranges,
 )
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import (
@@ -62,6 +69,36 @@ class DefaultModelState(ModelState):
         # Pruner is used for multimodal embedding pruning (EVS).
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
+        )
+
+        self.attn_metadata_graphs: AttnMetadataCudaGraphs | None = None
+        if self._can_record_attn_metadata():
+            self.attn_metadata_graphs = AttnMetadataCudaGraphs(
+                vllm_config,
+                vllm_config.num_speculative_tokens
+                + self.num_new_sampled_tokens_per_step,
+            )
+        # The key whose metadata build capture_inner_cudagraphs records.
+        self._recording_key: GraphKey | None = None
+
+    def _can_record_attn_metadata(self) -> bool:
+        """Whether FULL decode steps can replay recorded metadata builds.
+
+        Model states that override ``prepare_attn`` may feed builders per-step
+        host values, so they opt out by default.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        return (
+            current_platform.is_cuda()
+            and type(self).prepare_attn is DefaultModelState.prepare_attn
+            and self.vllm_config.compilation_config.cudagraph_mode.decode_mode()
+            == CUDAGraphMode.FULL
+            and not self.model_config.is_mm_prefix_lm
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and not parallel_config.use_ubatching
+            and not self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and self.vllm_config.kv_transfer_config is None
         )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -166,7 +203,85 @@ class DefaultModelState(ModelState):
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
 
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        super().initialize_kv_cache(kv_cache_config, block_tables)
+        # Recordings made during memory profiling wrote its KV cache's buffers.
+        if self.attn_metadata_graphs is not None:
+            self.attn_metadata_graphs.release()
+
+    def capture_inner_cudagraphs(
+        self,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        super().capture_inner_cudagraphs(
+            input_buffers, block_tables, attn_groups, kv_cache_config
+        )
+        graphs = self.attn_metadata_graphs
+        if graphs is None:
+            return
+        graphs.release()
+        # The runner may have downgraded the CUDA graph mode since __init__.
+        decode_mode = self.vllm_config.compilation_config.cudagraph_mode.decode_mode()
+        if decode_mode != CUDAGraphMode.FULL or not graphs.can_record(attn_groups):
+            return
+        # Record the metadata build of every decode step the FULL decode graphs
+        # serve, on dummy batches of that step's shape.
+        for key in graphs.capture_keys():
+            self._recording_key = key
+            try:
+                self.prepare_attn(
+                    graphs.padded_decode_batch(key, input_buffers),
+                    CUDAGraphMode.FULL,
+                    block_tables.get_dummy_block_tables(key[1]),
+                    block_tables.get_dummy_slot_mappings(key[3]),
+                    attn_groups,
+                    kv_cache_config,
+                )
+            finally:
+                self._recording_key = None
+
     def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    ) -> dict[str, Any]:
+        build = partial(
+            self._build_attn_metadata,
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
+            model_specific_attn_metadata=model_specific_attn_metadata,
+        )
+        graphs = self.attn_metadata_graphs
+        if graphs is None or for_capture or model_specific_attn_metadata is not None:
+            return build()
+        if self._recording_key is not None:
+            return graphs.capture(self._recording_key, build)
+        if graphs.can_record(attn_groups):
+            key = graphs.key(input_batch, cudagraph_mode)
+            attn_metadata = graphs.replay(key) if key is not None else None
+            if attn_metadata is not None:
+                return attn_metadata
+        return build()
+
+    def _build_attn_metadata(
         self,
         input_batch: InputBatch,
         cudagraph_mode: CUDAGraphMode,

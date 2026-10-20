@@ -199,6 +199,10 @@ Some attention backends also materialize derived state, such as scheduler metada
 
 For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
 
+### Recorded Decode Metadata Builds
+
+A FULL CUDA graph replays the forward only, so the target model's attention metadata would otherwise be rebuilt on the host before every decode replay. When every attention group declares `supports_recorded_decode_build`, `DefaultModelState` records the metadata build of each uniform decode batch shape served by a FULL decode graph during capture, and replays that recording on steps of the same shape (`AttnMetadataCudaGraphs`). As with draft metadata updates, only the build's GPU operations run on replay, so an opted-in builder must use capture-safe operations, write only persistent buffers, and read no host value the batch shape does not fix. Model states that override `prepare_attn` keep the eager build.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.

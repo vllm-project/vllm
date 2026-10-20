@@ -19,6 +19,7 @@ from vllm.config import (
 from vllm.distributed.device_communicators import pynccl_allocator
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.attn_metadata_cudagraphs import AttnMetadataCudaGraphs
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -452,6 +453,38 @@ def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     assert desc.max_query_len == _DECODE_QUERY_LEN
     assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
     assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
+
+
+@pytest.mark.parametrize("decode_query_len", [1, _DECODE_QUERY_LEN])
+def test_every_full_uniform_decode_step_has_a_recorded_metadata_build(
+    monkeypatch, decode_query_len
+):
+    """AttnMetadataCudaGraphs records one build per uniform decode step shape a
+    FULL decode graph serves, mirroring CudaGraphManager's padding. A step whose
+    key it misses falls back to the eager build, silently losing the speedup."""
+    manager = _make_spec_decode_manager(
+        monkeypatch,
+        decode_query_len=decode_query_len,
+        num_speculative_tokens=decode_query_len - 1,
+    )
+    recorded = set(
+        AttnMetadataCudaGraphs(manager.vllm_config, decode_query_len).capture_keys()
+    )
+
+    served = set()
+    for num_reqs in range(1, manager.max_num_reqs + 1):
+        num_tokens = num_reqs * decode_query_len
+        desc = manager.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            uniform_token_count=decode_query_len,
+            num_active_loras=0,
+        )
+        if desc.cg_mode == CUDAGraphMode.FULL:
+            served.add((num_reqs, desc.num_reqs, num_tokens, desc.num_tokens))
+
+    assert served
+    assert served == recorded
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
