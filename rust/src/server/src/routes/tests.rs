@@ -2934,12 +2934,18 @@ async fn non_stream_chat_returns_json_response() {
 async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
     for endpoint in ["/v1/chat/completions", "/v1/completions"] {
         for stream in [false, true] {
-            for watermarking in [None, Some(true), Some(false)] {
+            // `null` and omission both request watermarking, like `true`.
+            for (watermarking, expected) in [
+                (None, true),
+                (Some(json!(null)), true),
+                (Some(json!(true)), true),
+                (Some(json!(false)), false),
+            ] {
                 let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
                     Arc::new(FakeChatBackend::new()),
                     move |request| {
                         let params = request.sampling_params.as_ref().expect("sampling params");
-                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                        assert_eq!(params.watermarking, expected);
                     },
                 )
                 .await;
@@ -2951,7 +2957,7 @@ async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
                     body["prompt"] = json!("hi");
                 }
                 if let Some(watermarking) = watermarking {
-                    body["watermarking"] = json!(watermarking);
+                    body["watermarking"] = watermarking;
                 }
                 let response = app
                     .call(

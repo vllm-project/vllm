@@ -199,7 +199,7 @@ pub fn lower_sampling_params(
 
     let params = EngineCoreSamplingParams {
         temperature,
-        watermarking,
+        watermarking: watermarking.unwrap_or(true),
         top_p,
         top_k,
         seed,

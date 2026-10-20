@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::{Prompt, TruncationSide};
@@ -30,6 +31,7 @@ fn default_completion_max_tokens() -> Option<u32> {
 /// [`vllm_text::Prompt`] and add vLLM-only fields directly instead of layering
 /// wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CompletionRequest {
     // -------- Standard OpenAI API Parameters --------
@@ -43,6 +45,7 @@ pub struct CompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub echo: bool,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
@@ -77,6 +80,7 @@ pub struct CompletionRequest {
 
     /// Whether to stream back partial progress
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
 
     /// The suffix that comes after a completion of inserted text
@@ -96,8 +100,8 @@ pub struct CompletionRequest {
 
     // -------- vLLM Sampling Parameters --------
     /// Whether to apply the engine's configured watermark to this request.
-    #[serde(default = "default_true")]
-    pub watermarking: bool,
+    /// `None` requests it like `true`.
+    pub watermarking: Option<bool>,
 
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
@@ -309,4 +313,30 @@ pub(super) enum CompletionSseChunk {
     Chunk(CompletionStreamResponse),
     /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
     Usage(CompletionStreamResponse),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::CompletionRequest;
+
+    /// Python declares these fields `bool | None`, so an explicit `null` means
+    /// the same as omitting the field.
+    #[test]
+    fn nullable_booleans_treat_null_as_omitted() {
+        let base = json!({"prompt": "hi"});
+        let omitted: CompletionRequest = serde_json::from_value(base.clone()).unwrap();
+        for field in ["echo", "stream", "watermarking"] {
+            let mut body = base.clone();
+            body[field] = Value::Null;
+            let request: CompletionRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("`{field}: null` rejected: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                serde_json::to_value(&omitted).unwrap(),
+                "`{field}: null`"
+            );
+        }
+    }
 }

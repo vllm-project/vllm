@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -45,6 +46,7 @@ pub struct GenerateSamplingParams {
 
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct GenerateRequest {
     pub request_id: Option<String>,
@@ -52,6 +54,7 @@ pub struct GenerateRequest {
     pub token_ids: Vec<u32>,
     pub sampling_params: GenerateSamplingParams,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub stream: bool,
     pub stream_options: Option<StreamOptions>,
     pub cache_salt: Option<String>,
@@ -272,4 +275,24 @@ pub(super) struct GenerateLogprob {
     pub logprob: f32,
     pub rank: Option<u32>,
     pub decoded_token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::GenerateRequest;
+
+    /// Python declares `stream` as `bool | None`, so an explicit `null` means
+    /// a non-streaming request.
+    #[test]
+    fn null_stream_means_non_streaming() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {},
+            "stream": null,
+        }))
+        .expect("`stream: null` is accepted");
+        assert!(!request.stream);
+    }
 }
