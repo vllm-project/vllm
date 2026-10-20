@@ -1,0 +1,516 @@
+meta:
+  title: "GLM-5.3-Flash"
+  slug: "glm-5.3-flash"
+  provider: "GLM (Z-AI)"
+  description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
+  date_added: 2026-08-27
+  date_updated: 2026-10-08
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "320B MoE with 18B active parameters and 1M-token context"
+  hardware:
+    h100: verified
+    b200: verified
+    gb200: verified
+    mi355x: verified
+    ascend_950pr_8x: verified
+
+model:
+  model_id: "zai-org/GLM-5.3-Flash"
+  min_vllm_version: "0.29.0"
+  nightly_required: true
+  docker_image:
+    nvidia: "vllm/vllm-openai:nightly"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  install:
+    docker:
+      note: "NVIDIA: use vllm/vllm-openai:glm53-flash until support lands in the standard image. AMD: use the official vllm/vllm-openai-rocm:nightly image, which includes merged GLM-5.3-Flash support. Ascend 950PR: pin quay.io/ascend/vllm-ascend:nightly-main-a5 (same as GLM-5.3) with GLM-5.3-Flash overlays vLLM#53906 and vllm-ascend#15127."
+    pip: false
+  architecture: moe
+  parameter_count: "321B"
+  active_parameters: "18B"
+  context_length: 1048576
+  base_env:
+    VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+
+dependencies: []
+
+features:
+  tool_calling:
+    description: "GLM tool-call parsing with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm47"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Extract reasoning content with the GLM reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "glm47"
+  spec_decoding:
+    description: "Built-in MTP or an external DFlash2 drafter. Pick one method — only that --speculative-config is emitted."
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Use the checkpoint's MTP layer to draft 5 tokens."
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":5}'
+      dflash:
+        label: "DFlash2"
+        description: "External DFlash2 drafter (incoai/GLM-5.3-Flash-DFlash2). method is dflash; DFlash2 is selected by the draft architecture. num_speculative_tokens must be 7 (block_size 8 minus one)."
+        hardware:
+          amd: unsupported
+        args:
+          - "--speculative-config"
+          - '{"method":"dflash","model":"incoai/GLM-5.3-Flash-DFlash2","num_speculative_tokens":7}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 386
+    description: "Default native FP8 checkpoint (zai-org/GLM-5.3-Flash)"
+    hardware_overrides:
+      # Exact-GPU pin: computeDockerMeta has no Huawei brand, so a model-level
+      # docker_image string would only affect NVIDIA. Hide pip — official
+      # wheels have no NPU kernels.
+      ascend_950pr_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a5"
+        install:
+          pip: false
+      mi350x: &gfx950_aiter
+        extra_env:
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+      mi355x: *gfx950_aiter
+  nvfp4:
+    model_id: "RedHatAI/GLM-5.3-Flash-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 229
+    description: "NVFP4 checkpoint (RedHatAI/GLM-5.3-Flash-NVFP4) — MoE experts quantized to 4-bit; requires Blackwell"
+  bf16:
+    model_id: "zai-org/GLM-5.3-Flash-BF16"
+    precision: bf16
+    vram_minimum_gb: 772
+    description: "Official BF16 checkpoint; requires substantially more GPU memory"
+    hardware_overrides:
+      mi350x: *gfx950_aiter
+      mi355x: *gfx950_aiter
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+strategy_hardware:
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+
+hardware_overrides:
+  hopper:
+    extra_args:
+      - "--no-enable-flashinfer-autotune"
+  blackwell:
+    # FP8 KV cache only works on Blackwell for this model; Hopper runs BF16 KV.
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  amd:
+    extra_args:
+      - "--max-num-seqs"
+      - "512"
+      - "--attention-backend"
+      - "ROCM_AITER_MLA_SPARSE"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+  # Shared by 950PR 8x (8×128 GB). SFA / kpool indexer needs --block-size 512.
+  npu:
+    extra_args:
+      - "--trust-remote-code"
+      - "--block-size"
+      - "512"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "512"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_CONNECT_TIMEOUT: "7200"
+
+hardware_notes:
+  mi350x: &cdna4_indexer_topk_notes
+    title: "Long-context indexer top-k opt-in"
+    body: "When serving long contexts (>=64k), add `--sparse-indexer-topk-backend aiter` for improved decode performance."
+  mi355x: *cdna4_indexer_topk_notes
+  ascend_950pr_8x:
+    title: "vLLM Ascend A5 image required"
+    body: "Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vLLM#53906 / vllm-ascend#15127. Do not pass --quantization ascend. --block-size 512 is required (kpool indexer). EP is not available on this interconnect."
+
+strategy_overrides:
+  pd_cluster:
+    # KDA conv-state / KV-cache layouts must match on both pools for NIXL
+    # transfer; UCX is needed on the decode side too (strategy sets it on
+    # prefill only).
+    env:
+      VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+      VLLM_KV_CACHE_LAYOUT: "HND"
+      UCX_NET_DEVICES: "all"
+    prefill:
+      vllm_args:
+        - "--no-disable-hybrid-kv-cache-manager"
+        # LM stays eager (strategy default) but keep CUDA graphs on the
+        # multimodal encoder.
+        - "--compilation-config"
+        - '{"cudagraph_mm_encoder": true}'
+    decode:
+      vllm_args:
+        - "--no-disable-hybrid-kv-cache-manager"
+        - "--max-num-seqs"
+        - "512"
+
+guide: |
+  ## Overview
+
+  GLM-5.3-Flash is a multimodal mixture-of-experts model with approximately 321B
+  total parameters and 18B active parameters per token. Its 45-layer language model
+  combines KDA linear-attention layers with NoPE sparse MLA layers, routes each token
+  through 8 of 288 experts, and supports image and video inputs. The checkpoint declares
+  a maximum context length of 1,048,576 tokens and includes one MTP draft layer.
+
+  The implementation supports NVIDIA Hopper and newer GPUs, AMD Instinct
+  gfx950 via ROCm, and Huawei Ascend 950PR (8 NPUs, one node) via vLLM
+  Ascend. On NVIDIA/AMD it can scale with tensor, pipeline, expert, or
+  data+expert parallelism. The Ascend path is validated as single-node TP=8
+  only.
+
+  ## Prerequisites
+
+  - **Weights:** about 306 GiB for the default native FP8 checkpoint before runtime
+    and KV-cache overhead; the BF16 variant requires roughly twice the weight memory
+  - **vLLM:** use docker before the integration is included in the public repo
+  - **FlashInfer:** 0.6.17 or newer is required for NoPE sparse MLA
+
+  The default model ID, `zai-org/GLM-5.3-Flash`, is the FP8 checkpoint. Select the BF16
+  variant to serve `zai-org/GLM-5.3-Flash-BF16`, or the NVFP4 variant to serve
+  `RedHatAI/GLM-5.3-Flash-NVFP4`. Its MoE experts are quantized to 4-bit (NVFP4),
+  and it requires NVIDIA Blackwell GPUs.
+
+  ## Launching the server
+
+  ### FP8 with TP4 and MTP on one GB200 tray
+
+  ```bash
+  vllm serve zai-org/GLM-5.3-Flash \
+    --tensor-parallel-size 4 \
+    --kv-cache-dtype fp8 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name zai-org/GLM-5.3-Flash
+  ```
+
+  ### Prefill/Decode disaggregation (single node, TP4 + TP4)
+
+  Split one 8-GPU node into a prefill pool (GPUs 0-3) and a decode pool (GPUs 4-7),
+  bridged by NIXL KV transfer. The KDA conv-state and KV-cache layouts must be pinned
+  identically on both pools, and MTP drafts run on both sides. On Blackwell you can add
+  `--kv-cache-dtype fp8` to both pools; Hopper does not support FP8 KV cache for this
+  model and must run BF16 KV.
+
+  > Note: `num_speculative_tokens` must be the same in prefill and decode instance
+
+  ```bash
+  # Prefill pool
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  VLLM_SSM_CONV_STATE_LAYOUT=DS \
+  VLLM_KV_CACHE_LAYOUT=HND \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5557 \
+  vllm serve zai-org/GLM-5.3-Flash \
+    --port 8001 \
+    --tensor-parallel-size 4 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+    --compilation-config '{"cudagraph_mm_encoder": true}' \
+    --enforce-eager \
+    --no-disable-hybrid-kv-cache-manager \
+    --served-model-name zai-org/GLM-5.3-Flash
+
+  # Decode pool
+  CUDA_VISIBLE_DEVICES=4,5,6,7 \
+  VLLM_SSM_CONV_STATE_LAYOUT=DS \
+  VLLM_KV_CACHE_LAYOUT=HND \
+  UCX_NET_DEVICES=all \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5558 \
+  vllm serve zai-org/GLM-5.3-Flash \
+    --port 8002 \
+    --tensor-parallel-size 4 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}' \
+    --max-num-seqs 512 \
+    --no-disable-hybrid-kv-cache-manager \
+    --served-model-name zai-org/GLM-5.3-Flash
+
+  # Router
+  vllm-router --policy round_robin --vllm-pd-disaggregation \
+    --prefill http://127.0.0.1:8001 \
+    --decode http://127.0.0.1:8002 \
+    --host 0.0.0.0 --port 8000 \
+    --intra-node-data-parallel-size 1
+  ```
+
+  ## Reasoning modes
+
+  Thinking is always on — the generation prompt opens a `<think>` block unconditionally.
+  GLM-5.3-Flash offers **three reasoning effort levels** driven by the `reasoning_effort`
+  field; the default is **`max`**:
+
+  | Mode | How to request | Behavior |
+  |------|----------------|----------|
+  | **Think Max** (default) | omit `reasoning_effort`, or set `"max"` | Deepest reasoning — hard math, multi-step planning, agentic tasks. Highest token cost. |
+  | **Think High** | `"reasoning_effort": "high"` | Balanced depth and latency. |
+  | **Think Low** | `"reasoning_effort": "low"` | Lightest reasoning — simple Q&A, lowest latency and token cost. |
+
+  The chat template resolves effort to **`max` unless `reasoning_effort` is explicitly
+  `"low"` or `"high"`** (any other value falls back to `max`), then injects
+  `Reasoning Effort: Low|High|Max` into the system prompt. Pass it through
+  `chat_template_kwargs` or the top-level OpenAI `reasoning_effort` field.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  msgs = [{"role": "user", "content": "Summarize sparse attention in one sentence."}]
+
+  # Think Max (default) — just omit reasoning_effort
+  client.chat.completions.create(model="zai-org/GLM-5.3-Flash", messages=msgs, max_tokens=4096)
+
+  # Think High / Think Low — explicitly request the effort level
+  client.chat.completions.create(
+      model="zai-org/GLM-5.3-Flash",
+      messages=msgs,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"reasoning_effort": "low"}},
+  )
+  ```
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "zai-org/GLM-5.3-Flash",
+      "messages": [{"role": "user", "content": "Summarize sparse attention in one sentence."}],
+      "temperature": 1,
+      "max_tokens": 4096,
+      "chat_template_kwargs": {"reasoning_effort": "high"}
+    }'
+  ```
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  response = client.chat.completions.create(
+      model="zai-org/GLM-5.3-Flash",
+      messages=[{"role": "user", "content": "Summarize sparse attention in one sentence."}],
+      temperature=1.0,
+      max_tokens=256,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Multimodal input (image / video)
+
+  Standard OpenAI multi-part content — list `image_url` / `video_url` items alongside the
+  text. The chat template expands each into its `<|begin_of_image|>…` / `<|begin_of_video|>…`
+  placeholder tokens, and the same image token is reused for video frames (frame spans are
+  delimited by the video start/end tokens).
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  # Image
+  client.chat.completions.create(
+      model="zai-org/GLM-5.3-Flash",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+              {"type": "text", "text": "Describe the image."},
+          ],
+      }],
+      max_tokens=512,
+  )
+  ```
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  # Video
+  client.chat.completions.create(
+      model="zai-org/GLM-5.3-Flash",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+              {"type": "text", "text": "What happens in this video?"},
+          ],
+      }],
+      max_tokens=512,
+  )
+  ```
+
+  ```bash
+  # Image
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "zai-org/GLM-5.3-Flash",
+      "messages": [{
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+          {"type": "text", "text": "Describe the image."}
+        ]
+      }],
+      "max_tokens": 512
+    }'
+  ```
+
+  ```bash
+  # Video
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "zai-org/GLM-5.3-Flash",
+      "messages": [{
+        "role": "user",
+        "content": [
+          {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+          {"type": "text", "text": "What happens in this video?"}
+        ]
+      }],
+      "max_tokens": 512
+    }'
+  ```
+  
+  ## Running on AMD Instinct
+
+  Use the official `vllm/vllm-openai-rocm:nightly` image. GLM-5.3-Flash support
+  landed in [vLLM #53906](https://github.com/vllm-project/vllm/pull/53906).
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  # gfx950 (MI350X/MI355X) only
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1
+  vllm serve zai-org/GLM-5.3-Flash \
+    --served-model-name zai-org/GLM-5.3-Flash \
+    --tensor-parallel-size 4 \
+    --max-num-seqs 512 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --attention-backend ROCM_AITER_MLA_SPARSE
+  ```
+
+  At TP=4 the FP8 checkpoint reports a 14.92M-token KV pool and ~113.81x max
+  concurrency at 128K context; the BF16 checkpoint reports an 8.87M-token KV
+  pool at the same TP and context.
+
+  MTP speculative decoding is supported on MI355X by vLLM builds containing
+  [vLLM #55239](https://github.com/vllm-project/vllm/pull/55239), validated on 4×MI355X
+  with TP=4 and MTP5. Enable **Spec Decoding** and select **MTP** in the command builder
+  to add the required configuration.
+
+  ### Long-context indexer top-k (gfx950)
+
+  If your traffic is mostly long context (>=64k tokens) and using gfx950 
+  (MI350X/MI355X), using the topk indexer backend from AITER is recommended:
+
+  ```bash
+  vllm serve zai-org/GLM-5.3-Flash \
+    --attention-backend ROCM_AITER_MLA_SPARSE \
+    --sparse-indexer-topk-backend aiter
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --backend vllm \
+    --model zai-org/GLM-5.3-Flash \
+    --served-model-name zai-org/GLM-5.3-Flash \
+    --dataset-name random \
+    --random-input-len 8192 \
+    --random-output-len 1024 \
+    --max-concurrency 16 \
+    --num-prompts 64
+  ```
+
+  ## Troubleshooting
+
+  - **Sparse-MLA initialization error:** verify that the image contains FlashInfer
+    0.6.18 or newer.
+
+  ## KV cache offloading
+
+  Offloading requires a build containing [vllm-project/vllm#57145](https://github.com/vllm-project/vllm/pull/57145).
+  Validation used [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) on 4×H200 (TP4),
+  vLLM commit `d1b4028d7e`, the Python frontend, `--enforce-eager`,
+  `--max-model-len 16384`, `--max-num-seqs 16` and `--max-num-batched-tokens 8192`.
+  Validation used `TieringOffloadingSpec`: 8 GiB total CPU tier, `blocks_per_chunk: 1`,
+  a persistent filesystem `root_dir`, eight read/write threads and `PYTHONHASHSEED=0`.
+  Three CPU-tier reloads and three filesystem reloads after restarting the server passed.
+  GLM returned matching final answers; its arithmetic reasoning field varied on filesystem reload.
+  The five-shot GSM8K diagnostic scored 31/32; this is a small sample, not the full benchmark.
+  These results cover this text-only configuration, not the builder's larger tier/chunk defaults or other variants.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-5.3-Flash)
+  - [vLLM](https://github.com/vllm-project/vllm)
+  - [ROCm MTP sparse-MLA fix](https://github.com/vllm-project/vllm/pull/55239)
+  - **FlashInfer:** 0.6.17 or newer is required for NoPE sparse MLA
+  - **Ascend 950PR:** native FP8 checkpoint (~306 GiB). On 950 the block
+    scales are re-grouped to MXFP8 at load (weights stay 1 byte/element).
+    Do not pass `--quantization ascend`. `--block-size 512` is required
+    (kpool indexer). A2/A3 and the official BF16 checkpoint are not
+    validated in this recipe.

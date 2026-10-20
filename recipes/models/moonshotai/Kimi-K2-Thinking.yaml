@@ -1,0 +1,212 @@
+meta:
+  title: "Kimi-K2-Thinking"
+  slug: "kimi-k2-thinking"
+  provider: "Moonshot AI"
+  description: "Kimi-K2-Thinking is an advanced reasoning MoE model with native INT4 QAT weights, designed for long-horizon agent workflows interleaving chain-of-thought reasoning with tool calls."
+  date_added: 2025-11-06
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "1T MoE thinking model with native INT4 QAT for 2x low-latency speed-up"
+  related_recipes:
+    - "moonshotai/Kimi-K2-Instruct"
+    - "moonshotai/Kimi-K2.5"
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-K2-Thinking"
+  min_vllm_version: "0.12.0"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "32B"
+  context_length: 262144
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable Kimi K2 tool calling with the kimi_k2 tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "kimi_k2"
+  reasoning:
+    description: "Kimi K2 reasoning parser for extracting chain-of-thought content."
+    args:
+      - "--reasoning-parser"
+      - "kimi_k2"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: int4
+    vram_minimum_gb: 600
+    description: "Native INT4 (QAT) weights on 8xH200 / 8xH20; 2x low-latency speed-up vs FP8"
+  nvfp4:
+    model_id: "nvidia/Kimi-K2-Thinking-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 600
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  fp8:
+    model_id: "RedHatAI/Kimi-K2-Thinking-FP8-Block"
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "RedHatAI FP8 block quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Kimi-K2-Thinking](https://huggingface.co/moonshotai/Kimi-K2-Thinking) is an advanced
+  trillion-parameter MoE created by Moonshot AI with these highlights:
+
+  - **Deep Thinking & Tool Orchestration**: End-to-end trained to interleave
+    chain-of-thought reasoning with function calls, enabling autonomous research, coding,
+    and writing workflows that last hundreds of steps without drift.
+  - **Native INT4 Quantization**: Quantization-Aware Training (QAT) delivers lossless 2x
+    speed-up in low-latency mode.
+  - **Stable Long-Horizon Agency**: Maintains coherent goal-directed behavior across up to
+    200-300 consecutive tool invocations, surpassing prior models that degrade after
+    30-50 steps.
+
+  ## Prerequisites
+
+  - **Hardware**: 8x H200 or 8x H20 GPUs
+  - **vLLM**: Current stable release
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### AMD ROCm
+
+  The ROCm wheel requires Python 3.12, ROCm 7.0+, and glibc >= 2.35. Use the
+  ROCm Docker image when your host environment does not meet those requirements.
+
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Launching Kimi-K2-Thinking with vLLM
+
+  ### Low-Latency Scenarios (TP8)
+
+  ```bash
+  vllm serve moonshotai/Kimi-K2-Thinking \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --trust-remote-code
+  ```
+
+  The `--reasoning-parser` flag specifies the parser used to extract reasoning content
+  from the model output.
+
+  ### ROCm on 8x MI300X / MI325X / MI355X
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  vllm serve moonshotai/Kimi-K2-Thinking \
+    --tensor-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --trust-remote-code
+  ```
+
+  ### High-Throughput Scenarios (TP8+DCP8)
+
+  vLLM supports [Decode Context Parallel](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment.html#decode-context-parallel),
+  which provides significant benefits in high-throughput scenarios. Enable DCP by adding
+  `--decode-context-parallel-size 8`:
+
+  ```bash
+  vllm serve moonshotai/Kimi-K2-Thinking \
+    --tensor-parallel-size 8 \
+    --decode-context-parallel-size 8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser kimi_k2 \
+    --reasoning-parser kimi_k2 \
+    --trust-remote-code
+  ```
+
+  ## Metrics (GSM8K)
+
+  | Config | exact_match (flexible) | exact_match (strict) |
+  |--------|-----------------------|----------------------|
+  | TP8 | 0.9416 | 0.9409 |
+  | TP8+DCP8 | 0.9386 | 0.9371 |
+
+  ## Benchmarking
+
+  We used the following script to benchmark `moonshotai/Kimi-K2-Thinking` on 8xH200:
+
+  ```bash
+  vllm bench serve \
+    --model moonshotai/Kimi-K2-Thinking \
+    --dataset-name random \
+    --random-input 8000 \
+    --random-output 4000 \
+    --request-rate 100 \
+    --num-prompt 1000 \
+    --trust-remote-code
+  ```
+
+  ### DCP Gain Analysis
+
+  | Metric | TP8 | TP8+DCP8 | Change | Improvement |
+  |--------|-----|----------|--------|-------------|
+  | Request throughput (req/s) | 1.25 | 1.57 | +0.32 | +25.6% |
+  | Output token throughput (tok/s) | 485.78 | 695.13 | +209.35 | +43.1% |
+  | Mean TTFT (s) | 271.2 | 227.8 | -43.4 | +16.0% |
+
+  DCP multiplies the GPU KV cache size by `dcp_world_size`:
+  - TP8 KV cache: `715,072` tokens
+  - TP8+DCP8 KV cache: `5,721,088` tokens (8x)
+
+  Enabling DCP delivers strong advantages (43% faster token generation, 26% higher
+  throughput) with minimal drawbacks. Read the
+  [DCP doc](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment.html#decode-context-parallel)
+  and try it in your LLM workloads.
+
+  ## References
+
+  - [Kimi-K2-Thinking on Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking)
+  - [vLLM Decode Context Parallel docs](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment.html#decode-context-parallel)

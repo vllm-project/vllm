@@ -12,13 +12,17 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from transformers import Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
@@ -32,7 +36,6 @@ from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.minimax_m3.amd import model as minimax_m3_model
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_xpu(),
@@ -141,8 +144,10 @@ def get_deepseek_v4_quark_config(exclude: list[str]) -> dict[str, Any]:
     return quantization_config
 
 
-def _stub_quant_config() -> QuantizationConfig:
-    return cast(QuantizationConfig, object())
+class _StubGlm5NextAttention(nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        self.o_proj = SimpleNamespace(reduce_results=True)
 
 
 def get_fse_test_model_config(
@@ -178,7 +183,8 @@ def get_fse_test_model_config(
             head_dim=128,
             max_position_embeddings=128,
             sliding_window=None,
-            compress_ratios=[1],
+            layer_types=["sliding_attention"],
+            compress_rates={},
             rope_theta=10000.0,
             compress_rope_theta=10000.0,
             rope_parameters={"rope_type": "default"},
@@ -279,6 +285,33 @@ def get_fse_test_model_config(
             quantization_config=quantization_config,
         )
         return config, Glm4MoeModel
+    if model_type == "glm5_next":
+        from transformers import Glm5NextTextConfig
+
+        from vllm.models.glm5next.common.model import Glm5NextModel
+
+        config = Glm5NextTextConfig(
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=32,
+            moe_intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            num_experts_per_tok=1,
+            layer_types=["linear_attention"],
+            mlp_layer_types=["sparse"],
+            index_topk=1,
+            index_kpool=1,
+            pad_token_id=None,
+            scoring_func="sigmoid",
+            topk_method="noaux_tc",
+            mhc=False,
+            quantization_config=quantization_config,
+        )
+        return config, Glm5NextModel
     raise ValueError(f"Unsupported FSE test model: {model_type}")
 
 
@@ -307,7 +340,7 @@ def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        _stub_quant_config(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp"
     )
 
 
@@ -322,7 +355,7 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 
     assert (
         fused_moe_utils.resolve_layer_fused_shared_expert(
-            _stub_quant_config(), "model.layers.0.mlp"
+            ExpertsInt8Config(), "model.layers.0.mlp"
         )
         is False
     )
@@ -331,19 +364,22 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quant_config = _stub_quant_config()
+    quant_config = ExpertsInt8Config()
     monkeypatch.setattr(
         fused_moe_utils.rocm_aiter_ops,
         "is_fusion_moe_shared_experts_enabled",
         lambda: True,
     )
 
-    calls: list[tuple[object, str, str]] = []
+    calls: list[tuple[object, str, str, str | None]] = []
 
     def check_compatibility(
-        config: object, expert_prefix: str, shared_expert_prefix: str
+        config: object,
+        expert_prefix: str,
+        shared_expert_prefix: str,
+        moe_backend: str | None = None,
     ) -> tuple[bool, str | None]:
-        calls.append((config, expert_prefix, shared_expert_prefix))
+        calls.append((config, expert_prefix, shared_expert_prefix, moe_backend))
         return True, None
 
     monkeypatch.setattr(
@@ -354,12 +390,14 @@ def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
         quant_config,
         "model.layers.0.mlp",
         shared_expert_name="shared_expert",
+        moe_backend="aiter_mega_moe",
     )
     assert calls == [
         (
             quant_config,
             "model.layers.0.mlp.experts",
             "model.layers.0.mlp.shared_expert",
+            "aiter_mega_moe",
         )
     ]
 
@@ -376,11 +414,11 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     monkeypatch.setattr(
         fused_moe_utils,
         "is_shared_expert_quant_fse_compatible",
-        lambda *_: (False, "shared experts are excluded"),
+        lambda *_, **__: (False, "shared experts are excluded"),
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        _stub_quant_config(), "model.layers.0.mlp"
+        ExpertsInt8Config(), "model.layers.0.mlp"
     )
     assert "shared experts are excluded" in caplog.text
 
@@ -390,6 +428,7 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 ) -> None:
     class DeepseekV4Config:
         expert_dtype = "fp4"
+        online_quantization_config = None
 
         def _is_quark_mxfp4_ocp(self, hf_config: object) -> bool:
             return True
@@ -796,7 +835,7 @@ def test_is_model_fused_shared_expert_compatible() -> None:
 
 @pytest.mark.parametrize(
     "model_type",
-    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2"],
+    ["minimax_m3", "deepseek_v4", "qwen3_5", "glm4_moe", "deepseek_v2", "glm5_next"],
 )
 @pytest.mark.parametrize(
     ("use_fse", "exclude"),
@@ -850,6 +889,16 @@ def test_models_fse_init(
         )
     else:
         vllm_config.quant_config = QuarkConfig(quantization_config)
+    if model_type == "glm5_next":
+        from vllm.models.glm5next.common import model as glm5_next_model
+
+        for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
+            monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
+        # The gate allows fusion only at TP4/TP8 on gfx950, and this test
+        # runs at TP1; the gate has its own test.
+        monkeypatch.setattr(
+            glm5_next_model, "_fused_shared_experts_tuned", lambda _: True
+        )
 
     import vllm.envs as envs
     from vllm._aiter_ops import rocm_aiter_ops
@@ -902,6 +951,10 @@ def test_models_fse_init(
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
+        if model_type == "glm5_next":
+            assert (model.layers[0].mlp.shared_experts is None) is (
+                fse_enabled and not exclude
+            )
 
         # The dummy quant config here uses mixed mxfp4/fp8 for experts/shared_expert
         # so should just raise a warning.
@@ -924,6 +977,74 @@ def test_models_fse_init(
 
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "reason"),
+    [
+        ("tensor_parallel_size", 4, None),
+        ("tensor_parallel_size", 8, None),
+        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("data_parallel_size", 2, "data_parallel_size is 2"),
+        ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
+        ("enable_expert_parallel", True, "expert parallelism is enabled"),
+        ("on_gfx950", False, "the GPU is not gfx950"),
+    ],
+)
+def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    reason: str | None,
+) -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+        enable_expert_parallel=False,
+    )
+    on_gfx950 = value if setting == "on_gfx950" else True
+    if setting != "on_gfx950":
+        setattr(parallel_config, setting, value)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+
+    with patch.object(glm5_next_model.logger, "warning_once") as warning:
+        tuned = glm5_next_model._fused_shared_experts_tuned(
+            cast(ParallelConfig, parallel_config)
+        )
+
+    assert tuned is (reason is None)
+    if reason is None:
+        warning.assert_not_called()
+    else:
+        warning.assert_called_once()
+        assert warning.call_args.args[1] == reason
+
+
+def test_glm5_next_fused_shared_expert_loads_into_the_shared_slot() -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    assert glm5_next_model._num_fused_shared_experts(1, True) == 1
+    assert glm5_next_model._num_fused_shared_experts(1, False) == 0
+    assert glm5_next_model._num_fused_shared_experts(None, True) == 0
+    with pytest.raises(NotImplementedError, match="only 1 shared expert"):
+        glm5_next_model._num_fused_shared_experts(2, True)
+
+    for shared, fused in [
+        (
+            "model.layers.3.mlp.shared_experts.gate_proj.weight_scale_inv",
+            "model.layers.3.mlp.experts.288.gate_proj.weight_scale_inv",
+        ),
+        (
+            "model.layers.45.mtp_block.mlp.shared_experts.down_proj.weight",
+            "model.layers.45.mtp_block.mlp.experts.288.down_proj.weight",
+        ),
+    ]:
+        assert glm5_next_model._fused_shared_expert_name(shared, 288) == fused
+    routed = "model.layers.3.mlp.experts.7.down_proj.weight"
+    assert glm5_next_model._fused_shared_expert_name(routed, 288) == routed
 
 
 @pytest.mark.parametrize(
@@ -952,6 +1073,134 @@ def test_quark_shared_expert_fse_compatibility(
         assert (
             reason
             == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
+        )
+
+
+@pytest.mark.parametrize("exclude_shared_expert", [False, True])
+def test_online_targets_off_shared_expert_defer_to_checkpoint(
+    exclude_shared_expert: bool,
+) -> None:
+    """Unrelated online targets preserve the checkpoint's FSE decision."""
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            **_QUARK_FSE_CONFIG,
+            "exclude": (
+                [f"{shared_prefix}.down_proj"] if exclude_shared_expert else []
+            ),
+        }
+    )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*linear_attn.out_proj": "mxfp4"})
+    )
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    )
+
+    assert compatible is not exclude_shared_expert
+    assert reason == (
+        f"Quark excludes shared experts at {shared_prefix}"
+        if exclude_shared_expert
+        else None
+    )
+
+
+def test_online_targeting_only_one_shared_projection_rejects_fse() -> None:
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}.down_proj": "mxfp4"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online quantization targets only part of the shared expert at "
+        f"{shared_prefix}",
+    )
+
+
+def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "fp8_per_tensor"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
+
+
+def test_online_mxfp4_shared_expert_rejects_quark_weight_only_mxfp4_fse() -> None:
+    """Weight-only routed experts keep BF16 activations, unlike an MXFP4 target."""
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            **_QUARK_FSE_CONFIG,
+            "exclude": [],
+            "global_quant_config": {
+                **_QUARK_FSE_CONFIG["global_quant_config"],
+                "input_tensors": None,
+            },
+        }
+    )
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "mxfp4"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        ([], True),
+        (["lm_head", "model.embed_tokens"], True),
+        (["*.shared_experts.*"], False),
+        (["model.layers.0.mlp.experts"], False),
+        (["model.layers.0.mlp.experts", "*.shared_experts.*"], True),
+    ],
+)
+def test_modelopt_mxfp8_shared_expert_fse_compatibility(
+    exclude: list[str], expected: bool
+) -> None:
+    """MiniMax-M3 ships MXFP8, whose exclude list decides FSE compatibility."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=exclude,
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible is expected
+    if expected:
+        assert reason is None
+    else:
+        assert reason == (
+            "MXFP8 excludes routed and shared experts inconsistently at "
+            "model.layers.0.mlp.shared_experts"
         )
 
 
@@ -1220,14 +1469,15 @@ def test_quark_packed_layer_config_must_match_global_config() -> None:
 
 def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        _stub_quant_config(),
+        ExpertsInt8Config(),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )
 
     assert not compatible
     assert reason == (
-        "shared-expert FSE quantization compatibility is not implemented for object"
+        "shared-expert FSE quantization compatibility is not implemented for "
+        "ExpertsInt8Config"
     )
 
 

@@ -4,10 +4,9 @@ import argparse
 import math
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import ClassVar, Literal, get_args
+from typing import ClassVar, Literal, assert_never, get_args
 
 import numpy as np
-from typing_extensions import assert_never
 
 from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
 from vllm.utils.argparse_utils import FlexibleArgumentParser
