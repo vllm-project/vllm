@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.models.minimax_m3.amd.model_state import MiniMaxM3ModelState
 from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
 from vllm.models.minimax_m3.amd.specialized_decode.runtime.executor import (
     FfnExecutor,
 )
-from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
 
 class _Executor:
@@ -81,18 +81,10 @@ def test_abort_never_raises():
     executor.abort()
 
 
-@pytest.mark.parametrize("word", [[0, 0, 0, 0], [1, 2, 7, 3]])
-def test_step_output_raises_on_a_set_fault_word(word):
-    output = object.__new__(AsyncOutput)
-    output.copy_event = SimpleNamespace(synchronize=lambda: None)
-    output._model_fault = torch.tensor(word, dtype=torch.int32)
-    if any(word):
-        with pytest.raises(RuntimeError, match="discarded"):
-            output.get_output()
-    else:
-        with pytest.raises(AttributeError):
-            # past the fault check: the rest of the output is not set up here
-            output.get_output()
+def test_fault_description_names_the_failed_rank():
+    state = object.__new__(MiniMaxM3ModelState)
+    message = state.describe_fault([1, 2, 7, 3])
+    assert "rank 2" in message and "discarded" in message
 
 
 def test_close_is_idempotent():

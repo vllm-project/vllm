@@ -92,7 +92,9 @@ from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
+    DeviceFault,
     StepTimingCollector,
+    ep_fault,
 )
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
@@ -436,6 +438,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Initialize the components that require the model.
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
+        )
+        model_fault = self.model_state.device_fault_tensor()
+        self.model_faults = (
+            ()
+            if model_fault is None
+            else (DeviceFault(model_fault, self.model_state.describe_fault),)
         )
 
         self.decode_query_len = (
@@ -2203,9 +2211,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
-            model_fault=self.model_state.step_fault(),
+            faults=(
+                (*self.model_faults, ep_fault())
+                if self.check_ep_fault
+                else self.model_faults
+            ),
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.

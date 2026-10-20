@@ -272,7 +272,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         torch.tensor([1]),
         Mock(),
         Mock(),
-        check_ep_fault=False,
         pending_aux_output=pending,
     )
     event.record.assert_called_once()

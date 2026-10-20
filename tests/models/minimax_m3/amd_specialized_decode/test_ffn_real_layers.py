@@ -188,18 +188,19 @@ def test_ffn_launch_matches_native_layers(monkeypatch):
             assert res[0] > 0.99999
 
 
-def _abort(worker, rank):
-    executor = worker.model_runner.model_state.backbone.specialized_decode.executor
-    if executor.rank == rank:
-        executor.abort()
+def _arm_late_fault(worker, rank, ticks):
+    runner = worker.model_runner.model_state.backbone.specialized_decode.executor
+    runner.runner.inject.copy_(torch.tensor([rank + 1, ticks], dtype=torch.int32))
 
 
-def test_rank_failure_returns_no_tokens_from_full_graphs(monkeypatch):
-    """--monokernel under FULL decode graphs: one rank marks itself failed
-    between steps; the next step raises instead of returning tokens."""
+def test_late_rank_fault_returns_no_tokens_from_full_graphs(monkeypatch, capfd):
+    """--monokernel under FULL decode graphs: during a replayed step, rank 2
+    fails 5 ms after the rest of the step's last launch, so the output rank
+    is ahead of it; that step must return no token."""
     for name, value in ENV.items():
         monkeypatch.setenv(name, value)
     from vllm import LLM, SamplingParams
+    from vllm.v1.engine.exceptions import EngineDeadError
 
     llm = LLM(
         **ENGINE,
@@ -208,6 +209,12 @@ def test_rank_failure_returns_no_tokens_from_full_graphs(monkeypatch):
     )
     params = SamplingParams(max_tokens=8, temperature=0)
     assert llm.generate(["The capital of France is"], params)[0].outputs[0].text
-    llm.collective_rpc(_abort, args=(2,))
-    with pytest.raises(Exception, match="EngineCore|discarded"):
-        llm.generate(["The capital of Italy is"], params)
+    capfd.readouterr()
+    llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
+    outputs = None
+    with pytest.raises(EngineDeadError):
+        outputs = llm.generate(["The capital of Italy is"], params)
+    assert outputs is None
+    err = capfd.readouterr().err
+    assert "MiniMax-M3 FFN launch failed on TP rank 2" in err
+    assert "tokens are discarded" in err

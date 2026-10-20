@@ -1589,7 +1589,7 @@ steps:
   - pytest -v -s -m "distributed" models/kimi_k3
 
 - label: ":amd: (MI355) MiniMax M3 Specialized Decode"
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_4
@@ -1601,8 +1601,15 @@ steps:
   - vllm/models/deepseek_v41/amd/mono/common/
   - tests/models/minimax_m3/amd_specialized_decode/
   - vllm/platforms/rocm.py
+  - vllm/v1/worker/gpu/async_utils.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/model_states/interface.py
+  - tests/v1/worker/test_gpu_async_output_faults.py
   commands:
-  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  - pytest -v -s models/minimax_m3/amd_specialized_decode v1/worker/test_gpu_async_output_faults.py
+  # four-GPU stress, real-checkpoint parity and FULL-graph fail-stop (the latter
+  # skip without /models/MiniMax-M3-MXFP4 or MINIMAX_M3_MXFP4_PATH)
+  - pytest -v -s --optional models/minimax_m3/amd_specialized_decode/test_ffn_tp4_stress.py models/minimax_m3/amd_specialized_decode/test_ffn_real_layers.py
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55

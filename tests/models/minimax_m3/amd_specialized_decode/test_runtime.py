@@ -136,12 +136,6 @@ def test_plan_is_once_per_forward_and_returns_immutable_layer_map(
     assert executor.slots is not None and executor.slots.numel() == 1
 
 
-def test_step_fault_is_the_executor_word(decode):
-    instance, executor = decode
-    assert instance.step_fault() is executor.fault_word
-    assert executor.outputs == 1
-
-
 def test_cache_lifecycle_is_skipped_without_cache_reads(decode, monkeypatch):
     instance, executor = decode
     executor.uses_caches = False

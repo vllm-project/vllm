@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -112,6 +112,32 @@ class StepTimingCollector:
             self._step = None
 
 
+@dataclass(frozen=True)
+class DeviceFault:
+    """A device tensor whose nonzero entries mean a step's results are invalid.
+
+    The step's output copy, which waits on the main stream, also copies the
+    tensor; ``get_output`` raises ``describe(values)`` before converting or
+    returning any of the step's results if an entry is set. Device work that
+    sets it must precede the step's sampling on the main stream.
+    """
+
+    tensor: torch.Tensor
+    describe: Callable[[list[int]], str]
+
+
+def ep_fault() -> DeviceFault:
+    def describe(_: list[int]) -> str:
+        mask = get_ep_all2all_manager().query_active_mask()
+        return (
+            "Fault detected in EP all2all communication: "
+            "one or more ranks timed out during dispatch/combine. "
+            f"Mask: {mask.cpu().tolist()}"
+        )
+
+    return DeviceFault(get_ep_all2all_manager().query_fault(), describe)
+
+
 class AsyncOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
@@ -120,9 +146,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
-        model_fault: torch.Tensor | None = None,
+        faults: Sequence[DeviceFault] = (),
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -133,11 +158,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.pending_aux_output = pending_aux_output
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
-        self._has_fault: torch.Tensor | None = None
+        self.faults = faults
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
+            self._fault_values = [f.tensor.to("cpu", non_blocking=True) for f in faults]
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
             self.logprobs_tensors: LogprobsTensors | None = None
             if sampler_output.logprobs_tensors is not None:
@@ -166,23 +192,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     num_sampled=self.num_sampled_tokens_np,
                     num_rejected=async_copy_to_np(sampler_output.num_rejected),
                 )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
-            self._model_fault = (
-                None
-                if model_fault is None
-                else model_fault.to("cpu", non_blocking=True)
-            )
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
-        if self._model_fault is not None and self._model_fault.any():
-            raise RuntimeError(
-                "Model kernel failure reported on device: "
-                f"{self._model_fault.tolist()}; this step's tokens are discarded"
-            )
+        for fault, values in zip(self.faults, self._fault_values):
+            if values.any():
+                raise RuntimeError(fault.describe(values.flatten().tolist()))
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -215,14 +231,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.pending_aux_output is not None:
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()
-            )
-
-        if self._has_fault is not None and self._has_fault.item():
-            mask = get_ep_all2all_manager().query_active_mask()
-            raise RuntimeError(
-                "Fault detected in EP all2all communication: "
-                "one or more ranks timed out during dispatch/combine. "
-                f"Mask: {mask.cpu().tolist()}"
             )
 
         return self.model_runner_output

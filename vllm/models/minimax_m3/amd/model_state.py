@@ -30,9 +30,22 @@ class MiniMaxM3ModelState(DefaultModelState):
         if decode is not None:
             decode.bind_caches()
 
-    def step_fault(self):
+    def device_fault_tensor(self):
         decode = self.backbone.specialized_decode
-        return None if decode is None else decode.step_fault()
+        return None if decode is None else decode.executor.fault_word
+
+    def describe_fault(self, values: list[int]) -> str:
+        failed, rank, epoch, site = values[:4]
+        return (
+            f"MiniMax-M3 FFN launch failed on TP rank {rank} (epoch {epoch}, "
+            f"site {site}); this step's tokens are discarded"
+        )
+
+    def postprocess_state(self, idx_mapping, num_sampled, num_computed_tokens=None):
+        super().postprocess_state(idx_mapping, num_sampled, num_computed_tokens)
+        decode = self.backbone.specialized_decode
+        if decode is not None:
+            decode.executor.output_step()
 
     def close(self) -> None:
         if self._decode_finalizer is not None:

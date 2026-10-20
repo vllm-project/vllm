@@ -13,6 +13,7 @@ import torch
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from .caches import CacheBinding, TensorIdentity, checked_cache_bindings
 from .guards import model_refusals
@@ -180,18 +181,14 @@ class SpecializedDecode:
                 "MiniMax specialized-decode executor does not own every sparse layer"
             )
         assert isinstance(metadata, MiniMaxM3SparseMetadata)
+        # the kernels take any negative slot for a padded row
+        assert PAD_SLOT_ID < 0
         self.executor.begin_step(metadata.slot_mapping[: positions.shape[0]])
         self.mono_steps += 1
         return Step(self.config.first_layer, kernels)
 
     def health(self) -> Any:
         return self.executor.health()
-
-    def step_fault(self) -> torch.Tensor:
-        """The device error word, copied with each step's sampled tokens: the
-        runner raises before returning a step's tokens if it is set."""
-        self.executor.output_step()
-        return self.executor.fault_word
 
     def after_step(self, step: Step | None, failure: Exception | None = None) -> None:
         """A rank-local exception in the layer loop marks every rank's error
