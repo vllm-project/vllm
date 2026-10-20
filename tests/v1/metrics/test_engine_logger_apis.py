@@ -9,6 +9,7 @@ from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logge
 )
 from tests.utils import wait_for_memory_to_settle
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
+from vllm.v1.metrics.loggers import PerEngineStatLoggerAdapter
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
 
@@ -32,6 +33,7 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
         log_stats_enabled_engine_args, stat_loggers=[RayPrometheusStatLogger]
     )
     try:
+        assert engine.logger_manager is not None
         assert isinstance(
             engine.logger_manager.stat_loggers[0], RayPrometheusStatLogger
         )
@@ -57,10 +59,14 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
     )
 
     try:
+        assert engine.logger_manager is not None
         assert len(engine.logger_manager.stat_loggers) == 2
-        assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1
+        # DummyStatLogger is a per-engine logger, so the manager wraps it.
+        per_engine_adapter = engine.logger_manager.stat_loggers[0]
+        assert isinstance(per_engine_adapter, PerEngineStatLoggerAdapter)
+        assert len(per_engine_adapter.per_engine_stat_loggers) == 1
         assert isinstance(
-            engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],
+            per_engine_adapter.per_engine_stat_loggers[0],
             DummyStatLogger,
         )
 

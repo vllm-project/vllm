@@ -190,6 +190,7 @@ class TestParserSelection:
             "cohere_command4",
             enable_auto_tools=True,
         )
+        assert cls is not None
         request = ChatCompletionRequest(messages=[], model="m")
         assert request.skip_special_tokens
         cls(tokenizer).adjust_request(request)

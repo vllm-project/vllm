@@ -238,9 +238,7 @@ class EMABackpressureDetector(BackpressureDetector):
     _NETWORK_TIER_TYPES = frozenset({"obj"})
 
     @classmethod
-    def default_config(
-        cls, tier_type: str, *, locality: str | None = None
-    ) -> dict | None:
+    def default_config(cls, tier_type: str, *, locality: str | None = None) -> dict:
         is_remote = locality is not None and locality.upper() == "REMOTE"
         if is_remote or tier_type in cls._NETWORK_TIER_TYPES:
             return {

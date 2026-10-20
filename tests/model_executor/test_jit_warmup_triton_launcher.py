@@ -78,7 +78,7 @@ class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]  # narrows base **kwargs
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:
@@ -312,7 +312,7 @@ def test_triton_kernel_decorator_returns_launcher(
     ]
     assert launch.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
-        launch(first, 1, 7, stale_constexpr=True)
+        launch(first, 1, 7, stale_constexpr=True)  # type: ignore[call-arg]  # invalid on purpose
 
 
 def test_triton_kernel_decorator_without_triton(

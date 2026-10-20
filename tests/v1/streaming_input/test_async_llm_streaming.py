@@ -194,12 +194,15 @@ async def test_generate_with_async_generator():
 
 
 @pytest.mark.asyncio
-async def test_empty_input_stream_finishes_without_engine_request():
+async def test_empty_input_stream_finishes_without_engine_request(monkeypatch):
     llm = AsyncLLM.__new__(AsyncLLM)
-    llm._validate_streaming_input_sampling_params = MagicMock()
-    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
-    llm._run_output_handler = MagicMock()
-    llm._add_request = AsyncMock()
+    monkeypatch.setattr(llm, "_validate_streaming_input_sampling_params", MagicMock())
+    monkeypatch.setattr(
+        llm, "get_supported_tasks", AsyncMock(return_value=("generate",))
+    )
+    monkeypatch.setattr(llm, "_run_output_handler", MagicMock())
+    add_request = AsyncMock()
+    monkeypatch.setattr(llm, "_add_request", add_request)
     llm.vllm_config = MagicMock(is_mm_encoder_only=False)
     llm.model_config = MagicMock(is_diffusion=False)
 
@@ -220,16 +223,20 @@ async def test_empty_input_stream_finishes_without_engine_request():
     await task
 
     assert queue.get_nowait() is STREAM_FINISHED
-    llm._add_request.assert_not_awaited()
+    add_request.assert_not_awaited()
 
 
-def _make_streaming_llm(num_chunks: int, has_request: bool = True):
+def _make_streaming_llm(
+    monkeypatch: pytest.MonkeyPatch, num_chunks: int, has_request: bool = True
+):
     llm = AsyncLLM.__new__(AsyncLLM)
-    llm._validate_streaming_input_sampling_params = MagicMock()
-    llm._validate_resumable_request = MagicMock()
-    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
-    llm._run_output_handler = MagicMock()
-    llm._add_request = AsyncMock()
+    monkeypatch.setattr(llm, "_validate_streaming_input_sampling_params", MagicMock())
+    monkeypatch.setattr(llm, "_validate_resumable_request", MagicMock())
+    monkeypatch.setattr(
+        llm, "get_supported_tasks", AsyncMock(return_value=("generate",))
+    )
+    monkeypatch.setattr(llm, "_run_output_handler", MagicMock())
+    monkeypatch.setattr(llm, "_add_request", AsyncMock())
     llm.model_config = MagicMock()
     llm.output_processor = MagicMock()
     llm.output_processor.has_request.return_value = has_request
@@ -261,11 +268,13 @@ async def _stream_chunks(llm: AsyncLLM, num_chunks: int) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_live", [True, False])
-async def test_handle_inputs_stops_after_session_finished(session_live: bool):
+async def test_handle_inputs_stops_after_session_finished(
+    session_live: bool, monkeypatch: pytest.MonkeyPatch
+):
     """Once the session's request state is gone (aborted or errored), no
     further chunks or final request are sent: they would recreate a request
     state that is never cleaned up."""
-    llm, reqs = _make_streaming_llm(num_chunks=2, has_request=session_live)
+    llm, reqs = _make_streaming_llm(monkeypatch, num_chunks=2, has_request=session_live)
     await _stream_chunks(llm, num_chunks=2)
 
     sent = [call.args[0] for call in llm._add_request.await_args_list]

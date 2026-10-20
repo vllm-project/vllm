@@ -61,6 +61,13 @@ def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 
 
+def _ema_detector(tier: SecondaryTierManager) -> EMABackpressureDetector:
+    """Return the tier's detector, which TestBackpressure sets to an EMA one."""
+    bp = tier.bp_detector
+    assert isinstance(bp, EMABackpressureDetector)
+    return bp
+
+
 class DelayedSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that holds completed store jobs until released.
 
@@ -283,11 +290,13 @@ class TestBackpressure:
 
         assert len(self.tier._held_jobs) == 2
         assert all(
-            self.primary._policy.get(key).ref_cnt == int(key in self.tier.blocks)
+            self.primary._policy.get(key).ref_cnt == int(key in self.tier.blocks)  # type: ignore[union-attr]
             for key in all_keys
         )
 
-        reduced = self.manager.get_stats().reduce()
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
         stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
         blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
         assert reduced["{}:('1:delayed',)".format(stores_key)] == 6
@@ -297,10 +306,10 @@ class TestBackpressure:
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
         assert not self.manager._jobs
-        assert all(self.primary._policy.get(key).ref_cnt == 0 for key in all_keys)
+        assert all(self.primary._policy.get(key).ref_cnt == 0 for key in all_keys)  # type: ignore[union-attr]
 
     def test_ema_updates_on_store_completion(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         fast_latency = 0.01
         # EMA is in s/MiB; with 16-byte blocks, scale = MiB / block_bytes.
         scale = EMABackpressureDetector._MIB / self.tier.block_size_bytes
@@ -335,7 +344,7 @@ class TestBackpressure:
         assert bp.store_latency_ema == pytest.approx(expected, rel=0.1)
 
     def test_pressure_activates_above_high_water(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
 
         # Warm up the detector with fast completions first.
         for i in range(_BP_WARMUP):
@@ -358,7 +367,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_pressure_clears_below_low_water(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp.store_latency_ema = _BP_HIGH_WATER_S * 2
         bp._under_pressure = True
         bp._completions = _BP_WARMUP
@@ -384,7 +393,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is False
 
     def test_hysteresis_prevents_oscillation(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._completions = _BP_WARMUP
         block_bytes = self.tier.block_size_bytes
 
@@ -422,7 +431,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_stores_skipped_under_pressure(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         initial_blocks = self.tier.get_num_blocks()
@@ -436,7 +445,7 @@ class TestBackpressure:
         assert self.tier.get_num_blocks() == initial_blocks
 
     def test_stores_resume_after_pressure_clears(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
 
         # Start under pressure — stores skipped.
         bp._under_pressure = True
@@ -452,10 +461,12 @@ class TestBackpressure:
         assert all(k in self.tier.blocks for k in keys2)
 
     def test_dropped_store_count_tracked(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         policy = bp.policy
+        # the detector's default ThrottledDropPolicy keeps the drop counters
+        assert isinstance(policy, DropAccountingPolicy)
         assert policy.pop_stores_dropped() == (0, 0)
 
         self._store_blocks(to_keys([80]))
@@ -467,10 +478,11 @@ class TestBackpressure:
         assert policy._blocks_dropped == 3
 
     def test_metrics_reported_via_get_stats(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = 2.5
         policy = bp.policy
+        assert isinstance(policy, DropAccountingPolicy)
         policy._stores_dropped = 5
         policy._blocks_dropped = 12
 
@@ -490,7 +502,7 @@ class TestBackpressure:
         assert policy._blocks_dropped == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp.store_latency_ema = 5.0
         bp._under_pressure = True
 
@@ -514,7 +526,7 @@ class TestBackpressure:
         self.manager.on_new_request(ctx)
 
         # Activate pressure.
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         initial_blocks = self.tier.get_num_blocks()
@@ -535,7 +547,7 @@ class TestBackpressure:
         for b in blocks:
             self.tier.blocks[b] = True
 
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
 
