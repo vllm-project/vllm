@@ -269,9 +269,6 @@ strategy_overrides:
       # run reported "Available KV cache memory: -13.51 GiB" -- the engine could
       # not start even with the sparse-attention indexer buffer halved. TP4
       # lands at ~81 GiB per rank and leaves a healthy KV pool.
-      # --monokernel stays off on this SKU: the gfx942 kernels' own weight
-      # copies take a rank to 170.11 GiB, which does not leave a usable KV
-      # pool on 192 GB. MI325X carries the flag.
       mi300x:
         extra_args:
           - "--engram-config"
@@ -286,12 +283,7 @@ strategy_overrides:
           - '{"cpu_offload":true}'
           - "--compilation-config"
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          # Mono decode on gfx942 (vllm-project/vllm#60731), the same
-          # --monokernel switch as MI355X. TP4 only, and decode steps of up
-          # to 42 rows (7 requests with five DSpark drafts). A larger step,
-          # a prefill, or a mixed batch takes the regular path. TP2 logs and
-          # stays on vLLM's path. The kernels keep their own FNUZ weight
-          # copies, so this flag stays off on MI300X.
+          # gfx942 mono decode (vllm-project/vllm#60731): TP4, up to 42 rows.
           - "--monokernel"
         extra_env:
           VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
@@ -864,12 +856,6 @@ guide: |
   (`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`), with prefill
   eager.
 
-  This recipe does not pass `--monokernel` on MI300X. The gfx942 kernels
-  ([vllm-project/vllm#60731](https://github.com/vllm-project/vllm/pull/60731))
-  keep their own copies of the weights, 170.11 GiB a rank at TP4, which does
-  not leave a usable KV pool on a 192 GB card. MI325X is the gfx942 SKU that
-  carries the flag.
-
   The offload resolves on gfx942 only on builds carrying
   [vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491),
   the same gate MI325X and MI355X need. Those builds also default `cpu_offload`
@@ -895,19 +881,16 @@ guide: |
   eagerly.
 
   `--monokernel` selects the gfx942 mono decode kernels from
-  [vllm-project/vllm#60731](https://github.com/vllm-project/vllm/pull/60731),
-  on the same flag MI355X uses. They run a backbone layer as two persistent
-  launches for decode steps of up to 42 rows, which with five DSpark drafts
-  is concurrency 7. A larger step, a prefill, or a mixed batch takes the
-  regular path. The kernels are built for TP4 only: at TP2 the server logs
-  that and every layer stays on vLLM's path. gfx942 has no scaled FP4 or FP8
-  MFMA, so the kernels keep their own FNUZ copies of the weights. On the
-  #60731 measurement those copies take a rank from 98.88 GiB of weights to
-  170.11 GiB, and at `--gpu-memory-utilization 0.9` the MI325X KV pool still
-  holds 11.18 million tokens. The flag needs a ROCm nightly from 2026-10-20
-  or later; `nightly-rocm100-df3bd094aeea829f27baa0a5282830464f601d9f` is the
-  first. Earlier builds have the flag for gfx950 only and refuse to start on
-  MI325X.
+  [vllm-project/vllm#60731](https://github.com/vllm-project/vllm/pull/60731).
+  They cover decode steps of up to 42 rows (concurrency 7 with five DSpark
+  drafts) at TP4. Larger steps, prefill, and mixed batches take the regular
+  path, and TP2 stays on vLLM's path. The kernels keep their own FNUZ weight
+  copies: #60731 measured 170.11 GiB a rank, against 98.88 GiB without them,
+  and at `--gpu-memory-utilization 0.9` the MI325X KV pool still held 11.18
+  million tokens. That footprint does not fit MI300X, so this recipe does not
+  pass the flag there. Use a ROCm nightly from 2026-10-20 or later;
+  `nightly-rocm100-df3bd094aeea829f27baa0a5282830464f601d9f` is the first.
+  Earlier builds have the flag for gfx950 only and refuse to start on MI325X.
 
   The offload resolves on gfx942 only on builds carrying
   [vllm-project/vllm#57491](https://github.com/vllm-project/vllm/pull/57491),
