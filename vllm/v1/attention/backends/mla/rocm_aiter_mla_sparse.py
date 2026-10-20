@@ -956,7 +956,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
                 )
                 if attn_metadata.num_decode_tokens == num_tokens
-                # The split-K reduce aranges the whole row, so it needs a
+                # The split-K reduce spans the whole row, so it needs a
                 # power-of-two width: 512 NoPE rows, not 576 RoPE rows.
                 and q.shape[-1] == triton.next_power_of_2(q.shape[-1])
                 else 1
