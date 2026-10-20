@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
     compute_layout_strides,
@@ -806,6 +807,9 @@ class _TableBuilder:
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         return common_attn_metadata.block_table_tensor
 
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        return self.build(0, common_attn_metadata)
+
 
 _VLLM_CONFIG = SimpleNamespace(
     model_config=SimpleNamespace(max_model_len=8192),
@@ -883,3 +887,171 @@ def test_packed_token_cache_cannot_be_split():
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
+
+
+class _ReusableBuilder(_TableBuilder):
+    """A builder whose later groups re-apply their block table to the first
+    group's metadata."""
+
+    supports_update_block_table = True
+    builds = 0
+
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        _ReusableBuilder.builds += 1
+        return SimpleNamespace(
+            block_table=common_attn_metadata.block_table_tensor,
+            block_size=self.kv_cache_spec.block_size,
+        )
+
+    def update_block_table(self, metadata, blk_table, slot_mapping):
+        return SimpleNamespace(block_table=blk_table, block_size=metadata.block_size)
+
+
+def _model_specific(per_group: bool) -> MagicMock:
+    model_specific = MagicMock()
+    model_specific.get_extra_common_attn_kwargs.return_value = {}
+    model_specific.get_extra_attn_kwargs.return_value = {}
+    model_specific.per_group_common_attn_kwargs = per_group
+    return model_specific
+
+
+def _build_three_groups(spec, **kwargs):
+    _ReusableBuilder.builds = 0
+    backend = SimpleNamespace(get_builder_cls=lambda: _ReusableBuilder)
+    groups = []
+    for i in range(3):
+        group = AttentionGroup(backend, [f"layer.{i}"], spec, i)
+        group.metadata_builders = [
+            _ReusableBuilder(spec, group.layer_names, None, "cpu")  # type: ignore[list-item]
+        ]
+        groups.append([group])
+    block_tables = tuple(torch.full((2, 4), i, dtype=torch.int32) for i in range(3))
+    model_specific = kwargs.pop("model_specific_attn_metadata", None)
+    if model_specific is None:
+        model_specific = _model_specific(per_group=False)
+    attn_metadata = attn_utils.build_attn_metadata(
+        attn_groups=groups,
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([5, 7], dtype=torch.int32),
+        max_seq_len=7,
+        block_tables=block_tables,
+        slot_mappings=torch.zeros(3, 2, dtype=torch.int64),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[None] * 3),
+        model_specific_attn_metadata=model_specific,
+        **kwargs,
+    )
+    for i in range(3):
+        assert attn_metadata[f"layer.{i}"].block_table is block_tables[i]
+    return model_specific
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        MambaSpec(block_size=64, shapes=((4, 8),), dtypes=(torch.float32,)),
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        ),
+    ],
+    ids=["mamba", "attention"],
+)
+def test_build_attn_metadata_reused_groups_build_once(spec):
+    """Groups past the first of their spec build no metadata of their own:
+    they only re-apply their block table to the first group's metadata."""
+    model_specific = _build_three_groups(spec)
+    assert _ReusableBuilder.builds == 1
+    assert model_specific.get_extra_attn_kwargs.call_count == 1
+
+
+def test_build_attn_metadata_per_group_inputs_keep_attention_groups_apart():
+    """Attention groups with a per-group causal or per-group model extras
+    build their own metadata; Mamba groups, which take neither, still share."""
+    attention = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    _build_three_groups(attention, causal={0: True, 1: False})
+    assert _ReusableBuilder.builds == 3
+    _build_three_groups(
+        attention, model_specific_attn_metadata=_model_specific(per_group=True)
+    )
+    assert _ReusableBuilder.builds == 3
+    mamba = MambaSpec(block_size=64, shapes=((4, 8),), dtypes=(torch.float32,))
+    _build_three_groups(mamba, causal={0: True, 1: False})
+    assert _ReusableBuilder.builds == 1
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("mixed_group", [False, True])
+@pytest.mark.parametrize("ubatch_idx", [0, 1])
+@pytest.mark.parametrize("block_stride", [0, 5])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("kernel_sizes", [(256, 256), (256, 128)])
+def test_reused_metadata_maps_kernel_blocks(
+    capture, mixed_group, ubatch_idx, block_stride, device, kernel_sizes
+):
+    """Reused groups must refresh their own persistent kernel-page tables."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    groups = []
+    for i in range(2):
+        group = _packed_group(4, 132, [128, 256])
+        group.layer_names = [f"layer.{i}"]
+        group.kv_cache_group_id = i
+        group.backend.get_builder_cls = lambda: _ReusableBuilder
+        group.create_metadata_builders(
+            _VLLM_CONFIG,
+            device,
+            kernel_block_size=kernel_sizes[i],
+            num_metadata_builders=2,
+        )
+        group.kernel_block_stride = block_stride
+        groups.append([group])
+    if mixed_group:
+        other = _packed_group(4, 132, [128, 256])
+        other.layer_names = ["unreused"]
+        other.kv_cache_group_id = 1
+        other.create_metadata_builders(
+            _VLLM_CONFIG, device, kernel_block_size=256, num_metadata_builders=2
+        )
+        groups[1].append(other)
+    tables = (
+        torch.tensor([[1, 3]], dtype=torch.int32, device=device),
+        torch.tensor([[2, 4]], dtype=torch.int32, device=device),
+    )
+    pointers = None
+    for capture_pass in (capture, False):
+        metadata = attn_utils.build_attn_metadata(
+            attn_groups=groups,
+            num_reqs=1,
+            num_tokens=1,
+            query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32, device=device),
+            query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+            max_query_len=1,
+            seq_lens=torch.tensor([5], dtype=torch.int32, device=device),
+            max_seq_len=5,
+            block_tables=tables,
+            slot_mappings=torch.zeros(2, 1, dtype=torch.int64, device=device),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[None] * 2),
+            for_cudagraph_capture=capture_pass,
+            ubatch_idx=ubatch_idx,
+        )
+        for i, table in enumerate(tables):
+            blocks_per_page = 1024 // kernel_sizes[i]
+            expected = table[..., None] * (
+                block_stride or blocks_per_page
+            ) + torch.arange(blocks_per_page, device=device)
+            torch.testing.assert_close(
+                metadata[f"layer.{i}"].block_table, expected.reshape(1, -1).int()
+            )
+            assert metadata[f"layer.{i}"].block_size == kernel_sizes[i]
+        current_pointers = [
+            metadata[f"layer.{i}"].block_table.data_ptr() for i in range(2)
+        ]
+        assert pointers is None or current_pointers == pointers
+        pointers = current_pointers
+        for table in tables:
+            table.add_(1)

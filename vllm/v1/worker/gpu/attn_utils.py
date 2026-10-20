@@ -494,10 +494,18 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     token_to_req_indices: torch.Tensor | None = None
-    # Mamba groups with the same spec and builder differ only in their state
-    # indices, so later groups re-gather those from the first group's metadata.
-    # Also at capture, so FULL graphs share the batch-level buffers.
+    # Groups with the same spec and builder type differ only in what
+    # update_block_table re-applies: the block table and slot mapping, and for
+    # Mamba the state indices gathered from them. Later groups derive their
+    # metadata from the first group's, also at capture, so FULL graphs share the
+    # batch-level buffers. Attention groups also take the per-group causal and
+    # model-specific inputs, so they share only when those are the same for
+    # every group.
     cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
+    shared_attn_inputs = isinstance(causal, (bool, torch.Tensor)) and (
+        model_specific_attn_metadata is None
+        or not model_specific_attn_metadata.per_group_common_attn_kwargs
+    )
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
@@ -551,13 +559,20 @@ def build_attn_metadata(
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             reuse_key = None
-            if attn_metadata_builder.supports_update_block_table and isinstance(
-                attn_group.kv_cache_spec, MambaSpec
+            if attn_metadata_builder.supports_update_block_table and (
+                shared_attn_inputs or isinstance(attn_group.kv_cache_spec, MambaSpec)
             ):
-                reuse_key = (attn_group.kv_cache_spec, type(attn_metadata_builder))
+                # The builder's effective spec: equal manager specs can still
+                # map to different kernel page sizes.
+                reuse_key = (
+                    attn_metadata_builder.kv_cache_spec,
+                    type(attn_metadata_builder),
+                )
             if reuse_key in cached_metadata:
                 metadata = attn_metadata_builder.update_block_table(
-                    cached_metadata[reuse_key], block_table, slot_mapping
+                    cached_metadata[reuse_key],
+                    attn_group.map_to_kernel_block_table(block_table, ubatch_idx),
+                    slot_mapping,
                 )
             elif for_cudagraph_capture:
                 metadata = attn_group.build_metadata_for_cudagraph_capture(

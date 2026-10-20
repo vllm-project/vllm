@@ -28,6 +28,10 @@ from vllm.v1.worker.utils import AttentionGroup
 class ModelSpecificAttnMetadata:
     """Base class for model-specific attention metadata."""
 
+    per_group_common_attn_kwargs: ClassVar[bool] = False
+    """Whether get_extra_common_attn_kwargs depends on the KV cache group. If
+    not, attention groups with the same spec and builder share one metadata."""
+
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:

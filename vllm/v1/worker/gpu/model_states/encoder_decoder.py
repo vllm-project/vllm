@@ -24,6 +24,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 @dataclass
 class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
+    # Cross-attention groups get their encoder lengths.
+    per_group_common_attn_kwargs = True
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
