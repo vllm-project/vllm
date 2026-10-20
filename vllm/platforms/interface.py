@@ -197,6 +197,12 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
+    def get_hisparse_backend_cls(self) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        if self.is_cuda():
+            return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
+        return None
+
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 

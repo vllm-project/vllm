@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -126,8 +127,10 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
+    backend = get_hisparse_backend()
+    backend.validate_kv_cache_config(kv_cache_config)
     host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
@@ -137,6 +140,7 @@ def init_hisparse_kv_cache(
             kernel_block_sizes,
             host_pool,
         )
+        backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,

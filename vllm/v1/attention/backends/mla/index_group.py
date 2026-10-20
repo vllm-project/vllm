@@ -11,11 +11,13 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.forward_context import in_piecewise_cudagraph
-from vllm.utils.torch_utils import current_stream
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream as default_current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
     FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
@@ -25,11 +27,27 @@ from vllm.v1.hisparse.runtime import (
 
 
 def _create_side_stream(device: torch.device) -> torch.Stream:
+    if current_platform.get_hisparse_backend_cls() is not None:
+        return get_hisparse_backend().create_stream(device, generic=True)
     return torch.Stream(device=device)
 
 
 def _create_event() -> torch.Event:
+    if current_platform.get_hisparse_backend_cls() is not None:
+        return get_hisparse_backend().create_event()
     return torch.Event()
+
+
+def current_stream() -> Any:
+    if current_platform.get_hisparse_backend_cls() is not None:
+        return get_hisparse_backend().current_stream()
+    return default_current_stream()
+
+
+def _stream_context(stream: Any) -> Any:
+    if current_platform.get_hisparse_backend_cls() is not None:
+        return get_hisparse_backend().stream_context(stream, generic=True)
+    return stream
 
 
 @dataclass
@@ -142,7 +160,7 @@ class SparseMLAIndexGroup:
                 self.side_stream.wait_event(self.logical_topk_ready)
             else:
                 self.side_stream.wait_stream(compute_stream)
-            with self.side_stream:
+            with _stream_context(self.side_stream):
                 triton_convert_req_index_to_global_index(
                     req_id_per_token,
                     block_table,
@@ -326,7 +344,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         assert prefill_stream is not None
         block_table = plan.block_table[request_start : request_start + batch_size]
         prefill_stream.wait_stream(current_stream())
-        with prefill_stream:
+        with _stream_context(prefill_stream):
             ops.cp_gather_and_upconvert_fp8_kv_cache(
                 cache.view.cache,
                 dst,
