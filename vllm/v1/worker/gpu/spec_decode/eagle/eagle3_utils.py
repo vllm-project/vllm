@@ -8,6 +8,7 @@ import torch.nn as nn
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
+from vllm.v1.spec_decode.registry import get_speculative_method
 
 logger = init_logger(__name__)
 
@@ -19,6 +20,9 @@ def requires_aux_hidden_states(spec_config: SpeculativeConfig) -> bool:
             or {}
         )
         return eagle_config.get("use_aux_hidden_state", True)
+    registered = get_speculative_method(spec_config.method)
+    if registered is not None:
+        return registered.uses_aux_hidden_states
     return spec_config.method in ("dflash", "dspark", "extract_hidden_states")
 
 
