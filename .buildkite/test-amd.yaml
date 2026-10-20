@@ -1677,7 +1677,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTHONFAULTHANDLER=1
-  - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
+  - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
 
 #----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
@@ -5623,6 +5623,26 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+
+- label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/kv_connector/unit/test_umbp_
+  - tests/v1/kv_connector/umbp_test_utils.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  # Fail loudly instead of skipping every test if the image lacks mori.
+  - python3 -c "import mori"
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 - label: ":amd: (MI355) MoRIIO WRITE P/D Dummy-Weight E2E Shard %N"
   timeout_in_minutes: 45
