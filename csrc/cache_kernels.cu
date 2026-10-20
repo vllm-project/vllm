@@ -531,9 +531,11 @@ __global__ void concat_and_cache_mla_grouped_kernel(
 // which is at the launch floor for small token counts but latency-bound for
 // prefill-sized launches. From mla_cache_vec_min_tokens<kv_dt>() tokens the
 // launchers below switch to one 32-lane group per token,
-// kMlaCacheVecTokensPerBlock tokens per block, and 16-byte vector loads and
-// stores through vectorize_with_alignment, which falls back to scalar accesses
-// for rows that are not 16-byte aligned or not a multiple of the vector size.
+// kMlaCacheVecTokensPerBlock tokens per block, and vector accesses through
+// vectorize_with_alignment (16-byte loads; 16-byte stores for the plain
+// cache, 16 / sizeof(scalar_t)-byte stores for fp8).
+// The helper copies an unaligned prefix and tail with scalar accesses, and
+// the whole row only when the source and cache rows cannot both be aligned.
 // Both layouts apply the same per-element conversion, so the cache bytes are
 // identical. The threshold is per cache dtype: the plain copy is faster on the
 // vector layout from a few hundred tokens, and the original 512-thread blocks

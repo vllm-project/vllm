@@ -861,11 +861,13 @@ def test_concat_and_cache_mla_strided_input(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("shared_slot_mapping", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e5m2"])
+@pytest.mark.parametrize("num_tokens", [42, 2048])
 @torch.inference_mode()
 def test_concat_and_cache_mla_grouped(
     device: str,
     shared_slot_mapping: bool,
     kv_cache_dtype: str,
+    num_tokens: int,
 ) -> None:
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip("fp8_e5m2 KV cache is not supported on ROCm/HIP")
@@ -875,9 +877,8 @@ def test_concat_and_cache_mla_grouped(
     torch.accelerator.set_device_index(device)
 
     num_layers = 5
-    num_tokens = 42
-    num_blocks = 8
     block_size = 16
+    num_blocks = max(8, 2 * num_tokens // block_size)
     kv_lora_rank = 512
     qk_rope_head_dim = 64
     entry_size = kv_lora_rank + qk_rope_head_dim
