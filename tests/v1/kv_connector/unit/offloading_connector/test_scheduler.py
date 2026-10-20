@@ -82,6 +82,39 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 
+def test_update_offload_keys_without_scanning_hash_prefix():
+    """Incremental key updates must not iterate over the earlier request hashes."""
+
+    class IndexOnlyHashes(list[BlockHash]):
+        def __iter__(self):
+            raise AssertionError("Request hashes must be accessed by index")
+
+    config = MagicMock()
+    config.kv_group_configs = [
+        SimpleNamespace(
+            group_idx=group_idx, hashes_per_chunk=stride, tokens_per_chunk=16 * stride
+        )
+        for group_idx, stride in enumerate((1, 2, 4))
+    ]
+    request = MagicMock(kv_transfer_params=None, block_hashes=IndexOnlyHashes())
+    context = ReqContext("test")
+    state = RequestOffloadState(config, request, context, RequestOffloadingContext())
+
+    for num_hashes in (0, 1, 4, 7, 7, 8):
+        request.block_hashes.extend(
+            BlockHash(bytes([i])) for i in range(len(request.block_hashes), num_hashes)
+        )
+        state.update_offload_keys()
+        for group_idx, stride in enumerate((1, 2, 4)):
+            expected = [
+                make_offload_key(bytes([i]), group_idx)
+                for i in range(stride - 1, num_hashes, stride)
+            ]
+            assert state.group_states[group_idx].offload_keys == expected
+            for chunk_idx, key in enumerate(expected, 1):
+                assert context.get_offload_key_position(key) == chunk_idx * stride * 16
+
+
 @pytest.mark.parametrize(
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
