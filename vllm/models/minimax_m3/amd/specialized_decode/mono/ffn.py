@@ -386,7 +386,7 @@ def mfma_f32(a, b, acc):
 def stage_router(c, task):
     """Experts 16 tile .. over K part ``part`` (384 columns, 48 a wave) for
     every token: FP32 weight x f32(X) on f32 MFMAs, the waves summed in order
-    -> LOGIT[token][expert][part]. A lane's float4 of weights and four bf16 of
+    -> ``LOGIT[token][expert][part]``. A lane's float4 of weights and four bf16 of
     X feed four MFMAs (K slot = its lane group), the same K order on both."""
     s, tid, lane, wave, red, a = (
         c["S"],
@@ -655,7 +655,7 @@ def x_operands(c, base, row, k_dwords, st0, steps):
 def stage_up(c, u, j, weights=None):
     """Slot u's tile pair j: gate rows 16 j .., up rows 768 + 16 j .. of its
     expert over this wave's K steps; waves summed in order; SwiGLU-OAI ->
-    bf16 MID[u][column][16 j ..], then UPF."""
+    bf16 ``MID[u][column][16 j ..]``, then UPF."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     e = tab_ld(c, T_SLOT_E + u)
     cnt = slot_count(c, u)
@@ -699,7 +699,7 @@ def up_weights(c, rgs, st0):
 def stage_down(c, tasks):
     """Rows 16 task .. of every task in ``tasks``: a slot a wave, round robin,
     its MID columns loaded once for every task; a column's result ->
-    LDS CONTRIB[task][pick], then each token's routed picks (top-k order) x
+    LDS ``CONTRIB[task][pick]``, then each token's routed picks (top-k order) x
     their weights + the shared expert -> bf16 pairs pushed to every rank's FFN
     region."""
     s, tid, lane, wave, a = c["S"], c["tid"], c["lane"], c["wave"], c["args"]
