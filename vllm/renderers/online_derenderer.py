@@ -880,6 +880,9 @@ class OnlineDerenderer:
                         finish_reason=choice.finish_reason,
                         stop_reason=choice.stop_reason,
                         logprobs=completion_logprobs,
+                        prompt_token_ids=(
+                            gen.prompt_token_ids if return_token_ids else None
+                        ),
                         token_ids=choice.token_ids if return_token_ids else None,
                     )
                 )
@@ -994,6 +997,9 @@ class OnlineDerenderer:
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                     stop_reason=choice.stop_reason,
+                    prompt_token_ids=(
+                        generate_chunk.prompt_token_ids if return_token_ids else None
+                    ),
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
