@@ -10,7 +10,8 @@ pub use vllm_parser::tool::{
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
     HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MiMoToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3JsonToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Qwen3CoderToolParser, Qwen3JsonToolParser, SeedOssToolParser, Step5ToolParser, ToolParser,
+    ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -44,6 +45,7 @@ pub mod names {
     // An alias of `qwen3_coder` for the same XML format.
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered tool parser implementation.
@@ -88,6 +90,7 @@ impl ToolParserFactory {
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3JsonToolParser>(names::QWEN3_JSON)
+            .register_parser::<Step5ToolParser>(names::STEP5)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
@@ -126,6 +129,8 @@ impl ToolParserFactory {
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS);
 
