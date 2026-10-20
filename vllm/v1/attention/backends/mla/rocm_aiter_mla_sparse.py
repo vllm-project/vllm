@@ -66,6 +66,17 @@ def _use_rocm_sparse_triton(
     return head_size == kv_lora_rank and (num_prefills > 0 or num_decodes > 0)
 
 
+def _use_rocm_sparse_triton_fp8_sink(*, kv_cache_dtype: str, has_sinks: bool) -> bool:
+    """Select model-dtype Q over a dequantized FP8 cache for sink layers.
+
+    AITER's sink path quantizes Q to FP8 with a static per-tensor scale, so
+    both QK operands carry e4m3 rounding, and it needs a separate return-LSE
+    kernel. The ragged Triton kernel applies the sink in-kernel and rounds
+    only the cached KV rows.
+    """
+    return has_sinks and kv_cache_dtype.startswith("fp8")
+
+
 def _is_long_bf16_prefill(
     kv_dtype: torch.dtype,
     metadata: "ROCMAiterMLASparseMetadata",
@@ -894,6 +905,12 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 )
             )
         )
+        # Model-dtype Q over an FP8 cache; see _use_rocm_sparse_triton_fp8_sink.
+        triton_fp8_sink = (
+            need_lse
+            and q.dtype in (torch.float16, torch.bfloat16)
+            and kv_c_and_k_pe_cache.dtype == current_platform.fp8_dtype()
+        )
 
         # Long BF16 prefills omit persistent metadata. gfx942's
         # nonpersistent ASM path is unsupported or unsafe for these shapes.
@@ -905,6 +922,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         )
         if (
             triton_sink_fallback
+            or triton_fp8_sink
             or triton_prefill_fallback
             or _use_rocm_sparse_triton(
                 head_size=q.shape[-1],
@@ -938,6 +956,9 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
                 )
                 if attn_metadata.num_decode_tokens == num_tokens
+                # The split-K reduce aranges the whole row, so it needs a
+                # power-of-two width: 512 NoPE rows, not 576 RoPE rows.
+                and q.shape[-1] == triton.next_power_of_2(q.shape[-1])
                 else 1
             )
             if decode_num_splits > 1:
@@ -1161,15 +1182,20 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
         head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
         # The AITER sparse MLA opt-in takes precedence and reads FP8 Q.
-        use_triton_sparse = not self.use_aiter_sparse_mla and _use_rocm_sparse_triton(
-            head_size=head_size,
-            kv_lora_rank=self.kv_lora_rank,
-            num_prefills=attn_metadata.num_prefills,
-            num_decodes=attn_metadata.num_decodes,
+        use_triton_sparse = not self.use_aiter_sparse_mla and (
+            _use_rocm_sparse_triton(
+                head_size=head_size,
+                kv_lora_rank=self.kv_lora_rank,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+            )
+            or _use_rocm_sparse_triton_fp8_sink(
+                kv_cache_dtype=self.kv_cache_dtype, has_sinks=self.sinks is not None
+            )
         )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            # FP8 Q is an AITER asm input convention. The Triton NoPE path
+            # FP8 Q is an AITER asm input convention. The Triton path
             # consumes model-dtype Q and dequantizes only the KV cache.
             if fp8_attention and not use_triton_sparse:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
