@@ -665,7 +665,7 @@ guide: |
     --max-num-seqs 8 --max-num-batched-tokens 16384 \
     --max-cudagraph-capture-size "$MAX_CAPTURE" \
     --compilation-config "{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"cudagraph_capture_sizes\":[$CAPTURES]}" \
-    --speculative-config "{\"model\":\"Inferact/Kimi-K3-DSpark\",\"attention_backend\":\"TOKENSPEED_MLA\",\"method\":\"dspark\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"greedy\",\"rejection_sample_method\":\"block\"}" \
+    --speculative-config "{\"model\":\"Inferact/Kimi-K3-DSpark\",\"attention_backend\":\"TOKENSPEED_MLA\",\"method\":\"dspark\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\"}" \
     --enable-prefix-caching --prefix-match-unit 128 \
     --no-enable-flashinfer-autotune \
     --moe-backend auto --load-format fastsafetensors \
