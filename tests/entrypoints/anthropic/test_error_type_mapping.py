@@ -86,7 +86,7 @@ async def test_stream_error_event_uses_translated_type(
     payload_line = [
         line for line in error_events[0].splitlines() if line.startswith("data: ")
     ][0]
-    payload = json.loads(payload_line[len("data: "):])
+    payload = json.loads(payload_line[len("data: ") :])
     assert payload["type"] == "error"
     assert payload["error"]["type"] == expected_type
     assert payload["error"]["message"] == "boom"
@@ -103,14 +103,12 @@ async def test_stream_mid_stream_exception_maps_to_api_error():
         yield  # pragma: no cover - make this an async generator
 
     converter = AnthropicServingMessages.__new__(AnthropicServingMessages)
-    events = [
-        e async for e in converter.message_stream_converter(failing_generator())
-    ]
+    events = [e async for e in converter.message_stream_converter(failing_generator())]
     error_events = [e for e in events if e.startswith("event: error")]
     assert len(error_events) == 1
     payload_line = [
         line for line in error_events[0].splitlines() if line.startswith("data: ")
     ][0]
-    payload = json.loads(payload_line[len("data: "):])
+    payload = json.loads(payload_line[len("data: ") :])
     assert payload["error"]["type"] == "api_error"
     assert payload["error"]["message"] == "kaboom"
