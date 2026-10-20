@@ -73,6 +73,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         enable_sleep_mode: false,
         supports_draft_weight_updates: false,
         effective_attention_block_size: None,
+        supports_inline_hidden_states: false,
     }
 }
 

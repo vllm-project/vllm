@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
     resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
+    validate_inline_kv_request,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -556,6 +557,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
         return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inline_output(cls, data):
+        validate_inline_kv_request(data)
+        return data
 
     @model_validator(mode="before")
     @classmethod
