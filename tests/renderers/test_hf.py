@@ -1081,8 +1081,8 @@ class TestConsolidateSystemMessages:
         assert conversation[1]["role"] == "system"
 
 
-def _make_renderer(renderer_cls, model: str):
-    model_config = ModelConfig(model=model, dtype="float32")
+def _make_renderer(renderer_cls, model: str, **model_kwargs):
+    model_config = ModelConfig(model=model, dtype="float32", **model_kwargs)
     config = SimpleNamespace(
         model_config=model_config,
         parallel_config=SimpleNamespace(_api_process_rank=0),
@@ -1130,3 +1130,22 @@ def test_render_chat_rejects_unsupported_sanitize_control_tokens():
             renderer.render_chat([[{"role": "user", "content": "hi"}]], params)
     finally:
         renderer.shutdown()
+
+
+def test_sanitize_control_tokens_flag():
+    """`--sanitize-control-tokens` applies to every request and can't be
+    turned off per request; unsupported renderers fail at startup."""
+    with pytest.raises(ValueError, match="--sanitize-control-tokens"):
+        _make_renderer(
+            DeepseekV32Renderer, "Qwen/Qwen3-0.6B", sanitize_control_tokens=True
+        )
+
+    renderer = _make_renderer(
+        HfRenderer, "Qwen/Qwen3-0.6B", sanitize_control_tokens=True
+    )
+    params = ChatParams(chat_template_kwargs={"sanitize_control_tokens": False})
+    try:
+        params = renderer._apply_sanitize_control_tokens(params)
+    finally:
+        renderer.shutdown()
+    assert params.chat_template_kwargs["sanitize_control_tokens"] is True

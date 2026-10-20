@@ -280,11 +280,11 @@ completion = client.chat.completions.create(
 )
 ```
 
-To enable it for all requests, start the server with
-`--default-chat-template-kwargs '{"sanitize_control_tokens": true}'`. This uses the
+To enable it for all requests, start the server with `--sanitize-control-tokens`. Requests
+cannot turn it off. This uses the
 [`sanitize_control_tokens`](https://github.com/huggingface/transformers/pull/47386) option of
 `apply_chat_template`. Models whose renderer does not support it, such as DeepSeek-V3.2 and
-DeepSeek-V4, reject requests that set it.
+DeepSeek-V4, reject requests that set it and fail to start with `--sanitize-control-tokens`.
 
 ## Ray Serve LLM
 

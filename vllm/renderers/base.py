@@ -118,6 +118,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
+        # `is True` skips mock configs
+        self.sanitize_control_tokens = (
+            getattr(self.model_config, "sanitize_control_tokens", False) is True
+        )
+        if self.sanitize_control_tokens and not self.supports_sanitize_control_tokens:
+            raise ValueError(
+                f"{type(self).__name__} does not support `--sanitize-control-tokens`."
+            )
+
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while
         # staying serialized with the serving path through the same
@@ -1294,7 +1303,15 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         )
 
-    def _check_sanitize_control_tokens(self, chat_params: ChatParams) -> None:
+    def _apply_sanitize_control_tokens(self, chat_params: ChatParams) -> ChatParams:
+        if self.sanitize_control_tokens:
+            chat_params = replace(
+                chat_params,
+                chat_template_kwargs={
+                    **chat_params.chat_template_kwargs,
+                    "sanitize_control_tokens": True,
+                },
+            )
         if (
             chat_params.chat_template_kwargs.get("sanitize_control_tokens")
             and not self.supports_sanitize_control_tokens
@@ -1302,6 +1319,7 @@ class BaseRenderer(ABC, Generic[_T]):
             raise VLLMValidationError(
                 f"{type(self).__name__} does not support `sanitize_control_tokens`."
             )
+        return chat_params
 
     def render_chat(
         self,
@@ -1312,7 +1330,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
-        self._check_sanitize_control_tokens(chat_params)
+        chat_params = self._apply_sanitize_control_tokens(chat_params)
         arrival_time = time.time()
 
         if tok_params is None:
@@ -1353,7 +1371,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
-        self._check_sanitize_control_tokens(chat_params)
+        chat_params = self._apply_sanitize_control_tokens(chat_params)
         arrival_time = time.time()
 
         if tok_params is None:
