@@ -56,7 +56,7 @@ steps:
       - tests/distributed/test_eplb_spec_decode.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Nightly Elastic EP Scaling"
+- label: ":nvidia: (H100) [Nightly] Elastic EP Scaling"
   key: elastic-ep-scaling-test
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true

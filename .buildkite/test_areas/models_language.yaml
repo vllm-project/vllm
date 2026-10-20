@@ -134,7 +134,7 @@ steps:
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Language Models (Extended Generation)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
   timeout_in_minutes: 80
@@ -163,7 +163,7 @@ steps:
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-- label: ":nvidia: (H200 MIG 18GB) Nightly Language Models (PPL)"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Language Models (PPL)"
   key: language-models-test-ppl
   timeout_in_minutes: 30
   device: h200_18gb
@@ -200,7 +200,7 @@ steps:
       - vllm/platforms/rocm.py
       - tests/models/language/generation_ppl_test
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Language Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Pooling)"
   device: h200_35gb
   key: language-models-test-extended-pooling
   automatic_shard: true
@@ -227,7 +227,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (MTEB)"
   key: language-models-test-mteb
   automatic_shard: true
   timeout_in_minutes: 68

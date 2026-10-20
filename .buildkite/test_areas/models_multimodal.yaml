@@ -151,7 +151,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
@@ -172,7 +172,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Multimodal Models (PPL)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
   optional: true
@@ -191,7 +191,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Multimodal Models (Extended Generation 2)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 2)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
   automatic_shard: true
@@ -212,7 +212,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Multimodal Models (Extended Generation 3)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 3)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
   optional: true
@@ -231,7 +231,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Nightly Multimodal Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
   optional: true
   device: h200_18gb

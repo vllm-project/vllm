@@ -64,7 +64,7 @@ steps:
       - vllm/platforms/rocm.py
 
 
-- label: ":nvidia: (H200 MIG 18GB) Nightly GGUF Plugin"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] GGUF Plugin"
   key: gguf-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -91,7 +91,7 @@ steps:
       - tests/plugins_tests/gguf
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) Nightly BitsAndBytes Plugin"
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] BitsAndBytes Plugin"
   key: bitsandbytes-plugin
   device: h200_18gb
   timeout_in_minutes: 30
@@ -108,7 +108,7 @@ steps:
     - pip install "vllm-bnb-plugin >= 0.0.1"
     - pytest -v -s plugins_tests/bitsandbytes -m 'not distributed'
 
-- label: ":nvidia: (L4) Nightly BitsAndBytes Plugin"
+- label: ":nvidia: (L4) [Nightly] BitsAndBytes Plugin"
   key: bitsandbytes-plugin-2-gpus
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
