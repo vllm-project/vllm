@@ -23,10 +23,16 @@ from vllm.platforms.rocm import on_gfx950  # noqa: E402
 if not on_gfx950():
     pytest.skip("gfx950 only", allow_module_level=True)
 
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (  # noqa: E402
     gemma_fused_add_rmsnorm,
 )
-from vllm.models.minimax_m3.amd.specialized_decode.mono import ffn  # noqa: E402
+from vllm.models.minimax_m3.amd.specialized_decode.mono import (  # noqa: E402
+    ffn,
+    sync,
+)
 from vllm.models.minimax_m3.amd.specialized_decode.mono.runner import (  # noqa: E402
     FfnRunner,
 )
@@ -515,6 +521,110 @@ def test_isa_encodes_the_mailbox_contract(tp4_isa):
             assert ops[i + 1][:2] == ["s_waitcnt", "vmcnt(0)"]
         if op[0] == "buffer_inv":
             assert ops[i - 1][0] == "s_waitcnt" and "vmcnt(0)" in ops[i - 1][1]
+
+
+def test_isa_scopes_every_handoff_access(tp4_isa):
+    """gfx950 encodings: every global access (only hand-offs use them) carries
+    ``sc1``, alone for agent scope or with ``sc0`` for system scope, and every
+    agent-scope store / load form ``mono/sync.py`` uses is lowered that way."""
+    accesses = [
+        op for op in tp4_isa if op[0].startswith(("global_load", "global_store"))
+    ]
+    assert accesses and all("sc1" in op for op in accesses)
+    agent = {op[0] for op in accesses if "sc0" not in op}
+    assert {
+        "global_store_dword",
+        "global_store_dwordx2",
+        "global_store_short",
+        "global_load_dword",
+        "global_load_dwordx2",
+        "global_load_dwordx4",
+    } <= agent
+
+
+_STREAM = fx.Stream(None)
+
+
+@flyc.kernel(name="handoff_probe", known_block_size=[64, 1, 1])
+def _handoff_probe(data: fx.Int64, pair: fx.Int64, out: fx.Int64, v: fx.Int32):
+    tid = fx.Int32(fx.thread_idx.x)
+    at = data + fx.Int64(tid) * 64
+    sync.store_dev(at, 0, [v])
+    sync.store_dev(at, 2, [v, tid])
+    sync.store16(at + 16, 0, fx.Float32(v).to(fx.BFloat16), "agent")
+    sync.sync_release("agent")
+    sync.store64(pair, tid, sync.pack(v, tid), "agent")
+    got = sync.load64(pair, 63 - tid, "agent")
+    sync.sync_acquire("agent")
+    back = data + fx.Int64(63 - tid) * 64
+    a = sync.load_dev(back, 0)
+    b = sync.load_dev(back, 2, 2)
+    c = sync.load_dev(back, 4, 4)
+    sync.store32(out, tid, a + b[1] + c[3] + fx.Int32(got), "agent")
+
+
+@flyc.jit
+def _launch_handoff_probe(
+    data: fx.Int64,
+    pair: fx.Int64,
+    out: fx.Int64,
+    v: fx.Int32,
+    stream: fx.Stream = _STREAM,
+):
+    _handoff_probe(data, pair, out, v).launch(grid=(1,), block=(64,), stream=stream)
+
+
+def test_isa_orders_handoff_data_around_av_none_fences():
+    """The agent ``av none`` release / acquire on gfx950: a completion wait,
+    not an L2 write-back / invalidate, between the data stores and the pair
+    store, and between the pair load and the data loads (the data's addresses
+    do not depend on the pair, so only the acquire orders them)."""
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import (
+        code_object,
+    )
+
+    if OBJDUMP is None:
+        pytest.skip("needs llvm-objdump")
+    assert OBJDUMP is not None
+    buf = torch.zeros(1 << 14, dtype=torch.uint8, device="cuda")
+    base = buf.data_ptr()
+    fn = flyc.compile(
+        _launch_handoff_probe,
+        base,
+        base + 8192,
+        base + 12288,
+        7,
+        torch.cuda.current_stream(),
+    )
+    elf = Path(tempfile.mkdtemp()) / "probe.elf"
+    elf.write_bytes(code_object(fn._keepalive._ir_text))
+    isa = subprocess.run(
+        [OBJDUMP, "-d", "--mcpu=gfx950", str(elf)], capture_output=True, text=True
+    ).stdout
+    ops = [line.split("//")[0].split() for line in isa.splitlines() if "\t" in line]
+    ops = [op for op in ops if op]
+    stores = [i for i, op in enumerate(ops) if op[0].startswith("global_store")]
+    loads = [i for i, op in enumerate(ops) if op[0].startswith("global_load")]
+    assert all("sc1" in ops[i] and "sc0" not in ops[i] for i in stores + loads)
+    *data_stores, pair_store, _out = stores
+    pair_load, *data_loads = loads
+    assert ops[pair_store][0] == "global_store_dwordx2"
+    assert ops[pair_load][0] == "global_load_dwordx2"
+    assert {ops[i][0] for i in data_loads} == {
+        "global_load_dword",
+        "global_load_dwordx2",
+        "global_load_dwordx4",
+    }
+
+    def drained(lo, hi):
+        return any(
+            ops[i][0] == "s_waitcnt" and "vmcnt(0)" in ops[i][1] for i in range(lo, hi)
+        )
+
+    assert max(data_stores) < pair_store < pair_load < min(data_loads)
+    assert drained(max(data_stores) + 1, pair_store)
+    assert drained(pair_load + 1, min(data_loads))
+    assert not [op for op in ops if op[0] in ("buffer_wbl2", "buffer_inv")]
 
 
 def test_same_gpu_handoffs_do_no_l2_maintenance(tp4_isa):
