@@ -43,6 +43,19 @@ COLS = 32  # PV columns a group (one MX group of the output)
 GROUPS = HEAD_DIM // COLS  # 16
 
 PAIR = 8  # a mailbox (value, tag) pair
+# In a tuned build (``layer.MonoBuild.tuned``) the flags every CTA polls have
+# copies, CTA b polling copy b % COPIES (each copy its own lines): 256 CTAs
+# spinning on one region's lines serialize there.
+QRDY_COPIES = 8
+QRDY_STRIDE = 64  # pairs a QRDY copy: >= the tokens a launch, 512 B
+ARDY_COPIES = 8
+XRDY_COPIES = 8
+CRDY_COPIES = 8
+
+
+def flag_stride(n: int) -> int:
+    """Pairs a copy of an n-flag region: whole 128 B lines."""
+    return -(-n // 16) * 16
 
 
 def cdiv(a, b):
@@ -129,25 +142,31 @@ def byte_layout(items, start=0, align=256):
     return out
 
 
-def front_scratch(s: int, d: Dims) -> dict:
+def front_scratch(s: int, d: Dims, tuned: bool = False) -> dict:
     """K1's scratch regions -> (byte offset, bytes): published data (plain
-    words behind a flag) and mailbox pairs."""
+    words behind a flag) and mailbox pairs (``tuned``: the polled flags'
+    copies)."""
+    xrdy = WQKV_KPARTS * s * PAIR  # a flag a (token, K half)
+    qrdy = s * PAIR
+    if tuned:
+        xrdy = XRDY_COPIES * flag_stride(WQKV_KPARTS * s) * PAIR
+        qrdy = QRDY_COPIES * QRDY_STRIDE * PAIR
     return byte_layout(
         [
             ("x8", s * HIDDEN),  # e4m3 words (S > 16: quantized once, shared)
             ("x8s", s * HIDDEN // 32 * 4),  # an i32 code a group
-            ("xrdy", WQKV_KPARTS * s * PAIR),  # a flag a (token, K half)
+            ("xrdy", xrdy),
             ("qkvp", WQKV_KPARTS * s * QKV_ROWS * PAIR),
             ("qx8", s * Q_RANK),  # e4m3 words
             ("qx8s", s * Q_RANK // 32 * 4),  # an i32 code a group
-            ("qrdy", s * PAIR),
+            ("qrdy", qrdy),
         ]
     )
 
 
-def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
+def back_scratch(s: int, d: Dims, start: int = 0, tuned: bool = False) -> dict:
     """K2's scratch regions, laid out past ``start``: published data (plain)
-    and flag pairs."""
+    and flag pairs (``tuned``: the polled flags' copies)."""
     ck = (
         64 if GFX942 or (d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256) else 128
     )  # back.chunk_keys
@@ -159,10 +178,18 @@ def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
             ("srdy", s * nchunk * PAIR),
             ("xo", s * d.q_rows),  # e4m3 words
             ("xos", s * d.q_rows // 32 * 4),  # an i32 code a group
-            ("crdy", s * d.heads // 8 * PAIR),
+            (
+                "crdy",
+                (
+                    CRDY_COPIES * flag_stride(s * d.heads // 8)
+                    if tuned
+                    else s * d.heads // 8
+                )
+                * PAIR,
+            ),
             ("x8b", s * d.o_rows),
             ("x8bs", s * d.o_rows // 32 * 4),
-            ("ardy", d.woa_tasks * PAIR),
+            ("ardy", (ARDY_COPIES if tuned else 1) * d.woa_tasks * PAIR),
         ],
         start=start,
     )

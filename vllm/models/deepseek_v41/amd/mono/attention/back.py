@@ -67,6 +67,8 @@ from .device import (
 )
 from .gemv import RED, gemv_loads, gemv_mfmas, lds_row, row_sum, rows_loads, rows_store
 from .plan import (
+    ARDY_COPIES,
+    CRDY_COPIES,
     DATA,
     HALF,
     HEAD_DIM,
@@ -79,6 +81,7 @@ from .plan import (
     Dims,
     back_scratch,
     cdiv,
+    flag_stride,
     front_end,
     tile_rows,
     token_tiles,
@@ -146,6 +149,16 @@ def publish(c, region, i):
     gpu.barrier()
     if c["tid"] == 0:
         c["mb"].put(region, i, fx.Int32(1))
+
+
+@traced
+def publish_copies(c, region, i, copies, stride):
+    """``publish`` into each of the flag's ``copies`` (copy j at pair j stride +
+    i: thread j stores it)."""
+    rocdl.s_waitcnt(vmcnt=0)
+    gpu.barrier()
+    if c["tid"] < copies:
+        c["mb"].put(region, c["tid"] * stride + i, fx.Int32(1))
 
 
 @traced
@@ -600,7 +613,10 @@ def stage_combine(c, unit):
             t * (d.q_rows // 32) + (h * HEAD_DIM + d0) // 32,
             cache_modifier=CM_DEV,
         )
-    publish(c, c["crdy"], t * hg_n + hg)
+    if const_expr(c["tuned"]):
+        publish_copies(c, c["crdy"], t * hg_n + hg, CRDY_COPIES, flag_stride(s * hg_n))
+    else:
+        publish(c, c["crdy"], t * hg_n + hg)
 
 
 # ---------------------------------------------------------------- wo_a / wo_b
@@ -889,7 +905,13 @@ def run_back(c, key, bid):
     # wo_a: every token tile of its group's XO rows, the next tile's in flight
     if has_woa:
         grp = woa_t // (woa_tasks // groups)
-        await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
+        if const_expr(c["tuned"]):
+            ccopy = bid % CRDY_COPIES * flag_stride(s * (heads // COMB_HEADS))
+            await_flags(
+                c, c["crdy"], s, lambda u: ccopy + u * (heads // COMB_HEADS) + grp
+            )
+        else:
+            await_flags(c, c["crdy"], s, lambda u: u * (heads // COMB_HEADS) + grp)
         stamp(c, 9)
         xo = (
             c["xo"],
@@ -909,13 +931,20 @@ def run_back(c, key, bid):
                 regs = rows_loads(c, *xo, *tiles[ti + 1])
             stage_woa(c, woa_t, ops, t0, n)
         stamp(c, 10)
-        publish(c, c["ardy"], woa_t)
+        if const_expr(c["tuned"]):
+            publish_copies(c, c["ardy"], woa_t, ARDY_COPIES, woa_tasks)
+        else:
+            publish(c, c["ardy"], woa_t)
     stamp(c, 3)
     # wo_b
     if const_expr(not early_wob):
         ops1, ops2 = wob_weights()
     stamp(c, 11)
-    await_flags(c, c["ardy"], woa_tasks, lambda u: u)
+    if const_expr(c["tuned"]):
+        acopy = bid % ARDY_COPIES * woa_tasks
+        await_flags(c, c["ardy"], woa_tasks, lambda u: acopy + u)
+    else:
+        await_flags(c, c["ardy"], woa_tasks, lambda u: u)
     stamp(c, 12)
     x8b = (
         c["x8b"],

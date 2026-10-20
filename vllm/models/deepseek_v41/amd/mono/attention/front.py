@@ -74,6 +74,8 @@ from .plan import (
     NOPE,
     Q_RANK,
     QKV_ROWS,
+    QRDY_COPIES,
+    QRDY_STRIDE,
     ROPE,
     ROWS,
     TILE,
@@ -81,7 +83,9 @@ from .plan import (
     WINDOW,
     WQKV_KPARTS,
     WQKV_TASKS,
+    XRDY_COPIES,
     Dims,
+    flag_stride,
     front_scratch,
     tile_rows,
     token_tiles,
@@ -122,6 +126,16 @@ def publish(c, region, i):
     gpu.barrier()
     if c["tid"] == 0:
         c["mb"].put(region, i, fx.Int32(1))
+
+
+@traced
+def publish_copies(c, region, i, copies, stride):
+    """``publish`` into each of the flag's ``copies`` (copy j at pair j stride +
+    i: thread j stores it)."""
+    rocdl.s_waitcnt(vmcnt=0)
+    gpu.barrier()
+    if c["tid"] < copies:
+        c["mb"].put(region, c["tid"] * stride + i, fx.Int32(1))
 
 
 @traced
@@ -392,6 +406,10 @@ def stage_qkv(c, t):
                 t * (Q_RANK // 32) + tt // 4,
                 cache_modifier=CM_DEV,
             )
+    if const_expr(c["tuned"]):
+        # QX8 is all wq_b waits on: its flags before the kv record (K2 reads
+        # that, past the launch boundary), whose quant and stores follow
+        publish_copies(c, c["qrdy"], t, QRDY_COPIES, QRDY_STRIDE)
     # kv: this thread's pair (2 tt, 2 tt + 1)
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
     e0 = bf16_round(kn[0] * cs - kn[1] * sn)
@@ -438,7 +456,8 @@ def stage_qkv(c, t):
             w1 = sb[4] | (sb[5] << 8) | (sb[6] << 16)
             sc = base + fx.Int64(blk * DATA + soff * 8)
             gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)
-    publish(c, c["qrdy"], t)
+    if const_expr(not c["tuned"]):
+        publish(c, c["qrdy"], t)
 
 
 # ---------------------------------------------------------------- wq_b
@@ -618,7 +637,14 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
                 )
             rocdl.s_waitcnt(vmcnt=0)
             gpu.barrier()
-            if tid < xq_per:
+            if const_expr(key.tuned):
+                # every copy of the flags (``plan.XRDY_COPIES``)
+                if tid < xq_per * XRDY_COPIES:
+                    u = free + n_free * (tid % xq_per)
+                    if u < xq_units:
+                        at = tid // xq_per * flag_stride(xq_units) + u
+                        c["mb"].put(c["xrdy"], at, fx.Int32(1))
+            elif tid < xq_per:
                 u = free + n_free * tid
                 if u < xq_units:
                     c["mb"].put(c["xrdy"], u, fx.Int32(1))
@@ -644,7 +670,12 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
         if has_wqkv:
             stage_wqkv(c, task, part, kops, *tiles[0], has_wqkv)
     else:
-        await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
+        if const_expr(key.tuned):
+            # a CTA polls copy bid % XRDY_COPIES of the flags
+            xcopy = bid % XRDY_COPIES * flag_stride(xq_units)
+            await_flags(c, c["xrdy"], s, lambda u: xcopy + WQKV_KPARTS * u + part)
+        else:
+            await_flags(c, c["xrdy"], s, lambda u: WQKV_KPARTS * u + part)
         xr = (
             c["x8"],
             c["x8s"],
@@ -677,7 +708,11 @@ def run_front(c, key, bid, x8_given=False, before_wqkv=None, after_wqkv=None):
     # ---- wq_b: every task's rows of a token tile at a time, the next
     # tile's rows in flight
     ropes = [wqb_rope(c, wqb_task, poss[ti], tiles[ti][1]) for ti in range(len(tiles))]
-    await_flags(c, c["qrdy"], s, lambda u: u)
+    if const_expr(key.tuned):
+        qcopy = bid % QRDY_COPIES * QRDY_STRIDE
+        await_flags(c, c["qrdy"], s, lambda u: qcopy + u)
+    else:
+        await_flags(c, c["qrdy"], s, lambda u: u)
     qx = (c["qx8"], c["qx8s"], QX_WORDS, 0, QX_WORDS, Q_RANK // 32, 0, Q_RANK // 32)
     regs = rows_loads(c, *qx, *tiles[0])
     for ti in range_constexpr(len(tiles)):

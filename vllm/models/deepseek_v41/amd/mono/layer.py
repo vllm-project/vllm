@@ -34,7 +34,15 @@ from .attention.device import (
     memrealtime,
     rsrc,
 )
-from .attention.plan import HIDDEN, WINDOW, Dims, back_scratch, front_scratch
+from .attention.plan import (
+    HIDDEN,
+    WINDOW,
+    XRDY_COPIES,
+    Dims,
+    back_scratch,
+    flag_stride,
+    front_scratch,
+)
 from .common.arch import GFX942
 from .common.mx import clamp_fp8
 from .common.ops import butterfly, fp8_pack4, peer_bases, traced
@@ -183,9 +191,9 @@ def scratch_layout(
         off = max(off, base + max(o + n for o, n in regions.values()))
         off = -(-off // 256) * 256
 
-    place(front_scratch(s, d))
+    place(front_scratch(s, d, tuned))
     place(seam.scratch_layout(s))
-    place(back_scratch(s, d, start=0))
+    place(back_scratch(s, d, start=0, tuned=tuned))
     mkey = MoeBuild(
         tokens=s, experts=experts, topk=topk, tp=tp, ug_groups=ug_groups, tuned=tuned
     )
@@ -252,7 +260,12 @@ def publish_x8(c, t):
     """Token t's two XRDY flags (one a wqkv K half) once its X8 / X8S landed."""
     rocdl.s_waitcnt(vmcnt=0)
     gpu.barrier()
-    if c["tid"] < 2:
+    if const_expr(c["tuned"]):
+        # every copy (``plan.XRDY_COPIES``): thread 2 j + h copy j's flag of half h
+        if c["tid"] < 2 * XRDY_COPIES:
+            at = c["tid"] // 2 * flag_stride(2 * c["S"]) + 2 * t + c["tid"] % 2
+            c["mb"].put(c["xrdy"], at, fx.Int32(1))
+    elif c["tid"] < 2:
         c["mb"].put(c["xrdy"], 2 * t + c["tid"], fx.Int32(1))
     gpu.barrier()
 
@@ -366,7 +379,7 @@ def build_mono_k1(key: MonoBuild):
             "klen": klen,
             "qr_out": qr_out,
         }
-        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp))}
+        flayout = {n: layout[n] for n in front_scratch(s, Dims(tp), key.tuned)}
         c = mb_front.front_context(fkey, lds.front.peek(), fargs, scratch, tag, flayout)
         c["index"] = key.index
         amb = Mailbox(tag)
@@ -814,7 +827,9 @@ def build_mono_k2(key: MonoBuild):
             "out_stride": 0,
             "zrec": zrec,
         }
-        blayout = {n: layout[n] for n in back_scratch(s, Dims(tp), start=0)}
+        blayout = {
+            n: layout[n] for n in back_scratch(s, Dims(tp), start=0, tuned=key.tuned)
+        }
         views = {"split": lds.split.peek(), "gemv": lds.gemv.peek()}
         c = mb_back.back_context(bkey, views, bargs, scratch, tag, blayout)
         amb = Mailbox(tag)
