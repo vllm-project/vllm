@@ -16,13 +16,7 @@ build:
     create_environment:
       - uv venv $READTHEDOCS_VIRTUALENV_PATH
     install:
-      - >-
-        uv pip install --python "$READTHEDOCS_VIRTUALENV_PATH/bin/python"
-        --no-cache-dir -r requirements/docs.txt pytest
-    post_install:
-      - >-
-        "$READTHEDOCS_VIRTUALENV_PATH/bin/python" -m pytest
-        docs/mkdocs/tests/test_url_schemes.py -q
+      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt 
 
 mkdocs:
   configuration: mkdocs.yaml

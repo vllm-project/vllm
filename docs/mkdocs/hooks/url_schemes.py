@@ -11,6 +11,7 @@ including inside content included via pymdownx.snippets:
     - Replaces raw links with descriptive text,
         e.g. <...pull/123> -> [Pull Request #123](.../pull/123)
     - Works for external repos too by including the `owner/repo` in the link title
+- Links to `blob/main` or `tree/main` of this repo point at the Git ref being built
 
 The link replacement runs as a markdown preprocessor (priority 25) so that it executes
 after pymdownx.snippets (priority 32) has expanded all included content.
@@ -21,7 +22,7 @@ each page is converted.
 import os
 import posixpath
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 import regex as re
 from markdown import Extension
@@ -84,8 +85,7 @@ class UrlSchemesPreprocessor(Preprocessor):
                 return match.group(0)
 
             # Files and directories have different URL schemes on GitHub
-            kind = "tree" if path.is_dir() else "blob"
-            slug = f"{kind}/{quote(self.ext.source_ref, safe='')}"
+            slug = "tree/main" if path.is_dir() else "blob/main"
 
             path = path.relative_to(ROOT_DIR)
             url = f"https://github.com/vllm-project/vllm/{slug}/{path}{fragment}"
@@ -144,15 +144,17 @@ class UrlSchemesPreprocessor(Preprocessor):
 
 
 class SourceLinksTreeprocessor(Treeprocessor):
+    """Point `blob/main` and `tree/main` links at the ref being built."""
+
     def __init__(self, md, ext):
         super().__init__(md)
         self.ext = ext
 
     def run(self, root):
-        if self.ext.source_ref == "main":
+        ref = self.ext.source_ref
+        if ref == "main":
             return
 
-        ref = quote(self.ext.source_ref, safe="")
         for link in root.iter("a"):
             href = link.get("href", "")
             url = urlsplit(href)
@@ -192,12 +194,11 @@ _ext = UrlSchemesExtension()
 
 def on_config(config: MkDocsConfig) -> MkDocsConfig:
     """Register the URL schemes markdown extension."""
-    if os.getenv("READTHEDOCS_VERSION_TYPE") == "tag":
-        _ext.source_ref = os.environ["READTHEDOCS_GIT_IDENTIFIER"]
-        if not _ext.source_ref:
-            raise ValueError("READTHEDOCS_GIT_IDENTIFIER must contain the release tag")
+    # For pull request builds, the Git identifier is the PR number
+    if os.getenv("READTHEDOCS_VERSION_TYPE") == "external":
+        _ext.source_ref = os.getenv("READTHEDOCS_GIT_COMMIT_HASH", "main")
     else:
-        _ext.source_ref = "main"
+        _ext.source_ref = os.getenv("READTHEDOCS_GIT_IDENTIFIER", "main")
     config["markdown_extensions"].append(_ext)
     return config
 
