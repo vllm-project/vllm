@@ -53,6 +53,41 @@ Your custom class must accept a `VllmConfig` upon instantiation and implement a 
 - `speculative_config.method = "custom_class"`
 - `speculative_config.model = "your_module.YourCustomProposerClass"`
 
+## Out-of-Tree Speculative Methods (Experimental)
+
+A package can add a speculative method under its own name. It registers the
+method from a `vllm.general_plugins` entry point (see
+[Plugin System](../../design/plugin_system.md)):
+
+```python
+from vllm.v1.spec_decode.registry import (
+    SpeculativeMethodSpec,
+    register_speculative_method,
+)
+
+
+def register():
+    register_speculative_method(
+        "my_method",
+        SpeculativeMethodSpec(speculator_cls="my_pkg.spec:MySpeculator"),
+    )
+```
+
+The method is then selected by name, and `method_config` is passed to it
+uninterpreted:
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{"method": "my_method", "model": "<draft-model>", "method_config": {"depth": 4}}'
+```
+
+`MySpeculator` is a Model Runner V2 speculator (a subclass of
+`vllm.v1.worker.gpu.spec_decode.speculator.BaseSpeculator`), so registered
+methods always run on Model Runner V2. Unlike `custom_class`, a registered
+method keeps the draft model in `model`, and its `SpeculativeMethodSpec` tells
+vLLM what the drafter needs (target hidden states, auxiliary hidden states and
+lookahead KV slots).
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON
