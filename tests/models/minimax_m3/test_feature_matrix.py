@@ -266,7 +266,8 @@ def _serve(
         for instance in deployment.instances:
             env = {}
             if instance.pp > 1:
-                # Until #54710 is fixed, every PP stage needs a dense layer.
+                # Until #54710 is fixed, every PP stage needs a dense layer, and
+                # this split only starts with FlashInfer autotune off (#60791).
                 env["VLLM_PP_LAYER_PARTITION"] = "2,4"
             if deployment.offload:
                 # Enables /reset_prefix_cache.
