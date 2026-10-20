@@ -13,6 +13,7 @@ from fastapi import Request
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
+    PromptProgress,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import (
@@ -327,6 +328,44 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 last_res = res
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
+
+                report_progress = (
+                    request.return_progress
+                    and res.num_computed_tokens is not None
+                    and not res.outputs[0].token_ids
+                )
+                if report_progress:
+                    total_prompt_tokens = (
+                        len(prompt_token_ids) if prompt_token_ids else 0
+                    )
+                    if res.encoder_prompt_token_ids is not None:
+                        total_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    start_time = (
+                        res.metrics.arrival_time
+                        if res.metrics is not None
+                        else created_time
+                    )
+                    time_ms = int((time.time() - start_time) * 1000)
+                    cached_tokens = res.num_cached_tokens or 0
+                    progress_chunk = CompletionStreamResponse(
+                        id=request_id,
+                        created=created_time,
+                        model=model_name,
+                        choices=[],
+                        prompt_progress=PromptProgress(
+                            total=total_prompt_tokens,
+                            cache=cached_tokens
+                            if self.enable_prompt_tokens_details
+                            else 0,
+                            processed=res.num_computed_tokens,
+                            time_ms=time_ms,
+                        ),
+                    )
+                    data = progress_chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+                    # Progress outputs carry no tokens and precede the final
+                    # prefill stats, so they must not count as the first output.
+                    continue
 
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens

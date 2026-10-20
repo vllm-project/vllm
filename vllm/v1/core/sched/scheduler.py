@@ -2346,7 +2346,17 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
-            if should_emit_output:
+            # Requests that opted into prefill-progress reporting also get an
+            # output on every partial prefill chunk. Those outputs carry only
+            # the progress counters: prefill_stats are still taken once, when
+            # the prefill completes, so finalize() sees the final cache state.
+            report_progress = (
+                not should_emit_output
+                and request.is_prefill_chunk
+                and request.sampling_params is not None
+                and request.sampling_params.return_progress
+            )
+            if should_emit_output or report_progress:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -2371,10 +2381,20 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_computed_tokens=(
+                            request.num_computed_tokens if report_progress else None
+                        ),
+                        num_cached_tokens=(
+                            request.prefill_stats.num_cached_tokens
+                            if report_progress and request.prefill_stats is not None
+                            else None
+                        ),
                     )
                 )
             else:
-                # Invariant: EngineCore returns no partial prefill outputs.
+                # Invariant: EngineCore returns no partial prefill outputs,
+                # except for requests that opted into progress reporting
+                # (handled by the report_progress branch above).
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 

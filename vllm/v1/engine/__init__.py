@@ -223,6 +223,9 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
 
     prefill_stats: PrefillStats | None = None
+    # Only set on partial-prefill outputs of requests with return_progress.
+    num_computed_tokens: int | None = None
+    num_cached_tokens: int | None = None
 
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
