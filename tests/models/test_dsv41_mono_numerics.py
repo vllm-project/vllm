@@ -489,8 +489,10 @@ def _check_layers(rank: int, tp: int, device) -> None:
             topk_indices=s["topk"], comp_cache=s["comp_cache"],
             comp_block_table=s["comp_block_table"],
         )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        tuned = runner.build_key(M, ratio).tuned
+        off = scratch_layout(M, tp, tuned=tuned)["normed"][0]
+        normed = runner.scratch(M, tuned)[off : off + M * HIDDEN * 2]
+        normed = normed.view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (

@@ -53,6 +53,8 @@ class MoeBuild:
     timeline: bool = field(default=False, metadata={"sym": "tl"})
     # FP4 groups an ug task (``RouteShape.ug_groups``)
     ug_groups: int = 2
+    # a tuned build's paths (``layer.MonoBuild.tuned``)
+    tuned: bool = False
 
 
 @dataclass(frozen=True)

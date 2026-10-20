@@ -35,6 +35,7 @@ from .attention.device import (
     rsrc,
 )
 from .attention.plan import HIDDEN, WINDOW, Dims, back_scratch, front_scratch
+from .common.arch import GFX942
 from .common.mx import clamp_fp8
 from .common.ops import butterfly, fp8_pack4, peer_bases, traced
 from .common.plan import WAVES, first_task, key_tuple
@@ -90,6 +91,21 @@ class MonoBuild:
     ug_groups: int = 2
     swa_width: int = WINDOW
 
+    @property
+    def tuned(self) -> bool:
+        """A target layer of compress ratio 2 at TP2 on gfx950: the builds whose
+        step-width tuned paths are on (bit-exact against the generic ones).
+        Every other build compiles the generic code. A tuned build lays out its
+        scratch and peer regions its own way, so the runner gives it a scratch
+        and a peer range of their own."""
+        return (
+            not GFX942
+            and self.tp == 2
+            and self.ratio == 2
+            and (self.experts, self.topk, self.ug_groups, self.swa_width)
+            == (EXPERTS, TOPK, 2, WINDOW)
+        )
+
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
     return MoeBuild(
@@ -98,6 +114,7 @@ def _moe_key(key: MonoBuild) -> MoeBuild:
         topk=key.topk,
         tp=key.tp,
         ug_groups=key.ug_groups,
+        tuned=key.tuned,
     )
 
 
@@ -136,7 +153,12 @@ def _back_key(key: MonoBuild):
 
 
 def scratch_layout(
-    s: int, tp: int, experts: int = EXPERTS, topk: int = TOPK, ug_groups: int = 2
+    s: int,
+    tp: int,
+    experts: int = EXPERTS,
+    topk: int = TOPK,
+    ug_groups: int = 2,
+    tuned: bool = False,
 ) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
@@ -145,7 +167,9 @@ def scratch_layout(
     which a poll may take for a current tag. The MoE's counters, whose slots
     outlive a step width, are in the epoch buffer. The MoE regions follow the
     runner's routing and FP4 groups of an ug task: with one group a task (the
-    DSpark draft's runner) the ug flags take twice the room of two groups."""
+    DSpark draft's runner) the ug flags take twice the room of two groups.
+    ``tuned``: a tuned build's layout (``MonoBuild.tuned``), in a scratch of its
+    own."""
     d = Dims(tp)
     out: dict = {}
     off = 0
@@ -162,9 +186,10 @@ def scratch_layout(
     place(front_scratch(s, d))
     place(seam.scratch_layout(s))
     place(back_scratch(s, d, start=0))
-    regions = moe.scratch_layout(
-        _moe_key(MonoBuild(s, tp, 1, experts=experts, topk=topk, ug_groups=ug_groups))
-    ).items()
+    mkey = MoeBuild(
+        tokens=s, experts=experts, topk=topk, tp=tp, ug_groups=ug_groups, tuned=tuned
+    )
+    regions = moe.scratch_layout(mkey).items()
     mr = {n: v for n, v in regions if n not in COUNTERS}
     lo = min(o for o, _ in mr.values())
     place({n: (o - lo, n_) for n, (o, n_) in mr.items()})
@@ -179,8 +204,9 @@ def scratch_bytes(
     experts: int = EXPERTS,
     topk: int = TOPK,
     ug_groups: int = 2,
+    tuned: bool = False,
 ) -> int:
-    layout = scratch_layout(s, tp, experts, topk, ug_groups)
+    layout = scratch_layout(s, tp, experts, topk, ug_groups, tuned)
     return max(o + n for o, n in layout.values())
 
 
@@ -234,7 +260,7 @@ def publish_x8(c, t):
 def build_mono_k1(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     fkey = _front_key(key)
     FrontLds = mb_front.front_lds(s, Dims(tp))
     NORM0 = SLICES  # the norms on the CTAs past the slices: the wqkv waits on them
@@ -538,7 +564,7 @@ def run_ffn(
     # the target's runner, also for a gfx942 draft layer, so it reads the
     # target's layout.
     if const_expr(part is None):
-        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+        layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     else:
         layout = scratch_layout(s, tp)
     mkey = _moe_key(key)
@@ -671,7 +697,7 @@ def run_ffn(
 def build_mono_k2(key: MonoBuild):
     s, tp = key.tokens, key.tp
     assert 1 <= s <= MAX_TOKENS
-    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups)
+    layout = scratch_layout(s, tp, key.experts, key.topk, key.ug_groups, key.tuned)
     bkey = _back_key(key)
     mkey = _moe_key(key)
     rs = route_shape(mkey)

@@ -215,7 +215,7 @@ class DSV41MonoLayer:
         self.swa_width = swa_width
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
-        self._scratch: dict[int, torch.Tensor] = {}
+        self._scratch: dict[tuple[int, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.q = torch.zeros(
@@ -238,8 +238,18 @@ class DSV41MonoLayer:
         self.post_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
         self.comb_a = torch.zeros(MAX_TOKENS, HC, HC, dtype=torch.float32, device=dev)
         self.pre_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
-        self.peer = PeerBuffer(2 * peer_half_bytes(tp), group, rank, tp, dev)
+        # A tuned build (``MonoBuild.tuned``) packs its peer regions its own
+        # way: it takes two parities of its own past the generic builds' two.
+        half = peer_half_bytes(tp)
+        tuned = self.build_key(1, 2).tuned
+        self.peer = PeerBuffer((4 if tuned else 2) * half, group, rank, tp, dev)
         self.peer.bytes.zero_()
+        self._peers = {False: (self.peer.local, self.peer.addresses)}
+        if tuned:
+            self._peers[True] = (
+                self.peer.local + 2 * half,
+                self.peer.addresses + 2 * half,
+            )
         self._qk_scale = (
             torch.tensor([HEAD_DIM**-0.5 * _LOG2E], dtype=torch.float32)
             .view(torch.int32)
@@ -247,11 +257,12 @@ class DSV41MonoLayer:
         )
         self._kernels: dict = {}
 
-    def scratch(self, tokens: int) -> torch.Tensor:
+    def scratch(self, tokens: int, tuned: bool = False) -> torch.Tensor:
         """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``). Allocated at the width's first step, which is
-        eager: vLLM runs every graph's batch eagerly before capturing it."""
-        buf = self._scratch.get(tokens)
+        (``layer.scratch_layout``), and so has a tuned build's. Allocated at the
+        width's first step, which is eager: vLLM runs every graph's batch
+        eagerly before capturing it."""
+        buf = self._scratch.get((tokens, tuned))
         if buf is None:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -259,11 +270,13 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp, self.experts, self.topk, self.ug_groups),
+                scratch_bytes(
+                    tokens, self.tp, self.experts, self.topk, self.ug_groups, tuned
+                ),
                 dtype=torch.uint8,
                 device=self.device,
             )
-            self._scratch[tokens] = buf
+            self._scratch[(tokens, tuned)] = buf
         return buf
 
     def first_pre_mix(self, tokens: int) -> torch.Tensor:
@@ -273,21 +286,27 @@ class DSV41MonoLayer:
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
 
+    def build_key(
+        self, tokens: int, ratio: int, fold: bool = True, index: bool = False
+    ) -> MonoBuild:
+        """The build of a layer of this runner (``layer.MonoBuild``)."""
+        return MonoBuild(
+            tokens,
+            self.tp,
+            ratio,
+            timeline=self.timeline,
+            fold=fold,
+            index=index,
+            experts=self.experts,
+            topk=self.topk,
+            ug_groups=self.ug_groups,
+            swa_width=self.swa_width,
+        )
+
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
         key = (tokens, ratio, fold, index)
         if key not in self._kernels:
-            b = MonoBuild(
-                tokens,
-                self.tp,
-                ratio,
-                timeline=self.timeline,
-                fold=fold,
-                index=index,
-                experts=self.experts,
-                topk=self.topk,
-                ug_groups=self.ug_groups,
-                swa_width=self.swa_width,
-            )
+            b = self.build_key(tokens, ratio, fold, index)
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
             # the key-table build.
@@ -354,6 +373,9 @@ class DSV41MonoLayer:
         index = select is not None
         assert not index or ratio
         k1, k2 = self.kernels(M, ratio, fold, index)
+        tuned = self.build_key(M, ratio).tuned
+        scratch = self.scratch(M, tuned)
+        sym, peers = self._peers[tuned]
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -424,7 +446,7 @@ class DSV41MonoLayer:
             self.klen.data_ptr(),
             self.normed.data_ptr(),
             self.qr.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.epoch.data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
             stream=st,
@@ -499,9 +521,9 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch(M).data_ptr(),
-            self.peer.local,
-            self.peer.addresses.data_ptr(),
+            scratch.data_ptr(),
+            sym,
+            peers.data_ptr(),
             self.rank,
             self.epoch.data_ptr(),
             self.tl2.data_ptr() if self.timeline else 0,
