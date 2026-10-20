@@ -14,7 +14,9 @@ Supported tokenizers use standard HF fast ByteLevel BPE without automatic
 prefix-space insertion. NFC normalization is supported when added tokens are
 extracted before normalization (`normalized=false`); other normalizers and
 context-sensitive added tokens disable the cache. Custom encoding/template
-overrides retain their regular path.
+overrides retain their regular path, except a tokenizer that only overrides
+`apply_chat_template` (DeepSeek V4 / V3.2): its templated text is cached, and
+the cache is compared once with the ids that override returns before reuse.
 Other tokenizers retain normal encoding. Offset requests, assistant masks,
 tensor/dictionary chat outputs, and tokenizer-level truncation overflow retain
 the existing path. Changing tokenizer vocabulary while serving is unsupported.

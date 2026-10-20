@@ -9,6 +9,7 @@ import math
 import sys
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -42,6 +43,7 @@ class SegmentTokenizerCache:
         self.disabled_reason = "zero capacity"
         self._pattern: re.Pattern[str] | None = None
         self._special_tokens_are_noop = False
+        self._chat_ok: bool | None = None
         if not self.capacity:
             return
         try:
@@ -51,6 +53,14 @@ class SegmentTokenizerCache:
                 self.disabled_reason = "stochastic BPE dropout is unsupported"
                 return
             normalizer = state.get("normalizer")
+            # An empty ``Sequence`` is how some tokenizers spell "no
+            # normalization" (DeepSeek V4), so treat it as absent.
+            if (
+                isinstance(normalizer, dict)
+                and normalizer.get("type") == "Sequence"
+                and not normalizer.get("normalizers")
+            ):
+                normalizer = None
             if state["model"]["type"] != "BPE" or normalizer not in (
                 None,
                 {"type": "NFC"},
@@ -172,3 +182,61 @@ class SegmentTokenizerCache:
         if kwargs.get("truncation") and maximum is not None and len(result) > maximum:
             return None
         return result
+
+    def verify_chat_path(self, ids: list[int], render: Callable[..., Any]) -> bool:
+        """Check once that this template's text encodes to what it returns.
+
+        ``ids`` is what the cache encoded for the template text and ``render``
+        re-enters the renderer with ``tokenize`` forced, so a tokenizer that
+        overrides ``apply_chat_template`` (DeepSeek V4 / V3.2) is compared with
+        the cache instead of being trusted. The verdict is kept per cache,
+        which is per renderer, so the probe runs once per process.
+        """
+        with self._lock:
+            verdict = self._chat_ok
+        if verdict is not None:
+            return verdict
+        ok = False
+        try:
+            ok = list(render(tokenize=True)) == ids
+        except Exception:
+            ok = False
+        with self._lock:
+            self._chat_ok = ok
+        return ok
+
+
+def cached_chat_token_ids(
+    cache: SegmentTokenizerCache | None,
+    render: Callable[..., Any],
+    chat_kwargs: dict[str, Any],
+) -> list[int] | None:
+    """Token ids for a chat render, or ``None`` to run the template again.
+
+    The template is rendered as text first and then encoded from the cache.
+    ``verify_chat_path`` compares that result with what the renderer returns
+    for ``tokenize=True`` before the first reuse, so an overridden
+    ``apply_chat_template`` can never silently change the ids.
+    """
+    if cache is None or not cache.enabled:
+        return None
+    if not chat_kwargs.get("tokenize", True):
+        return None
+    if chat_kwargs.get("return_assistant_tokens_mask"):
+        return None
+    try:
+        text = render(tokenize=False)
+    except Exception:
+        return None
+    if not isinstance(text, str):
+        return None
+    encode_kwargs: dict[str, Any] = {"add_special_tokens": False}
+    for key in ("truncation", "max_length"):
+        if key in chat_kwargs:
+            encode_kwargs[key] = chat_kwargs[key]
+    ids = cache.encode(text, **encode_kwargs)
+    if ids is None:
+        return None
+    if not cache.verify_chat_path(ids, render):
+        return None
+    return ids

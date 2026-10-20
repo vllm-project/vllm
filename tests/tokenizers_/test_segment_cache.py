@@ -356,3 +356,83 @@ def test_cache_context_does_not_consume_template_variables(tokenizer):
         )
         == regular
     )
+
+
+def test_cached_chat_token_ids_requires_text_and_matching_ids(tokenizer):
+    from vllm.tokenizers.segment_cache import cached_chat_token_ids
+
+    cache = SegmentTokenizerCache(tokenizer, 0.001)
+    assert cache.enabled, cache.disabled_reason
+    text = "<|start|>hello<|end|>"
+    expected = list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    def render(*, tokenize=True):
+        return expected if tokenize else text
+
+    assert cached_chat_token_ids(None, render, {}) is None
+    assert cached_chat_token_ids(cache, render, {"tokenize": False}) is None
+    assert (
+        cached_chat_token_ids(cache, render, {"return_assistant_tokens_mask": True})
+        is None
+    )
+    assert cached_chat_token_ids(cache, render, {}) == expected
+    assert cached_chat_token_ids(cache, render, {}) == expected
+    assert cache.hits > 0
+
+
+def test_cached_chat_token_ids_falls_back_on_non_text_or_mismatch(tokenizer):
+    from vllm.tokenizers.segment_cache import cached_chat_token_ids
+
+    text = "<|start|>hello<|end|>"
+    expected = list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    def render_ids_only(*, tokenize=True):
+        return expected
+
+    ids_only_cache = SegmentTokenizerCache(tokenizer, 0.001)
+    assert cached_chat_token_ids(ids_only_cache, render_ids_only, {}) is None
+
+    def render_mismatch(*, tokenize=True):
+        return expected + [0] if tokenize else text
+
+    mismatch_cache = SegmentTokenizerCache(tokenizer, 0.001)
+    assert cached_chat_token_ids(mismatch_cache, render_mismatch, {}) is None
+    assert mismatch_cache._chat_ok is False
+
+
+def test_template_override_tokenizer_still_gets_a_cache(tokenizer):
+    from types import SimpleNamespace
+
+    from vllm.renderers.hf import HfRenderer
+
+    class TemplateOverrideTokenizer(TokenizersBackend):
+        def apply_chat_template(self, messages, **kwargs):
+            text = "".join(f"<|start|>{m['content']}<|end|>" for m in messages)
+            if kwargs.get("tokenize", True):
+                return self.encode(text, add_special_tokens=False)
+            return text
+
+    custom = TemplateOverrideTokenizer(tokenizer_object=tokenizer.backend_tokenizer)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            renderer_num_workers=1,
+            tokenizer_cache_gb=0.001,
+            enable_prompt_embeds=False,
+            is_multimodal_model=False,
+            supports_multimodal_inputs=False,
+        ),
+        parallel_config=SimpleNamespace(_api_process_rank=0),
+    )
+    renderer = HfRenderer(config, custom)
+    try:
+        cache = renderer._tokenizer_cache
+        assert cache is not None, "a template-only override must keep the cache"
+        assert cache.enabled, cache.disabled_reason
+        messages: list[ConversationMessage] = [{"role": "user", "content": "hello"}]
+        ids = renderer._cached_chat_token_ids(
+            lambda **kw: custom.apply_chat_template(messages, **kw), {}
+        )
+        assert ids == custom.apply_chat_template(messages, tokenize=True)
+    finally:
+        renderer.shutdown()

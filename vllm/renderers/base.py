@@ -4,7 +4,7 @@ import asyncio
 import time
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
@@ -47,7 +47,10 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.segment_cache import SegmentTokenizerCache
+from vllm.tokenizers.segment_cache import (
+    SegmentTokenizerCache,
+    cached_chat_token_ids,
+)
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -140,7 +143,6 @@ class BaseRenderer(ABC, Generic[_T]):
                     "_convert_encoding",
                     "_get_padding_truncation_strategies",
                     "set_truncation_and_padding",
-                    "apply_chat_template",
                 )
             ):
                 self._tokenizer_cache = SegmentTokenizerCache(tokenizer, capacity_gb)
@@ -148,6 +150,11 @@ class BaseRenderer(ABC, Generic[_T]):
                 logger.warning(
                     "Segment tokenizer cache disabled: %s",
                     self._tokenizer_cache.disabled_reason,
+                )
+            elif self._tokenizer_cache is not None:
+                logger.info(
+                    "Segment tokenizer cache enabled (%.2f GiB per renderer).",
+                    capacity_gb,
                 )
 
         # Background multimodal warmup task (a future returned by
@@ -680,6 +687,20 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt,
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
+
+    def _cached_chat_token_ids(
+        self,
+        render: Callable[..., Any],
+        chat_kwargs: dict[str, Any],
+    ) -> list[int] | None:
+        """Token ids from the segment cache, or ``None`` to run the template.
+
+        ``render`` must re-enter this renderer's chat entry point with
+        ``tokenize`` forced. Renderers whose tokenizer overrides
+        ``apply_chat_template`` (DeepSeek V4 / V3.2) call this so that the
+        cache is verified against the tokenizer's own ids before reuse.
+        """
+        return cached_chat_token_ids(self._tokenizer_cache, render, chat_kwargs)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
