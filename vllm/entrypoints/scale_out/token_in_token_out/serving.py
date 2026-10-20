@@ -543,50 +543,14 @@ class ServingTokens(GenerateBaseServing):
                     GenerateDerenderChoice(message=message, **fields)
                 )
 
-        assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        if final_res.encoder_prompt_token_ids is not None:
-            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
-
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-        )
-        if (
-            self.enable_prompt_tokens_details
-            and final_res.num_cached_tokens is not None
-        ):
-            # This info is not available at the /coordinator level
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
-
-        request_metadata.final_usage_info = usage
-
-        per_request_metrics = None
-        if request.sampling_params.n == 1:
-            spec_stats = build_spec_decoding_metrics(final_res)
-            if spec_stats is not None:
-                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
-        response_fields: dict[str, Any] = dict(
-            request_id=request_id,
-            created=created_time,
-            model=model_name,
-            usage=usage,
-            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-            prompt_token_id_logprobs=(
-                numpy2base64(final_res.prompt_token_id_logprobs)
-                if final_res.prompt_token_id_logprobs is not None
-                else None
-            ),
-            prompt_token_ids=(
-                final_res.prompt_token_ids if request.return_token_ids else None
-            ),
-            mm_placeholders=request._response_mm_placeholders,
-            metrics=per_request_metrics,
-            kv_transfer_params=final_res.kv_transfer_params,
-            ec_transfer_params=final_res.ec_transfer_params,
+        response_fields = self._build_response_fields(
+            request,
+            final_res,
+            request_id,
+            model_name,
+            created_time,
+            num_generated_tokens,
+            request_metadata,
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
@@ -620,6 +584,63 @@ class ServingTokens(GenerateBaseServing):
                     )
 
         return response
+
+    def _build_response_fields(
+        self,
+        request: GenerateRequest,
+        final_res: RequestOutput,
+        request_id: str,
+        model_name: str,
+        created_time: int,
+        num_generated_tokens: int,
+        request_metadata: RequestResponseMetadata,
+    ) -> dict[str, Any]:
+        """Build the fields shared by every non-streaming response level."""
+        assert final_res.prompt_token_ids is not None
+        num_prompt_tokens = len(final_res.prompt_token_ids)
+        if final_res.encoder_prompt_token_ids is not None:
+            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            completion_tokens=num_generated_tokens,
+            total_tokens=num_prompt_tokens + num_generated_tokens,
+        )
+        if (
+            self.enable_prompt_tokens_details
+            and final_res.num_cached_tokens is not None
+        ):
+            # This info is not available at the /coordinator level
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens
+            )
+
+        request_metadata.final_usage_info = usage
+
+        per_request_metrics = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
+        return dict(
+            request_id=request_id,
+            created=created_time,
+            model=model_name,
+            usage=usage,
+            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_id_logprobs=(
+                numpy2base64(final_res.prompt_token_id_logprobs)
+                if final_res.prompt_token_id_logprobs is not None
+                else None
+            ),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
+            metrics=per_request_metrics,
+            kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
+        )
 
     async def serve_tokens_stream_generator(
         self,
