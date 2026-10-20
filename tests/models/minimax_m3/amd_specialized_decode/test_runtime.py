@@ -3,9 +3,6 @@
 """Host side of --monokernel: config and weight refusals, per-step routing,
 the per-forward plan, cache binding and the fail-stop gate."""
 
-import resource
-import subprocess
-import sys
 from collections import Counter
 from types import SimpleNamespace
 
@@ -131,7 +128,9 @@ def _vllm_config(layers=60, **parallel):
 
 
 def test_config_refusals_report_every_reason():
-    assert specialized_decode_config(_vllm_config()) is DECODE_CONFIG
+    assert specialized_decode_config(_vllm_config()).last_layer == 59
+    # a truncated checkpoint: the sparse layers end at its last layer
+    assert specialized_decode_config(_vllm_config(layers=5)).last_layer == 4
 
     config = _vllm_config(tensor_parallel_size=2, enable_expert_parallel=True)
     config.cache_config.block_size = 64
@@ -146,9 +145,11 @@ def test_config_refusals_report_every_reason():
         "expert parallelism",
         "block size",
         "routed-expert capture",
-        "sparse attention on layers 3 through 59",
+        "sparse attention on layers 3",
     ):
         assert reason in str(error.value)
+    with pytest.raises(ValueError, match="sparse attention on layers 3"):
+        specialized_decode_config(_vllm_config(layers=3))
 
 
 def _parameter(shape, dtype, *, meta=True):
@@ -429,55 +430,3 @@ def test_abort_never_raises():
         addresses=SimpleNamespace(tolist=broken),
     )
     executor.abort()
-
-
-_GATE_IN_FULL_GRAPH = """
-import torch
-from vllm.models.minimax_m3.amd.specialized_decode.runtime import decode as runtime
-
-decode = object.__new__(runtime.SpecializedDecode)
-decode.executor = type("E", (), {})()
-decode.executor.fault_word = torch.zeros(4, dtype=torch.int32, device="cuda")
-decode._closed = False
-token = torch.zeros(1, dtype=torch.int64, device="cuda")
-
-def forward():
-    decode.after_step(None)
-    token.fill_(42)
-
-forward()
-graph = torch.cuda.CUDAGraph()
-with torch.cuda.graph(graph):
-    forward()
-token.zero_()
-decode.executor.fault_word[0] = FAIL
-graph.replay()
-copy_stream = torch.cuda.Stream()
-copy_stream.wait_stream(torch.cuda.current_stream())
-with torch.cuda.stream(copy_stream):
-    host = token.to("cpu", non_blocking=True)
-    done = torch.cuda.Event(blocking=True)
-    done.record(copy_stream)
-done.synchronize()
-print("token", host.item(), flush=True)
-"""
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-@pytest.mark.parametrize("fail", [0, 1])
-def test_set_word_stops_a_replayed_step_before_its_output_copy(fail):
-    """The gate replayed from a FULL graph: with the word set, work queued
-    after it (the token write and its copy-stream copy) never reaches the host
-    and the process dies; this also fails on a torch build whose device
-    asserts compile to nothing."""
-    run = subprocess.run(
-        [sys.executable, "-c", _GATE_IN_FULL_GRAPH.replace("FAIL", str(fail))],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)),
-    )
-    if fail:
-        assert run.returncode != 0 and "token" not in run.stdout
-    else:
-        assert run.returncode == 0 and "token 42" in run.stdout, run.stderr

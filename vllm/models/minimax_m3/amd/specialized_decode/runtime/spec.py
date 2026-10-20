@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from vllm.config import CompilationMode, VllmConfig
 
@@ -78,14 +78,19 @@ class DecodeConfig:
             reasons.append("does not support routed-expert capture")
         if config.kernel_config.moe_backend != "aiter":
             reasons.append("requires --moe-backend aiter")
-        sparse = getattr(text_config, "sparse_attention_config", None)
-        if text_config.num_hidden_layers != 60 or not sparse:
-            reasons.append("requires the 60-layer MiniMax M3 sparse schema")
-        else:
-            frequencies = sparse.get("sparse_attention_freq", ())
-            sparse_layers = [i for i, enabled in enumerate(frequencies) if enabled]
-            if sparse_layers != list(range(self.first_layer, self.last_layer + 1)):
-                reasons.append("requires sparse attention on layers 3 through 59")
+        sparse = getattr(text_config, "sparse_attention_config", None) or {}
+        layers = text_config.num_hidden_layers
+        frequencies = sparse.get("sparse_attention_freq", ())[:layers]
+        sparse_layers = [i for i, enabled in enumerate(frequencies) if enabled]
+        if (
+            self.last_layer != layers - 1
+            or layers <= self.first_layer
+            or sparse_layers != list(range(self.first_layer, layers))
+        ):
+            reasons.append(
+                f"requires sparse attention on layers {self.first_layer} through "
+                "the last"
+            )
 
         return reasons
 
@@ -96,9 +101,11 @@ DECODE_CONFIG = DecodeConfig()
 def specialized_decode_config(config: VllmConfig) -> DecodeConfig | None:
     if not config.kernel_config.monokernel:
         return None
-    reasons = DECODE_CONFIG.refusal_reasons(config)
+    layers = config.model_config.hf_text_config.num_hidden_layers
+    spec = replace(DECODE_CONFIG, last_layer=layers - 1)
+    reasons = spec.refusal_reasons(config)
     if reasons:
         raise ValueError(
             "MiniMax-M3 specialized decode unsupported: " + "; ".join(reasons)
         )
-    return DECODE_CONFIG
+    return spec

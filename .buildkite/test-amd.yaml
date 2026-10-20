@@ -1603,8 +1603,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
-  # optional four-GPU qualification (checkpoint tests skip without
-  # /models/MiniMax-M3-MXFP4 or MINIMAX_M3_MXFP4_PATH)
+  # the long TP4 hand-off stress
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
