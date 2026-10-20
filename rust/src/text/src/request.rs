@@ -73,7 +73,8 @@ pub struct SamplingParams {
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
     /// Whether to apply the engine's configured watermark to this request.
-    pub watermarking: bool,
+    /// `None` applies it, as in Python's `SamplingParams`.
+    pub watermarking: Option<bool>,
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
@@ -161,7 +162,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
-            watermarking: true,
+            watermarking: None,
             top_p: None,
             top_k: None,
             seed: None,

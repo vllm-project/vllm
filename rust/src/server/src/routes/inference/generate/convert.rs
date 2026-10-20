@@ -172,24 +172,31 @@ mod tests {
 
     #[test]
     fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
-        for watermarking in [None, Some(true), Some(false)] {
+        // Python's `SamplingParams` declares `watermarking: bool | None`, so an
+        // explicit `null` means the same as omitting it.
+        for (watermarking, expected) in [
+            (None, None),
+            (Some(json!(null)), None),
+            (Some(json!(true)), Some(true)),
+            (Some(json!(false)), Some(false)),
+        ] {
             let mut body = json!({
                 "token_ids": [11, 22],
                 "sampling_params": {}
             });
             if let Some(watermarking) = watermarking {
-                body["sampling_params"]["watermarking"] = json!(watermarking);
+                body["sampling_params"]["watermarking"] = watermarking;
             }
             let prepared = prepare_generate_request(
-                serde_json::from_value(body).expect("parse request"),
+                serde_json::from_value(body.clone()).expect("parse request"),
                 &served(&["test-model"]),
                 ResolvedRequestContext::default(),
                 None,
             )
             .expect("prepare request");
             assert_eq!(
-                prepared.text_request.sampling_params.watermarking,
-                watermarking.unwrap_or(true)
+                prepared.text_request.sampling_params.watermarking, expected,
+                "{body}"
             );
         }
     }
