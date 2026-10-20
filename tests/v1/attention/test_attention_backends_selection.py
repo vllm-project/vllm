@@ -153,7 +153,7 @@ def test_mamba2_config_state_shape_includes_speculative_tokens(model_cls):
 )
 def test_mamba_layers_get_attn_backend(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     layer_class,
     init_kwargs,
     expected_backend,
