@@ -205,10 +205,11 @@ def _kpool_compress_warmup_inputs(
     kv_cache = k_cache.kv_cache
     page_size = kv_cache.shape[1]
     buf_numel_per_page = kv_cache.stride(0)
+    buf_storage_bytes = kv_cache.untyped_storage().size()
     loc_aligned: Any = WarmupChoices(True, False)
     return dict(
-        buf_fp8_ptr=TritonWarmupTensor(FP8_DTYPE),
-        buf_fp32_ptr=TritonWarmupTensor(torch.float32),
+        buf_fp8_ptr=TritonWarmupTensor(FP8_DTYPE, storage_bytes=buf_storage_bytes),
+        buf_fp32_ptr=TritonWarmupTensor(torch.float32, storage_bytes=buf_storage_bytes),
         slot_k_ptr=TritonWarmupTensor(torch.bfloat16, shape=(1, pool_size, head_dim)),
         slot_score_ptr=TritonWarmupTensor(
             torch.bfloat16, shape=(1, pool_size, head_dim)
@@ -438,12 +439,13 @@ def _kpool_tail_seed_warmup_inputs(
     tail_block_elems = tail_kv_cache.stride(0)
     kpool_head = tail_kv_cache.stride(1)
     ring = tail_kv_cache.shape[2]
+    tail_storage_bytes = tail_kv_cache.untyped_storage().size()
     tslot_aligned: Any = WarmupChoices(True, False)
     return dict(
         key_ptr=TritonWarmupTensor(torch.bfloat16),
         score_ptr=TritonWarmupTensor(torch.bfloat16),
         tslot_ptr=TritonWarmupTensor(torch.int64, aligned=tslot_aligned),
-        tail_ptr=TritonWarmupTensor(torch.bfloat16),
+        tail_ptr=TritonWarmupTensor(torch.bfloat16, storage_bytes=tail_storage_bytes),
         n_tokens=WarmupChoices(1, 16, 2),
         tail_block_elems=tail_block_elems,
         kpool_head=kpool_head,

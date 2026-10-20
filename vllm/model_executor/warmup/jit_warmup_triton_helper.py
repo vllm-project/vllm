@@ -174,6 +174,11 @@ class TritonWarmupTensor:
 
     ``strides=None`` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
+
+    ``storage_bytes`` must be set from ``untyped_storage().size()`` of the
+    runtime tensor whenever that storage can exceed 2 GiB. The ROCm backend
+    specializes pointers on it (``tt.pointer_range``), so a KV-cache view left
+    at the 0 default value warms a variant the live launch never uses.
     """
 
     dtype: Any
@@ -181,12 +186,13 @@ class TritonWarmupTensor:
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
     init: Any = 0
+    storage_bytes: int = 0
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
     def ptr_range(self) -> int:
-        return 0
+        return self.storage_bytes
 
     @property
     def device(self) -> Any:
@@ -497,6 +503,7 @@ def _triton_metadata_arg(value: Any) -> Any:
         aligned=getattr(value, "_vllm_warmup_aligned", True),
         shape=tuple(value.shape),
         strides=tuple(value.stride()),
+        storage_bytes=getattr(value, "_vllm_warmup_storage_bytes", 0),
     )
 
 
@@ -536,6 +543,7 @@ def _materialize_warmup_case(
                 tensor.fill_(value.init)
         else:
             tensor._vllm_warmup_aligned = value.aligned
+            tensor._vllm_warmup_storage_bytes = value.storage_bytes
             with suppress(TypeError):
                 cache[value] = tensor
         return tensor
