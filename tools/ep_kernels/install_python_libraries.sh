@@ -214,6 +214,44 @@ do_build() {
 #endif' csrc/kernels/backend/symmetric.hpp
     fi
 
+    # deepseek-ai/DeepEP#695: NVSHMEM >= 3.6 leaves num_rc_per_pe at 0 when
+    # IBGDA cannot initialize (no RDMA NIC), so the low-latency dispatch assert
+    # aborts single-node jobs whose peers are all reachable over P2P. Only
+    # require RC QPs when some peer has no P2P path.
+    # See pytorch/test-infra#8890.
+    if [[ "$name" == "DeepEP" && -f csrc/kernels/legacy/internode_ll.cu ]] && \
+        ! grep -q "needs_ibgda" csrc/kernels/legacy/internode_ll.cu; then
+        git apply <<'EOF'
+diff --git a/csrc/kernels/legacy/internode_ll.cu b/csrc/kernels/legacy/internode_ll.cu
+--- a/csrc/kernels/legacy/internode_ll.cu
++++ b/csrc/kernels/legacy/internode_ll.cu
+@@ -280,8 +280,21 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
+     } else if (warp_id == num_warps - 1) {
+         EP_DEVICE_ASSERT(num_sms > 1);
+         if (sm_id == 0) {
+-            // The first SM is also responsible for checking QPs
+-            EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
++            // RC QPs are only needed for peers that are not directly reachable
++            // through P2P. NVSHMEM 3.6 zeroes num_rc_per_pe when its optional
++            // IBGDA transport is unavailable; all-local jobs still work because
++            // every send/count path below already falls back to the P2P pointer.
++            bool needs_ibgda = false;
++            for (int dst_rank = 0; dst_rank < num_ranks; ++dst_rank) {
++                if (dst_rank != rank and
++                    nvshmemi_get_p2p_ptr(
++                        reinterpret_cast<uint64_t>(rdma_recv_count), rank, dst_rank) == 0) {
++                    needs_ibgda = true;
++                    break;
++                }
++            }
++            EP_DEVICE_ASSERT(not needs_ibgda or
++                             ibgda_get_state()->num_rc_per_pe >= num_local_experts);
+
+             // The first SM is also responsible for cleaning the next buffer
+             #pragma unroll
+EOF
+    fi
+
     if [[ "$name" == "DeepEP" ]]; then
         # DeepEP links against the CUDA driver API in driverless build images.
         local cuda_driver_stub
