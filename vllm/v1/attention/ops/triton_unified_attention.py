@@ -37,9 +37,9 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 MAX_3D_QUERY_LEN = 8
 
 # RDNA launch tuning: TRITON_ATTN's launch configs for gfx1201 (RDNA4) and gfx1100
-# (RDNA3). VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS=0 keeps vLLM's default launch.
+# (RDNA3).
 is_gfx1201 = is_gfx1100 = False
-if current_platform.is_rocm() and envs.VLLM_ROCM_TRITON_ATTN_TUNED_CONFIGS:
+if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx1100, on_gfx1201
 
     is_gfx1201 = on_gfx1201()
