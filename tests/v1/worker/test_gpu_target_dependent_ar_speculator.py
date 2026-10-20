@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
@@ -397,6 +398,52 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
     assert actual_feedback_hidden is hidden
 
 
+@pytest.mark.parametrize("partitioned", [False, True])
+def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
+    hidden = torch.full((4, 3), 1.0)
+    speculator = _make_speculator(monkeypatch, hidden)
+    gathered_is_padding = torch.tensor(
+        [False, False, False, True, False, False, True, True]
+    )
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        max_num_tokens=4,
+        moe_gathers_tokens=True,
+    )
+    if partitioned:
+        manager.draft_prefill_batch = SimpleNamespace(
+            input_ids=torch.arange(4),
+            positions=torch.arange(4),
+            is_padding=gathered_is_padding,
+        )
+    else:
+        local_is_padding = torch.tensor([False, False, False, True])
+        speculator.input_buffers.is_padding = local_is_padding
+        gathered_is_padding = torch.cat([local_is_padding, local_is_padding])
+    seen = {}
+    monkeypatch.setattr(
+        spec_module,
+        "set_forward_context",
+        lambda *args, **kwargs: (seen.update(kwargs), nullcontext())[1],
+    )
+    speculator.pcp_manager = manager
+
+    speculator._run_model(
+        4,
+        attn_metadata=None,
+        slot_mappings=None,
+        num_tokens_across_dp=None,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+    torch.testing.assert_close(seen["is_padding"], gathered_is_padding)
+    if partitioned:
+        assert seen["is_padding"] is gathered_is_padding
+
+
 @pytest.mark.parametrize(
     (
         "method_name",
@@ -534,11 +581,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         seq_lens=torch.tensor([5, 6], dtype=torch.int32),
         block_table=torch.zeros((2, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(3, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=2,
@@ -546,7 +588,6 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
         num_decode_tokens=3,
         num_prefill_tokens=0,
         scheduler_metadata=torch.tensor([-1, -1, -1], dtype=torch.int32),
-        prefix_scheduler_metadata=None,
         max_num_splits=4,
         causal=True,
         mm_prefix_query_range_tensor=None,
@@ -584,11 +625,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         seq_lens=torch.tensor([1], dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         slot_mapping=torch.zeros(1, dtype=torch.int32),
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
         max_dcp_context_kv_len=None,
         dcp_context_kv_lens=None,
         num_decode_reqs=1,
@@ -596,7 +632,6 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
         num_decode_tokens=1,
         num_prefill_tokens=0,
         scheduler_metadata=None,
-        prefix_scheduler_metadata=None,
         max_num_splits=1,
         causal=True,
         mm_prefix_query_range_tensor=None,

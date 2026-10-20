@@ -49,6 +49,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
@@ -1170,7 +1173,7 @@ def _make_stream_chunk(
     stop_reason: int | str | None = None,
     choices: list[ChatCompletionResponseStreamChoice] | None = None,
     usage: UsageInfo | None = None,
-) -> str:
+) -> ChatCompletionStreamResponse:
     if choices is None:
         choices = [
             ChatCompletionResponseStreamChoice(
@@ -1187,7 +1190,7 @@ def _make_stream_chunk(
         choices=choices,
         usage=usage,
     )
-    return f"data: {chunk.model_dump_json()}"
+    return chunk
 
 
 def _tc(*, args, id=None, name=None):
@@ -1196,6 +1199,39 @@ def _tc(*, args, id=None, name=None):
         id=id,
         function=DeltaFunctionCall(name=name, arguments=args),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_type", [None, "text", "thinking", "tool_use"])
+async def test_stream_error_preserves_message_and_closes_block(block_type):
+    async def source():
+        if block_type is not None:
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            if block_type == "text":
+                delta = DeltaMessage(content="Hello")
+            elif block_type == "thinking":
+                delta = DeltaMessage(reasoning="Thinking")
+            else:
+                delta = DeltaMessage(
+                    tool_calls=[_tc(id="call_1", name="search", args='{"q":')]
+                )
+            yield _make_stream_chunk(delta=delta)
+        yield create_error_response(ValueError("backend failed"))
+
+    converter = _make_stream_converter()
+    events = _parse_sse_events(
+        [event async for event in converter.message_stream_converter(source())]
+    )
+    assert events[-1] == (
+        "error",
+        {
+            "type": "error",
+            "error": {"type": "internal_error", "message": "backend failed"},
+        },
+    )
+    assert not any(event_type == "message_stop" for event_type, _ in events)
+    if block_type is not None:
+        assert events[-2][0] == "content_block_stop"
 
 
 class TestMessageStreamConverterToolUseContentBuffering:
@@ -1210,7 +1246,7 @@ class TestMessageStreamConverterToolUseContentBuffering:
     async def test_tool_use_args_not_dropped_when_content_in_same_chunk(
         self,
     ):
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant"),
                 usage=UsageInfo(prompt_tokens=10, total_tokens=10),
@@ -1247,11 +1283,10 @@ class TestMessageStreamConverterToolUseContentBuffering:
                     completion_tokens=20,
                 ),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
 
         events = _parse_sse_events(output)
@@ -1292,7 +1327,7 @@ class TestMessageStreamConverterToolUseContentBuffering:
         stream jumps straight from finish_reason to [DONE], skipping the
         empty-choices usage chunk."""
 
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant"),
                 usage=UsageInfo(prompt_tokens=10, total_tokens=10),
@@ -1314,11 +1349,10 @@ class TestMessageStreamConverterToolUseContentBuffering:
                 finish_reason="tool_calls",
             )
             # No empty-choices usage chunk — go straight to [DONE].
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
 
         events = _parse_sse_events(output)
@@ -1352,7 +1386,7 @@ class TestMessageStartIncludesTypeAndRole:
 
     @pytest.mark.asyncio
     async def test_message_start_contains_message_type_and_role(self):
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(content="Hello"),
                 usage=UsageInfo(
@@ -1362,11 +1396,10 @@ class TestMessageStartIncludesTypeAndRole:
                 ),
             )
             yield _make_stream_chunk(finish_reason="stop")
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
 
         events = _parse_sse_events(output)
@@ -1396,7 +1429,7 @@ class TestStreamingCacheUsageSemantics:
         message_start omits cache fields. The final chunk carries
         prompt_tokens_details, so message_delta carries resolved values."""
 
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant", content="hi"),
                 usage=UsageInfo(prompt_tokens=100, total_tokens=100),
@@ -1413,11 +1446,10 @@ class TestStreamingCacheUsageSemantics:
                     ),
                 ),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
         events = _parse_sse_events(output)
 
@@ -1441,7 +1473,7 @@ class TestStreamingCacheUsageSemantics:
         """When the final chunk reports cached_tokens=0, message_delta carries
         cache fields = 0 (cache miss); message_start still omits them."""
 
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant"),
                 usage=UsageInfo(prompt_tokens=50, total_tokens=50),
@@ -1458,11 +1490,10 @@ class TestStreamingCacheUsageSemantics:
                     ),
                 ),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
         events = _parse_sse_events(output)
 
@@ -1482,7 +1513,7 @@ class TestStreamingCacheUsageSemantics:
         """If --enable-prompt-tokens-details is off, no chunk carries cache
         info; both message_start and message_delta omit cache fields."""
 
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant"),
                 usage=UsageInfo(prompt_tokens=30, total_tokens=30),
@@ -1492,11 +1523,10 @@ class TestStreamingCacheUsageSemantics:
                 choices=[],
                 usage=UsageInfo(prompt_tokens=30, completion_tokens=2, total_tokens=32),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
         events = _parse_sse_events(output)
 
@@ -1764,7 +1794,7 @@ class TestStopSequenceReason:
 
     @pytest.mark.asyncio
     async def test_streaming_stop_string_maps_to_stop_sequence(self):
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(content="hi"),
                 usage=UsageInfo(prompt_tokens=5, total_tokens=5, completion_tokens=0),
@@ -1774,11 +1804,10 @@ class TestStopSequenceReason:
                 choices=[],
                 usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
 
         events = _parse_sse_events(output)
@@ -1790,7 +1819,7 @@ class TestStopSequenceReason:
     async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
         """exclude_unset=True drops stop_sequence unless it is set explicitly."""
 
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
             yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
             yield _make_stream_chunk(finish_reason="stop")
@@ -1798,11 +1827,10 @@ class TestStopSequenceReason:
                 choices=[],
                 usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         output = []
-        async for event in converter.message_stream_converter(sse_input()):
+        async for event in converter.message_stream_converter(chunk_input()):
             output.append(event)
 
         events = _parse_sse_events(output)
@@ -1860,7 +1888,7 @@ class TestToolUseStopReason:
         ],
     )
     async def test_streaming(self, args, finish_reason, stop_reason, expected):
-        async def sse_input():
+        async def chunk_input():
             yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
             yield _make_stream_chunk(
                 delta=DeltaMessage(
@@ -1874,11 +1902,10 @@ class TestToolUseStopReason:
                 choices=[],
                 usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
             )
-            yield "data: [DONE]"
 
         converter = _make_stream_converter()
         events = _parse_sse_events(
-            [e async for e in converter.message_stream_converter(sse_input())]
+            [e async for e in converter.message_stream_converter(chunk_input())]
         )
 
         msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
