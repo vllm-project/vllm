@@ -8,7 +8,6 @@ prefix cache hash table so future requests cannot match and reuse corrupted data
 """
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -16,6 +15,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -73,7 +73,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     }
 
     # mock connector indicating sync load
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )

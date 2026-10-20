@@ -9,6 +9,7 @@ path.
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -22,6 +23,11 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import chunk_kda_with_fused_gat
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 
 logger = init_logger(__name__)
+
+
+# Consumed by kimi_k3_triton_warmup.py during kernel_warmup().
+def get_gluon_chunk_kda_warmup_profiles() -> tuple[tuple[int, int], ...]:
+    return ((1, 64), (2, 64), (4, 64), (8, 64), (16, 64), (1, 4096), (2, 2048))
 
 
 def chunk_kda_prefill(
@@ -40,7 +46,7 @@ def chunk_kda_prefill(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
-    use_fused_chunk: bool = False,
+    backend: str = "triton",
     out: torch.Tensor | None = None,
     checkpoint_state: torch.Tensor | None = None,
     checkpoint_offsets: torch.Tensor | None = None,
@@ -68,9 +74,10 @@ def chunk_kda_prefill(
         cu_seqlens: int32 cumulative sequence lengths.
         chunk_indices: precomputed chunk indices for ``cu_seqlens``.
         chunk_offsets: int32 per-sequence first chunk index.
-        use_fused_chunk: request the two-kernel ROCm path. It is used only when
-            every one of its preconditions holds; otherwise the Triton path
-            runs unchanged.
+        backend: ``"triton"`` (the vendored chunk path), ``"fused"`` (the
+            two-kernel ROCm path; used only when every one of its
+            preconditions holds, otherwise the Triton path runs unchanged) or
+            ``"gluon"`` (AITER's ``chunk_kda``).
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
@@ -89,6 +96,11 @@ def chunk_kda_prefill(
         The output and, when requested, the final recurrent state.
 
     """
+    if backend not in ("triton", "fused", "gluon"):
+        raise ValueError(
+            "chunk_kda_prefill backend must be 'triton', 'fused' or 'gluon', "
+            f"got {backend!r}."
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
@@ -96,7 +108,7 @@ def chunk_kda_prefill(
     # needs the raw projections and a bounded gate rather than the pre-normalized
     # tensors the Triton path takes.
     fused = (
-        use_fused_chunk
+        backend == "fused"
         and use_qk_l2norm_in_kernel
         and cu_seqlens is not None
         and lower_bound is not None
@@ -115,6 +127,28 @@ def chunk_kda_prefill(
             raise ValueError("state_cache replaces initial_state/output_final_state")
         if state_indices is None or has_initial_state is None:
             raise ValueError("state_cache needs state_indices and has_initial_state")
+
+    if backend == "gluon":
+        return rocm_aiter_ops.kda_chunk_prefill(
+            q=q,
+            k=k,
+            v=v,
+            g=raw_g,
+            beta=raw_beta,
+            A_log=A_log,
+            dt_bias=g_bias,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            out=out,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            state_cache=state_cache,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
+        )
 
     # Only the fused walk addresses the paged rows directly. The Triton path
     # gathers the rows it needs and scatters the results back here, so callers
@@ -155,7 +189,13 @@ def chunk_kda_prefill(
             aqk=ws["aqk"],
             decay=ws["decay"],
             # v is dead by this point, so it doubles as the output buffer.
-            out=out if out is not None else v,
+            out=out
+            if out is not None
+            else (
+                v
+                if v.is_contiguous()
+                else torch.empty_like(v, memory_format=torch.contiguous_format)
+            ),
             scale=scale,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,

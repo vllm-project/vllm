@@ -26,7 +26,7 @@ needs no D2H sync. Per-step content (top-k slots) is written into the
 reserved buffers by kernels inside the captured forward, and captured runs
 read the refreshed plan buffers on replay.
 
-KV cache format: plain contiguous E4M3 ``[num_blocks, block_size, 512]``
+KV cache format: E4M3 ``[num_blocks, block_size, 512]`` (any block stride)
 (uint8 storage) with a per-tensor ``k_scale``; BF16 caches also work. The
 per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
@@ -57,9 +57,11 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -99,7 +101,12 @@ def _pack_topk_indices(
     end = tl.load(indptr + row + 1)
     mask = (cols < end - start) & (cols < WIDTH)
     values = tl.load(slots + row * WIDTH + cols, mask=mask, other=0)
-    tl.store(indices + start + cols, tl.maximum(values, 0), mask=mask)
+    first_slot = tl.load(slots + row * WIDTH)
+    tl.store(
+        indices + start + cols,
+        tl.where(values >= 0, values, tl.maximum(first_slot, 0)),
+        mask=mask,
+    )
 
 
 @triton.jit
@@ -148,6 +155,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -221,10 +232,6 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBHNC,)
 
 
 class _SM90State:
@@ -443,10 +450,16 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         assert topk_indices_buffer is not None
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
+        # fp8 KV cache is stored as uint8; plan() needs the logical dtype.
+        kv_plan_dtype = (
+            torch.float8_e4m3fn
+            if kv_cache_spec.dtype == torch.uint8
+            else kv_cache_spec.dtype
+        )
         self.state = _SM90State(
             device,
             impl.num_heads,
-            kv_cache_spec.dtype,
+            kv_plan_dtype,
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,
@@ -596,6 +609,9 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_tokens]
+        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         # return_valid_counts=True keeps the compacted-prefix layout: valid
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
@@ -604,6 +620,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )

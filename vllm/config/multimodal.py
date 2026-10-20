@@ -725,7 +725,7 @@ class MultiModalConfig:
             # The model expects raw pixels and normalises on device;
             # overriding these per request would silently double-normalise.
             for key in ("do_normalize", "do_rescale"):
-                if key in inference_kwargs:
+                if inference_kwargs.get(key):
                     logger.warning_once(
                         "mm_device_do_normalize is enabled; ignoring "
                         "per-request mm_processor_kwargs[%r].",

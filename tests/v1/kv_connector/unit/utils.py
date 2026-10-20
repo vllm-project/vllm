@@ -6,7 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
 from typing import Any, Literal
+from unittest.mock import Mock
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -30,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
 )
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -42,11 +45,24 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
+
+
+def create_mock_connector() -> Mock:
+    connector = Mock()
+    connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
+        {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
+    )
+    return connector
+
+
+def maybe_update_block_size(block_size: int) -> int:
+    return 64 if current_platform.is_xpu() else block_size
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -60,6 +76,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._kv_fetch_stages
+    assert not any(scheduler._kv_fetch_counts.values())
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -165,6 +183,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -195,6 +214,7 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=hash_block_size,
     )
 
 
@@ -474,7 +494,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["all", "align", "none"] = "none",
+    mamba_cache_mode: Literal["align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -520,6 +540,7 @@ def make_kv_cache_config(
 def make_nixl_scheduler(
     has_mamba: bool = False,
     is_hma_required: bool = False,
+    bounded_replay: bool = False,
     heartbeat: bool = False,
     kv_lease_duration: int = 30,
 ):
@@ -536,6 +557,7 @@ def make_nixl_scheduler(
 
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
+    sched._bounded_replay = bounded_replay
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -603,6 +625,7 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched._bounded_replay = False
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,
@@ -660,3 +683,18 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
+    """Expand Nx5 (addr, len, dev, stride, count) rows to one row per block.
+
+    Mirrors how NIXL indexes a strided descriptor list, so desc ids computed
+    by the connector can be resolved to (addr, len, dev) byte ranges.
+    """
+    strided_descs = np.asarray(strided_descs, dtype=np.uint64).reshape(-1, 5)
+    counts = strided_descs[:, 4].astype(np.intp)
+    starts = np.cumsum(strided_descs[:, 4]) - strided_descs[:, 4]
+    out = np.repeat(strided_descs[:, :3], counts, axis=0)
+    offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
+    out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
+    return out

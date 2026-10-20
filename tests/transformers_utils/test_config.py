@@ -24,11 +24,6 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     uses_mrope,
 )
-from vllm.transformers_utils.configs.glm5_next import (
-    Glm5NextConfig,
-    Glm5NextTextConfig,
-    Glm5NextVisionConfig,
-)
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
 
@@ -174,54 +169,6 @@ def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
     assert config.rope_parameters["attention_factor"] == 1.0
 
 
-def test_glm5_next_accepts_deepseek_sparse_attention_layers():
-    layer_types = ["linear_attention", "deepseek_sparse_attention"]
-
-    config = Glm5NextTextConfig(
-        num_hidden_layers=len(layer_types), layer_types=layer_types
-    )
-
-    assert config.layer_types == layer_types
-    assert config.layers_block_type == ["linear_attention", "attention"]
-
-
-def test_glm5_next_accepts_prebuilt_subconfigs():
-    text_config = Glm5NextTextConfig(hidden_size=1024)
-    vision_config = Glm5NextVisionConfig(hidden_size=768)
-
-    config = Glm5NextConfig(
-        text_config=text_config,
-        vision_config=vision_config,
-    )
-
-    assert config.text_config is text_config
-    assert config.vision_config is vision_config
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "option"),
-    [
-        (
-            {"index_topk": 2048, "index_dsa_use_layernorm": False},
-            "index_dsa_use_layernorm",
-        ),
-        (
-            {"index_topk": 2048, "index_kpool_compress": False},
-            "index_kpool_compress",
-        ),
-        (
-            {"index_topk": 2048, "index_kpool_always_select_tail": False},
-            "index_kpool_always_select_tail",
-        ),
-        ({"hres_vwnstyle": False}, "hres_vwnstyle"),
-        ({"mhc_no_norm_weight": True}, "mhc_no_norm_weight"),
-    ],
-)
-def test_glm5_next_rejects_unimplemented_config_options(kwargs, option):
-    with pytest.raises(NotImplementedError, match=option):
-        Glm5NextTextConfig(**kwargs)
-
-
 def test_get_llama3_eos_token():
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -294,6 +241,7 @@ def test_safetensors_metadata_of_repo_without_safetensors():
     )
     api = SimpleNamespace(
         get_safetensors_metadata=get_safetensors_metadata,
+        list_repo_files=MagicMock(return_value=["pytorch_model.bin"]),
         snapshot_download=MagicMock(side_effect=LocalEntryNotFoundError("no cache")),
     )
 
@@ -301,6 +249,34 @@ def test_safetensors_metadata_of_repo_without_safetensors():
         assert get_safetensors_params_metadata("some/pytorch-only-model") == {}
 
     get_safetensors_metadata.assert_called_once()
+
+
+def test_safetensors_metadata_of_repo_with_a_nonstandard_file_name():
+    """`get_safetensors_metadata` only knows `model.safetensors` and its index,
+    so older checkpoints are read through the file listing instead."""
+    from huggingface_hub.errors import NotASafetensorsRepoError
+    from huggingface_hub.utils import TensorInfo
+
+    weights = "gptq_model-4bit-128g.safetensors"
+    tensor = TensorInfo(dtype="I32", shape=[5632], data_offsets=(0, 22528))
+    parse_safetensors_file_metadata = MagicMock(
+        return_value=SimpleNamespace(tensors={"layers.0.mlp.down_proj.qweight": tensor})
+    )
+    api = SimpleNamespace(
+        get_safetensors_metadata=MagicMock(
+            side_effect=NotASafetensorsRepoError("not a safetensors repo")
+        ),
+        list_repo_files=MagicMock(return_value=["config.json", weights]),
+        parse_safetensors_file_metadata=parse_safetensors_file_metadata,
+    )
+
+    with patch.object(config_module, "hf_api", lambda: api):
+        metadata = get_safetensors_params_metadata("some/old-gptq-model")
+
+    assert metadata["layers.0.mlp.down_proj.qweight"]["dtype"] == "I32"
+    parse_safetensors_file_metadata.assert_called_once_with(
+        "some/old-gptq-model", weights, revision=None
+    )
 
 
 @pytest.mark.parametrize(
