@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -29,6 +30,31 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_glm_mtp_defers_lm_head(default_vllm_config):
+    from vllm.model_executor.models import deepseek_mtp
+    from vllm.models.glm5next.common import mtp
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        index_kpool=4,
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_text_config = config
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+
+    with (
+        mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(deepseek_mtp, "ParallelLMHead") as parallel_lm_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.Glm5NextMultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    parallel_lm_head.assert_not_called()
+    assert layer.shared_head.head is None
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -77,15 +103,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
-    target_indexer_layers: dict = {}
-    all_indexer_layers: dict = {}
 
-    mock_get_layers.side_effect = [
-        target_attn_layers,
-        target_indexer_layers,
-        all_attn_layers,
-        all_indexer_layers,
-    ]
+    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
     mock_pp_group = mock.MagicMock()
     mock_pp_group.world_size = 1
@@ -112,6 +131,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.lm_head == target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+    assert proposer._draft_attn_layer_names == {"draft_attn_1"}
+    assert all_attn_layers["draft_attn_1"].is_draft_layer is True
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
@@ -194,7 +215,6 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         device=device,
     )
 
-    proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)

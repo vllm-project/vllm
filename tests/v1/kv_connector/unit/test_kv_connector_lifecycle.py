@@ -27,7 +27,6 @@ def _make_empty_scheduler_output():
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
         kv_connector_metadata=ExampleConnectorMetadata(),
@@ -72,6 +71,7 @@ def test_kv_connector_mixin_clears_metadata():
         assert connector._connector_metadata is None
         # Test connector wrapper records method calls
         assert connector.call_record.get("bind_connector_metadata", 0) == 1
+        assert connector.call_record.get("wait_for_save", 0) == 1
         assert connector.call_record.get("clear_connector_metadata", 0) == 1
     finally:
         # Ensure we clean up the global connector between tests

@@ -87,6 +87,82 @@ class _EncoderSession:
         return _EncoderResponse(self._replies.pop(0))
 
 
+@pytest.mark.parametrize("second_type", ["image_url", "audio_url", "input_audio"])
+@pytest.mark.parametrize("transfer", ["example", "nixl", "mooncake"])
+def test_partial_audio_metadata_falls_back_with_all_transfers(
+    proxy, monkeypatch, second_type, transfer
+):
+    """Never mix metadata-only audio with raw media, or lose EC identities."""
+    import copy
+
+    seen = []
+    reported = {}
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            body = msgspec.json.decode(data)
+            seen.append(body)
+            item = body["messages"][0]["content"][0]
+            mm_hash = item["uuid"] + "-processed"
+            entry: dict[str, Any] = {
+                "metadata": {"audio_feature_lengths": [100]} if len(seen) == 1 else {},
+                "item_indices": [0],
+            }
+            if transfer == "nixl":
+                entry.update(peer_host="encoder", peer_port=1234, size_bytes=4096)
+            reported[mm_hash] = entry
+            return _EncoderResponse({mm_hash: entry})
+
+    second = (
+        {"type": second_type, "input_audio": {"data": "large", "format": "wav"}}
+        if second_type == "input_audio"
+        else {"type": second_type, second_type: {"url": "large"}}
+    )
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "small"},
+                        "uuid": "user-audio",
+                    },
+                    second,
+                ],
+            }
+        ],
+        "mm_processor_kwargs": {"sampling_rate": 16000},
+    }
+    original = copy.deepcopy(body)
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", False)
+    consumer = "tcp://consumer:1" if transfer == "mooncake" else None
+    prepared, _, _ = asyncio.run(
+        proxy.prepare_for_decode(body, "r", ["http://encoder"], "", consumer)
+    )
+    assert body == original
+    assert prepared["mm_processor_kwargs"] == body["mm_processor_kwargs"]
+    content = prepared["messages"][0]["content"]
+    assert [item["type"] for item in content] == ["audio_url", second_type]
+    assert content[0]["uuid"] == "user-audio"
+    for item, encoded in zip(content, seen):
+        assert item == encoded["messages"][0]["content"][0]
+    params = prepared["ec_transfer_params"]
+    for mm_hash, entry in reported.items():
+        assert params[mm_hash] == entry
+    if transfer == "mooncake":
+        assert params["ec_items"] == [
+            {
+                "mm_hash": mm_hash,
+                "transfer_id": encoded["ec_transfer_params"]["ec_items"][0][
+                    "transfer_id"
+                ],
+            }
+            for mm_hash, encoded in zip(reported, seen)
+        ]
+
+
 @pytest.mark.parametrize("no_rewrite", [False, True])
 @pytest.mark.parametrize(
     "batch_size, expected_sizes", [(0, [3, 3]), (1, [1] * 6), (2, [2, 2, 1, 1])]
@@ -509,7 +585,11 @@ def test_video_audio_fallback(proxy, monkeypatch, no_rewrite, transfer):
     original = copy.deepcopy(body)
     # Collector indices describe two processed features from one video item.
     video_metadata = collect_ec_item_metadata(
-        [SimpleNamespace(identifier=key, data=None) for key in ("video", "audio")], None
+        [
+            SimpleNamespace(identifier=key, modality=key, data=None)
+            for key in ("video", "audio")
+        ],
+        SimpleNamespace(fields_for=lambda _: set()),
     )
     if transfer == "handle":
         video_metadata["audio"]["transfer_id"] = "reservation"
