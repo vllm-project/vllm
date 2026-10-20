@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -40,7 +38,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
-from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -76,6 +73,41 @@ def resolve_layer_fused_shared_expert(
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
     fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+    if fse_requested:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            parallel_config = vllm_config.parallel_config
+            hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+            hf_config = getattr(vllm_config.model_config, "hf_config", None)
+            model_type = getattr(hf_text_config, "model_type", None) or getattr(
+                hf_config, "model_type", None
+            )
+            # Multimodal/text sub-configs use suffixed model types (e.g.
+            # ``minimax_m3_text``/``minimax_m3_vl``, ``deepseek_v4_text``).
+            is_minimax_m3 = isinstance(model_type, str) and model_type.startswith(
+                "minimax_m3"
+            )
+            is_deepseek_v4 = isinstance(model_type, str) and model_type.startswith(
+                "deepseek_v4"
+            )
+            # Only MiniMax-M3 and DeepSeek-V4 gate FSE on expert parallelism
+            # today (the fused shared-expert slot is appended to the routed
+            # top-k, which the EP expert-mapping path does not handle).
+            # TODO: should it be disabled for all models?
+            if is_minimax_m3 or is_deepseek_v4:
+                if parallel_config.enable_expert_parallel:
+                    fse_requested = False
+                elif is_deepseek_v4 and parallel_config.data_parallel_size > 1:
+                    raise ValueError(
+                        "DeepSeek-V4 fused shared experts "
+                        "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1) are not "
+                        "supported with data parallelism "
+                        "(data_parallel_size > 1). Set "
+                        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the "
+                        "shared expert as an unfused FP8 MLP."
+                    )
     fse_compatible, fse_reason = (
         is_shared_expert_quant_fse_compatible(
             quant_config,
@@ -128,43 +160,6 @@ def resolve_layer_fused_shared_expert(
             fse_reason,
         )
     return is_fused_shared_expert_enabled
-
-
-def is_model_fused_shared_expert_compatible(
-    layers: nn.ModuleList | Iterable[nn.Module],
-    moe_cls: type[nn.Module],
-    moe_name: str,
-) -> bool:
-    """Resolve one fused-shared-expert state for a model's MoE layers."""
-
-    def get_moe_layer(layer: nn.Module) -> nn.Module | None:
-        for name in moe_name.split("."):
-            layer = getattr(layer, name, None)
-            if layer is None:
-                return None
-        return layer
-
-    moe_layers = (
-        moe_layer
-        for layer in layers
-        if not isinstance(layer, PPMissingLayer)
-        and (moe_layer := get_moe_layer(layer)) is not None
-        and isinstance(moe_layer, moe_cls)
-    )
-
-    enabled = [
-        getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
-    ]
-    enabled_count = sum(enabled)
-    disabled_count = len(enabled) - enabled_count
-    if enabled_count > 0 and disabled_count > 0:
-        raise NotImplementedError(
-            "Fused shared experts must be enabled for all MoE layers; found "
-            f"{enabled_count} enabled and {disabled_count} disabled layers. "
-            "Per-layer fused shared experts is not yet supported. Please open "
-            "an issue."
-        )
-    return enabled_count > 0 and disabled_count == 0
 
 
 @triton.jit

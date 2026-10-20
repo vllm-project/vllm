@@ -21,9 +21,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -170,10 +167,9 @@ class DeepseekV4MoE(nn.Module):
 
         self.n_shared_experts = config.n_shared_experts
 
-        # No CPU fused-shared-expert grouped-GEMM path yet.
-        self.is_fused_shared_expert_enabled = False
-
-        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
+        # CPU has no fused-shared-expert grouped-GEMM path, so always build the
+        # shared experts as a separate MLP.
+        if config.n_shared_experts is None:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -197,10 +193,6 @@ class DeepseekV4MoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
-            n_shared_experts=(
-                config.n_shared_experts if self.is_fused_shared_expert_enabled else None
-            ),
-            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -492,11 +484,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
-            DeepseekV4MoE,
-            "ffn",
-        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, self.rms_norm_eps)
@@ -660,35 +647,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
-        # Each MoE's own per-layer fusion decision is the source of truth,
-        # so the redirect below can't diverge from how it was built.
-        fuse_by_layer = {
-            extract_layer_index(mod_name): mod.is_fused_shared_expert_enabled
-            for mod_name, mod in self.named_modules()
-            if isinstance(mod, DeepseekV4MoE)
-        }
-        n_routed = self.config.n_routed_experts
-        # Maps the single shared-expert tensor group to one appended slot;
-        # multiple shared experts would need per-expert slicing (see
-        # deepseek_v2.py). DeepSeek-V4 has n_shared_experts == 1.
-        if any(fuse_by_layer.values()) and self.config.n_shared_experts != 1:
-            raise NotImplementedError(
-                "deepseek-v4 fused shared-expert loading supports only "
-                f"n_shared_experts == 1, got {self.config.n_shared_experts}"
-            )
-
         for name, loaded_weight in weights:
-            # Shared-expert fusion: redirect shared_experts.w{1,2,3} into
-            # the appended routed-expert slot so it loads through the
-            # routed expert (grouped GEMM) loader.
-            if ".ffn.shared_experts.w" in name and fuse_by_layer.get(
-                extract_layer_index(name), False
-            ):
-                name = name.replace(
-                    ".ffn.shared_experts.w",
-                    f".ffn.experts.{n_routed}.w",
-                )
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -756,13 +715,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # (param_name, weight_name, expert_id, shard_id). When fusing shared
-        # experts, include the appended slots so redirected shared-expert
-        # weights route through the expert loader.
-        n_shared = getattr(self.config, "n_shared_experts", 0) or 0
-        num_experts = self.config.n_routed_experts + (
-            n_shared if self.is_fused_shared_expert_enabled else 0
-        )
+        # (param_name, weight_name, expert_id, shard_id).
+        num_experts = self.config.n_routed_experts
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
@@ -772,9 +726,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
 
 
-def _make_deepseek_v4_weights_mapper(
-    expert_dtype: str, fuse_shared_experts: bool = False
-) -> WeightsMapper:
+def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     if expert_dtype == "fp4":
         # MXFP4 experts register scales as ``w{1,2,3}_weight_scale`` (no
         # _inv); FP8 linear/shared-expert scales register as
@@ -794,13 +746,9 @@ def _make_deepseek_v4_weights_mapper(
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
-    # Fused shared experts are redirected to routed expert slots elsewhere;
-    # leave their names untouched here.
-    substr_map: dict[str, str | None] = (
-        {}
-        if fuse_shared_experts
-        else {".shared_experts.w2": ".shared_experts.down_proj"}
-    )
+    substr_map: dict[str, str | None] = {
+        ".shared_experts.w2": ".shared_experts.down_proj"
+    }
     # No MTP support on CPU yet: drop mtp.* weights (no model.mtp submodule).
     substr_map["mtp."] = None
     return WeightsMapper(
@@ -842,11 +790,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        if expert_dtype != "fp4" or self.model.is_fused_shared_expert_enabled:
-            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
-                expert_dtype,
-                fuse_shared_experts=self.model.is_fused_shared_expert_enabled,
-            )
+        if expert_dtype != "fp4":
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

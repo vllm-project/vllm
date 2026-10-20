@@ -12,10 +12,10 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_fused_shared_expert_layers,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    extract_layer_index,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -172,10 +173,11 @@ class DeepseekV32Model(torch.nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
             self.layers,
             DeepseekV2MoE,
             "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -247,11 +249,7 @@ class DeepseekV32Model(torch.nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -265,7 +263,8 @@ class DeepseekV32Model(torch.nn.Module):
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
             if _try_load_fp8_indexer_wk(
                 name,

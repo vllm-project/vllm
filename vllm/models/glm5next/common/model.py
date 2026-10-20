@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -48,6 +47,9 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_fused_shared_expert_layers,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -76,6 +78,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -749,8 +752,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers, Glm5NextMoE, "mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self.layers,
+            Glm5NextMoE,
+            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -890,7 +896,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 0,
             )
             num_fused_shared = _num_fused_shared_experts(
-                self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+                self.config.n_shared_experts,
+                bool(self.fused_shared_expert_layers),
             )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
@@ -926,7 +933,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.is_fused_shared_expert_enabled:
+            if (
+                "mlp.shared_experts." in name
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with

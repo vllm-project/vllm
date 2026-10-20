@@ -49,7 +49,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -62,6 +61,9 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_fused_shared_expert_layers,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -84,6 +86,7 @@ from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -742,10 +745,11 @@ class AXK1Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
             self.layers,
             AXK1MoE,
             "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -842,7 +846,7 @@ class AXK1Model(nn.Module):
             num_experts=self.config.n_routed_experts
             + (
                 (self.config.n_shared_experts or 0)
-                if self.is_fused_shared_expert_enabled
+                if self.fused_shared_expert_layers
                 else 0
             ),
             num_redundant_experts=self.num_redundant_experts,
@@ -859,7 +863,8 @@ class AXK1Model(nn.Module):
                 continue  # skip spec decode layers for main model
 
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

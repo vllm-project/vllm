@@ -24,7 +24,6 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
@@ -47,7 +46,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -58,7 +57,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
-    is_shared_expert_quant_fse_compatible,
+    get_fused_shared_expert_layers,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -80,6 +79,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -386,32 +386,11 @@ class MiniMaxM3MoE(nn.Module):
         # MoE call as the last expert slot, so we don't build a separate module.
         # On gfx950 with aiter MoE the append is fused inside aiter's grouped
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
-        # It is disabled under expert parallelism (the shared slot is appended to
-        # the routed top-k, which the EP expert-mapping path does not handle).
-        # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
-        # is checked to enable FSE for MiniMax-M3, despite AITER not being used.
-        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
-        fse_requested = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-
         self.is_fused_shared_expert_enabled = False
-        if (
-            fse_requested
-            and bool(getattr(config, "n_shared_experts", None))
-            and not get_current_vllm_config().parallel_config.enable_expert_parallel
-        ):
-            fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
-                quant_config,
-                f"{prefix}.experts",
-                f"{prefix}.shared_experts",
+        if bool(getattr(config, "n_shared_experts", None)):
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
             )
-            if not fse_compatible:
-                logger.warning(
-                    "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-                    "cannot be enabled: %s.",
-                    fse_reason,
-                )
-            else:
-                self.is_fused_shared_expert_enabled = True
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
         # expert is appended inside aiter's an active aiter MoE backend, the shared
@@ -1449,10 +1428,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
             self.layers,
             MiniMaxM3MoE,
             "block_sparse_moe",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1508,7 +1488,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # expert, include the appended slot (id == num_local_experts).
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
         num_experts = self.config.num_local_experts + (
-            n_shared if self.is_fused_shared_expert_enabled else 0
+            n_shared if self.fused_shared_expert_layers else 0
         )
         return fused_moe_make_expert_params_mapping(
             self,
@@ -1557,7 +1537,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # down->w2) so it loads via the routed expert loader. Runs before the
             # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
             # captured by the dense gate_up_proj mapping.
-            if self.is_fused_shared_expert_enabled and ".shared_experts." in name:
+            if (
+                ".shared_experts." in name
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
                 sid = self.config.num_local_experts
                 name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
                 name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
