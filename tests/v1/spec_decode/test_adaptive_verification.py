@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -181,6 +182,40 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert draft_budget == 1
     assert valid_drafts == {"low": 2, "high": 2}
     assert num_non_draft_tokens == {"low": 1, "high": 1}
+
+
+def test_pinned_requests_keep_all_their_drafts():
+    # Same costs as above, where only one draft is worth verifying; a pinned
+    # request (e.g. seeded, so its output must not depend on the batch) keeps
+    # both of its drafts and the rest of the budget is chosen around them.
+    manager = make_manager(
+        np.array([[0.1, 0.1], [0.9, 0.9]], dtype=np.float32),
+        np.array([1.0, 1.0, 1.0, 1.0, 100.0, 100.0, 100.0]),
+    )
+    manager.pinned_requests = lambda slots: slots == 0
+
+    manager.get_num_tokens(
+        {"low": 3, "high": 3},
+        {"low": [1, 2], "high": [3, 4]},
+    )
+    assert manager._batch_budget is not None
+    _, _, draft_budget = manager._batch_budget
+
+    assert draft_budget == 4
+    assert manager._pinned_req_ids == {"low"}
+
+
+def test_pinned_rows_are_admitted_first():
+    capacities = torch.tensor([2, 2], dtype=torch.int32)
+    adaptive_module._assign_draft_token_budget(
+        torch.tensor([[0.1, 0.1], [0.9, 0.9]]),
+        torch.tensor([0, 1]),
+        capacities,
+        3,
+        2,
+        torch.tensor([True, False]),
+    )
+    assert capacities.tolist() == [2, 1]
 
 
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):

@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import sys
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -898,7 +899,9 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+@pytest.mark.parametrize(
+    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
+)
 def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
@@ -911,6 +914,25 @@ def test_v2_model_runner_supports_speculative_method(method):
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_suffix_config_without_arctic_inference(monkeypatch):
+    """Suffix decoding config no longer needs Arctic Inference: Model Runner
+    V2 runs it on the GPU, and the V1 proposer checks for Arctic itself."""
+    from vllm.utils.import_utils import _has_module
+
+    # Make arctic_inference unimportable, whichever way a check looks for it.
+    monkeypatch.setitem(sys.modules, "arctic_inference", None)
+    _has_module.cache_clear()
+    try:
+        config = SpeculativeConfig(method="suffix")
+    finally:
+        _has_module.cache_clear()
+    assert config.num_speculative_tokens == 8
+    shallow = SpeculativeConfig(method="suffix", suffix_decoding_max_tree_depth=4)
+    assert shallow.num_speculative_tokens == 4
+    with pytest.raises(ValueError, match="suffix_decoding_corpus_tokens"):
+        SpeculativeConfig(method="suffix", suffix_decoding_corpus_tokens=-1)
 
 
 @pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
