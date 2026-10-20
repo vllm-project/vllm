@@ -334,8 +334,6 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
         ("dflash", None, NUM_SPEC_STEPS + 1),
         ("ngram", None, 0),
         ("ngram_gpu", None, 0),
-        ("medusa", None, 0),
-        ("mlp_speculator", None, 0),
         ("suffix", None, 0),
         ("extract_hidden_states", None, 0),
     ],

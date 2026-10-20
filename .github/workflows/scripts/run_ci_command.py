@@ -58,9 +58,12 @@ AMD_CI_COMMANDS = frozenset(
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
+CI_COMMAND_PREFIXES = frozenset({"/ci", "/amd-ci"})
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
+BRANCH_UPDATE_POLL_SECONDS = 3
+BRANCH_UPDATE_POLL_ATTEMPTS = 40
 ACTIVE_BUILD_STATES = {
     "blocked",
     "creating",
@@ -257,6 +260,13 @@ class GitHubClient:
         if type(behind) is not int or behind < 0:
             raise ApiError(None, "GitHub returned an invalid commits-behind count.")
         return behind
+
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self._request(
+            self._repo_path(f"/pulls/{number}/update-branch"),
+            body={"expected_head_sha": expected_head_sha},
+            method="PUT",
+        )
 
     def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
         commit = urllib.parse.quote(commit, safe="")
@@ -461,9 +471,15 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
+    body = body.strip()
     if body in ALL_CI_COMMANDS:
         return body
     return None
+
+
+def is_ci_command_attempt(body: str) -> bool:
+    words = body.split(maxsplit=1)
+    return bool(words) and words[0].casefold() in CI_COMMAND_PREFIXES
 
 
 def pipeline_for_command(
@@ -771,10 +787,11 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
-            "- Your branch must contain every commit currently on its upstream "
-            "target branch. Merge or rebase onto the latest target branch, then "
-            "rerun the command. Append `--allow-stale` to a run command to test "
-            "an outdated branch at your own risk.\n"
+            "- Run commands test your branch with every commit currently on its "
+            "upstream target branch. If it is behind, the bot merges the target "
+            "branch into it first (pull before pushing again). Append "
+            "`--allow-stale` to a run command to test an outdated branch as is, "
+            "at your own risk.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -822,10 +839,65 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
+def merge_base_into_pr(
+    github: GitHubClient,
+    branch_updater: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+    lag: str,
+) -> tuple[dict[str, Any], str]:
+    base_ref = pr["base"]["ref"]
+
+    def merge_failed(reason: str) -> CiPreparationError:
+        return CiPreparationError(
+            f"{lag} The bot could not merge upstream `{base_ref}` into this "
+            f"branch ({reason}). No new CI build was started. Either merge or "
+            f"rebase onto the latest `{base_ref}` yourself and rerun `{command}`, "
+            f"or use `{command}{ALLOW_STALE_SUFFIX}` to test this branch as is."
+        )
+
+    try:
+        branch_updater.update_branch(pr["number"], pr["head"]["sha"])
+        for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
+            time.sleep(BRANCH_UPDATE_POLL_SECONDS)
+            current_pr = github.get_pr(pr["number"])
+            if current_pr["head"]["sha"] == pr["head"]["sha"]:
+                continue
+            try:
+                behind = github.get_commits_behind_base(
+                    base_ref, current_pr["head"]["sha"]
+                )
+            except ApiError as error:
+                # A fork's new head is briefly unknown to the base repository.
+                if error.status == 404:
+                    continue
+                raise
+            break
+        else:
+            raise merge_failed("the merge commit did not appear in time")
+        if (
+            current_pr["state"] != "open"
+            or current_pr["base"]["ref"] != base_ref
+            or behind
+        ):
+            raise merge_failed("the PR changed during the merge")
+    except ApiError as error:
+        raise merge_failed(str(error)) from error
+
+    note = (
+        f"ℹ️ {lag} Merged upstream `{base_ref}` into this branch as "
+        f"`{current_pr['head']['sha'][:12]}` before starting CI. "
+        "Pull the branch before pushing more changes."
+    )
+    print(note)
+    return current_pr, note
+
+
 def prepare_pr_for_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     command: str,
+    branch_updater: GitHubClient | None = None,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
     no_action = "No new CI build was started."
@@ -861,6 +933,8 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
+    if behind and branch_updater is not None:
+        return merge_base_into_pr(github, branch_updater, current_pr, command, lag)
     if behind:
         raise CiPreparationError(
             f"{lag} Your branch must contain every commit currently on upstream "
@@ -880,6 +954,8 @@ def handle_run_ci(
     command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
+    branch_updater: GitHubClient | None = None,
+    allow_repeat_run: bool = False,
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -906,7 +982,19 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr, warning = prepare_pr_for_ci(github, pr, command)
+    tested_build = select_latest_build(
+        [build for build in current_builds if build.get("state") != "canceled"],
+        pr["number"],
+    )
+    if tested_build and not allow_repeat_run:
+        raise CiPreparationError(
+            f"{ci_name} already ran on this commit: {tested_build['web_url']}. "
+            "No new CI build was started. Push new changes to run CI again, use "
+            f"`{retry_command_for_command(command)}` to rerun failed jobs, or ask "
+            "a reviewer with write access to rerun it."
+        )
+
+    current_pr, warning = prepare_pr_for_ci(github, pr, command, branch_updater)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -1086,11 +1174,34 @@ def handle_cancel_ci(
     )
 
 
+def reply_unrecognized_command(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+) -> None:
+    if "pull_request" not in event["issue"]:
+        return
+    issue_number = event["issue"]["number"]
+    comment_id = event["comment"]["id"]
+    actor = event["comment"]["user"]["login"]
+    if is_already_handled(github, issue_number, comment_id):
+        print(f"Comment {comment_id} was already handled.")
+        return
+    add_reaction_safely(github, comment_id, "-1")
+    commands = ", ".join(f"`{command}`" for command in sorted(ALL_CI_COMMANDS))
+    github.add_comment(
+        issue_number,
+        f"❌ @{actor}, that is not a recognized CI command, so no CI was "
+        "started. Post a new comment containing only one of: "
+        f"{commands}.\n\n{command_comment_marker(comment_id)}",
+    )
+
+
 def run(
     event: Mapping[str, Any],
     github: GitHubClient,
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
+    branch_updater: GitHubClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1153,6 +1264,8 @@ def run(
                 command=command,
                 github=github,
                 pr=pr,
+                branch_updater=branch_updater,
+                allow_repeat_run=is_trusted_permission(permission),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
@@ -1217,8 +1330,11 @@ def main() -> None:
         )
         return
 
-    command = parse_command(event["comment"]["body"])
+    body = event["comment"]["body"]
+    command = parse_command(body)
     if not command:
+        if is_ci_command_attempt(body):
+            reply_unrecognized_command(event, github)
         return
 
     pipeline = pipeline_for_command(
@@ -1231,11 +1347,15 @@ def main() -> None:
         os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
         pipeline,
     )
+    branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
         github,
         buildkite,
         os.environ.get("CI_TRUSTED_USERS", ""),
+        GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
+        if branch_update_token
+        else None,
     )
 
 

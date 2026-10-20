@@ -162,6 +162,16 @@ def apply_pre_quantized_block_scaled_mm(
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
+def _default_first_token_threshold() -> int:
+    """Max tokens at which the CSA/HCA fork enqueues the default chain first.
+
+    At small batches starting the long default chain first shortens the step
+    tail; larger batches saturate the device and aux-first is faster. Only
+    tuned on gfx950 (24 tokens = conc 8 with MTP=2); 0 disables elsewhere.
+    """
+    return 24 if _ON_GFX950 else 0
+
+
 @triton.jit
 def _combine_topk_swa_indices_kernel(
     combined_indices_ptr,
@@ -807,6 +817,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         indexer = self.indexer
         compressor = self.compressor
         assert compressor is not None
+        # Static per captured graph: each capture size bakes its own order.
+        default_first = hidden_states.shape[0] <= _default_first_token_threshold()
 
         def default_chain():
             qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
@@ -838,6 +850,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 [self.ln_events[1]],
                 aux_streams[:1],
                 enable=True,
+                default_first=default_first,
             )
             self._sparse_indexer_and_attn(
                 hidden_states, None, None, None, q, kv_out, positions, o_padded
@@ -864,6 +877,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.ln_events[1:3],
             aux_streams[:2],
             enable=True,
+            default_first=default_first,
         )
 
         indexer_weights_out, _ = indexer.weights_proj(hidden_states)

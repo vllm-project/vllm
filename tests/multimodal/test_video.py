@@ -21,6 +21,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
+    ClefOmniVideoBackend,
     DynamicVideoBackend,
     Glm5NextVideoBackend,
     GLM46VVideoBackend,
@@ -1813,3 +1814,18 @@ def test_glm5next_read_frames_dense_walk_matches_stock(tmp_path):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
     # One initial seek, then pure walking -- no re-seek churn.
     assert cap.seeks == 1
+
+
+def test_clef_omni_backend_samples_reference_frames(tmp_path):
+    """Clef-Omni samples the first frame at or after each 0.5 s boundary
+    (the reference's 2 fps timestamp sampling), not uniform strides."""
+    pytest.importorskip("cv2")
+
+    # 2 s at 30 fps: the reference reads frames 0, 15, 30 and 45, where
+    # uniform sampling would read 0, 19, 39 and 59.
+    path = _write_gray_video(tmp_path, total_frames=60, fps=30)
+    frames, metadata = ClefOmniVideoBackend.load_bytes(path.read_bytes())
+    assert metadata["frames_indices"] == [0, 15, 30, 45]
+    assert metadata["do_sample_frames"] is False
+    for frame, idx in zip(frames, [0, 15, 30, 45]):
+        assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1

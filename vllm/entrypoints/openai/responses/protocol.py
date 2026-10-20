@@ -14,6 +14,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -54,10 +56,6 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
@@ -68,6 +66,10 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -701,6 +703,34 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_custom_tool_format(cls, data):
+        if not isinstance(data, dict):
+            return data
+        tools = data.get("tools")
+        if not isinstance(tools, list):
+            return data
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool_dict = tool
+            elif hasattr(tool, "model_dump"):
+                tool_dict = tool.model_dump()
+            else:
+                continue
+            tool_format = tool_dict.get("format")
+            if (
+                tool_dict.get("type") == "custom"
+                and isinstance(tool_format, dict)
+                and tool_format.get("type") == "grammar"
+            ):
+                raise VLLMValidationError(
+                    "Custom tools with a grammar format are not supported; "
+                    "only free-form text custom tools are accepted.",
+                    parameter="tools",
+                )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_tool_usage(cls, data):
         if not isinstance(data, dict):
             return data
@@ -708,9 +738,9 @@ class ResponsesRequest(OpenAIBaseModel):
         tools = data.get("tools")
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
-        is_named_tool_choice = (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
-        )
+        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
+            "type"
+        ) in ("function", "custom")
 
         if not has_tools:
             if tool_choice in ("auto", "none"):
@@ -913,6 +943,8 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseOutputItemDoneEvent
     | ResponseContentPartAddedEvent
     | ResponseContentPartDoneEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
     | ResponseReasoningTextDeltaEvent
     | ResponseReasoningTextDoneEvent
     | ResponseCodeInterpreterCallInProgressEvent

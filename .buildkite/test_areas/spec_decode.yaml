@@ -594,7 +594,6 @@ steps:
       - vllm/model_executor/models/gemma4_mtp.py
       - vllm/model_executor/models/llama.py
       - vllm/model_executor/models/llama_eagle3.py
-      - vllm/model_executor/models/medusa.py
       - vllm/model_executor/models/registry.py
       - tests/evals/gsm8k/
       - tests/utils.py

@@ -45,6 +45,7 @@ def _make_region(
     num_workers: int = 1,
     rank: int = 0,
     barrier=None,
+    populate_shard: tuple[int, int] | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -54,6 +55,7 @@ def _make_region(
         kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
         barrier=barrier,
+        populate_shard=populate_shard,
     )
 
 
@@ -215,7 +217,7 @@ def _mp_barrier_construct_and_hold(
             kv_bytes_per_chunk=PAGE_SIZE if replicated else num_workers * PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
-            populate_only_on_creator=replicated,
+            populate_shard=(rank, num_workers) if replicated else None,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
@@ -524,6 +526,35 @@ def test_madvise_success_selects_madvise_population(iid, monkeypatch):
         assert fallback_calls == [], (
             "native-path constructor must not invoke the fallback helper"
         )
+
+
+@pytest.mark.parametrize(
+    "shard, expected",
+    [((1, 2), [(3 * PAGE_SIZE, 3 * PAGE_SIZE)]), ((3, 4), [])],
+)
+def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expected):
+    """Workers that map the same bytes each pre-fault one contiguous share
+    (page-rounded; a trailing share may be empty) instead of the whole region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int]] = []
+
+    def populate(mm, off, ln):
+        assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+        madvise_calls.append((off, ln))
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", populate)
+
+    def check_population():
+        if barrier.call_count == 2:
+            assert madvise_calls == [(0, PAGE_SIZE), *expected]
+
+    barrier = MagicMock(side_effect=check_population)
+    with _region(
+        iid, num_chunks=3, num_workers=2, populate_shard=shard, barrier=barrier
+    ):
+        assert madvise_calls == [(0, PAGE_SIZE), *expected]
+        assert barrier.call_count == 2
 
 
 def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
@@ -1039,6 +1070,22 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
+    """A native user's buffer export must block unmapping -- unmapping under it
+    would let the NIC write into reused address space. The pathname still goes."""
+    region = _make_region(iid)
+    export = ctypes.c_char.from_buffer(region.mmap_obj)
+    try:
+        region.cleanup()
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+        assert not os.path.exists(region.mmap_path), "pathname must still go"
+        assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
+    finally:
+        del export
+        region.mmap_obj.close()
+        _cleanup_file(region.mmap_path)
+
+
 def test_backing_file_unlinked_after_barrier(iid):
     """The file must exist until the barrier releases (late joiners need the
     name) and be gone right after, so no exit path can leak it."""
@@ -1061,12 +1108,17 @@ def test_backing_file_unlinked_after_barrier(iid):
         _cleanup_file(path)
 
 
-def test_barrier_failure_unlinks_creator_and_raises(iid):
+@pytest.mark.parametrize("populate_shard", [None, (0, 1)])
+def test_barrier_failure_unlinks_creator_and_raises(iid, populate_shard):
     """A failed rendezvous must remove the creator's file and re-raise, not
     leave a stub that wedges the next start in _wait_for_file_size."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
-        _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
+        _make_region(
+            iid,
+            barrier=MagicMock(side_effect=RuntimeError("peer died")),
+            populate_shard=populate_shard,
+        )
     assert not os.path.exists(path)
 
 
@@ -1095,9 +1147,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
         assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
         assert not any(r["path_exists"] for r in results)
         assert all(r["contents_match"] for r in results)
-        assert sum(r["populate_calls"] for r in results) == (
-            1 if replicated else num_workers
-        )
+        assert sum(r["populate_calls"] for r in results) == num_workers
         assert not os.path.exists(path)
     finally:
         for p in procs:
@@ -1109,23 +1159,40 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
         assert restarted._creator is True, "restart must be able to create anew"
 
 
-@pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
-def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_phase):
+@pytest.mark.parametrize(
+    "failure_phase,populate_shard",
+    [("shm", None), ("memory", None)]
+    + [
+        (phase, (0, 1))
+        for phase in ("shm", "memory", "probe", "population", "population_view")
+    ],
+)
+def test_setup_failure_before_barrier_releases_peers(
+    iid, monkeypatch, failure_phase, populate_shard
+):
     """A worker that dies before the rendezvous must still arrive at the
     barrier, or its peers block in the collective until it times out."""
-    failure = MagicMock(side_effect=ValueError("Insufficient space"))
+    failure = MagicMock(side_effect=ValueError("setup failed"))
     memory_check = failure if failure_phase == "memory" else None
     if failure_phase == "shm":
         monkeypatch.setattr(region_module, "check_shm_free_space", failure)
-    elif failure_phase == "population":
-        monkeypatch.setattr(region_module, "_get_populate_write_fn", failure)
+    elif failure_phase in ("probe", "population", "population_view"):
+
+        def populate(mm, offset, length):
+            failure(memoryview(mm) if failure_phase == "population_view" else None)
+
+        monkeypatch.setattr(
+            region_module,
+            "_get_populate_write_fn",
+            failure if failure_phase == "probe" else lambda mm: populate,
+        )
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     seen_at_barrier = []
     barrier = MagicMock(
         side_effect=lambda: seen_at_barrier.append(os.path.exists(path))
     )
 
-    with pytest.raises(ValueError, match="Insufficient space"):
+    with pytest.raises(ValueError, match="setup failed"):
         SharedOffloadRegion(
             engine_id=iid,
             num_chunks=1,
@@ -1134,11 +1201,15 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
             cpu_page_size=PAGE_SIZE,
             barrier=barrier,
             creator_memory_check=memory_check,
-            populate_only_on_creator=True,
+            populate_shard=populate_shard,
         )
 
-    barrier.assert_called_once_with()
-    assert seen_at_barrier == [False]
+    assert barrier.call_count == (2 if populate_shard is not None else 1)
+    assert seen_at_barrier == (
+        [False] * barrier.call_count
+        if failure_phase in ("shm", "memory")
+        else [True, False]
+    )
 
 
 def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
@@ -1154,18 +1225,29 @@ def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
     assert seen_at_barrier == [False], "file must be gone before peers release"
 
 
-def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
+@pytest.mark.parametrize("failure_phase", ["shm", "population"])
+def test_barrier_release_failure_keeps_original_error(iid, monkeypatch, failure_phase):
     """When releasing the peers fails too, the setup error that explains the
     failure must be the one that propagates."""
     import vllm.v1.kv_offload.cpu.shared_offload_region as region
 
-    monkeypatch.setattr(
-        region,
-        "check_shm_free_space",
-        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    failure = MagicMock(side_effect=RuntimeError("setup failed"))
+    if failure_phase == "shm":
+        monkeypatch.setattr(region, "check_shm_free_space", failure)
+    else:
+        monkeypatch.setattr(region, "_get_populate_write_fn", lambda mm: failure)
+
+    barrier = MagicMock(
+        side_effect=[None, TimeoutError("barrier")]
+        if failure_phase == "population"
+        else TimeoutError("barrier")
     )
+    with pytest.raises(RuntimeError, match="setup failed"):
+        _make_region(
+            iid,
+            barrier=barrier,
+            populate_shard=(0, 1) if failure_phase == "population" else None,
+        )
 
-    with pytest.raises(RuntimeError, match="Insufficient space"):
-        _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
-
+    assert barrier.call_count == (2 if failure_phase == "population" else 1)
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")

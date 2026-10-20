@@ -411,15 +411,9 @@ def test_deep_sleep_compressed_tensors_kv_scales(
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1(
-    monkeypatch: pytest.MonkeyPatch, gpu_memory_cleared
-):
-    # Regression test for https://github.com/vllm-project/vllm/pull/28783.
-    # In particular, verify that MRV1 does not rely on post_kv_cache_wake_up()
-    # to restore correct output after level-2 sleep.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    envs.disable_envs_cache()
-
+def test_deep_sleep_fp8_kvcache(gpu_memory_cleared):
+    # Regression test for https://github.com/vllm-project/vllm/pull/28783:
+    # fp8 KV cache output must be restored correctly after level-2 sleep.
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
@@ -454,10 +448,9 @@ def test_deep_sleep_fp8_kvcache_mrv1(
 
 
 @requires_fp8
-def test_deep_sleep_fp8_kvcache_mrv1_with_undefined_remap(
+def test_deep_sleep_fp8_kvcache_with_undefined_remap(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     envs.disable_envs_cache()
 

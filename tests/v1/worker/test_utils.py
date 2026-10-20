@@ -94,6 +94,9 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "host_to_device_bytes": [64],
         "host_cache_usage_perc": [],
         "pending_page_transfers": [],
+        "host_block_lifetime_seconds": [],
+        "host_block_idle_before_evict_seconds": [],
+        "host_block_reuse_gap_seconds": [],
     }
 
 
@@ -236,7 +239,7 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     page = mmap.PAGESIZE
-    tp_group = MagicMock()
+    tp_group = MagicMock(rank_in_group=1, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -250,6 +253,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.pinned_addresses = []
             self.view_sizes = []
             self.offset = 0
+            kwargs["barrier"]()
 
         def create_next_canonical_view(self, size):
             self.view_sizes.append(size)
@@ -277,16 +281,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     pinned: list[torch.Tensor] = []
 
     def pin_tensor(tensor):
+        tp_group.barrier.assert_called_once_with()
         pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
-        ),
+        parallel_config=_hisparse_parallel_config(),
     )
 
     pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -307,7 +308,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
+        "populate_shard": (1, 2),
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -325,7 +326,8 @@ def test_shared_host_pool_tracks_successful_registrations(
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    tp_group = MagicMock(rank_in_group=0, world_size=2)
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -441,6 +443,43 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     torch.testing.assert_close(cache[4:6], torch.full_like(cache[4:6], 11))
     assert (backing[0] == -1).all()
     assert (backing[9] == -1).all()
+
+
+def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
+    """Block copies index scheduler blocks, so the runner keeps the unmapped
+    views while a packed layer is bound with kernel blocks."""
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    num_blocks, row = 4, 64
+    storage = torch.zeros(num_blocks * row)
+    # Two layers packed into one block row: an 8x4 page, then a 4x2 page
+    # split into two 2-row kernel blocks.
+    mla = storage.as_strided((num_blocks, 8, 4), (row, 4, 1))
+    indexer = storage.as_strided((num_blocks, 1, 4, 2), (row, 8, 2, 1), 40)
+    # The indexer in 2-row kernel blocks: block b's kernel block j is b * 16 + j.
+    mapped = indexer.as_strided((50, 1, 2, 2), (4, 8, 2, 1))
+    kv_caches = {"layers.0.attn": mla, "layers.1.indexer": indexer}
+    ctx = {name: _Layer() for name in kv_caches}
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(
+        kv_caches,
+        ctx,
+        runner_kv_caches,
+        layer_kv_caches={**kv_caches, "layers.1.indexer": mapped},
+    )
+
+    assert ctx["layers.1.indexer"].kv_cache is mapped
+    assert runner_kv_caches == [mla, indexer]
+    copies = [KVCacheBlockCopy(1, 3)]
+    with pytest.raises(AssertionError, match="not divisible"):
+        copy_kv_cache_blocks_inplace([mapped], num_blocks, copies)
+    storage[row : 2 * row] = 7
+    copy_kv_cache_blocks_inplace(runner_kv_caches, num_blocks, copies)
+    assert (mla[3] == 7).all() and (indexer[3] == 7).all()
 
 
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
@@ -1028,6 +1067,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1039,6 +1079,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1112,6 +1153,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )

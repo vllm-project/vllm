@@ -24,12 +24,18 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None" = None,
+        attn_metadata: dict[str, Any] | None = None,
+    ) -> None:
         pass
 
     def finish_forward(self) -> None:
@@ -61,7 +67,12 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None" = None,
+        attn_metadata: dict[str, Any] | None = None,
+    ) -> None:
         if self._disabled:
             return
 
@@ -69,13 +80,35 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self._pending_load_kwargs = kwargs
+        self._pending_load_kwargs = self._build_load_kwargs(
+            scheduler_output, input_batch, attn_metadata
+        )
 
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
         # Otherwise start the async load after forward to keep submission
         # off the critical path.
+
+    @staticmethod
+    def _build_load_kwargs(
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None",
+        attn_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Keyword args for the connector's start_load_kv()."""
+        if input_batch is None:
+            # No forward this step.
+            return {}
+        load_kwargs: dict[str, Any] = dict(
+            scheduler_output=scheduler_output,
+            request_state_indices=input_batch.idx_mapping,
+            request_ids=input_batch.req_ids,
+            num_tokens=input_batch.num_tokens,
+        )
+        if attn_metadata is not None:
+            load_kwargs["attn_metadata"] = attn_metadata
+        return load_kwargs
 
     def _start_load_kv(self) -> None:
         load_kwargs = self._pending_load_kwargs

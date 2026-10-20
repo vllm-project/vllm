@@ -481,8 +481,13 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.static:
             assert scale is not None
+            group_shape = self.quant_key.scale.group_shape
             _, result = auto_functionalized(
-                self.QUANT_OP, result=result, input=input, scale=scale
+                self.QUANT_OP,
+                result=result,
+                input=input,
+                scale=scale,
+                group_shape=[group_shape.row, group_shape.col],
             )
             return result, scale
         else:

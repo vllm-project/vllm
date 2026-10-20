@@ -269,17 +269,6 @@ class DiffusionGemmaForConditionalGeneration(
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
 
-    def compute_self_conditioning(
-        self,
-        inputs_embeds: torch.Tensor,
-        probs: torch.Tensor,
-    ) -> torch.Tensor:
-        embed_weight = self.model.embed_tokens.weight
-        soft_embeds = torch.matmul(
-            probs.to(embed_weight.dtype), embed_weight
-        ) * self.model.normalizer.to(inputs_embeds.dtype)
-        return self.self_conditioning(inputs_embeds, soft_embeds)
-
     # ------------------------------------------------------------------ #
     # Multimodal: reuse Gemma4's image parsing, processing & embedding
     # ------------------------------------------------------------------ #

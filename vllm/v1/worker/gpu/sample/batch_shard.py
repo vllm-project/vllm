@@ -214,21 +214,15 @@ class BatchSharder:
         local_logits_indices = torch.empty(
             num_local_logits, dtype=torch.int64, device=self.device
         )
-        local_idx_mapping = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
+        local_idx_mapping = input_batch.idx_mapping.new_empty(num_local_reqs)
+        local_cu_num_logits = input_batch.cu_num_logits.new_empty(num_local_reqs + 1)
+        local_expanded_idx_mapping = input_batch.expanded_idx_mapping.new_empty(
+            num_local_logits
         )
-        local_cu_num_logits = torch.empty(
-            num_local_reqs + 1, dtype=torch.int32, device=self.device
+        local_expanded_local_pos = input_batch.expanded_local_pos.new_empty(
+            num_local_logits
         )
-        local_expanded_idx_mapping = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_expanded_local_pos = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_seq_lens = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
-        )
+        local_seq_lens = input_batch.seq_lens.new_empty(num_local_reqs)
         if num_reqs > 0:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,

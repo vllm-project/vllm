@@ -45,7 +45,6 @@ from fastapi import Request
 from pydantic import BaseModel
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource as InternalCitationSource,
 )
@@ -91,6 +90,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
     POSITION_TO_SOURCE_KEY,
@@ -254,6 +254,8 @@ class CohereServingChatV2(OpenAIServingChat):
         tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         is_reasoning_model: bool = True,
     ) -> None:
@@ -272,6 +274,8 @@ class CohereServingChatV2(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            enable_log_outputs=enable_log_outputs,
+            enable_log_deltas=enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         # Controls how the assistant's chain-of-thought is surfaced on
@@ -498,7 +502,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # Map every content block to a plain ``{"type": "text", "text":
         # ...}`` part, mirroring the shape :meth:`_convert_user_message`
         # emits for multi-part user content. vLLM's
-        # ``_parse_chat_message_content`` collapses a text-only tool
+        # ``parse_chat_message_content`` collapses a text-only tool
         # part list back into ``"\n".join(...)`` on the way to the
         # renderer, so simple chat templates that expect string tool
         # content still work; keeping the list here just preserves the
@@ -508,8 +512,8 @@ class CohereServingChatV2(OpenAIServingChat):
         # Tool message content uses ``ToolMessageV2Content``, a union of
         # ``TextToolContent`` and ``DocumentToolContent``. The latter
         # produces ``{"type": "document", "document": {...}}`` blocks,
-        # which vLLM's shared ``_parse_chat_message_content_parts`` in
-        # ``vllm/entrypoints/chat_utils.py`` rejects because the OpenAI
+        # which vLLM's shared ``parse_chat_message_content_parts`` in
+        # ``vllm/renderers/chat_utils.py`` rejects because the OpenAI
         # ``ChatCompletionContentPartParam`` union only knows text /
         # image / audio / etc. Emitting them anyway triggers a Pydantic
         # ``ValidatorIterator`` failure at chat-parsing time, so we
@@ -597,7 +601,7 @@ class CohereServingChatV2(OpenAIServingChat):
             json_schema=(
                 JsonSchemaResponseFormat(
                     name="cohere_v2_json_schema",
-                    json_schema=rf.json_schema,
+                    schema=rf.json_schema,
                 )
                 if rf.json_schema
                 else None

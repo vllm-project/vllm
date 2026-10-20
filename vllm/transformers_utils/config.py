@@ -14,6 +14,7 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
+from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -51,6 +52,42 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "total_num_kv_heads": (
+        "n_head_kv",  # Falcon
+        "num_kv_heads",
+        "num_key_value_heads",  # LLaMA-2
+        "multi_query_group_num",  # ChatGLM
+        "num_attention_groups",  # Step3p5
+    ),
+    "num_experts": (
+        "num_experts",  # Jamba
+        "moe_num_experts",  # Dbrx
+        "n_routed_experts",  # DeepSeek
+        "num_local_experts",  # Mixtral
+    ),
+    "num_experts_per_token": (
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "top_k_experts",
+        "moe_topk",  # Hunyuan
+        "moe_top_k",
+        "top_k",
+    ),
+    "moe_intermediate_size": (
+        "moe_intermediate_size",
+        "intermediate_size",
+    ),
+    "num_shared_experts": (
+        "n_shared_experts",  # DeepSeek, Docs, GLM
+        "moe_num_shared_experts",  # Aria, Ernie
+    ),
+}
+"""HF config fields that models spell differently, keyed by the name vLLM uses.
+
+`ModelArchConfigConvertorBase` reads a scalar from these; a caller that needs the
+raw value (a per-layer `list`, say) passes the aliases to `getattr_iter` itself."""
 
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
@@ -108,8 +145,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    mlp_speculator="MLPSpeculatorConfig",
-    medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
@@ -126,12 +161,13 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
+    unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 # Checkpoints whose config.json has no model_type, only remote code in auto_map
 _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
@@ -807,6 +843,19 @@ def maybe_override_with_speculators(
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
+    verifier_error = (
+        "Speculators verifier must name a remote model repository. "
+        "Select local verifiers explicitly with --model and --speculative-config."
+    )
+    if not isinstance(verifier_model, str):
+        raise ValueError(verifier_error)
+    try:
+        validate_repo_id(verifier_model)
+    except HFValidationError as exc:
+        raise ValueError(verifier_error) from exc
+    verifier_path = Path(verifier_model)
+    if verifier_path.exists() or verifier_path.is_symlink():
+        raise ValueError(verifier_error)
     model = tokenizer = verifier_model
 
     return model, tokenizer, speculative_config

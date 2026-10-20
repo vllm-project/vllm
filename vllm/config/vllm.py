@@ -71,12 +71,6 @@ else:
 
 logger = init_logger(__name__)
 
-# TODO(rocm): These models are either unsupported by MRV2 or slower with
-# MRV2 on AMD GPUs.
-ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
-)
-
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
@@ -727,30 +721,6 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        from vllm.platforms import current_platform
-
-        model_config = self.model_config
-        if model_config is not None and current_platform.is_rocm():
-            architectures = getattr(model_config, "architectures", ())
-            if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
-                # This default is a speed preference, not a claim that V1 can
-                # serve the config, so it yields where V1 cannot. It yields by
-                # falling through to the checks below, not by selecting V2.
-                v1_unsupported = self._get_v1_model_runner_unsupported_features()
-                if not v1_unsupported:
-                    logger.warning_once(
-                        "Defaulting to V1 model runner on ROCm for model "
-                        "architectures: %s",
-                        ", ".join(architectures),
-                    )
-                    return False
-                logger.warning_once(
-                    "Skipping the ROCm V1 model runner default for %s: V1 does "
-                    "not support %s.",
-                    ", ".join(architectures),
-                    ", ".join(v1_unsupported),
-                )
-
         if not HAS_TRITON:
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
@@ -1229,6 +1199,21 @@ class VllmConfig:
         ):
             return
 
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            # Lazy import to avoid circular dependencies
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if not connector_cls.supports_sleep_mode(self.kv_transfer_config):
+                raise ValueError(
+                    f"{self.kv_transfer_config.kv_connector} does not support "
+                    "sleep mode."
+                )
+
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.
@@ -1562,8 +1547,6 @@ class VllmConfig:
                 self.quant_config.use_deep_gemm = False
                 logger.warning_once(
                     "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "DeepGemm E8M0 scale format causes accuracy degradation "
-                    "for this architecture. Falling back to CUTLASS. "
                     "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
                     model_type,
                 )
@@ -1685,18 +1668,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
-
-        if (
-            self.speculative_config is not None
-            and self.scheduler_config.async_scheduling
-            and self.model_config is not None
-            and not self.model_config.disable_cascade_attn
-        ):
-            logger.warning_once(
-                "Disabling cascade attention (not yet compatible with "
-                "async speculative decoding).",
-            )
-            self.model_config.disable_cascade_attn = True
 
         if (
             self.observability_config.per_request_spec_decode_metrics != "none"
@@ -1828,6 +1799,16 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.sparse_mla_prefill_workspace_factor is None
+            and self.model_config is not None
+        ):
+            # Resolved once: KV cache auto-fit can lower max_model_len later, and
+            # factor * max_model_len must stay within the workspace reserved at init.
+            self.attention_config.sparse_mla_prefill_workspace_factor = (
+                5 if self.model_config.max_model_len <= 256 * 1024 else 2
+            )
 
         if (
             self.attention_config.hisparse_config is None
@@ -2120,36 +2101,17 @@ class VllmConfig:
         )
 
         # final check of cudagraph mode after all possible updates
-        if current_platform.is_cuda_alike():
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-                and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
-            ):
-                logger.warning_once(
-                    "No piecewise cudagraph for executing cascade attention. "
-                    "Will fall back to eager execution if a batch runs into "
-                    "cascade attentions."
-                )
-
-            if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert (
-                    self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                    or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-                ), (
-                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
-                    "when cudagraph_mode piecewise cudagraphs is used, "
-                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
-                )
         if (
-            self.model_config
-            and envs.VLLM_BATCH_INVARIANT
-            and not self.model_config.disable_cascade_attn
+            current_platform.is_cuda_alike()
+            and self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
         ):
-            self.model_config.disable_cascade_attn = True
-            logger.warning_once(
-                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+            assert (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            ), (
+                "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                "when cudagraph_mode piecewise cudagraphs is used, "
+                f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
             )
 
         if self.parallel_config.use_ubatching:
@@ -2166,10 +2128,6 @@ class VllmConfig:
                 "--all2all-backend=deepep_high_throughput, or "
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
-
-            if not self.model_config.disable_cascade_attn:
-                self.model_config.disable_cascade_attn = True
-                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -2980,12 +2938,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in (
-                "suffix",
-                "medusa",
-                "mlp_speculator",
-                "custom_class",
-            ):
+            if speculative_config.method in ("suffix", "custom_class"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
@@ -3415,7 +3368,7 @@ class VllmConfig:
                 and not self.use_v2_model_runner
             ):
                 raise ValueError(
-                    "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
+                    "RecoverSSM with prefix caching requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
@@ -3426,8 +3379,8 @@ class VllmConfig:
         elif use_mamba_replayssm_spec:
             if self.cache_config.mamba_cache_mode != "none":
                 raise ValueError(
-                    "FlashInfer ReplaySSM speculative decoding requires "
-                    "--mamba-cache-mode none"
+                    "FlashInfer ReplaySSM speculative decoding does not support "
+                    "prefix caching; use --no-enable-prefix-caching"
                 )
             query_len = 1 + self.num_speculative_tokens
             if self.cache_config.replayssm_buffer_len < query_len:
@@ -3445,8 +3398,8 @@ class VllmConfig:
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(
-                    "FlashInfer ReplaySSM does not support "
-                    "--mamba-cache-mode align yet; use none"
+                    "FlashInfer ReplaySSM does not support prefix caching yet; "
+                    "use --no-enable-prefix-caching"
                 )
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(

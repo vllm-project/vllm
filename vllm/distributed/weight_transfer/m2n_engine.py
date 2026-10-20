@@ -449,5 +449,7 @@ class M2NWeightTransferEngine(
             torch.accelerator.synchronize()
             self._handle.destroy()
             self._handle = None
-        self.model_update_group = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None
         self._parameter_destinations = []

@@ -76,6 +76,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
+from concurrent.futures import Future
 from typing import Literal, NamedTuple
 
 CancelMode = Literal["immediate", "wait"]
@@ -179,6 +180,53 @@ class DataTransport(ABC):
         """
         ...
 
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        """Register a remote peer without blocking the caller.
+
+        Registration is O(num_blocks) and can take seconds for a large
+        secondary tier, so the session starts it here and sends
+        ``ConnectAckMsg`` only once the returned future resolves. The
+        acknowledgement is therefore the peer's guarantee that this side
+        is ready to serve, and no ``write_blocks`` can arrive before it.
+
+        The default implementation runs ``add_remote_peer`` inline and
+        returns an already-resolved future; transports whose registration
+        is cheap need not override it.
+
+        Args:
+            peer_id: Unique identifier for the remote peer.
+            agent_metadata: Opaque bytes from the peer's get_agent_metadata().
+            base_addr: Base address of the peer's block memory region.
+            num_blocks: Number of blocks in the peer's region.
+            block_len: Size of each block (must match local block_len).
+
+        Returns:
+            A future resolving to None on success. A failed future means
+            the peer must be rejected rather than acknowledged.
+
+        """
+        future: Future[None] = Future()
+        try:
+            self.add_remote_peer(
+                peer_id,
+                agent_metadata=agent_metadata,
+                base_addr=base_addr,
+                num_blocks=num_blocks,
+                block_len=block_len,
+            )
+        except Exception as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(None)
+        return future
+
     @abstractmethod
     def remove_remote_peer(self, peer_id: str) -> None:
         """Unregister a remote peer and release associated resources.
@@ -248,12 +296,12 @@ class DataTransport(ABC):
                     return []. Matches the legacy fire-and-forget
                     behavior — the caller does not wait for the
                     underlying transfer to drain.
-                "wait": attempt to release each handle. If the release
-                    cannot complete because the transfer is still
-                    PROC/PEND, the entry stays in the inflight set and
-                    its id is included in the returned list. The
-                    caller is expected to keep calling poll() until
-                    every returned id surfaces in done/failed.
+                "wait": release only transfers that have stopped. A
+                    transfer still PROC/PEND (or whose release fails)
+                    stays in the inflight set and its id is included in
+                    the returned list. The caller is expected to keep
+                    calling poll() until every returned id surfaces in
+                    done/failed.
 
         Returns:
             For mode="wait", the subset of *transfer_ids* still

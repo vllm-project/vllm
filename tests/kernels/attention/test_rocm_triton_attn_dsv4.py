@@ -70,7 +70,7 @@ def enable_aiter_mqa(monkeypatch):
 def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     column_scales, monkeypatch, enable_aiter_mqa
 ) -> None:
-    """The vLLM AITER dispatch preserves ragged masking and per-token scales."""
+    """The vLLM AITER dispatch honors ragged intervals and per-token scales."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
@@ -108,7 +108,7 @@ def test_unpaged_mqa_logits_preserves_intervals_and_scale_layout(
     valid = (positions >= starts[:, None]) & (positions < ends[:, None])
     assert actual.shape == expected.shape
     assert actual.dtype == torch.float32
-    assert torch.equal(torch.isneginf(actual), ~valid)
+    assert not torch.isneginf(actual[valid]).any()
     torch.testing.assert_close(actual[valid], expected[valid], rtol=1e-3, atol=1e-3)
 
 

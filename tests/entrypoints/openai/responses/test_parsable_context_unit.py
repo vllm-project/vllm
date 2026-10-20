@@ -169,6 +169,7 @@ def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
     finish_reason: str = "stop",
+    num_cache_creation_tokens: int | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
@@ -186,6 +187,7 @@ def _make_request_output(
             )
         ],
         finished=True,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -423,6 +425,14 @@ def test_reasoning_tokens_counted_per_round():
 
     assert ctx.response_parser.counted_ids == [[7, 7, 1], [7, 2]]
     assert ctx.num_reasoning_tokens == 3
+
+
+def test_cache_creation_tokens_counted_per_round():
+    ctx = _make_context(None)
+
+    for count, expected in [(None, 0), (0, 0), (3, 3), (4, 7)]:
+        ctx.append_output(_make_request_output(num_cache_creation_tokens=count))
+        assert ctx.num_cache_creation_tokens == expected
 
 
 def test_reasoning_tokens_zero_without_parser():

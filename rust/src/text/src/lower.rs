@@ -124,6 +124,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        stream_interval,
     } = sampling_params;
 
     validate_logprobs(
@@ -214,6 +215,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start: 0,
+        stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -341,6 +343,7 @@ fn merge_unique_token_ids(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    use std::num::NonZeroU32;
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -693,6 +696,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -746,6 +750,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -921,6 +926,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -992,6 +998,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1056,6 +1063,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1401,6 +1409,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                stream_interval: None,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1428,6 +1437,26 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_carries_stream_interval_in_sampling_params() {
+        let mut request = sample_request();
+        request.sampling_params.stream_interval = NonZeroU32::new(4);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.generate_request.sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]

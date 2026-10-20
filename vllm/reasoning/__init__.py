@@ -116,6 +116,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "mimo_engine_reasoning_parser",
         "MiMoParserReasoningAdapter",
     ),
+    "minicpmv": (
+        "minicpmv_reasoning_parser",
+        "MiniCPMVParserReasoningAdapter",
+    ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
