@@ -256,7 +256,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
     worker.world_size = 4
-    worker.moriio_wrapper = FakeWrapper()  # type: ignore[assignment]
+    worker.moriio_wrapper = FakeWrapper()
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
@@ -290,6 +290,7 @@ def test_worker_reports_unexpected_heartbeat_exit(exit_kind):
         if exit_kind == "killed":
             process.kill()
         else:
+            assert process.stdin is not None
             process.stdin.close()
         returncode = process.wait(timeout=5)
         with pytest.raises(RuntimeError, match=f"heartbeat.*{returncode}"):
@@ -330,10 +331,8 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
-    worker.moriio_config = SimpleNamespace(  # type: ignore[assignment]
-        recv_abort_timeout=600.0
-    )
-    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_wrapper = wrapper
     # A layer maps to the list of reads posted for it (a KDA layer posts two).
     worker._recving_transfers = defaultdict(
         dict, {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
@@ -383,7 +382,7 @@ def test_aborted_read_without_local_blocks_only_releases_remote_blocks():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.mode = MoRIIOMode.READ
     worker.world_size = 8
-    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
+    worker.moriio_wrapper = wrapper
 
     worker._read_blocks(
         local_block_ids=[],
@@ -436,10 +435,8 @@ def test_read_completion_waits_for_every_posted_read():
     wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
-    worker.moriio_config = SimpleNamespace(  # type: ignore[assignment]
-        recv_abort_timeout=600.0
-    )
-    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_wrapper = wrapper
     worker._recving_transfers = defaultdict(
         dict, {"req": {"kda_layer": [Status(done=True), Status(done=False)]}}
     )
@@ -482,7 +479,7 @@ def test_hybrid_step_barrier_fails_closed(monkeypatch):
     worker._has_mamba = True
     worker._reads_issued_this_step = [object()]
     worker._mamba_reads_this_step = [object()]
-    worker.moriio_wrapper = FailingWrapper()  # type: ignore[assignment]
+    worker.moriio_wrapper = FailingWrapper()
     monkeypatch.setattr(
         "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.get_forward_context",
         lambda: SimpleNamespace(cudagraph_runtime_mode=None),
