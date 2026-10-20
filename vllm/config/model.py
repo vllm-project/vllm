@@ -2016,6 +2016,10 @@ class ModelConfig:
         return self._model_info.supports_pp
 
     @property
+    def is_lora_supported(self) -> bool:
+        return self._model_info.supports_lora
+
+    @property
     def is_attention_free(self) -> bool:
         return self._model_info.is_attention_free
 
@@ -2033,6 +2037,10 @@ class ModelConfig:
     @property
     def has_noops(self) -> bool:
         return self._model_info.has_noops
+
+    @property
+    def supports_kv_cache_grouping(self) -> bool:
+        return self._model_info.supports_kv_cache_grouping
 
     @property
     def has_inner_state(self):
@@ -2274,7 +2282,7 @@ class ModelConfig:
 
     @property
     def is_quantized(self) -> bool:
-        return getattr(self.hf_config, "quantization_config", None) is not None
+        return self.model_arch_config.quantization_config is not None
 
     def is_nvfp4_quantized(self) -> bool:
         quant_config = self.model_arch_config.quantization_config
