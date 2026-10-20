@@ -17,6 +17,7 @@ from vllm.entrypoints.common.cli_args import (
 )
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
+from vllm.entrypoints.launchers.api_server.rust_frontend import run_rust_frontend
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.launchers.launcher import create_server_socket
 from vllm.logger import init_logger
