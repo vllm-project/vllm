@@ -34,6 +34,9 @@ logger = init_logger(__name__)
 # single-program planner loops over WIDTH lanes and scans the pool per miss.
 MAX_DECODE_LANES = 64
 
+# Marlin MoE indexes its weight operand in 16-byte units with a 32-bit int.
+MARLIN_MAX_WEIGHT_BYTES = 16 * 2**31
+
 
 def _next_power_of_two(value: int) -> int:
     return 1 << max(int(value) - 1, 0).bit_length()
@@ -44,6 +47,19 @@ def _check_top_k(top_k: int) -> None:
         raise ValueError(
             f"expert pool supports 0 < top_k <= {MAX_DECODE_LANES}, got {top_k}"
         )
+
+
+def _check_bank_size(
+    source: dict[str, torch.Tensor], slots: int, num_layers: int, staging: int
+) -> None:
+    for name in ("w13_weight", "w2_weight"):
+        row_bytes = source[name][0].nbytes
+        if (slots * num_layers + staging) * row_bytes > MARLIN_MAX_WEIGHT_BYTES:
+            max_slots = (MARLIN_MAX_WEIGHT_BYTES // row_bytes - staging) // num_layers
+            raise ValueError(
+                f"expert pool bank: {name} would exceed the 32 GiB that Marlin "
+                f"MoE can address; use --moe-expert-pool-rows <= {max_slots}"
+            )
 
 
 def check_pool_layers(layers: list[tuple[str, torch.nn.Module]]) -> None:
@@ -154,6 +170,7 @@ def install_expert_pool(
                 raise RuntimeError(
                     f"{name}.{tensor_name}: layer rows differ from {first_name}"
                 )
+    _check_bank_size(sources[0], slots, len(layers), staging)
     pool = GlobalPool(device, sources[0], [slots] * len(layers), staging)
     configure_copy("chunks")
     for index, ((name, layer), src) in enumerate(zip(layers, sources)):

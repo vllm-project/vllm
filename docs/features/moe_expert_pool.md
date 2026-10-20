@@ -53,6 +53,9 @@ allocations. Rows can move between layers at run time.
 - No expert, data or sequence parallelism.
 - `N` must be at least `top_k` and every MoE layer must have the same expert
   count and top-k.
+- Each bank weight tensor must fit in 32 GiB, the range Marlin MoE indexes
+  with 32-bit offsets (e.g. 8192 rows of 4 MiB gate/up weights); a larger
+  bank is rejected at installation with the largest `N` that fits.
 - Prefill of long inputs reads the non-resident experts from host memory on
   every chunk, which adds host-read transfer cost per chunk; the dominant
   term of long-input prefill time has not been profiled.

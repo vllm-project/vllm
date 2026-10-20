@@ -60,6 +60,17 @@ def test_planner_width_is_bounded_by_the_decode_lane_cap():
         assert inst._next_power_of_two(top_k * tokens) <= 2 * inst.MAX_DECODE_LANES
 
 
+def test_bank_beyond_the_marlin_weight_index_is_rejected():
+    # 4 MiB w13 rows (GLM-5.3-Flash, TP2): 8192 bank rows fill the 32 GiB.
+    source = {
+        "w13_weight": torch.empty(1, 4 << 20, dtype=torch.uint8, device="meta"),
+        "w2_weight": torch.empty(1, 2 << 20, dtype=torch.uint8, device="meta"),
+    }
+    inst._check_bank_size(source, slots=193, num_layers=42, staging=64)
+    with pytest.raises(ValueError, match="w13_weight .* <= 193"):
+        inst._check_bank_size(source, slots=194, num_layers=42, staging=64)
+
+
 def test_top_k_beyond_the_lane_cap_is_rejected():
     assert inst.install_expert_pool(torch.nn.Module(), torch.device("cpu")) is None
     for bad in (0, inst.MAX_DECODE_LANES + 1):
