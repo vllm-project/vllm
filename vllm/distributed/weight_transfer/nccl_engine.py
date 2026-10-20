@@ -298,8 +298,9 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
     Every source root joins the shared communicator and participates in each
     broadcast. Rank 0 drives the inference control plane, while each source
-    supplies its own manifest when selected. Other trainer ranks only iterate
-    their source to participate in source-side collectives.
+    supplies the parameters selected by its `held_names()` ownership. Other
+    trainer ranks only iterate their source to participate in source-side
+    collectives.
 
     Packing parameters come from `NCCLTrainerInitInfo` and are propagated to
     workers during initialization.
@@ -350,9 +351,33 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed_num_buffers=init_info.packed_num_buffers,
         )
         local_meta = None
+        local_held_names = None
+        local_metadata = None
         local_metadata_error = None
         try:
             local_meta = source.metadata()
+            names = [item.name for item in local_meta]
+            local_metadata = {
+                "names": names,
+                "dtype_names": [str(item.dtype).split(".")[-1] for item in local_meta],
+                "shapes": [list(item.shape) for item in local_meta],
+            }
+            held = source.held_names()
+            if held is None:
+                local_held_names = names
+            else:
+                held_set = set(held)
+                if not all(isinstance(name, str) for name in held_set):
+                    raise TypeError("WeightSource.held_names() must contain strings")
+                unknown = sorted(held_set - set(names))
+                if unknown:
+                    raise ValueError(
+                        "WeightSource.held_names() contains names not present in "
+                        f"metadata(), e.g. {unknown[:3]}"
+                    )
+                local_held_names = [name for name in names if name in held_set]
+                if not local_held_names:
+                    raise ValueError("WeightSource.held_names() must not be empty")
         except Exception as exc:
             local_metadata_error = f"{type(exc).__name__}: {exc}"
 
@@ -363,19 +388,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                     "NCCL source metadata validation failed: " + local_metadata_error
                 )
             return engine
-
-        local_update_info = None
-        if local_metadata_error is None:
-            assert local_meta is not None
-            try:
-                local_update_info = NCCLWeightTransferUpdateInfo(
-                    names=[m.name for m in local_meta],
-                    dtype_names=[str(m.dtype).split(".")[-1] for m in local_meta],
-                    shapes=[list(m.shape) for m in local_meta],
-                    src=source_rank,
-                )
-            except Exception as exc:
-                local_metadata_error = f"{type(exc).__name__}: {exc}"
 
         if init_info.num_source_ranks > 1:
             assert init_info.coordination_port is not None
@@ -389,34 +401,31 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 {
                     "source_rank": source_rank,
                     "error": local_metadata_error,
-                    "update_info": (
-                        asdict(local_update_info)
-                        if local_update_info is not None
-                        else None
-                    ),
+                    "metadata": local_metadata,
+                    "held_names": local_held_names,
                 }
             )
-            errors = [
-                f"source rank {envelope['source_rank']}: {envelope['error']}"
-                for envelope in envelopes
-                if envelope["error"] is not None
-            ]
-            if errors:
-                raise RuntimeError(
-                    "NCCL source metadata validation failed: " + "; ".join(errors)
-                )
-            engine.update_infos = [
-                NCCLWeightTransferUpdateInfo(**envelope["update_info"])
-                for envelope in envelopes
-            ]
-            engine._validate_update_infos()
         else:
-            if local_metadata_error is not None:
-                raise RuntimeError(
-                    "NCCL source metadata validation failed: " + local_metadata_error
-                )
-            assert local_update_info is not None
-            engine.update_infos = [local_update_info]
+            envelopes = [
+                {
+                    "source_rank": source_rank,
+                    "error": local_metadata_error,
+                    "metadata": local_metadata,
+                    "held_names": local_held_names,
+                }
+            ]
+        errors = [
+            f"source rank {envelope['source_rank']}: {envelope['error']}"
+            for envelope in envelopes
+            if envelope["error"] is not None
+        ]
+        if errors:
+            raise RuntimeError(
+                "NCCL source metadata validation failed: " + "; ".join(errors)
+            )
+        engine.update_infos = engine._build_update_infos(
+            envelopes, init_info.num_source_ranks
+        )
 
         worker_init_info = NCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
@@ -478,7 +487,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         source = self.source
 
         if self.source_rank is None:
-            for _ in source:
+            for _ in self._iter_owned(source):
                 pass
             self._post_send_sync()
             return
@@ -504,30 +513,17 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 start_error = f"{type(exc).__name__}: {exc}"
         self._check_start_outcomes(start_error)
 
-        if not self.is_sender:
-            try:
-                self._send_updates()
-            except BaseException:
-                try:
-                    self._receive_round_outcome()
-                except BaseException:
-                    logger.exception(
-                        "failed to receive NCCL round outcome after local failure"
-                    )
-                raise
-            self._receive_round_outcome()
-            return
-
         try:
             self._send_updates()
-            self.client.finish_weight_update()
+            if self.is_sender:
+                self.client.finish_weight_update()
         except BaseException as exc:
             try:
-                self._publish_round_outcome(exc)
+                self._check_round_outcomes(exc)
             except BaseException:
-                logger.exception("failed to publish NCCL round failure")
+                logger.exception("failed to coordinate NCCL round failure")
             raise
-        self._publish_round_outcome(None)
+        self._check_round_outcomes(None)
 
     def _send_updates(self) -> None:
         for update_info in self.update_infos:
@@ -566,40 +562,28 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         if errors:
             raise RuntimeError("NCCL update failed to start: " + "; ".join(errors))
 
-    def _publish_round_outcome(self, failure: BaseException | None) -> None:
+    def _check_round_outcomes(self, failure: BaseException | None) -> None:
         if self.source_metadata_group is None:
             return
-        envelope = {
-            "ok": failure is None,
-            "error": (
-                None if failure is None else f"{type(failure).__name__}: {failure}"
-            ),
-        }
-        for rank in range(1, self.num_source_ranks):
-            self.source_metadata_group.send_obj(envelope, rank)
-        expected_ack = {"phase": "round_outcome_consumed"}
-        for rank in range(1, self.num_source_ranks):
-            ack = self.source_metadata_group.recv_obj(rank)
-            if ack != expected_ack:
-                raise RuntimeError(
-                    f"source rank {rank} sent an invalid round-outcome acknowledgement"
-                )
-
-    def _receive_round_outcome(self) -> None:
-        if self.source_metadata_group is None:
-            return
-        outcome = self.source_metadata_group.recv_obj(0)
-        self.source_metadata_group.send_obj({"phase": "round_outcome_consumed"}, 0)
-        if not isinstance(outcome, dict) or set(outcome) != {"ok", "error"}:
-            raise RuntimeError("source rank 0 sent an invalid NCCL round outcome")
-        ok = outcome["ok"]
-        error = outcome["error"]
-        if not isinstance(ok, bool) or ok != (error is None):
-            raise RuntimeError("source rank 0 sent an invalid NCCL round outcome")
-        if not ok:
-            if not isinstance(error, str) or not error:
-                raise RuntimeError("source rank 0 sent an invalid NCCL round error")
-            raise RuntimeError("NCCL worker update failed on source rank 0: " + error)
+        outcomes = self.source_metadata_group.all_gather_obj(
+            {
+                "source_rank": self.source_rank,
+                "error": (
+                    None if failure is None else f"{type(failure).__name__}: {failure}"
+                ),
+            }
+        )
+        if [outcome["source_rank"] for outcome in outcomes] != list(
+            range(self.num_source_ranks)
+        ):
+            raise RuntimeError("NCCL round outcomes are not ordered by source rank")
+        errors = [
+            f"source rank {outcome['source_rank']}: {outcome['error']}"
+            for outcome in outcomes
+            if outcome["error"] is not None
+        ]
+        if errors and failure is None:
+            raise RuntimeError("NCCL weight transfer failed: " + "; ".join(errors))
 
     def _broadcast_update(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         assert self.model_update_group is not None
@@ -616,7 +600,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             if is_source:
                 assert self.source is not None
                 packed_nccl_broadcast_producer(
-                    iterator=self._checked_iter(self.source, meta),
+                    iterator=self._checked_iter(self._iter_owned(self.source), meta),
                     group=self.model_update_group,
                     src=update_info.src,
                     post_iter_func=lambda item: item[1],
@@ -640,7 +624,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             tensors: Iterator[tuple[str, torch.Tensor]]
             if is_source:
                 assert self.source is not None
-                tensors = self._checked_iter(self.source, meta)
+                tensors = self._checked_iter(self._iter_owned(self.source), meta)
             else:
                 tensors = (
                     (
@@ -660,24 +644,93 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 )
         self._post_send_sync()
 
-    def _validate_update_infos(self) -> None:
-        if [info.src for info in self.update_infos] != list(
-            range(self.num_source_ranks)
+    @staticmethod
+    def _build_update_infos(
+        envelopes: list[dict], num_source_ranks: int
+    ) -> list[NCCLWeightTransferUpdateInfo]:
+        if [envelope["source_rank"] for envelope in envelopes] != list(
+            range(num_source_ranks)
         ):
             raise ValueError("source manifests must be ordered by source rank")
+
+        metadata = envelopes[0]["metadata"]
+        if any(envelope["metadata"] != metadata for envelope in envelopes[1:]):
+            raise ValueError("WeightSource metadata() differs across source ranks")
+        if not isinstance(metadata, dict):
+            raise TypeError("source metadata must be a dictionary")
+        full_info = NCCLWeightTransferUpdateInfo(src=0, **metadata)
+        if len(set(full_info.names)) != len(full_info.names):
+            raise ValueError("WeightSource metadata() contains duplicate names")
+
         owners: dict[str, int] = {}
-        for info in self.update_infos:
-            for name in info.names:
+        known_names = set(full_info.names)
+        for envelope in envelopes:
+            source_rank = envelope["source_rank"]
+            held_names = envelope["held_names"]
+            if not isinstance(held_names, list) or not held_names:
+                raise ValueError(
+                    f"source rank {source_rank} must hold at least one parameter"
+                )
+            for name in held_names:
+                if name not in known_names:
+                    raise ValueError(
+                        f"source rank {source_rank} holds unknown parameter {name!r}"
+                    )
                 if name in owners:
                     raise ValueError(
                         f"parameter {name!r} is declared by source ranks "
-                        f"{owners[name]} and {info.src}"
+                        f"{owners[name]} and {source_rank}"
                     )
-                owners[name] = info.src
+                owners[name] = source_rank
+
+        missing = [name for name in full_info.names if name not in owners]
+        if missing:
+            raise ValueError(f"no source rank holds parameter {missing[0]!r}")
+
+        return [
+            NCCLWeightTransferUpdateInfo(
+                names=[name for name in full_info.names if owners[name] == source_rank],
+                dtype_names=[
+                    dtype_name
+                    for name, dtype_name in zip(full_info.names, full_info.dtype_names)
+                    if owners[name] == source_rank
+                ],
+                shapes=[
+                    shape
+                    for name, shape in zip(full_info.names, full_info.shapes)
+                    if owners[name] == source_rank
+                ],
+                src=source_rank,
+            )
+            for source_rank in range(num_source_ranks)
+        ]
+
+    @staticmethod
+    def _iter_owned(
+        source: WeightSource,
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        held = source.held_names()
+        if held is None and type(source).iter_groups is WeightSource.iter_groups:
+            yield from source
+            return
+
+        held_set = None if held is None else set(held)
+        for names, tensors in source.iter_groups():
+            for name, tensor in zip(names, tensors, strict=True):
+                if held_set is None or name in held_set:
+                    if tensor is None:
+                        raise ValueError(
+                            f"WeightSource holds {name!r} but yielded None"
+                        )
+                    yield name, tensor
+                elif tensor is not None:
+                    raise ValueError(
+                        f"WeightSource does not hold {name!r} but yielded a tensor"
+                    )
 
     @staticmethod
     def _checked_iter(
-        source: WeightSource, meta: list[ParamMeta]
+        pairs: Iterator[tuple[str, torch.Tensor]], meta: list[ParamMeta]
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Yield the source's pairs, checking each against what the worker was
         told to expect.
@@ -690,7 +743,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         divergent parameter.
         """
         sent = 0
-        for name, tensor in source:
+        for name, tensor in pairs:
             if sent >= len(meta):
                 raise ValueError(
                     f"WeightSource yielded more parameters than metadata() "

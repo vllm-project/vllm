@@ -71,6 +71,12 @@ class StageSource(WeightSource):
         return [
             ParamMeta(name, param.dtype, tuple(param.shape))
             for name, param in self.model.named_parameters()
+        ]
+
+    def held_names(self) -> list[str]:
+        return [
+            name
+            for name, _ in self.model.named_parameters()
             if self._owner(name) == self.stage_rank
         ]
 

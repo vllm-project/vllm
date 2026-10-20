@@ -95,9 +95,10 @@ applies when no trainer ships a value — which, on this path, never happens.
 
 Set `num_source_ranks` to the number of disjoint trainer sources and assign each
 source root a unique `source_rank`. Source rank 0 drives the control plane.
-Every source root joins the transfer communicator, exchanges its local manifest
-over `coordination_port`, and participates in each broadcast. Initialize and
-call `send_weights()` on all source roots concurrently.
+Every source root joins the transfer communicator, exchanges its whole-model
+metadata and `held_names()` ownership over `coordination_port`, and participates
+in each broadcast. The ownership sets must form a disjoint partition of the
+metadata. Initialize and call `send_weights()` on all source roots concurrently.
 
 Trainer processes that only participate in source-side gathers leave
 `source_rank=None`; they do not join the transfer communicator.

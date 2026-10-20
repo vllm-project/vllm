@@ -644,10 +644,12 @@ class MultiSourceInferenceWorker:
             def __init__(self):
                 super().__init__()
                 self.received: dict[str, float] = {}
+                self.load_counts: dict[str, int] = {}
 
             def load_weights(self, weights):
                 for name, tensor in weights:
                     self.received[name] = tensor.sum().item()
+                    self.load_counts[name] = self.load_counts.get(name, 0) + 1
 
         self.recorder = Recorder()
         self.engine = NCCLWeightTransferEngine(
@@ -677,9 +679,12 @@ class MultiSourceInferenceWorker:
 
     def results(self):
         torch.accelerator.synchronize()
-        received = self.recorder.received
+        results = {
+            "received": self.recorder.received,
+            "load_counts": self.recorder.load_counts,
+        }
         self.engine.shutdown()
-        return received
+        return results
 
 
 @ray.remote(num_gpus=1)
@@ -692,7 +697,8 @@ def trainer_send_from_source(
     num_sources: int,
     source_rank: int,
     tensor_shape: list[int],
-    value: float,
+    num_tensors_per_source: int,
+    packed: bool,
 ) -> bool:
     device = _set_ray_assigned_device()
 
@@ -704,20 +710,34 @@ def trainer_send_from_source(
     from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 
     class Source(WeightSource):
+        @staticmethod
+        def name(rank: int, index: int) -> str:
+            return f"source_{rank}.weight_{index}"
+
         def metadata(self):
             return [
                 ParamMeta(
-                    f"source_{source_rank}.weight",
+                    self.name(rank, index),
                     torch.float32,
                     tuple(tensor_shape),
                 )
+                for rank in range(num_sources)
+                for index in range(num_tensors_per_source)
+            ]
+
+        def held_names(self):
+            return [
+                self.name(source_rank, index) for index in range(num_tensors_per_source)
             ]
 
         def __iter__(self):
-            yield (
-                f"source_{source_rank}.weight",
-                torch.full(tensor_shape, value, device=device),
-            )
+            for rank in range(num_sources):
+                for index in range(num_tensors_per_source):
+                    tensor = None
+                    if rank == source_rank:
+                        value = source_rank * num_tensors_per_source + index + 1
+                        tensor = torch.full(tensor_shape, value, device=device)
+                    yield self.name(rank, index), tensor
 
     class Client:
         def call(self, method, *args):
@@ -746,13 +766,14 @@ def trainer_send_from_source(
             num_source_ranks=num_sources,
             source_rank=source_rank,
             rank=source_rank,
-            packed=True,
+            packed=packed,
             packed_buffer_size_bytes=1024,
         ),
         client=Client(),
         source=Source(),
     )
-    engine.send_weights()
+    for _ in range(2):
+        engine.send_weights()
     engine.shutdown()
     return True
 
@@ -761,7 +782,8 @@ def trainer_send_from_source(
     torch.accelerator.device_count() < 4,
     reason="Need 4 GPUs for two NCCL sources and two inference workers.",
 )
-def test_nccl_weight_transfer_from_multiple_sources():
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_nccl_weight_transfer_from_multiple_sources(packed):
     _init_ray_for_weight_transfer()
 
     master_address = "127.0.0.1"
@@ -770,8 +792,8 @@ def test_nccl_weight_transfer_from_multiple_sources():
     num_sources = 2
     num_workers = 2
     world_size = num_sources + num_workers
-    tensor_shape = [16, 16]
-    source_values = [1.0, 2.0]
+    tensor_shape = [8, 8]
+    num_tensors_per_source = 10
 
     receivers = [
         MultiSourceInferenceWorker.remote(  # type: ignore[attr-defined]
@@ -790,18 +812,27 @@ def test_nccl_weight_transfer_from_multiple_sources():
             num_sources,
             source_rank,
             tensor_shape,
-            source_values[source_rank],
+            num_tensors_per_source,
+            packed,
         )
         for source_rank in range(num_sources)
     ]
     assert ray.get(futures, timeout=300) == [True] * num_sources
     expected_numel = torch.tensor(tensor_shape).prod().item()
     expected = {
-        f"source_{src}.weight": value * expected_numel
-        for src, value in enumerate(source_values)
+        f"source_{source_rank}.weight_{index}": (
+            source_rank * num_tensors_per_source + index + 1
+        )
+        * expected_numel
+        for source_rank in range(num_sources)
+        for index in range(num_tensors_per_source)
     }
     results = ray.get([receiver.results.remote() for receiver in receivers])
-    assert results == [expected] * num_workers
+    for result in results:
+        assert result["received"] == expected
+        assert result["load_counts"] == dict.fromkeys(expected, 2)
+    for receiver in receivers:
+        ray.kill(receiver)
 
 
 def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
@@ -1893,27 +1924,24 @@ def test_nccl_trainer_init_gathers_multi_source_manifests(monkeypatch):
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     metadata_group = MagicMock()
+    metadata = {
+        "names": ["first.weight", "second.weight"],
+        "dtype_names": ["float32", "float32"],
+        "shapes": [[4], [2]],
+    }
     metadata_group.all_gather_obj.side_effect = [
         [
             {
                 "source_rank": 0,
                 "error": None,
-                "update_info": {
-                    "names": ["first.weight"],
-                    "dtype_names": ["float32"],
-                    "shapes": [[4]],
-                    "src": 0,
-                },
+                "metadata": metadata,
+                "held_names": ["first.weight"],
             },
             {
                 "source_rank": 1,
                 "error": None,
-                "update_info": {
-                    "names": ["second.weight"],
-                    "dtype_names": ["float32"],
-                    "shapes": [[2]],
-                    "src": 1,
-                },
+                "metadata": metadata,
+                "held_names": ["second.weight"],
             },
         ],
         [
@@ -1931,6 +1959,12 @@ def test_nccl_trainer_init_gathers_multi_source_manifests(monkeypatch):
     )
 
     client = RecordingClient()
+    source = MagicMock(spec=WeightSource)
+    source.metadata.return_value = [
+        ParamMeta("first.weight", torch.float32, (4,)),
+        ParamMeta("second.weight", torch.float32, (2,)),
+    ]
+    source.held_names.return_value = ["first.weight"]
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=NCCLTrainerInitInfo(
             master_address="127.0.0.1",
@@ -1943,13 +1977,42 @@ def test_nccl_trainer_init_gathers_multi_source_manifests(monkeypatch):
             packed=True,
         ),
         client=client,
-        source=ModuleSource(_module_with(("first.weight", torch.zeros(4)))),
+        source=source,
     )
 
     assert [info.src for info in engine.update_infos] == [0, 1]
+    assert [info.names for info in engine.update_infos] == [
+        ["first.weight"],
+        ["second.weight"],
+    ]
     assert client.last_init_info is not None
     assert client.last_init_info["rank_offset"] == 2
     assert metadata_group.all_gather_obj.call_count == 2
+
+
+def test_nccl_trainer_three_source_round_failure_uses_all_gather():
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(),
+        source=MagicMock(spec=WeightSource),
+        source_rank=0,
+        num_source_ranks=3,
+    )
+    metadata_group = MagicMock()
+    metadata_group.all_gather_obj.return_value = [
+        {"source_rank": 0, "error": None},
+        {"source_rank": 1, "error": None},
+        {"source_rank": 2, "error": "RuntimeError: transfer failed"},
+    ]
+    engine.source_metadata_group = metadata_group
+
+    with pytest.raises(RuntimeError, match="source rank 2"):
+        engine._check_round_outcomes(None)
+
+    metadata_group.all_gather_obj.assert_called_once_with(
+        {"source_rank": 0, "error": None}
+    )
+    metadata_group.send_obj.assert_not_called()
+    metadata_group.recv_obj.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -2092,6 +2155,7 @@ def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
     client = RecordingClient()
     source = MagicMock(spec=WeightSource)
     source.metadata.return_value = [ParamMeta("w", torch.float32, (4,))]
+    source.held_names.return_value = None
     source.__iter__.return_value = iter([("w", torch.zeros(4))])
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=NCCLTrainerInitInfo(
