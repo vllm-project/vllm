@@ -440,10 +440,10 @@ def bf16x3_router_gemm_module():
 
         return bf16x3_router_gemm_sm90
     from vllm.model_executor.layers.fused_moe.router import (
-        bf16x3_router_gemm_cutedsl,
+        bf16x3_router_gemm_sm100,
     )
 
-    return bf16x3_router_gemm_cutedsl
+    return bf16x3_router_gemm_sm100
 
 
 def rocm_bf16x3_router_gemm_dispatch_impl(

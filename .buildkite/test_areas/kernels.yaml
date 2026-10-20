@@ -137,9 +137,9 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py
   - vllm/model_executor/layers/fused_moe/router/gate_linear.py
-  - tests/kernels/test_bf16x3_router_gemm_sm90.py
+  - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   commands:
-    - pytest -v -s kernels/test_bf16x3_router_gemm_sm90.py
+    - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -246,9 +246,9 @@ steps:
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
-# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200); test_ll_bf16_gemm and
-# test_ll_fp32w_gemm run in Gate Linear CuTeDSL Kernels (B200);
-# test_bf16x3_router_gemm_sm90 runs in BF16x3 Router GEMM Kernels (H100)).
+# (test_bf16x3_router_gemm_cutedsl runs in Kernels (B200) and BF16x3 Router GEMM
+# Kernels (H100); test_ll_bf16_gemm and test_ll_fp32w_gemm run in Gate Linear
+# CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
   automatic_shard: true
@@ -277,7 +277,6 @@ steps:
         --ignore=kernels/test_cpu_fused_sampling.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
         --ignore=kernels/test_bf16x3_router_gemm_rocm.py
-        --ignore=kernels/test_bf16x3_router_gemm_sm90.py
         --ignore=kernels/test_ll_bf16_gemm.py
         --ignore=kernels/test_ll_fp32w_gemm.py
         --ignore=kernels/test_shuffle_rows.py
@@ -622,7 +621,7 @@ steps:
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
-  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+  - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
   - cmake/external_projects/fmha_sm100.cmake
   - vllm/models/minimax_m3/common/sparse_attention.py
   - vllm/models/minimax_m3/nvidia/

@@ -2,27 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL BF16x3 router GEMM for Hopper (SM90).
 
-Computes the fp32 router logits ``x @ w.T`` for bf16 activations ``x`` with
-shape ``[M, K]`` and fp32 router weights ``w`` with shape ``[E, K]``. Without
-it, SM90 runs batches above the fp32 GEMV's 32 tokens as an fp32 SGEMM on CUDA
-cores.
-
-The MMA runs swapped: 64 experts form the wgmma M dimension and tokens the N
-dimension, so small batches still fill the instruction. TMA brings fp32 weight
-tiles and bf16 token tiles into shared memory. The MMA warpgroup reads each
-k16 slice of its weight fragment as fp32, splits it into three bf16 terms whose
-sum is exact, and issues register-A wgmma against the token tile. Every product
-with a bf16 activation is exact in fp32, so all of the error comes from
-accumulation:
-
-- the first-term products go to a tensor-core partial that starts fresh every
-  K-tile and is then added into an fp32 register accumulator;
-- the second and third terms, about 2^-8 of the output, accumulate in their own
-  partial across the whole K range.
-
-Split-K runs in a thread-block cluster. Each CTA sums one slice of the tile over
-all CTAs of the cluster through distributed shared memory, in rank order, so
-results do not depend on scheduling and no second kernel is needed.
+Computes fp32 ``x @ w.T`` for bf16 ``x`` [M, K] and fp32 router weights ``w``
+[E, K]. The MMA warpgroup splits each fp32 weight fragment into three bf16
+terms in registers and issues register-A wgmma with experts as the MMA M
+dimension. The first term accumulates per K-tile and is promoted into an fp32
+register accumulator; the other two accumulate across K. Split-K reduces in
+rank order over the cluster's distributed shared memory.
 """
 
 import math
@@ -49,7 +34,6 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
 )
-from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -134,7 +118,6 @@ class _Sm90BF16x3RouterGemm:
         block_k: int,
         num_stages: int,
         split_k: int,
-        use_pdl: bool,
     ) -> None:
         # Slices alternate between two register buffers, so a K-tile holds an
         # even number of k16 slices.
@@ -147,7 +130,6 @@ class _Sm90BF16x3RouterGemm:
         self.block_k = block_k
         self.num_stages = num_stages
         self.split_k = split_k
-        self.use_pdl = use_pdl
         self.num_mma_threads = 128
         self.producer_warp = 4  # after the MMA warpgroup, which must be aligned
         self.threads = self.num_mma_threads + 32
@@ -216,7 +198,7 @@ class _Sm90BF16x3RouterGemm:
             block=[self.threads, 1, 1],
             cluster=[1, 1, self.split_k],
             stream=stream,
-            use_pdl=self.use_pdl,
+            use_pdl=True,
         )
 
     @cute.jit
@@ -348,8 +330,7 @@ class _Sm90BF16x3RouterGemm:
         k_begin = bid_s * k_tiles // self.split_k
         k_end = (bid_s + 1) * k_tiles // self.split_k
         pipeline_init_wait(cluster_shape_mn=(1, 1))
-        if const_expr(self.use_pdl):
-            cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_wait()
 
         if warp_idx == self.producer_warp:
             cpasync.prefetch_descriptor(tma_w)
@@ -370,7 +351,7 @@ class _Sm90BF16x3RouterGemm:
                 state.advance()
             mainloop.producer_tail(state)
 
-        if tidx < self.num_mma_threads:
+        if warp_idx < self.producer_warp:
             thr_mma = tiled_mma.get_slice(tidx)
             tCsW = thr_mma.partition_A(sW)  # fp32 view in A-fragment order
             tCrX = tiled_mma.make_fragment_B(thr_mma.partition_B(sX))
@@ -477,7 +458,7 @@ class _Sm90BF16x3RouterGemm:
             # have read it.
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()
-            if tidx < self.num_mma_threads:
+            if warp_idx < self.producer_warp:
                 rank = cute.arch.block_idx_in_cluster()
                 chunk = bE * bT // self.split_k
                 red_base = storage.sW.data_ptr()
@@ -514,8 +495,7 @@ class _Sm90BF16x3RouterGemm:
             cute.arch.cluster_arrive()
             cute.arch.cluster_wait()
 
-        if const_expr(self.use_pdl):
-            cute.arch.griddepcontrol_launch_dependents()
+        cute.arch.griddepcontrol_launch_dependents()
 
 
 # Candidate tiles as (block_t, block_k, num_stages) -> (fixed_us, us_per_k64):
@@ -565,7 +545,6 @@ class Sm90BF16x3RouterGemmKernel(
         block_k: int
         num_stages: int
         split_k: int
-        use_pdl: bool
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -574,7 +553,6 @@ class Sm90BF16x3RouterGemmKernel(
             block_k=compile_key.block_k,
             num_stages=compile_key.num_stages,
             split_k=compile_key.split_k,
-            use_pdl=compile_key.use_pdl,
         )
 
     def dispatch(  # type: ignore[override]
@@ -584,7 +562,6 @@ class Sm90BF16x3RouterGemmKernel(
         K: int,
         E: int,
         num_sms: int,
-        use_pdl: bool,
     ) -> CompileKey:
         config = _pick_config(num_tokens, K, E, num_sms)
         return self.CompileKey(
@@ -593,7 +570,6 @@ class Sm90BF16x3RouterGemmKernel(
             block_k=config[1],
             num_stages=config[2],
             split_k=config[3],
-            use_pdl=use_pdl,
         )
 
     def get_warmup_keys(
@@ -608,7 +584,6 @@ class Sm90BF16x3RouterGemmKernel(
             K=K,
             E=E,
             num_sms=num_compute_units(torch.accelerator.current_device_index()),
-            use_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
@@ -630,7 +605,6 @@ class Sm90BF16x3RouterGemmKernel(
             K=K,
             E=E,
             num_sms=num_compute_units(x.device.index),
-            use_pdl=current_platform.is_arch_support_pdl(),
         )
         out = x.new_empty((M, E), dtype=torch.float32)
         return compile_key, (x, weight, out), out
