@@ -63,7 +63,13 @@ def _bytes_view(t: torch.Tensor) -> torch.Tensor:
 
 
 def permute_on_load(param: torch.Tensor, perm: torch.Tensor, dim: int) -> None:
-    """Make ``param``'s weight loader gather the loaded shard by ``perm``."""
+    """Make ``param``'s weight loader gather the loaded shard by ``perm``.
+
+    The loader keeps a private host copy of ``perm``: it runs again on weight
+    reload after sleep level 2, which discards GPU tensors that are not
+    parameters or buffers.
+    """
+    perm = perm.detach().to("cpu", copy=True)
 
     def gather(t: torch.Tensor) -> torch.Tensor:
         return _bytes_view(t).index_select(dim, perm.to(t.device)).view(t.dtype)

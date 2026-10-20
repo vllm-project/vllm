@@ -77,3 +77,16 @@ def test_permuted_wo_a_consumes_fused_output():
     torch.testing.assert_close(
         fused_o @ loaded_weight.T, expected, rtol=1e-3, atol=1e-3
     )
+
+
+def test_permute_on_load_owns_its_permutation():
+    """Reload after sleep level 2 must not depend on the caller's ``perm``."""
+    perm = q_fused_permutation(2, HEAD_DIM)
+    checkpoint = torch.arange(perm.numel(), dtype=torch.float32)
+    param = torch.nn.Parameter(torch.empty_like(checkpoint), requires_grad=False)
+    param.weight_loader = default_weight_loader  # type: ignore[attr-defined]
+    permute_on_load(param, perm, 0)
+    expected = checkpoint[perm]
+    perm.fill_(0)
+    param.weight_loader(param, checkpoint)  # type: ignore[attr-defined]
+    torch.testing.assert_close(param.data, expected)
