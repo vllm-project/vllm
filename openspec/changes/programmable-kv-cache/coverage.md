@@ -43,19 +43,19 @@ Historical Qwen/Store results are located by the evidence index in `validation.m
 | Demotion lifecycle | `transfers.py` and CPU/Store adapters; queued source-reference tests; recorded real CPU/Store copies | Full failure workload |
 | Proactive preparation | Transfer leases, all-rank publication; Store/CPU suites; real `lifecycle.py` duplicate COPY/resume race hits 784 tokens and cancelled preparation falls back correctly | Full outage/restart loop (7.9) |
 | Cross-engine reuse | Unified `http_control.py --destination-url`; actual destination hits in `functional/` and both merged CLI rounds | Other models/layouts |
-| Complete native G2 path | Legacy actions and version-1.0 primitives have real Store/Qwen evidence; request-attached and opt-in native-policy G2 traces pass on rfc-hint | Broader workload and external model validation |
-| Programmable local policy | At utilization 0.5 and 256 rollouts, quota 30/1 and 120/30 finish in 1,898.86 s and 1,369.48 s versus native 1,994.30 s (+5.0%/+45.6%, one run each); the latter has 2 versus 9 preemptions and lower tails for all 32 families | Repeated deployment cache-fit/pressure, complete forecast sensitivity and external workloads |
+| Complete native G2 path | Legacy actions and version-1.0 primitives have real Store/Qwen evidence; request-attached and opt-in native-policy G2 traces pass on rfc-hint | Broader workload validation |
+| Programmable local policy | At utilization 0.5 and 256 rollouts, quota 30/1 and 120/30 finish in 1,898.86 s and 1,369.48 s versus native 1,994.30 s (+5.0%/+45.6%, one run each); the latter has 2 versus 9 preemptions and lower tails for all 32 families | Repeated deployment cache-fit/pressure and complete forecast sensitivity |
 | Multi-policy composition | Composer and shared leases; unit coverage plus direct retention/movement/composed and quota-only ablations | Oracle/adverse workloads (7.4) remain unexecuted |
 | Request/KV cooperation | Quota scheduler checks preserve priority and bounded waiting; deployment runs record phases, per-family latency and zero per-request control RPCs | Repeated fairness/admission and idle/noop overhead matrix (7.5) |
 | Logical lifecycle completion | Real root+B/C cleanup preserves the independently owned external task and its GPU priority | Broader pressure/failure matrix |
 | Closed-loop control | Current bounded GPU residency/priority queries, association/session revisions, explicit result ACK and incarnation-checked cancellation | Full recovery loop (7.9); cold residency is not advertised |
 | Recovery | `functional/` actual Store outage has no false residency, recomputation matches, restart rejects old epoch and reconstructs logical state | Unified-CLI full recovery completion after fixing early Store-segment-host shutdown; user deferred the remaining quality run |
-| Weight compatibility | `functional/weight-update.json.gz` actual norm parameter update/rollback passes with async control drained; new namespace cannot reuse old KV, rollback restores reuse | External models; full optimizer/trainer integration |
+| Weight compatibility | `functional/weight-update.json.gz` actual norm parameter update/rollback passes with async control drained; new namespace cannot reuse old KV, rollback restores reuse | Full optimizer/trainer integration (outside first-release acceptance) |
 
 Runtime restrictions: general CPU control requires one block per chunk; native CPU Share is unsupported.
 Mooncake supports full primary boundaries and PCP=DCP=1.
 Cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are unsupported.
-Local Qwen results do not validate GPT-OSS-120B or DeepSeek-V4-Flash.
+Evaluation conclusions are limited to the tested local Qwen configuration.
 `verl_rollout.py` now executes the actual verl ToolAgentLoop with real model/tool calls, response masks, logprobs and rewards.
 The current 256-rollout native trace and ordinary quota comparison use utilization 0.5, peak at full KV occupancy and incur real preemptions.
 Repeated deployment-scale acceptance remains tracked separately and is not inferred from the earlier 32-rollout artificial-budget results.
@@ -96,7 +96,7 @@ The demo IDs are not public action names.
 ## Validation configuration
 
 - Local debug: **Qwen3.8-27B, TP=2**, as corrected by the user.
-- Complete evaluation elsewhere: GPT-OSS-120B and DeepSeek-V4-Flash.
+- Acceptance environment: GPUs 0/3 with local Qwen TP=2, including repeated pressure/fit and failure validation.
 - Model downloads: `/home/youwei/bzh/model/download.py`.
 - Dataset downloads: `/home/youwei/bzh/dataset/download_dataset.py`.
 - The first delivery includes a real Mooncake cross-engine run; scripts and mocks alone do not establish that result.
@@ -104,7 +104,7 @@ The demo IDs are not public action names.
 ## Remaining delivery gaps
 
 Payloads, whole-envelope routing, revisions and snapshot/follow-growth scope are specified in `implementation.md` and implemented in the native modules.
-The open items are the incomplete acceptance rows above and the task list, especially the complete performance/failure matrix and external-model coverage.
+The open items are the incomplete acceptance rows above and the task list, especially the complete performance/failure matrix.
 
 The `rfc-hint` implementation adds the public primitive profile and the concrete request lifecycle described in `vllm/v1/kv_hints/README.md`.
 Result scope now includes per-target transfer IDs/generations.

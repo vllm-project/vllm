@@ -52,15 +52,15 @@ Separate correctness validation SHALL establish that local and external KV from 
 - **WHEN** a new weight version becomes active while a prefix from the previous version remains in a remote store
 - **THEN** the old copy cannot satisfy a new-version request or be published by a stale control completion
 
-### Requirement: Distinguish local debugging from full evaluation
+### Requirement: Record the validated model and hardware scope
 
-Local Qwen3.8-27B TP=2 debugging SHALL NOT be reported as comprehensive performance validation.
-The full evaluation matrix SHALL include GPT-OSS-120B and DeepSeek-V4-Flash on the designated external machines and record their actual cache-group/layout coverage.
+Acceptance SHALL use Qwen3.8-27B TP=2 on the selected local GPUs 0 and 3.
+Reports SHALL record the actual cache-group/layout and hardware coverage and SHALL NOT generalize measured results to untested configurations.
 
-#### Scenario: Local debug succeeds
+#### Scenario: Local evaluation succeeds
 
-- **WHEN** the local debug scenario passes
-- **THEN** the report records that result while leaving unexecuted external model evaluations incomplete
+- **WHEN** the local comparison and correctness checks pass
+- **THEN** the report records the tested model, hardware, layouts and workload as the scope of its conclusions
 
 ### Requirement: Deployment-scale overhead comparisons
 

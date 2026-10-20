@@ -203,7 +203,7 @@ The concrete quota formula, score combination, and starvation protection still n
 Performance scenarios reuse KV only within one weight version; weight updates receive independent old-KV invalidation correctness checks.
 A full RL training loop is not required for the first performance workload.
 
-The local four-A100 machine is for quick debugging, not comprehensive evaluation.
+Acceptance uses the local A100 machine with GPUs 0 and 3.
 The user corrected the local debug model to Qwen3.8-27B with TP=2.
 Use that model instead of Flash-Next.
 Exact downloaded checkpoint/configuration, usable GPU IDs, and Mooncake deployment still need verification before execution.
@@ -215,8 +215,7 @@ Any Python execution follows the repository's uv/venv instructions.
 Related repositories can be cloned alongside this repository under `../` when necessary for integration/adaptation.
 This does not remove the agreed boundary prohibiting changes to the Mooncake project.
 
-Later full evaluation on other machines targets GPT-OSS-120B and DeepSeek-V4-Flash.
-Group-aware resolution and multi-rank completion must therefore be part of the main implementation, not deferred behind a full-attention-only demonstration.
+Group-aware resolution and multi-rank completion remain part of acceptance for the local hybrid model.
 Exact supported layouts remain in the capability matrix.
 
 ### Proposed validation approach
@@ -266,7 +265,7 @@ An HTTP client adapter may add native KV controls without replacing verl's loop/
 Separate controlled trace replay (identical model-visible inputs/output budgets) from live agent trajectories (which can diverge); report both.
 Cover multiple prefix families, staggered tool waits, cold/warm pressure sweeps and misleading resume predictions.
 Repeat measured arms, separate warmup, and retain raw rows, configuration, source versions and server metrics.
-Local GPUs 0/3 and Qwen TP=2 remain the development environment; external model results require actual runs.
+Local GPUs 0/3 and Qwen TP=2 define the agreed evaluation environment; conclusions remain scoped to the tested configuration.
 
 Runtime work includes an idle-engine weight-version transition with stale-transfer and local/external KV isolation, bounded current-residency queries, explicit result acknowledgement that preserves bounded deduplication, and workload-aware movement and scheduler guidance.
 Admission remains engine-owned; hints never guarantee residency.

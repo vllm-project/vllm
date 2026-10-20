@@ -136,7 +136,7 @@ Mocks can verify API contracts; full-path acceptance needs real Store calls.
 
 This section records the follow-up scope after removal of the separate local notes.
 Dynamo integration, mixed-owner envelopes, and concrete KVCR G1 integration remain subsequent work.
-Unexecuted first-release performance, failure and external-model acceptance remains in `tasks.md`.
+Unexecuted first-release performance and failure acceptance remains in `tasks.md`.
 
 The user has allowed related repositories under `../` for required adaptations.
 The confirmed no-Mooncake-project-modification boundary still applies.

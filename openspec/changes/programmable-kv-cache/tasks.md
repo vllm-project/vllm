@@ -124,14 +124,14 @@ Resumed on October 18 at the user's request. The October 12 stop boundary no lon
 On October 19 the user requested incremental tested commits and prioritized speed over detailed output checks.
 Completed `quota-wait120-aging30` and stopped all experiment launchers at the user's requested boundary.
 Ordinary native/quota 30/1/quota 120/30 runs take 1,994.30/1,898.86/1,369.48 seconds at utilization 0.5 and equal work; the latter exceeds the 25% target in this single run.
-At that stop, repeated cache-fit/pressure, remaining ablations and external models were incomplete; detailed output validation was deferred by the user.
-Section 12 records the later completed pressure/fit repetitions and real tool loop; broader ablations and external coverage remain incomplete.
+At that stop, repeated cache-fit/pressure, remaining ablations were incomplete; detailed output validation was deferred by the user.
+Section 12 records the later completed pressure/fit repetitions and real tool loop; broader ablations remain incomplete.
 
 - [x] 11.1 Remove avoidable control waits and queries while preserving result collection, resource publication and cleanup ordering; add behavioral regressions.
 - [x] 11.2 Run repeated cache-fit and pressure workloads at gpu_memory_utilization >= 0.5, with larger rollout counts and prefix working sets.
 - [ ] 11.3 Analyze request phases, control RPCs, CPU profiles and GPU logs; retain adverse prediction and regression results.
 - [ ] 11.4 Complete relevant unit/adapter/GPU, lifecycle, fault/restart and model-quality checks on the final implementation.
-- [x] 11.5 Record commands, raw evidence locations, measured conclusions and remaining external coverage; pass required code checks and commit locally.
+- [x] 11.5 Record commands, raw evidence locations, measured conclusions and validation scope; pass required code checks and commit locally.
 
 ## 12. Application timing and live admission, 2026-10-19
 
@@ -161,4 +161,18 @@ state and a separate live GPU audit. Source restoration matched all 29 runtime
 file hashes to tested B5 code. No experiment queue remains active.
 See the [October 19 report](../../../docs/programmable-kvc/rollout-report-2026-10-19.md).
 Tasks 10.5/10.6 and 11.3/11.4 remain open for broader ablations, forecast sensitivity,
-fault/model checks and external coverage, not merely the completed round here.
+fault/model checks, not merely the completed round here.
+
+## Remaining acceptance resumed, 2026-10-19
+
+The user requested completion of the remaining tasks and removed the two
+external-model evaluations from scope. Local Qwen TP=2 on GPUs 0/3 remains the
+acceptance environment. The previous optimization-round stop is superseded.
+Keep tasks unchecked until their evidence is complete:
+
+| Tasks | Required remaining evidence |
+| --- | --- |
+| 7.4, 10.5 | Native/idle/noop, direct directives, individual/composed policy arms, separately labeled oracle and early/late forecasts; repeated fixed-work and live runs |
+| 7.5, 11.3 | Model quality, per-family tails, request phases, RPC and CPU/index cost, GPU ownership, forecast errors and retained negative cases |
+| 7.9, 11.4 | Final-source lifecycle, duplicate/race/cancel/deferral, real Store failure/restart, real weight update/rollback and CPU/Mooncake validation |
+| 10.6, 8.4 | Final regressions/lint, reconciled coverage and reports, complete local PR description with AI disclosure and human review requirements |

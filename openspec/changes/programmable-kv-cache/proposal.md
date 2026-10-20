@@ -28,7 +28,7 @@ Preserve the complementary backend-interpreted KVCR path.
 - Add multi-round rollout, shared-prefix, tool-wait, and memory-pressure experiments, including a router-directive baseline, policy ablations, failures, and overhead measurements.
   Performance improvements are hypotheses to measure.
 - Measure rollout reuse within one weight version and independently verify invalidation after weight updates.
-  Use the local machine only for TP=2 debugging; comprehensive evaluation targets GPT-OSS-120B and DeepSeek-V4-Flash on other machines.
+  Acceptance uses local Qwen3.8-27B TP=2 on GPUs 0 and 3, with conclusions scoped to the tested hardware and layouts.
 - Provide runnable control recipes for direct commands without policies, shared-prefix association, branching and task cleanup, range retention, paused-session movement, cross-engine reuse, policy competition, and recovery.
   Three reference policy algorithms do not define the scope of this contribution.
 
