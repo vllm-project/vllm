@@ -411,6 +411,16 @@ predicate can then request per-request demand; low-occupancy short pauses retain
 the counters-only path and cached scheduler age history. Unknown subclasses keep
 the existing full-observation default.
 
+An unreferenced cached G1 block is already in the allocator's free queue.
+Removing its hash through MOVE does not add an allocatable block. Evaluate an
+opt-in `preserve_source` tool policy using the existing GPU-source COPY primitive
+for backup; the normal allocator may still reclaim that cached copy on demand.
+Legacy policy and explicit MOVE retain their behavior. Successful GPU-source
+COPY results update the same bounded cold catalog and measured store cost as
+MOVE, while cold-source COPY remains a load result. Behavioral checks must prove
+equal free capacity, preserved immediate reuse, normal allocation-driven eviction,
+and restoration of only the successfully stored subset before full-work timing.
+
 `integration-paths.md` records the follow-up scope; incomplete first-release acceptance stays in `tasks.md`.
 Dynamo integration and mixed-envelope dispatch are future work.
 The supplied diagram's future KVCR G1 path requires its own agreed integration and is not represented as current support.

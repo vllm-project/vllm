@@ -82,6 +82,7 @@ PYTHONPATH=../verl \
 | `--movement-min-pause-seconds` | movement 的最低预计暂停窗口，默认 0.5 秒；还须覆盖已观测的存出加加载耗时 |
 | `--movement-min-pressure` | 搬运压力阈值，默认 0.8；短暂停利用排队窗口时还检查当前引用占用 |
 | `--movement-pressure-only` | 忽略暂停和等待成本的压力消融；容量充足时可能产生大量无效存出 |
+| `--movement-preserve-source` | 通过 GPU 源 COPY 备份，存出完成后保留可回收的 G1 缓存；默认仍为 MOVE，结果分列 |
 | `--prefetch-on-admission` | 有排队需求时等调度器选中对应 session 再准备，失败后回退重算；结果收集期限包含准入等待预算 |
 | `--enforce-eager` / `--disable-custom-all-reduce` | 显式诊断选项；不与默认编译/图执行的速度混算 |
 | `--profile` | 服务预热后启用 Yappi 多线程 CPU 计时；GPU 默认跳过 128 个迭代后采集 32 个迭代，由 `--profile-delay-iterations` / `--profile-iterations` 调整。与普通计时实验分开 |
