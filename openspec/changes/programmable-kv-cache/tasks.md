@@ -73,7 +73,7 @@
 - [x] 8.1 Document configuration, plugin extension contracts, operation semantics, backend coverage, examples, and measured limitations.
 - [x] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
 - [x] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
-- [ ] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
+- [x] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
 - [x] 8.5 Reconcile delivered coverage with the follow-up scope in integration-paths.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.
 
 ## Evidence corrections, 2026-10-06
@@ -192,3 +192,23 @@ shared-load correlation, CPU/index measurements, retained negative cases,
 and real failure recovery. Full direct/component/live comparisons and the
 final CPU/GPU profile remain open under 7.4, 10.5 and 11.3; final reconciliation
 and the complete PR description remain under 10.6 and 8.4.
+
+## User-requested wrap-up, 2026-10-20
+
+GPU 0/3 remained occupied by other users. The user requested local commits,
+documentation updates and a status report. The main and follow-up controllers
+and this task's model processes have exited; experiments will not auto-resume.
+No main/full matrix completion marker was written.
+
+Task 8.4 is complete: the [local PR description](../../../docs/programmable-kvc/pr-description.md)
+records the implementation, duplicate-work boundaries, executed test/model
+results, measurement limits, incomplete acceptance, AI assistance and required
+human review/testing. Preparing this document does not complete the remaining
+experiments or publish the PR update.
+
+Progress is **78/82**. Tasks **7.4, 10.5, 10.6 and 11.3** remain unchecked for
+direct/component comparisons, repeated live and cache-fit forecast runs,
+independent CPU/GPU profiling and final acceptance reconciliation. The
+[acceptance report](../../../docs/programmable-kvc/acceptance-report-2026-10-20.md)
+preserves accepted measurements and the rejected sampling-gap run. The updated
+HTTP/benchmark suite has 40 passing checks, overlapping the broad 1,999-check suite.

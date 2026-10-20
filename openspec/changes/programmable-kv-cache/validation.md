@@ -9,7 +9,8 @@
 ## Current acceptance
 
 原始记录位于 `benchmarks/programmable_kv_cache/results/acceptance-2026-10-19/`。
-任务 7.5/7.9/11.4 已完成，整体为 77/82；策略消融、低压力预测、在线重复、profile 和交付汇总继续执行。
+任务 7.5/7.9/11.4 及本地 PR 描述 8.4 已完成，整体为 78/82。
+按用户要求收尾，已确认本任务队列和模型进程退出；策略消融、低压力预测、在线重复、profile 和最终验收汇总保持未完成。
 
 | 数据 | 已验证范围 |
 | --- | --- |
@@ -23,6 +24,10 @@
 | `fit-overhead-summary.json`、`pressure-prediction-comparison.json` | 六轮空载开销及六轮压力预测对照；输入/输出长度相同、GPU 审计通过；30 s 预测为失准诊断输入 |
 | `sampling-gap-diagnostic.json`、`pressure-direct-sampling-gap/` | 模型/控制完成但 11.072 s 采样空档超过 10 s 标准的无效性能轮，待重跑 |
 | `mypy-sampling-final.log`、`hooks-sampling-staged.log` | 采样加密后 Python 3.12 类型、默认 hooks 通过；拒绝空档的标准保持不变 |
+| `user-wrap-up.json` | 用户要求的停止边界、已完成/未完成任务、进程退出及无矩阵完成标记；后续需显式恢复 |
+
+[本地 PR 描述](../../../docs/programmable-kvc/pr-description.md) 已整理当前实现、已测结果和未完成验收，
+并包含重复工作边界、AI 使用说明及人工审阅/测试要求；未发布到远端。
 
 ## October 19 optimization round
 

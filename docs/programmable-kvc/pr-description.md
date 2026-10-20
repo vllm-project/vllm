@@ -1,4 +1,9 @@
-# Programmable KV cache PR description (draft)
+# Add application-directed programmable KV cache control
+
+Local PR description at the October 20 wrap-up. Implementation and the tests
+reported below are committed. Full acceptance remains incomplete; GPU experiments
+are stopped at the user's request while the allocated GPUs remain occupied.
+This document has not been published to the remote PR.
 
 ## Purpose
 
@@ -14,18 +19,20 @@ This updates PR #62382. Duplicate checks against RFC #57103 and the programmable
 
 ## Test Plan
 
-Reproduction commands and capability limits are in [the benchmark guide](../../benchmarks/programmable_kv_cache/README.md). All Python commands use the uv-managed `.venv`.
+Reproduction commands and capability limits are in [the benchmark guide](../../benchmarks/programmable_kv_cache/README.md). All Python commands use the uv-managed `.venv`. The executed checks are:
 
-- Run the related control/state/engine/HTTP, scheduler/prefix-cache, Mooncake adapter, offloading and tiering suites using the complete command in [the testing report](rollout-report-2026-10-18.md).
-- Run `tests/v1/kv_offload/cpu/{test_gpu_worker,test_canonical_layout,test_swap_blocks_batch,test_swap_blocks_triton}.py` and `tests/v1/kv_connector/mooncake_integration/test_store_buffers.py` on GPUs 0/3.
-- Run `run_recovery` with `--evaluation-samples 128 --lifecycle --weight-update --cpu-evaluation-samples 128`, and separately with `--capacity-deferral-only`. This checks real cross-engine reuse, branches/TTLs, duplicate/racing/cancelled control, Store outage/restart, real IPC parameter update/rollback, capacity retry/fallback and paired model quality.
-- Run deployment-budget native/quota/cooperative comparisons, cache-fit native/idle/noop, direct-command and local-policy ablations, separately labeled recorded-pause oracle and incorrect forecasts. Repeat actual verl tool loops separately from equal-work replay; audit GPU ownership in both.
-- Run CPU metadata measurements and a separately instrumented CPU/GPU profile. Preserve regressions and failed validation attempts.
-- Run default pre-commit hooks, `pre-commit run mypy-3.12 --all-files --hook-stage manual`, and `openspec validate programmable-kv-cache --strict`.
+- Related control/state/engine/HTTP, scheduler/prefix-cache, Mooncake adapter, offloading and tiering suites using the complete command in [the testing report](rollout-report-2026-10-18.md): 1,999 passed.
+- `.venv/bin/python -m pytest tests/entrypoints/serve/kv_control/test_api.py -q`: 40 passed after the sampling fix; overlaps the broad suite.
+- `.venv/bin/python -m pytest -q tests/v1/kv_offload/cpu/{test_gpu_worker,test_canonical_layout,test_swap_blocks_batch,test_swap_blocks_triton}.py tests/v1/kv_connector/mooncake_integration/test_store_buffers.py` on GPUs 0/3: 56 passed, one ROCm-only skip.
+- `.venv/bin/python -m benchmarks.programmable_kv_cache.run_recovery` with `--evaluation-samples 128 --lifecycle --weight-update --cpu-evaluation-samples 128`, and separately with `--capacity-deferral-only`: passed. Model/dataset/trace/output arguments and full executed commands are retained in the local `acceptance-2026-10-19/queue.json` evidence directory. These check real cross-engine reuse, branches/TTLs, duplicate/racing/cancelled control, Store outage/restart, real IPC parameter update/rollback, capacity retry/fallback and paired model quality.
+- Repeated deployment-budget native/quota/cooperative replay, cache-fit native/idle/noop, separately labeled recorded-pause oracle and incorrect pressure forecasts: completed as reported below. One actual verl cooperative loop completed; native/quota/cooperative live repetitions remain incomplete.
+- CPU metadata measurements and completed-data phase/RPC/transfer analysis: completed. The final-runtime independent CPU/GPU profile and remaining direct/component/low-pressure forecast comparisons are unexecuted.
+- `.venv/bin/pre-commit run`, `.venv/bin/pre-commit run mypy-3.12 --all-files --hook-stage manual`, and `openspec validate programmable-kv-cache --strict`: passed for the tested source. The wrap-up changes only documentation; default hooks, strict OpenSpec validation and `git diff --check` are run for that update.
 
 ## Test Result
 
-The following primary comparisons are complete. The remaining acceptance results below are still being collected; this description is not ready for publication until that evidence is incorporated.
+The following primary comparisons are complete. Remaining acceptance is explicitly
+listed below and is not represented as passing. No experiment queue is active.
 
 Qwen3.8-27B BF16, TP=2, GPUs 0/3 (A100 80GB PCIe), `gpu_memory_utilization=0.5`, actual KV 12.12 GiB/card, concurrency 64, batch token budget 4096 and max context 16384. Compilation/CUDA graphs are enabled; no fixed KV-byte override or profiler is used for ordinary timing.
 
@@ -53,9 +60,15 @@ The selected runtime is unchanged from the previous tested normal-cost MOVE impl
 
 Final-runtime recovery, real parameter update/rollback, and capacity partial/retry/fallback passed. Both CPU and Mooncake paired 128-question evaluations score 124/128 for recomputation and preparation, with zero answer mismatches and zero length cuts; cached tokens are 0/784 per question. Final result records and pending transfers are empty. Functional runs use eager TP=2 and utilization 0.45 to accommodate two engines; they are excluded from performance ratios.
 
-One direct-priority replay completed its model/control work but failed a predeclared process-log coverage limit (11.072 s gap, allowed maximum 10 s); its timing is excluded. Process ownership sampling is now one second, with the same rejection boundary and regression coverage. Remaining runs add same-sampling references and repeat the rejected arm.
+One direct-priority replay completed its model/control work but failed a predeclared process-log coverage limit (11.072 s gap, allowed maximum 10 s); its timing is excluded. Process ownership sampling is now one second, with the same rejection boundary and regression coverage. Same-sampling references and the rejected arm's repeat remain unexecuted.
 
-Pending incorporation: complete direct/component/live/profile and cache-fit forecast matrix, final checks and consolidated report. Detailed executed evidence is in [the acceptance report](acceptance-report-2026-10-20.md).
+OpenSpec is **78/82**. Four acceptance tasks remain open: **7.4** direct/component
+comparisons; **10.5** complete repeated replay/live and cache-fit forecast matrices;
+**11.3** independent CPU/GPU profiling and analysis; **10.6** final acceptance
+reconciliation. Completing this local description satisfies documentation task
+8.4 without closing those gates. Main and follow-up controllers have exited and
+will not automatically resume. Detailed executed evidence and the stop boundary
+are in [the acceptance report](acceptance-report-2026-10-20.md).
 
 Acceptance is scoped to this local model/hardware/layout. Native Mooncake uses complete primary boundaries and PCP=DCP=1; CPU control uses one block per chunk. CPU Share, cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner envelopes are not advertised. Real Dynamo/llm-d and a full trainer/optimizer run are outside this delivery.
 
