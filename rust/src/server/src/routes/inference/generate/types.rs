@@ -12,7 +12,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -21,11 +21,23 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 /// higher layers, and the Rust frontend does not implement it). Capturing it
 /// here lets validation reject `n > 1` explicitly instead of silently
 /// dropping the key and returning a single choice.
+///
+/// It also captures Python sampling fields that the route does not support
+/// yet, so validation can reject their non-default values instead of
+/// dropping them.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// Stop strings. Not supported yet: the route does not detokenize.
+    pub stop: Option<StringOrArray>,
+    /// Whether to include the matched stop string in the output. Only
+    /// meaningful with `stop`.
+    pub include_stop_str_in_output: Option<bool>,
+    /// Decode token IDs to replay instead of sampling, gated by
+    /// `--enable-trace-replay` in Python. Not supported.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
@@ -50,6 +62,7 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
@@ -63,6 +76,16 @@ pub struct GenerateRequest {
 
 impl Normalizable for GenerateRequest {}
 
+/// Response level of the generate API, mirroring Python's `OutputMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerateOutputMode {
+    /// Token IDs only. The default when absent.
+    Tokens,
+    /// Token IDs plus detokenized text and decoded logprobs. Not supported.
+    Text,
+}
+
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
 ///
 /// Do not skip serializing `None` fields here: non-streaming response types
@@ -74,6 +97,9 @@ pub(super) struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
@@ -87,6 +113,9 @@ pub(super) struct GenerateResponseStreamChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
+    /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
+    /// set on the terminal response, as Python `numpy2base64` encodes them.
+    pub routed_experts: Option<String>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
     /// Set on the final chunk only; covers the whole output.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,

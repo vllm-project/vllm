@@ -893,7 +893,7 @@ guide: |
   serving profile. For high interactivity on any of them, use
   `--tensor-parallel-size 4`.
 
-  ## B200 scheduling and KV offload
+  ## AgentX tuning on NVIDIA GPUs
 
   On B200, TP2 at concurrency 1 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'`,
   `--max-num-seqs 8` and `--max-num-batched-tokens 4096`. DEP2 (TP1 x DP2 with expert
@@ -905,6 +905,117 @@ guide: |
   For DEP2 at c128, add vLLM's native CPU KV offloading with
   `--kv-offloading-backend native --kv-offloading-size 32` (GiB per DP rank, 64 GiB per
   server), `--gpu-memory-utilization 0.955` and `--max-num-seqs 48`.
+
+  ### Aggregate serving on B300
+
+  The B300 aggregate lanes in
+  [InferenceX #4332](https://github.com/SemiAnalysisAI/InferenceX/pull/4332)
+  ([full config](https://github.com/SemiAnalysisAI/InferenceX/blob/ad96b211c783aece9914b332bff96842b2d9ae43/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/b300-fp4-mtp/agentic.yaml))
+  serve the original
+  [DeepSeek-V4.1-Flash checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
+  on `vllm/vllm-openai:cu134-nightly-x86_64-dev-20261019-mk` with
+  `--kernel-config '{"enable_flashinfer_autotune":true}'` and `--max-model-len 1048576`.
+
+  | Lane | Concurrency | `--max-num-seqs` | `--max-num-batched-tokens` | `--prefill-schedule-interval` | Attention backend |
+  |---|---|---|---|---|---|
+  | TP4 | 1, 8, 16 | 1, 16, 32 | 4096, 8192, 8192 | 1, 160, 128 | `FLASHINFER_MLA_SPARSE_DSV41` |
+  | DEP2 | 8, 16, 32, 64 | 16, 16, 32, 64 | 16384, 16384, 16384, 32768 | 80, 80, 80, 56 | `FLASHINFER_MLA_SPARSE_DSV41` |
+  | DEP2 + KV offload | 128, 192 | 128, 192 | 16384 | 32 | `FLASHMLA_MEGA_ATTN_DSV41` |
+
+  TP4 uses `--engram-config '{"cpu_offload":true,"use_thp":true}'` and
+  `--additional-config '{"decode_backend":"latency_specialized"}'`. The specialized decode
+  comes from [#61868](https://github.com/vllm-project/vllm/pull/61868) and
+  [#61869](https://github.com/vllm-project/vllm/pull/61869), which are not yet on main,
+  and serves pure decode steps only, hence the long prefill interval at c8 and c16.
+  TP4 adds graph capture size 5, so the DSpark draft gets a one-request graph.
+
+  DEP2 (TP1 x DP2 with expert parallelism) runs behind a consistent-hash vLLM Router with
+  `--kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe"}'`
+  and `--engram-config '{"cpu_offload":true,"embedding_across_dp":true}'`. At c128 and
+  c192, KV blocks are offloaded lazily to DRAM, 50 GiB per DP rank, and are written only
+  when evicted from HBM:
+
+  ```
+  --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":53687091200,"lazy_offload":true}}'
+  ```
+
+  ### Dynamo disaggregated serving on B300 and GB300
+
+  The AgentX lanes in
+  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231) (B300) and
+  [InferenceX #4266](https://github.com/SemiAnalysisAI/InferenceX/pull/4266) (GB300) run
+  N DEP2 prefill engines and one DEP decode engine, each with its own sidecar, behind one
+  KV-routing frontend. Prefill pushes KV to decode with NIXL and keeps a host KV tier.
+  The `push_as_nixl` connector and `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP` come from the dev
+  images `vllm/vllm-openai:nightly-x86_64-dev-20261012-59e75f4` (B300) and
+  `vllm/vllm-openai:cu134-nightly-aarch64-dev-20261019` (GB300).
+
+  | GPU | Clients | Prefill engines | Decode | Decode `--max-num-seqs` | `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP` |
+  |---|---|---:|---|---|---|
+  | B300 | 256, 768, 1280, 2048, 3584 | 2, 2, 3, 4, 5 | DEP8 | 18, 40, 72, 132, 168 | 4 |
+  | GB300 | 3018, 7388, 10888 | 6, 12, 16 | DEP32 | 18, 50, 76 | 2, 4, 5 |
+  | GB300 | 9888 | 12 | DEP16 | 253 | 6 |
+
+  Both roles use TP1 with expert parallelism and these settings:
+
+  ```bash
+  export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_ALLREDUCE_USE_SYMM_MEM=0 VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 NCCL_CUMEM_ENABLE=1
+  export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n UCX_RNDV_PIPELINE_ERROR_HANDLING=y
+  export VLLM_ENGINE_READY_TIMEOUT_S=7200 VLLM_RPC_TIMEOUT=600000
+  --attention-config '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+  --kernel-config '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","enable_adaptive_verification":false}'
+  --kv-cache-dtype fp8 --gpu-memory-utilization 0.95 --prefill-schedule-interval 2 --enable-ep-weight-filter --numa-bind
+  ```
+
+  | | B300 | GB300 |
+  |---|---|---|
+  | NIXL backend | `LIBFABRIC` over EFA | `UCX` over MNNVL |
+  | Env | `FI_PROVIDER=efa FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_FORK_SAFE=1 UCX_TLS=cuda_copy,cuda_ipc,srd,tcp NIXL_UCX_SGL_ENABLE=0` | `UCX_TLS=cuda_copy,cuda_ipc,tcp UCX_CUDA_IPC_ENABLE_MNNVL=y NIXL_UCX_SGL_ENABLE=1 NCCL_MNNVL_ENABLE=1 NCCL_NVLS_ENABLE=1 VLLM_RS_TOKEN_IDS_AS_BYTES=1` |
+  | Allocator | `--no-enable-cumem-allocator` (EFA cannot register VMM memory) | `--enable-cumem-allocator` |
+  | DSpark | adds `"rejection_sample_method":"block"` | as above |
+  | Engram | `{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}` | same; decode sets `"cpu_offload":false` |
+  | Host KV per prefill rank | 70 GiB | 80 GiB |
+  | Prefill `--max-num-batched-tokens` | 16384 | 32768 |
+  | Decode EPLB redundant experts | 16 | 16 at DEP16, 32 at DEP32 |
+  | Decode `--numa-bind-nodes` | `0 0 0 0 1 1 1 1` | `0 0 1 1` |
+
+  On B300, set `--cpu-distributed-timeout-seconds 7200` for the Engram load. NIXL's
+  LIBFABRIC plugin also needs libfabric and rdma-core from the AWS EFA installer and the
+  CUDA 12 runtime (`nvidia-cuda-runtime-cu12`), which the image lacks.
+
+  Prefill runs `--data-parallel-size 2` per GPU pair with `--max-num-seqs 64`,
+  `--long-prefill-token-threshold 8192` and `--prefix-cache-retention-interval 32768`. Its
+  KV config, shown for B300 (GB300 uses `"backends":["UCX"]` and `85899345920` bytes):
+
+  ```json
+  {"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[
+    {"kv_connector":"NixlConnector","kv_connector_module_path":"vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_as_nixl","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["LIBFABRIC"],"enforce_handshake_compat":false,"kv_lease_duration":120}},
+    {"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":75161927680,"lazy_offload":true}}]}}
+  ```
+
+  Prefill graphs:
+  `{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}`.
+
+  Decode uses the `NixlConnector` entry alone with `"kv_role":"kv_consumer"` and
+  `--no-enable-prefix-caching`. It sets `--max-num-batched-tokens` to ten times
+  `--max-num-seqs` and captures FULL decode-only graphs in steps of 6 up to six times
+  `--max-num-seqs`. It balances experts with `--enable-eplb` and
+  `--eplb-config '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true}'`.
+
+  Launch the sidecars as in **Dynamo sidecar serving**, with
+  `--grpc-startup-deadline-secs 3600`. Start the frontend so that every request prefills
+  on a prefill engine and each session stays on one prefill engine's prefix and host KV
+  cache. On GB300, also set `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT=10000000`.
+
+  ```bash
+  export DYN_ROUTER_TEMPERATURE=0 DYN_ROUTER_QUEUE_THRESHOLD=None DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600
+  export DYN_TOKENIZER=fastokens DYN_TOKENIZER_CACHE=1 DYN_TOKENIZER_CACHE_BYTES=8000000000
+  export DYN_TCP_CHANNEL_BUFFER=128 DYN_TCP_REQUEST_TIMEOUT=60
+  uv run --no-project python -m dynamo.frontend --http-port 8000 --router-mode kv \
+    --router-session-affinity-ttl-secs 14400 --active-decode-blocks-threshold None \
+    --active-prefill-tokens-threshold None --active-prefill-tokens-threshold-frac None
+  ```
 
   ## Dynamo sidecar serving
 
@@ -954,9 +1065,8 @@ guide: |
   uv run --no-project python -m dynamo.frontend --http-port 8000 --router-mode kv
   ```
 
-  For disaggregated serving, follow Dynamo's launch examples to configure
-  the prefill and decode engines, NIXL KV transfer and the host's transport.
-  Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
+  For disaggregated serving, configure the engines as in
+  **Dynamo disaggregated serving on B300 and GB300**. Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
   and `--disaggregation-mode decode` to decode sidecars. Allocate distinct
   gRPC and KV-event ports when running several engines on the same host.
 

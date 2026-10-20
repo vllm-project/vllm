@@ -247,6 +247,14 @@ pub struct ChatCompletionRequest {
     /// Include token IDs alongside generated text
     pub return_token_ids: Option<bool>,
 
+    /// Include the chat-templated prompt string in the response. Not supported
+    /// yet.
+    pub return_prompt_text: Option<bool>,
+
+    /// Include the weight-version spans that sampled each choice's output
+    /// tokens. Not supported yet.
+    pub return_weight_versions: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
@@ -332,6 +340,8 @@ impl Default for ChatCompletionRequest {
             session_id: None,
             return_tokens_as_token_ids: None,
             return_token_ids: None,
+            return_prompt_text: None,
+            return_weight_versions: None,
             cache_salt: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -457,15 +467,17 @@ pub(super) struct ChatMessageDelta {
 fn validate_chat_cross_parameters(
     req: &ChatCompletionRequest,
 ) -> Result<(), validator::ValidationError> {
-    // 1. Validate logprobs dependency
-    if req.top_logprobs.is_some() && !req.logprobs {
+    // 1. Validate logprobs dependency. Like Python, `top_logprobs: 0` (the
+    // OpenAI default) does not request any alternatives, so it is allowed
+    // without `logprobs`.
+    if req.top_logprobs.is_some_and(|n| n != 0) && !req.logprobs {
         let mut e = validator::ValidationError::new("top_logprobs_requires_logprobs");
         e.message = Some("top_logprobs is only allowed when logprobs is enabled".into());
         return Err(e);
     }
 
     // 2. Validate stream_options dependency
-    if req.stream_options.is_some() && !req.stream {
+    if req.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !req.stream {
         let mut e = validator::ValidationError::new("stream_options_requires_stream");
         e.message = Some("stream_options can only be used when stream is true".into());
         return Err(e);
