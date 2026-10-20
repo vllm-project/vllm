@@ -113,13 +113,13 @@ def _operation_store(
     coordinator: ExternalElasticEPScaleCoordinator,
     *,
     phase: ExternalElasticEPScalePhase,
+    epoch: str = "epoch-1",
     operation_id: str = "scale-1",
     target_dp_size: int = 3,
     effective_dp_size: int = 2,
     topology_known: bool = True,
     error: str | None = None,
 ) -> DictStore:
-    epoch = "epoch-1"
     bootstrap = ReconfigureDistributedRequest(
         new_data_parallel_size=target_dp_size,
         new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
@@ -133,15 +133,16 @@ def _operation_store(
         coordinator.key("current_epoch"): epoch.encode(),
         coordinator.key(epoch, "bootstrap"): msgspec.msgpack.encode(bootstrap),
         coordinator.key(epoch, "operation_id"): operation_id.encode(),
-        coordinator.key(epoch, "effective_dp_size"): str(effective_dp_size).encode(),
-        coordinator.key(epoch, "topology_known"): (b"1" if topology_known else b"0"),
         coordinator.key(epoch, "phase"): phase.value.encode(),
     }
     if phase == ExternalElasticEPScalePhase.COMPLETED:
         values[coordinator.key(epoch, "completed")] = b"1"
     if error is not None:
         values[coordinator.key(epoch, "error")] = error.encode()
-    return DictStore(values)
+    store = DictStore(values)
+    coordinator._publish_topology(store, epoch, effective_dp_size, topology_known)
+    store.writes.clear()
+    return store
 
 
 def test_external_elastic_ep_status_reports_operation_state(monkeypatch):
@@ -213,6 +214,27 @@ def test_external_elastic_ep_bootstrap_rejects_unknown_topology():
         coordinator._prepare_reconfig_bootstrap(store, 2, 3, "scale-2")
 
 
+@pytest.mark.parametrize("snapshot", [None, b"invalid"])
+def test_external_elastic_ep_unreadable_topology_rejects_new_operation(
+    monkeypatch, snapshot
+):
+    coordinator = _external_eep_coordinator()
+    store = _operation_store(
+        coordinator,
+        phase=ExternalElasticEPScalePhase.FAILED,
+        error="prepare failed",
+    )
+    topology_key = coordinator.key("epoch-1", "topology")
+    if snapshot is None:
+        del store.values[topology_key]
+    else:
+        store.set(topology_key, snapshot)
+    monkeypatch.setattr(coordinator, "_get_reconfig_store", lambda: store)
+
+    with pytest.raises((RuntimeError, msgspec.DecodeError)):
+        coordinator.validate_request(3, "scale-2", coordinator.instance_id)
+
+
 def test_external_elastic_ep_publishes_evidence_before_completion():
     coordinator = _external_eep_coordinator()
     stores = tuple(
@@ -227,8 +249,7 @@ def test_external_elastic_ep_publishes_evidence_before_completion():
     coordinator._publish_completed(stores, "epoch-1", 3)
 
     expected_writes = [
-        coordinator.key("epoch-1", "effective_dp_size"),
-        coordinator.key("epoch-1", "topology_known"),
+        coordinator.key("epoch-1", "topology"),
         coordinator.key("epoch-1", "phase"),
         coordinator.key("epoch-1", "completed"),
     ]
@@ -263,6 +284,40 @@ def test_external_elastic_ep_completion_during_poll_has_current_topology():
     assert status.phase == ExternalElasticEPScalePhase.COMPLETED
     assert status.effective_data_parallel_size == 3
     assert status.topology_known
+
+
+@pytest.mark.parametrize("complete_after_read", range(1, 7))
+def test_external_elastic_ep_topology_is_consistent_during_completion(
+    complete_after_read,
+):
+    coordinator = _external_eep_coordinator()
+
+    class CompletingStore(DictStore):
+        reads = 0
+
+        def get(self, key):
+            value = super().get(key)
+            self.reads += 1
+            if self.reads == complete_after_read:
+                coordinator._publish_completed((self,), "epoch-1", 3)
+            return value
+
+    store = CompletingStore(
+        _operation_store(
+            coordinator,
+            phase=ExternalElasticEPScalePhase.COMMITTING,
+            topology_known=False,
+        ).values
+    )
+
+    status = coordinator._read_status(store)
+
+    assert (status.effective_data_parallel_size, status.topology_known) in (
+        (2, False),
+        (3, True),
+    )
+    if status.phase == ExternalElasticEPScalePhase.COMPLETED:
+        assert (status.effective_data_parallel_size, status.topology_known) == (3, True)
 
 
 @pytest.mark.parametrize(
@@ -342,6 +397,66 @@ async def test_external_elastic_ep_bootstrap_rejects_other_operation():
 
 
 @pytest.mark.asyncio
+async def test_external_elastic_ep_bootstrap_skips_unrelated_safe_failure(monkeypatch):
+    coordinator = _external_eep_coordinator(dp_rank=1)
+    store = _operation_store(
+        coordinator,
+        phase=ExternalElasticEPScalePhase.FAILED,
+        error="operation A prepare failed",
+    )
+    monkeypatch.setattr(coordinator, "_get_reconfig_store", lambda: store)
+    replay = coordinator.validate_request(3, "scale-1", coordinator.instance_id)
+    assert replay.terminal
+    assert coordinator.active_epoch is None
+
+    async def publish_next_operation(backoff_step):
+        assert backoff_step == 0
+        store.values.update(
+            _operation_store(
+                coordinator,
+                phase=ExternalElasticEPScalePhase.PREPARING,
+                epoch="epoch-2",
+                operation_id="scale-2",
+            ).values
+        )
+        store.set(coordinator.key("epoch-2", "prepared"), b"1")
+        return backoff_step + 1
+
+    monkeypatch.setattr(coordinator, "_sleep_with_backoff", publish_next_operation)
+
+    epoch, bootstrap = await coordinator._wait_for_bootstrap(store, 3, "scale-2")
+
+    assert epoch == "epoch-2"
+    assert bootstrap.new_data_parallel_size == 3
+    assert coordinator.active_epoch is None
+    assert coordinator._get_error(store, "epoch-1") == "operation A prepare failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_id", "target_dp_size", "topology_known", "error_type", "message"),
+    [
+        ("scale-1", 3, True, RuntimeError, "prepare failed"),
+        ("scale-1", 4, True, ExternalElasticEPScaleConflict, "already targets"),
+        ("scale-2", 3, False, ExternalElasticEPScaleConflict, "restart or recover"),
+    ],
+)
+async def test_external_elastic_ep_bootstrap_preserves_failure_guards(
+    operation_id, target_dp_size, topology_known, error_type, message
+):
+    coordinator = _external_eep_coordinator(dp_rank=1)
+    store = _operation_store(
+        coordinator,
+        phase=ExternalElasticEPScalePhase.FAILED,
+        topology_known=topology_known,
+        error="prepare failed",
+    )
+
+    with pytest.raises(error_type, match=message):
+        await coordinator._wait_for_bootstrap(store, target_dp_size, operation_id)
+
+
+@pytest.mark.asyncio
 async def test_external_elastic_ep_commit_failure_keeps_admission_closed(monkeypatch):
     class FailingEngineCore:
         async def prepare_elastic_ep(self, *_args):
@@ -394,7 +509,7 @@ async def test_external_elastic_ep_http_replays_do_not_repeat_commit(monkeypatch
 
     async def commit():
         epoch = store.get(coordinator.key("current_epoch")).decode()
-        store.set(coordinator.key(epoch, "topology_known"), b"0")
+        coordinator._publish_topology(store, epoch, 2, False)
         coordinator._set_phase(store, epoch, ExternalElasticEPScalePhase.COMMITTING)
         await finish_commit.wait()
         coordinator._publish_completed((store,), epoch, 3)
@@ -490,7 +605,7 @@ async def test_external_elastic_ep_http_replays_do_not_repeat_commit(monkeypatch
         set_scaling_elastic_ep(True)
         epoch = completed["epoch"]
         store.set(coordinator.key(epoch, "error"), b"commit failed")
-        store.set(coordinator.key(epoch, "topology_known"), b"0")
+        coordinator._publish_topology(store, epoch, 3, False)
         replay = await client.post("/scale_elastic_ep", json=payload)
         assert replay.status_code == 200
         assert replay.json()["phase"] == "failed"
