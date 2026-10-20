@@ -92,8 +92,7 @@ def setup_listen_address(
                 ) from e
             if e.errno == errno.EACCES:
                 raise OSError(
-                    f"Permission denied binding to "
-                    f"{host or '0.0.0.0'}:{port}. "
+                    f"Permission denied binding to {host or '0.0.0.0'}:{port}."
                 ) from e
             if e.errno == errno.ENOPROTOOPT and reuse_port:
                 raise OSError(

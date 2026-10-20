@@ -405,6 +405,7 @@ class TestPermissionScenario:
         assert "elevated privileges" in msg
         assert exc_info.value.__cause__ is err
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scenario: unexpected OS error (must not be masked)
 # ─────────────────────────────────────────────────────────────────────────────
